@@ -8,6 +8,7 @@
   },
   "scripts": {
     "story:process": "node --import tsx apps/cli/index.ts process",
+    "story:batch": "node --import tsx apps/cli/batch.ts",
     "smoke": "node --import tsx apps/cli/smoke.ts",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"

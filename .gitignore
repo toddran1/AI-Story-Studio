@@ -4,6 +4,7 @@ dist/
 .env.*
 !.env.example
 stories/
+input/
 coverage/
 *.log
 .DS_Store

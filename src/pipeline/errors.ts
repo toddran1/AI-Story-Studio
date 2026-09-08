@@ -9,3 +9,5 @@ export class StoryBibleError extends AppError {}
 export class TTSError extends AppError {}
 export class StorageError extends AppError {}
 export class PipelineError extends AppError {}
+export class BatchValidationError extends AppError {}
+export class BatchError extends AppError {}

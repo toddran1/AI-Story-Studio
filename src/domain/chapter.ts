@@ -8,6 +8,9 @@ const usageSchema = z.object({
   outputTokens: z.number().optional(),
   cachedTokens: z.number().optional(),
   requestId: z.string().optional(),
+  requests: z.number().optional(),
+  characters: z.number().optional(),
+  bytes: z.number().optional(),
 }).optional();
 
 export const stageStateSchema = z.object({

@@ -2,7 +2,7 @@ import { mkdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { Chapter, StageName, StageState, chapterSchema } from "../domain/chapter.js";
 import { Story } from "../domain/story.js";
-import { StoryBible, emptyStoryBible, storyBibleSchema, storyBibleUpdateSchema } from "../domain/story-bible.js";
+import { StoryBibleUpdate, storyBibleUpdateSchema } from "../domain/story-bible.js";
 import { LLMRouter } from "../llm/router.js";
 import { TTSProvider } from "../tts/provider.js";
 import { atomicWrite, atomicWriteJson } from "../storage/atomic-write.js";
@@ -17,10 +17,15 @@ import { polishNarration } from "../narration/narration-editor.js";
 import { STORY_BIBLE_PROMPT_VERSION } from "../story-bible/prompts.js";
 import { extractStoryBible } from "../story-bible/extractor.js";
 import { contextBeforeChapter, mergeStoryBible } from "../story-bible/updater.js";
+import { rebuildStoryBibleBeforeChapter } from "../story-bible/rebuild.js";
 import { PipelineError } from "./errors.js";
 
 export type ForceStage = "translation" | "narration" | "story-bible" | "tts" | "all";
-export type PipelineOptions = { root: string; story: Story; chapter: number; inputPath: string; force?: ForceStage };
+export type PipelineStageEvent = { stage: StageName; status: "started" | "completed" | "reused"; state: StageState };
+export type PipelineOptions = {
+  root: string; story: Story; chapter: number; inputPath: string; force?: ForceStage;
+  onStageEvent?: (event: PipelineStageEvent) => void;
+};
 
 const pending = (): StageState => ({ status: "pending" });
 
@@ -36,8 +41,8 @@ export class ChapterPipeline {
       counts: { originalCharacters: 0, englishWords: 0, narrationWords: 0 }, createdAt: now, updatedAt: now,
       stages: { ingestion: pending(), translation: pending(), narration: pending(), storyBible: pending(), tts: pending() },
     });
-    let bible = storyBibleSchema.parse((await readJsonIfExists<StoryBible>(paths.bible)) ?? emptyStoryBible());
-    const priorContext = contextBeforeChapter(bible, options.chapter);
+    let bible = await rebuildStoryBibleBeforeChapter(options.root, options.story.slug, options.chapter);
+    const priorContext = contextBeforeChapter(bible, options.chapter, options.story.context.recentChapterSummaries);
 
     const source = await readFile(options.inputPath, "utf8");
     if (!source.trim()) throw new PipelineError(`Input file is empty: ${options.inputPath}`);
@@ -48,16 +53,19 @@ export class ChapterPipeline {
       const forced = isForced(options.force, stage);
       if (!forced && state.status === "complete" && state.fingerprint === fp && outputExists) {
         logger.info({ event: "pipeline.stage.reused", story: options.story.slug, chapter: options.chapter, stage });
+        options.onStageEvent?.({ stage, status: "reused", state });
         return undefined;
       }
       const started = Date.now();
       chapter.stages[stage] = { ...details, status: "running", fingerprint: fp, startedAt: new Date().toISOString() };
       await persist();
+      options.onStageEvent?.({ stage, status: "started", state: chapter.stages[stage] });
       logger.info({ event: "pipeline.stage.started", story: options.story.slug, chapter: options.chapter, stage, provider: details.provider, model: details.model });
       try {
         const value = await action();
         chapter.stages[stage] = { ...chapter.stages[stage], status: "complete", completedAt: new Date().toISOString(), durationMs: Date.now() - started, error: undefined };
         await persist();
+        options.onStageEvent?.({ stage, status: "completed", state: chapter.stages[stage] });
         logger.info({ event: "pipeline.stage.completed", story: options.story.slug, chapter: options.chapter, stage, provider: details.provider, model: details.model, durationMs: Date.now() - started });
         return value;
       } catch (error) {
@@ -115,6 +123,11 @@ export class ChapterPipeline {
       return bible;
     });
     if (bibleResult) bible = bibleResult;
+    else {
+      const cachedUpdate = storyBibleUpdateSchema.parse(await readJsonIfExists<StoryBibleUpdate>(paths.bibleUpdate));
+      bible = mergeStoryBible(bible, cachedUpdate, options.chapter);
+      await atomicWriteJson(paths.bible, bible);
+    }
 
     const ttsConfig = options.story.pipeline.tts;
     const ttsFp = fingerprint({ narration: narrationFp, config: ttsConfig });
@@ -127,7 +140,10 @@ export class ChapterPipeline {
         await mkdir(paths.segments, { recursive: true });
         await Promise.all(result.segments.map((segment, index) => atomicWrite(join(paths.segments, `${String(index + 1).padStart(4, "0")}.mp3`), segment)));
       }
-      chapter.stages.tts.usage = result.requestIds?.length ? { requestId: result.requestIds.join(",") } : undefined;
+      chapter.stages.tts.usage = {
+        requestId: result.requestIds?.join(","), requests: result.segments.length,
+        characters: [...narration].length, bytes: result.audio.byteLength,
+      };
     });
 
     return chapter;

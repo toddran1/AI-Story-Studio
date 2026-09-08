@@ -6,6 +6,8 @@ Milestone 1 is a CLI-first, provider-agnostic vertical slice:
 
 The pipeline preserves every intermediate artifact, fingerprints stage inputs, and resumes at the first stale or failed stage. OpenAI and Gemini are isolated behind one LLM contract; Fish Audio is isolated behind the TTS contract.
 
+Milestone 2 adds deterministic multi-chapter discovery, validation, sequential processing, retries, durable batch history, graceful pause/resume, and progress summaries.
+
 ## Requirements
 
 - Node.js 22 or newer (an active LTS release is recommended)
@@ -55,6 +57,48 @@ npm run story:process -- --story demo-story --chapter 1 --input ./input/chapter-
 
 Allowed values are `translation`, `narration`, `story-bible`, `tts`, and `all`. Forcing narration, for example, also regenerates the Story Bible update and audio because those outputs depend on narration.
 
+## Milestone 2 — Multi-Chapter Processing
+
+Place UTF-8 chapter files in one directory. Supported names include `001.txt`, `0001.txt`, `chapter-1.txt`, `chapter-001.txt`, and `Chapter 001.txt`.
+
+```sh
+npm run story:batch -- \
+  --story my-story \
+  --input ./input/my-story \
+  --from 1 \
+  --to 100
+```
+
+`--from` and `--to` are inclusive and optional. Discovery validates the entire directory before any provider call: duplicate numbers, unrecognized `.txt` names, empty files, invalid ranges, and numbering gaps all stop the run. Use `--allow-gaps` only when missing chapter numbers are intentional.
+
+Preview the plan with zero paid API calls:
+
+```sh
+npm run story:batch -- --story my-story --input ./input/my-story --dry-run
+```
+
+Chapters run strictly in ascending order because each chapter's translation depends on the Story Bible produced by earlier chapters. The default behavior stops on the first failure. `--continue-on-error` is available, but later chapters may then receive incomplete story context.
+
+Transient network, timeout, rate-limit, and server failures use bounded exponential backoff with jitter. Defaults are three attempts, a 1-second initial delay, and a 30-second cap. Configure these with `--max-attempts`, `--initial-delay-ms`, and `--max-delay-ms`; add `--delay-ms` to throttle between chapters.
+
+Every run has a unique manifest under `stories/<story>/batches/`, plus `latest.json`. Rerunning the normal batch is safe: the chapter pipeline remains the authority for fingerprints and reuses valid expensive outputs. Retry only failures from the latest manifest with:
+
+```sh
+npm run story:batch -- --story my-story --retry-failed
+```
+
+Batch force values match the single-chapter command. Force is applied only on the first attempt of a chapter; retries reuse any stages that already finished. Forcing translation, narration, or Story Bible work causes dependent stages and later chapter context fingerprints to be reevaluated chronologically.
+
+Press Ctrl+C once to request a graceful pause. The active chapter is allowed to reach its safe boundary, the manifest is written atomically, and no next chapter starts. Run the original batch command again to resume via stage-level reuse.
+
+Story configuration now supports a bounded summary window:
+
+```json
+{"context":{"recentChapterSummaries":5}}
+```
+
+Canonical entities remain available, while only the latest configured number of chapter summaries enters model context.
+
 The result is stored under:
 
 ```text
@@ -62,6 +106,9 @@ stories/demo-story/
 ├── story.json
 ├── pipeline.json
 ├── story-bible.json
+├── batches/
+│   ├── latest.json
+│   └── <batch-id>.json
 └── chapters/0001/
     ├── chapter.json
     ├── original.txt

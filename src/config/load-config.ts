@@ -7,7 +7,7 @@ export function defaultStory(slug: string, env: Environment): Story {
   const title = slug.split("-").map((part) => part[0]?.toUpperCase() + part.slice(1)).join(" ");
   return storySchema.parse({
     id: slug, slug, title, sourceLanguage: "zh-CN", outputLanguage: "en-US",
-    source: { type: "text" },
+    source: { type: "text" }, context: { recentChapterSummaries: 5 },
     pipeline: {
       translation: { provider: "gemini", model: env.GEMINI_DEFAULT_MODEL },
       narration: { provider: "openai", model: env.OPENAI_DEFAULT_MODEL },

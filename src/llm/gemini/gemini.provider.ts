@@ -15,7 +15,7 @@ export class GeminiProvider implements LLMProvider {
     try {
       const interaction = await this.client.interactions.create({ model: request.model, input: `${request.instructions}\n\n${request.input}` });
       if (!interaction.output_text) throw new ProviderError("Gemini returned no output text");
-      return { text: interaction.output_text, usage: { requestId: interaction.id } };
+      return { text: interaction.output_text, usage: usageFrom(interaction) };
     } catch (error) { if (error instanceof ConfigurationError) throw error; throw new ProviderError("Gemini Interactions API request failed", { cause: error }); }
   }
 
@@ -27,7 +27,16 @@ export class GeminiProvider implements LLMProvider {
         response_format: { type: "text", mime_type: "application/json", schema: z.toJSONSchema(request.schema) },
       });
       if (!interaction.output_text) throw new ProviderError("Gemini returned no structured output");
-      return { value: request.schema.parse(JSON.parse(interaction.output_text)), usage: { requestId: interaction.id } };
+      return { value: request.schema.parse(JSON.parse(interaction.output_text)), usage: usageFrom(interaction) };
     } catch (error) { if (error instanceof ConfigurationError) throw error; throw new ProviderError("Gemini structured Interactions API request failed", { cause: error }); }
   }
+}
+
+function usageFrom(interaction: { id: string; usage?: { total_input_tokens?: number; total_output_tokens?: number; total_cached_tokens?: number } }) {
+  return {
+    requestId: interaction.id,
+    inputTokens: interaction.usage?.total_input_tokens,
+    outputTokens: interaction.usage?.total_output_tokens,
+    cachedTokens: interaction.usage?.total_cached_tokens,
+  };
 }

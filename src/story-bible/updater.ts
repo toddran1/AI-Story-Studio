@@ -13,7 +13,7 @@ function mergeNamed(existing: Named[], incoming: Named[]): Named[] {
     // Existing canonical English is deliberately never overwritten.
     match.firstSeenChapter = Math.min(match.firstSeenChapter, item.firstSeenChapter);
     match.lastSeenChapter = Math.max(match.lastSeenChapter, item.lastSeenChapter);
-    if (item.description && !match.description.includes(item.description)) match.description = [match.description, item.description].filter(Boolean).join(" ");
+    match.description = mergeDescription(match.description, item.description);
     if (match.aliases || item.aliases) match.aliases = [...new Set([...(match.aliases ?? []), ...(item.aliases ?? []), ...(match.canonicalEnglishName !== item.canonicalEnglishName ? [item.canonicalEnglishName] : [])])];
     if (!match.gender && item.gender) match.gender = item.gender;
     if (match.pronouns || item.pronouns) match.pronouns = [...new Set([...(match.pronouns ?? []), ...(item.pronouns ?? [])])];
@@ -58,14 +58,27 @@ function mergeTerms(existing: StoryBible["translationTerms"], incoming: StoryBib
   return out;
 }
 
-export function contextBeforeChapter(bible: StoryBible, chapter: number): StoryBible {
+export function contextBeforeChapter(bible: StoryBible, chapter: number, recentSummaryCount = 5): StoryBible {
   const result = structuredClone(bible);
   for (const key of ["characters", "locations", "factions", "abilities", "classes", "ranks", "items", "creatures", "systemTerms", "relationships", "translationTerms"] as const) {
     (result[key] as Array<{ firstSeenChapter: number }>) = result[key].filter((item) => item.firstSeenChapter < chapter) as never;
   }
-  result.chapterSummaries = Object.fromEntries(Object.entries(result.chapterSummaries).filter(([number]) => Number(number) < chapter));
+  const earlierSummaries = Object.entries(result.chapterSummaries)
+    .filter(([number]) => Number(number) < chapter)
+    .sort(([a], [b]) => Number(a) - Number(b));
+  result.chapterSummaries = Object.fromEntries(recentSummaryCount === 0 ? [] : earlierSummaries.slice(-recentSummaryCount));
   // The cumulative file may include this chapter from an earlier run. Context
   // versioning must describe only prior chapters so reruns remain cache-stable.
-  result.version = Object.keys(result.chapterSummaries).length;
+  // This value participates in fingerprints and therefore includes the chapter
+  // numbers, not merely the number of retained summaries.
+  result.version = bible.version;
   return result;
+}
+
+function mergeDescription(existing: string, incoming: string): string {
+  if (!incoming) return existing;
+  const normalize = (value: string) => value.replace(/\s+/g, " ").trim().toLocaleLowerCase();
+  if (normalize(existing).includes(normalize(incoming))) return existing;
+  const combined = [existing.trim(), incoming.trim()].filter(Boolean).join(" ");
+  return combined.length <= 4000 ? combined : `${combined.slice(0, 3999).trimEnd()}…`;
 }

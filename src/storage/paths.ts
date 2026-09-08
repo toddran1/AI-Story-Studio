@@ -12,3 +12,8 @@ export function storyPaths(root: string, slug: string, chapter: number) {
     audio: join(chapterDir, "audio.mp3"), segments: join(chapterDir, "audio-segments"),
   };
 }
+
+export function batchPaths(root: string, slug: string, id?: string) {
+  const story = join(root, "stories", slug); const batches = join(story, "batches");
+  return { story, batches, latest: join(batches, "latest.json"), manifest: id ? join(batches, `${id}.json`) : undefined };
+}

@@ -14,6 +14,9 @@ export const storySchema = z.object({
     url: z.string().url().optional(),
     externalId: z.string().optional(),
   }),
+  context: z.object({
+    recentChapterSummaries: z.number().int().min(0).max(100).default(5),
+  }).default({ recentChapterSummaries: 5 }),
   pipeline: z.object({
     translation: stageModelConfigSchema,
     narration: stageModelConfigSchema,
