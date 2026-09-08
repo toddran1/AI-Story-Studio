@@ -1,0 +1,2 @@
+export const STORY_BIBLE_PROMPT_VERSION = "1";
+export const storyBibleInstructions = `Extract structured story knowledge from the chapter. Record only facts supported by the text. Use canonical English names already established in the supplied Story Bible. Do not rename or replace an established translation; add aliases or descriptions instead. All firstSeenChapter and lastSeenChapter values for newly observed facts must equal the supplied chapter number. Write a concise factual chapterSummary.`;
