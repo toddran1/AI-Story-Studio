@@ -17,3 +17,5 @@ export class BatchError extends AppError {}
 export class AudioError extends AppError {}
 export class SubtitleError extends AppError {}
 export class VideoError extends AppError {}
+export class SceneError extends AppError {}
+export class ArtworkError extends AppError {}

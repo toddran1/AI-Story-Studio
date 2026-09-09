@@ -41,7 +41,8 @@ export const testStory = (overrides: Partial<Story["pipeline"]> = {}): Story => 
     narration: { provider: "openai", model: "narration-model" },
     qa: { provider: "openai", model: "qa-model" },
     storyBible: { provider: "gemini", model: "bible-model" },
+    scenePlanner: { provider: "openai", model: "scene-model" },
     tts: { provider: "fish", model: "s2-pro", speed: 1, format: "mp3", sampleRate: 44100, bitrate: 128, normalize: true, maxCharsPerRequest: 4000 },
     ...overrides,
-  }, subtitles: { maxCharactersPerLine: 42, maxLines: 2, minimumDurationSeconds: 1.2, maximumDurationSeconds: 6 }, video: { width: 1920, height: 1080, fps: 30, codec: "libx264", quality: 20, subtitleMode: "burn", subtitleStyle: "default", backgroundMode: "cover", introDurationSeconds: 3 },
+  }, subtitles: { maxCharactersPerLine: 42, maxLines: 2, minimumDurationSeconds: 1.2, maximumDurationSeconds: 6 }, video: { width: 1920, height: 1080, fps: 30, codec: "libx264", quality: 20, subtitleMode: "burn", subtitleStyle: "default", backgroundMode: "cover", introDurationSeconds: 3 }, scenes: { targetDurationSeconds: 20, minimumDurationSeconds: 10, maximumDurationSeconds: 30, maximumScenesPerChapter: 50 }, artwork: { provider: "openai", model: "gpt-image-1", stylePrompt: "cinematic illustrated fiction", aspectRatio: "16:9", quality: "medium", size: "1536x1024", outputFormat: "png" },
 });

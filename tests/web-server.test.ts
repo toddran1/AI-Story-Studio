@@ -2,7 +2,7 @@ import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { getAudioDashboard, getChapter, getChapterPage, getQaDashboard, getStoryOverview, getVideoDashboard, listStories, updateStorySettings } from "../apps/server/catalog.js";
+import { getAudioDashboard, getChapter, getChapterPage, getQaDashboard, getScenesDashboard, getStoryOverview, getVideoDashboard, listStories, updateStorySettings } from "../apps/server/catalog.js";
 import { Job, JobManager } from "../apps/server/job-manager.js";
 import { StudioOperations } from "../apps/server/operations.js";
 import { loadEnvironment } from "../src/config/env.js";
@@ -21,11 +21,14 @@ import { AudioMasteringProcessor } from "../src/audio/mastering.js";
 import { AudiobookProcessor } from "../src/audio/audiobook.js";
 import { VideoProcessor } from "../src/video/renderer.js";
 import { VideoExportProcessor } from "../src/video/video-export.js";
+import { ImageProvider } from "../src/artwork/provider.js";
 
 const webAudio: AudioMasteringProcessor = { version: "web-audio-v1", master: async (_inputs, output) => { await atomicWrite(output, Buffer.from("mastered")); return { durationSeconds: 9, codec: "mp3", container: "mp3" }; } };
 const webBook: AudiobookProcessor = { version: "web-book-v1", assemble: async (_chapters, output, format) => { await atomicWrite(output, Buffer.from("book")); return { durationSeconds: 9, codec: format === "m4b" ? "aac" : "mp3", container: format === "m4b" ? "mp4" : "mp3" }; } };
 const webVideo: VideoProcessor = { version: "web-video-v1", render: async (_input, output, settings) => { await atomicWrite(output, Buffer.from("video")); return { durationSeconds: 12, videoCodec: "h264", audioCodec: "aac", width: settings.width, height: settings.height, container: "mp4" }; } };
 const webVideoExport: VideoExportProcessor = { version: "web-video-export-v1", assemble: async (_chapters, output) => { await atomicWrite(output, Buffer.from("video-export")); return { durationSeconds: 12, videoCodec: "h264", audioCodec: "aac", width: 1920, height: 1080, container: "mp4" }; } };
+const webImages: ImageProvider = { name: "openai", version: "web-images-v1", validateConfiguration: async () => undefined, generate: async () => ({ data: Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 1]), mimeType: "image/png" }) };
+const webScenePlanner = new MockLLM("openai"); webScenePlanner.generateStructured = async (request: any) => ({ value: request.schema.parse({ scenes: [{ summary: "The lantern wakes.", startSeconds: 0, endSeconds: 9, characters: [], location: "Tower", visualPrompt: "A blue lantern wakes in a dark tower", importance: "major" }] }) });
 
 const env = loadEnvironment({});
 const pending = () => ({ status: "pending" as const });
@@ -70,13 +73,14 @@ describe("web service layer", () => {
   });
 
   it("runs mastering and audiobook exports through web jobs", async () => {
-    const root = await mkdtemp(join(tmpdir(), "story-web-audio-")); const jobs = new JobManager(); const operations = new StudioOperations(root, env, jobs, { audio: webAudio, audiobook: webBook, video: webVideo, videoExport: webVideoExport });
+    const root = await mkdtemp(join(tmpdir(), "story-web-audio-")); const jobs = new JobManager(); const operations = new StudioOperations(root, env, jobs, { audio: webAudio, audiobook: webBook, video: webVideo, videoExport: webVideoExport, scenePlanner: webScenePlanner, image: webImages });
     const inspection = await operations.inspectSource({ filename: "chapter.txt", file: Buffer.from("A chapter."), chapter: 1 }); const imported = await operations.importInspection("audio-story", inspection.id); const paths = storyPaths(root, imported.story.slug, 1); const manifest = sourceManifestSchema.parse(JSON.parse(await readFile(paths.sourceManifest, "utf8"))); const now = new Date().toISOString(); const complete = { status: "complete" as const, fingerprint: "input", outputFingerprint: "output" };
     await atomicWriteJson(paths.chapterMeta, chapterSchema.parse({ chapter: 1, originalTitle: "Opening", source: { type: manifest.chapters[0]!.ref.sourceType, sourceId: manifest.chapters[0]!.ref.sourceId, fingerprint: manifest.chapters[0]!.fingerprint, metadata: manifest.chapters[0]!.ref.metadata }, sourceLanguage: imported.story.sourceLanguage, outputLanguage: imported.story.outputLanguage, counts: { originalCharacters: 10, englishWords: 2, narrationWords: 2 }, createdAt: now, updatedAt: now,
       stages: { ingestion: complete, translation: complete, narration: complete, qa: complete, storyBible: complete, tts: complete, audioMastering: pending() } })); await atomicWrite(paths.narration, "The chapter opens. The lantern burns brightly."); await atomicWrite(paths.audioRaw, Buffer.from("raw"));
     const mastering = await waitForJob(jobs, operations.startAudio(imported.story.slug, { from: 1, to: 1 }).id); expect(mastering.status).toBe("completed"); expect((await getAudioDashboard(root, imported.story.slug)).counts.mastered).toBe(1);
     const exportJob = await waitForJob(jobs, operations.startAudiobook(imported.story.slug, { from: 1, to: 1, format: "m4b" }).id); expect(exportJob.status).toBe("completed"); const dashboard = await getAudioDashboard(root, imported.story.slug); expect(dashboard.exports[0]).toMatchObject({ format: "m4b", from: 1, to: 1, downloadUrl: "/api/stories/audio-story/exports/1-1.m4b" });
     expect((await waitForJob(jobs, operations.startSubtitles(imported.story.slug, { from: 1, to: 1 }).id)).status).toBe("completed"); expect((await waitForJob(jobs, operations.startVideo(imported.story.slug, { from: 1, to: 1 }).id)).status).toBe("completed"); expect((await waitForJob(jobs, operations.startVideoExport(imported.story.slug, { from: 1, to: 1 }).id)).status).toBe("completed"); const videoDashboard = await getVideoDashboard(root, imported.story.slug); expect(videoDashboard.counts).toMatchObject({ subtitles: 1, videos: 1 }); expect(videoDashboard.exports[0]?.downloadUrl).toBe("/api/stories/audio-story/video-exports/1-1.mp4");
+    expect((await waitForJob(jobs, operations.startScenes(imported.story.slug, { from: 1, to: 1 }).id)).status).toBe("completed"); const estimate = await waitForJob(jobs, operations.startArtwork(imported.story.slug, { from: 1, to: 1, dryRun: true }).id); expect(estimate.result).toMatchObject({ dryRun: true, imageCountEstimate: 1 }); expect((await waitForJob(jobs, operations.startArtwork(imported.story.slug, { from: 1, to: 1 }).id)).status).toBe("completed"); const scenes = await getScenesDashboard(root, imported.story.slug, 1); expect(scenes.manifest?.scenes[0]).toMatchObject({ summary: "The lantern wakes.", imageUrl: "/api/stories/audio-story/chapters/1/scenes/scene-001.png" });
     await operations.close();
   });
 

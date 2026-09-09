@@ -20,6 +20,8 @@
     "story:subtitles": "node --import tsx apps/cli/subtitles.ts",
     "story:video": "node --import tsx apps/cli/video.ts",
     "story:video-export": "node --import tsx apps/cli/video-export.ts",
+    "story:scenes": "node --import tsx apps/cli/scenes.ts",
+    "story:artwork": "node --import tsx apps/cli/artwork.ts",
     "web": "node --import tsx apps/server/index.ts --dev",
     "web:build": "vite build",
     "smoke": "node --import tsx apps/cli/smoke.ts",

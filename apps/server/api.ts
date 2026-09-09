@@ -2,10 +2,12 @@ import { createReadStream } from "node:fs";
 import { stat } from "node:fs/promises";
 import { IncomingMessage, ServerResponse } from "node:http";
 import { z } from "zod";
-import { getAudioDashboard, getChapter, getChapterPage, getQaDashboard, getStoryBible, getStoryOverview, getVideoDashboard, listStories, updateStorySettings, chapterFilterSchema } from "./catalog.js";
+import { getAudioDashboard, getChapter, getChapterPage, getQaDashboard, getScenesDashboard, getStoryBible, getStoryOverview, getVideoDashboard, listStories, updateStorySettings, chapterFilterSchema } from "./catalog.js";
 import { JobConflictError } from "./job-manager.js";
 import { StudioOperations } from "./operations.js";
-import { exportPaths, previewPaths, storyPaths, videoExportPaths } from "../../src/storage/paths.js";
+import { exportPaths, previewPaths, sceneImagePath, storyPaths, videoExportPaths } from "../../src/storage/paths.js";
+import { SceneManifest, sceneManifestSchema } from "../../src/scenes/types.js";
+import { readJsonIfExists } from "../../src/storage/story-files.js";
 import { BatchValidationError, ConfigurationError, ProviderError, StorageError } from "../../src/pipeline/errors.js";
 import { WebHttpError } from "../../src/source/web/http-client.js";
 import { logger } from "../../src/utils/logger.js";
@@ -64,12 +66,20 @@ export function createApiHandler(operations: StudioOperations) {
       if (subtitleFileMatch && request.method === "GET") { const chapter = await getChapter(operations.root, subtitleFileMatch[1]!, Number(subtitleFileMatch[2])); if (!chapter.subtitles) return send(response, 404, { error: "Chapter subtitles were not found" }); const paths = storyPaths(operations.root, subtitleFileMatch[1]!, Number(subtitleFileMatch[2])); return sendFile(request, response, subtitleFileMatch[3] === "srt" ? paths.subtitlesSrt : paths.subtitlesVtt, subtitleFileMatch[3] === "srt" ? "application/x-subrip" : "text/vtt; charset=utf-8"); }
       const chapterVideoMatch = /^\/api\/stories\/([a-z0-9-]+)\/chapters\/(\d+)\/video$/.exec(url.pathname);
       if (chapterVideoMatch && request.method === "GET") { const chapter = await getChapter(operations.root, chapterVideoMatch[1]!, Number(chapterVideoMatch[2])); if (!chapter.videoUrl) return send(response, 404, { error: "Chapter video was not found" }); return sendFile(request, response, storyPaths(operations.root, chapterVideoMatch[1]!, Number(chapterVideoMatch[2])).video, "video/mp4"); }
+      const sceneImageMatch = /^\/api\/stories\/([a-z0-9-]+)\/chapters\/(\d+)\/scenes\/(scene-\d{3})\.png$/.exec(url.pathname);
+      if (sceneImageMatch && request.method === "GET") { const raw = await readJsonIfExists<SceneManifest>(storyPaths(operations.root, sceneImageMatch[1]!, Number(sceneImageMatch[2])).scenesManifest); const manifest = raw ? sceneManifestSchema.safeParse(raw) : undefined; const scene = manifest?.success ? manifest.data.scenes.find((item) => item.id === sceneImageMatch[3]) : undefined; if (!scene || scene.artwork.status !== "complete") return send(response, 404, { error: "Scene artwork was not found" }); return sendFile(request, response, sceneImagePath(operations.root, sceneImageMatch[1]!, Number(sceneImageMatch[2]), sceneImageMatch[3]!), "image/png"); }
       const qaMatch = /^\/api\/stories\/([a-z0-9-]+)\/qa$/.exec(url.pathname);
       if (qaMatch && request.method === "GET") return send(response, 200, await getQaDashboard(operations.root, qaMatch[1]!));
       const audioDashboardMatch = /^\/api\/stories\/([a-z0-9-]+)\/audio$/.exec(url.pathname);
       if (audioDashboardMatch && request.method === "GET") return send(response, 200, await getAudioDashboard(operations.root, audioDashboardMatch[1]!));
       const videoDashboardMatch = /^\/api\/stories\/([a-z0-9-]+)\/video$/.exec(url.pathname);
       if (videoDashboardMatch && request.method === "GET") return send(response, 200, await getVideoDashboard(operations.root, videoDashboardMatch[1]!));
+      const scenesDashboardMatch = /^\/api\/stories\/([a-z0-9-]+)\/scenes$/.exec(url.pathname);
+      if (scenesDashboardMatch && request.method === "GET") return send(response, 200, await getScenesDashboard(operations.root, scenesDashboardMatch[1]!, optionalInteger(url.searchParams.get("chapter"))));
+      const scenesEditMatch = /^\/api\/stories\/([a-z0-9-]+)\/chapters\/(\d+)\/scenes$/.exec(url.pathname);
+      if (scenesEditMatch && request.method === "PUT") { const input = z.object({ scenes: z.array(z.unknown()) }).strict().parse(await jsonBody(request)); return send(response, 200, { manifest: await operations.updateScenes(scenesEditMatch[1]!, Number(scenesEditMatch[2]), input.scenes) }); }
+      const artworkReviewMatch = /^\/api\/stories\/([a-z0-9-]+)\/chapters\/(\d+)\/scenes\/(scene-\d{3})\/review$/.exec(url.pathname);
+      if (artworkReviewMatch && request.method === "POST") { const input = z.object({ review: z.enum(["unreviewed", "approved", "rejected", "needs-regeneration"]) }).strict().parse(await jsonBody(request)); return send(response, 200, { manifest: await operations.reviewArtwork(artworkReviewMatch[1]!, Number(artworkReviewMatch[2]), artworkReviewMatch[3]!, input.review) }); }
       const exportMatch = /^\/api\/stories\/([a-z0-9-]+)\/exports\/(\d+)-(\d+)\.(mp3|m4b)$/.exec(url.pathname);
       if (exportMatch && request.method === "GET") {
         const from = Number(exportMatch[2]); const to = Number(exportMatch[3]); const format = exportMatch[4] as "mp3" | "m4b";
@@ -107,6 +117,10 @@ export function createApiHandler(operations: StudioOperations) {
       if (videoJobMatch && request.method === "POST") return send(response, 202, operations.startVideo(videoJobMatch[1]!, await jsonBody(request)));
       const videoExportJobMatch = /^\/api\/stories\/([a-z0-9-]+)\/jobs\/video-export$/.exec(url.pathname);
       if (videoExportJobMatch && request.method === "POST") return send(response, 202, operations.startVideoExport(videoExportJobMatch[1]!, await jsonBody(request)));
+      const scenesJobMatch = /^\/api\/stories\/([a-z0-9-]+)\/jobs\/scenes$/.exec(url.pathname);
+      if (scenesJobMatch && request.method === "POST") return send(response, 202, operations.startScenes(scenesJobMatch[1]!, await jsonBody(request)));
+      const artworkJobMatch = /^\/api\/stories\/([a-z0-9-]+)\/jobs\/artwork$/.exec(url.pathname);
+      if (artworkJobMatch && request.method === "POST") return send(response, 202, operations.startArtwork(artworkJobMatch[1]!, await jsonBody(request)));
       const previewResult = /^\/api\/stories\/([a-z0-9-]+)\/previews\/([A-Za-z0-9T_-]+)$/.exec(url.pathname);
       if (previewResult && request.method === "GET") return send(response, 200, await operations.getPreview(previewResult[1]!, previewResult[2]!));
       const previewAudio = /^\/api\/stories\/([a-z0-9-]+)\/previews\/([A-Za-z0-9T_-]+)\/audio-([ab])$/.exec(url.pathname);

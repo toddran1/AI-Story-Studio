@@ -24,7 +24,7 @@ export async function masterStoredChapter(options: { root: string; story: Story;
     && chapter.stages.audioMastering.outputFingerprint === currentOutput && chapter.audio) {
     options.onEvent?.({ status: "reused", chapter: options.chapter, state: chapter.stages.audioMastering }); return { chapter, reused: true, probe: chapter.audio };
   }
-  const started = Date.now(); chapter.audio = undefined; chapter.subtitle = undefined; chapter.video = undefined; chapter.stages.subtitles = { status: "pending" }; chapter.stages.video = { status: "pending" }; chapter.stages.audioMastering = { status: "running", provider: "ffmpeg", model: options.processor.version, fingerprint: fp, startedAt: new Date().toISOString() };
+  const started = Date.now(); chapter.audio = undefined; chapter.subtitle = undefined; chapter.video = undefined; chapter.scenes = undefined; chapter.stages.subtitles = { status: "pending" }; chapter.stages.scenePlanning = { status: "pending" }; chapter.stages.artwork = { status: "pending" }; chapter.stages.video = { status: "pending" }; chapter.stages.audioMastering = { status: "running", provider: "ffmpeg", model: options.processor.version, fingerprint: fp, startedAt: new Date().toISOString() };
   await persist(paths.chapterMeta, chapter); options.onEvent?.({ status: "started", chapter: options.chapter, state: chapter.stages.audioMastering });
   const staged = `${paths.audio}.stage-${randomUUID()}.mp3`;
   try {

@@ -11,11 +11,14 @@ export function defaultStory(slug: string, env: Environment): Story {
     audio: { loudnessTarget: -17, truePeak: -1.5, segmentGapSeconds: 0.35, chapterGapSeconds: 1.5, format: "mp3", bitrate: "128k", sampleRate: 44100 },
     subtitles: { maxCharactersPerLine: 42, maxLines: 2, minimumDurationSeconds: 1.2, maximumDurationSeconds: 6 },
     video: { width: 1920, height: 1080, fps: 30, codec: "libx264", quality: 20, subtitleMode: "burn", subtitleStyle: "default", backgroundMode: "cover", introDurationSeconds: 3 },
+    scenes: { targetDurationSeconds: 20, minimumDurationSeconds: 10, maximumDurationSeconds: 30, maximumScenesPerChapter: 50 },
+    artwork: { provider: "openai", model: "gpt-image-1", stylePrompt: "cinematic illustrated fiction, dramatic natural lighting, consistent character design, widescreen composition", aspectRatio: "16:9", quality: "medium", size: "1536x1024", outputFormat: "png" },
     pipeline: {
       translation: { provider: "gemini", model: env.GEMINI_DEFAULT_MODEL },
       narration: { provider: "openai", model: env.OPENAI_DEFAULT_MODEL },
       qa: { provider: "openai", model: env.OPENAI_DEFAULT_MODEL },
       storyBible: { provider: "gemini", model: env.GEMINI_DEFAULT_MODEL },
+      scenePlanner: { provider: "openai", model: env.OPENAI_DEFAULT_MODEL },
       tts: {
         provider: "fish", model: env.FISH_AUDIO_MODEL, referenceId: env.FISH_AUDIO_REFERENCE_ID,
         speed: env.FISH_AUDIO_SPEED, format: "mp3", sampleRate: env.FISH_AUDIO_SAMPLE_RATE,

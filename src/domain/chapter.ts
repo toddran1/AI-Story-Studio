@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { qaCategorySchema, qaStatusSchema } from "./qa.js";
 
-export const stageNameSchema = z.enum(["ingestion", "translation", "narration", "qa", "storyBible", "tts", "audioMastering", "subtitles", "video"]);
+export const stageNameSchema = z.enum(["ingestion", "translation", "narration", "qa", "storyBible", "tts", "audioMastering", "subtitles", "scenePlanning", "artwork", "video"]);
 export type StageName = z.infer<typeof stageNameSchema>;
 
 const usageSchema = z.object({
@@ -49,6 +49,7 @@ const rawChapterSchema = z.object({
   audio: z.object({ durationSeconds: z.number().positive(), codec: z.string(), container: z.string(), sampleRate: z.number().positive().optional(), bitrate: z.number().positive().optional() }).optional(),
   subtitle: z.object({ cueCount: z.number().int().positive(), durationSeconds: z.number().positive() }).optional(),
   video: z.object({ durationSeconds: z.number().positive(), codec: z.string(), width: z.number().int().positive(), height: z.number().int().positive() }).optional(),
+  scenes: z.object({ total: z.number().int().positive(), generated: z.number().int().nonnegative(), approved: z.number().int().nonnegative() }).optional(),
 });
 
 export const chapterSchema = z.preprocess((value) => {
@@ -60,6 +61,8 @@ export const chapterSchema = z.preprocess((value) => {
   if (!("qa" in normalized)) normalized.qa = { status: "pending" };
   if (!("audioMastering" in normalized)) normalized.audioMastering = { status: "pending" };
   if (!("subtitles" in normalized)) normalized.subtitles = { status: "pending" };
+  if (!("scenePlanning" in normalized)) normalized.scenePlanning = { status: "pending" };
+  if (!("artwork" in normalized)) normalized.artwork = { status: "pending" };
   if (!("video" in normalized)) normalized.video = { status: "pending" };
   return { ...chapter, stages: normalized };
 }, rawChapterSchema);

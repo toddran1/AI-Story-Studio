@@ -7,20 +7,21 @@ import { Story, storySchema } from "../../src/domain/story.js";
 import { StoryBible, emptyStoryBible, storyBibleSchema } from "../../src/domain/story-bible.js";
 import { SourceManifest, sourceManifestSchema } from "../../src/source/types.js";
 import { atomicWriteJson } from "../../src/storage/atomic-write.js";
-import { storyPaths } from "../../src/storage/paths.js";
+import { sceneImagePath, storyPaths } from "../../src/storage/paths.js";
 import { exists, readJsonIfExists, readTextIfExists } from "../../src/storage/story-files.js";
 import { withStoryLock } from "../../src/storage/story-lock.js";
 import { loadStory } from "../../src/config/load-config.js";
 import { rebuildStoryBibleBeforeChapter } from "../../src/story-bible/rebuild.js";
 import { exportManifestSchema } from "../../src/audio/audiobook.js";
 import { videoExportManifestSchema } from "../../src/video/video-export.js";
+import { SceneManifest, artworkSettingsSchema, sceneManifestSchema, sceneSettingsSchema } from "../../src/scenes/types.js";
 
 const slugSchema = z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/);
 export const chapterFilterSchema = z.enum(["all", "unprocessed", "warn", "fail", "complete"]);
 
 export type ChapterSummary = {
   chapter: number; originalTitle?: string; translation: string; narration: string; qa?: QaResult["status"];
-  qaScore?: number; qaIssues?: QaResult["issues"]; tts: string; audioMastering: string; subtitles: string; video: string; audioAvailable: boolean; videoAvailable: boolean; durationSeconds?: number;
+  qaScore?: number; qaIssues?: QaResult["issues"]; tts: string; audioMastering: string; subtitles: string; scenePlanning: string; artwork: string; video: string; audioAvailable: boolean; videoAvailable: boolean; durationSeconds?: number;
 };
 
 export async function listStories(root: string) {
@@ -110,11 +111,13 @@ export const settingsUpdateSchema = z.object({
   translation: z.object({ provider: z.enum(["openai", "gemini"]), model: z.string().trim().min(1) }),
   narration: z.object({ provider: z.enum(["openai", "gemini"]), model: z.string().trim().min(1) }),
   qa: z.object({ provider: z.enum(["openai", "gemini"]), model: z.string().trim().min(1) }),
+  scenePlanner: z.object({ provider: z.enum(["openai", "gemini"]), model: z.string().trim().min(1) }).optional(),
   tts: z.object({ referenceId: z.string().trim().optional(), speed: z.number().min(0.5).max(2) }),
   audio: z.object({ loudnessTarget: z.number().min(-24).max(-12), truePeak: z.number().min(-6).max(-0.1), segmentGapSeconds: z.number().min(0).max(5),
     chapterGapSeconds: z.number().min(0).max(10), bitrate: z.enum(["64k", "96k", "128k", "160k", "192k", "256k", "320k"]), sampleRate: z.union([z.literal(32000), z.literal(44100), z.literal(48000)]) }).optional(),
   subtitles: z.object({ maxCharactersPerLine: z.number().int().min(20).max(80), maxLines: z.number().int().min(1).max(3), minimumDurationSeconds: z.number().min(.4).max(5), maximumDurationSeconds: z.number().min(2).max(12) }).optional(),
   video: z.object({ width: z.number().int().min(640).max(3840), height: z.number().int().min(360).max(2160), fps: z.union([z.literal(24), z.literal(25), z.literal(30), z.literal(60)]), codec: z.literal("libx264"), quality: z.number().int().min(0).max(40), subtitleMode: z.enum(["none", "burn", "soft", "both"]), subtitleStyle: z.enum(["default", "large", "minimal"]), backgroundMode: z.enum(["cover", "gradient", "kenBurns"]), introDurationSeconds: z.number().min(0).max(10) }).optional(),
+  scenes: sceneSettingsSchema.optional(), artwork: artworkSettingsSchema.optional(),
 }).strict();
 
 export async function updateStorySettings(root: string, slug: string, input: unknown): Promise<Story> {
@@ -123,7 +126,7 @@ export async function updateStorySettings(root: string, slug: string, input: unk
     const current = await loadStory(paths.storyConfig);
     const story = storySchema.parse({ ...current, title: update.title, sourceLanguage: update.sourceLanguage, outputLanguage: update.outputLanguage,
       context: { ...current.context, recentChapterSummaries: update.recentChapterSummaries },
-      audio: { ...current.audio, ...update.audio }, subtitles: { ...current.subtitles, ...update.subtitles }, video: { ...current.video, ...update.video }, pipeline: { ...current.pipeline, translation: update.translation, narration: update.narration, qa: update.qa,
+      audio: { ...current.audio, ...update.audio }, subtitles: { ...current.subtitles, ...update.subtitles }, video: { ...current.video, ...update.video }, scenes: { ...current.scenes, ...update.scenes }, artwork: { ...current.artwork, ...update.artwork }, pipeline: { ...current.pipeline, translation: update.translation, narration: update.narration, qa: update.qa, scenePlanner: update.scenePlanner ?? current.pipeline.scenePlanner,
         tts: { ...current.pipeline.tts, referenceId: update.tts.referenceId || undefined, speed: update.tts.speed } } });
     await atomicWriteJson(paths.storyConfig, story); await atomicWriteJson(paths.pipelineConfig, story.pipeline); return story;
   });
@@ -157,10 +160,10 @@ async function loadSummaries(root: string, slug: string, numbers: number[], inde
     const metadata = parsed?.success ? parsed.data : undefined; const fresh = isCurrent(metadata, index.manifestByChapter.get(chapter), Boolean(index.manifest));
     const qaRaw = fresh && metadata?.stages.qa.status === "complete" ? await readJsonIfExists<QaResult>(chapterPaths.qa) : undefined;
     const qa = qaRaw ? qaResultSchema.safeParse(qaRaw) : undefined; const tts = fresh ? metadata?.stages.tts.status ?? "pending" : "pending";
-    const audioMastering = fresh ? metadata?.stages.audioMastering.status ?? "pending" : "pending"; const subtitles = fresh ? metadata?.stages.subtitles.status ?? "pending" : "pending"; const video = fresh ? metadata?.stages.video.status ?? "pending" : "pending";
+    const audioMastering = fresh ? metadata?.stages.audioMastering.status ?? "pending" : "pending"; const subtitles = fresh ? metadata?.stages.subtitles.status ?? "pending" : "pending"; const scenePlanning = fresh ? metadata?.stages.scenePlanning.status ?? "pending" : "pending"; const artwork = fresh ? metadata?.stages.artwork.status ?? "pending" : "pending"; const video = fresh ? metadata?.stages.video.status ?? "pending" : "pending";
     return { chapter, originalTitle: metadata?.originalTitle ?? index.titles.get(chapter), translation: fresh ? metadata?.stages.translation.status ?? "pending" : "pending",
       narration: fresh ? metadata?.stages.narration.status ?? "pending" : "pending", qa: qa?.success ? qa.data.status : undefined,
-      qaScore: qa?.success ? qa.data.score : undefined, qaIssues: qa?.success ? qa.data.issues : undefined, tts, audioMastering, subtitles, video,
+      qaScore: qa?.success ? qa.data.score : undefined, qaIssues: qa?.success ? qa.data.issues : undefined, tts, audioMastering, subtitles, scenePlanning, artwork, video,
       durationSeconds: audioMastering === "complete" ? metadata?.audio?.durationSeconds : undefined,
       audioAvailable: audioMastering === "complete" && await exists(chapterPaths.audio), videoAvailable: video === "complete" && await exists(chapterPaths.video) };
   });
@@ -184,6 +187,14 @@ export async function getVideoDashboard(root: string, slug: string) {
   try { names = (await readdir(join(storyRoot, "exports"))).filter((name) => name.endsWith(".mp4.json")); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
   const exports = (await mapLimit(names, 8, async (name) => { const raw = await readJsonIfExists(join(storyRoot, "exports", name)); const parsed = raw ? videoExportManifestSchema.safeParse(raw) : undefined; return parsed?.success ? { ...parsed.data, downloadUrl: `/api/stories/${slug}/video-exports/${parsed.data.from}-${parsed.data.to}.mp4` } : undefined; })).filter((item): item is NonNullable<typeof item> => Boolean(item)).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   return { settings: story.video, subtitleSettings: story.subtitles, background: { coverAvailable: Boolean(cover), coverName: cover, effectiveMode: story.video.backgroundMode === "gradient" || !cover ? "fallback" : story.video.backgroundMode }, counts: { total: chapters.length, mastered: chapters.filter((item) => item.audioMastering === "complete").length, subtitles: chapters.filter((item) => item.subtitles === "complete").length, videos: chapters.filter((item) => item.video === "complete").length }, chapters: chapters.map((item) => ({ chapter: item.chapter, title: item.originalTitle, durationSeconds: item.durationSeconds, subtitleStatus: item.subtitles, videoStatus: item.video, videoAvailable: item.videoAvailable })), exports };
+}
+
+export async function getScenesDashboard(root: string, slug: string, selectedChapter?: number) {
+  slugSchema.parse(slug); const story = await loadStory(storyPaths(root, slug, 1).storyConfig); const chapters = await loadChapterSummaries(root, slug); const chapterNumber = selectedChapter ?? chapters[0]?.chapter;
+  if (chapterNumber !== undefined && !chapters.some((item) => item.chapter === chapterNumber)) throw new Error(`Chapter ${chapterNumber} was not found`);
+  let manifest: (SceneManifest & { scenes: Array<SceneManifest["scenes"][number] & { imageUrl?: string }> }) | undefined;
+  if (chapterNumber !== undefined) { const raw = await readJsonIfExists<SceneManifest>(storyPaths(root, slug, chapterNumber).scenesManifest); const parsed = raw ? sceneManifestSchema.safeParse(raw) : undefined; if (parsed?.success) { const scenes = await mapLimit(parsed.data.scenes, 8, async (scene) => ({ ...scene, imageUrl: scene.artwork.status === "complete" && await exists(sceneImagePath(root, slug, chapterNumber, scene.id)) ? `/api/stories/${slug}/chapters/${chapterNumber}/scenes/${scene.id}.png` : undefined })); manifest = { ...parsed.data, scenes }; } }
+  return { settings: story.scenes, artwork: story.artwork, planner: story.pipeline.scenePlanner, selectedChapter: chapterNumber, chapters: chapters.map((item) => ({ chapter: item.chapter, title: item.originalTitle, durationSeconds: item.durationSeconds, sceneStatus: item.scenePlanning, artworkStatus: item.artwork })), counts: { chapters: chapters.length, planned: chapters.filter((item) => item.scenePlanning === "complete").length, artworkReady: chapters.filter((item) => item.artwork === "complete").length }, manifest };
 }
 
 function isCurrent(metadata: Chapter | undefined, source: SourceManifest["chapters"][number] | undefined, hasManifest: boolean) {

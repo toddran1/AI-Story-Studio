@@ -12,7 +12,13 @@ export function storyPaths(root: string, slug: string, chapter: number) {
     narration: join(chapterDir, "narration.txt"), qa: join(chapterDir, "qa.json"), bibleUpdate: join(chapterDir, "story-bible-update.json"),
     audioRaw: join(chapterDir, "audio-raw.mp3"), audio: join(chapterDir, "audio.mp3"), segments: join(chapterDir, "audio-segments"),
     subtitlesSrt: join(chapterDir, "subtitles.srt"), subtitlesVtt: join(chapterDir, "subtitles.vtt"), video: join(chapterDir, "video.mp4"),
+    scenesManifest: join(chapterDir, "scenes.json"), scenesDirectory: join(chapterDir, "scenes"),
   };
+}
+
+export function sceneImagePath(root: string, slug: string, chapter: number, sceneId: string) {
+  if (!/^scene-\d{3}$/.test(sceneId)) throw new Error("Invalid scene ID");
+  return join(storyPaths(root, slug, chapter).scenesDirectory, `${sceneId}.png`);
 }
 
 export function videoExportPaths(root: string, slug: string, from: number, to: number) {

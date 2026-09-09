@@ -20,6 +20,8 @@ Milestone 7 adds FFmpeg audio mastering, durable chapter masters, and cached MP3
 
 Milestone 8 adds deterministic SRT/WebVTT timing, cached H.264 chapter videos, cover or fallback backgrounds, and combined MP4 editions.
 
+Milestone 9 adds structured scene planning, reviewable still-art generation, character visual references, and approved scene timelines for chapter video.
+
 ## Requirements
 
 - Node.js 22 or newer (an active LTS release is recommended)
@@ -334,6 +336,46 @@ Burned captions require FFmpeg’s `subtitles` filter (libass), and title cards 
 Combined exports are written to `stories/<story>/exports/<story>-<from>-<to>.mp4` in numeric chapter order with container chapter markers. ffprobe validation requires H.264 video, AAC audio, the configured resolution, and a plausible duration. Subtitle and video fingerprints are independent: formatting changes do not rerun TTS or mastering, and video-setting changes invalidate only video.
 
 The studio’s **Video** workspace presents the production as a real edit rail—mastered audio, subtitle timing, visual field, and chapter renders—alongside range controls, caption mode, playback, combined editions, downloads, and live job progress. Chapter detail pages include subtitle preview and MP4 playback.
+
+## Milestone 9 — Scene Planning and Artwork
+
+Scene planning runs after narration and audio mastering, using the final narration, chapter title, mastered duration, and the canonical Story Bible. Plans cover the complete audio timeline and are stored at `chapters/<chapter>/scenes.json`. The default target is one still every 20 seconds, with 10–30 second guidance and a 50-scene safety cap; all values are validated story settings.
+
+```sh
+npm run story:scenes -- --story undead-disaster --chapter 1
+npm run story:scenes -- --story undead-disaster --from 1 --to 10 --force
+npm run story:artwork -- --story undead-disaster --from 1 --to 10 --dry-run
+npm run story:artwork -- --story undead-disaster --chapter 1 --scene scene-003
+npm run story:artwork -- --story undead-disaster --from 1 --to 10 --force
+```
+
+Both commands require an explicit chapter or inclusive range so a mistyped command cannot create a large paid job. `--dry-run` reports exactly which images would be requested without validating credentials or calling a provider. Artwork is written separately as `chapters/<chapter>/scenes/scene-NNN.png`; scene plans and individual images have independent fingerprints, so a prompt edit regenerates only its changed scene and planning changes never rerun narration, TTS, or mastering.
+
+Artwork configuration lives in `story.json`:
+
+```json
+{
+  "scenes": {
+    "targetDurationSeconds": 20,
+    "minimumDurationSeconds": 10,
+    "maximumDurationSeconds": 30,
+    "maximumScenesPerChapter": 50
+  },
+  "artwork": {
+    "provider": "openai",
+    "model": "gpt-image-1",
+    "stylePrompt": "cinematic illustrated fiction, dramatic natural lighting, consistent character design, widescreen composition",
+    "aspectRatio": "16:9",
+    "quality": "medium",
+    "size": "1536x1024",
+    "outputFormat": "png"
+  }
+}
+```
+
+Optional character references belong under `stories/<story>/assets/characters/<character>/profile.json`, with a `reference.png` beside the profile when available. Profiles can define `name`, `description`, `hair`, `clothing`, and `distinctiveFeatures`; their content and image fingerprints participate in artwork caching. The initial OpenAI provider uses the textual canonical profile in its prompt. The reference PNG is retained and fingerprinted for consistency and future image-conditioned providers.
+
+The studio’s **Scenes / Artwork** workspace uses a film-strip timeline to edit timing, summaries, characters, locations, importance, and visual prompts; estimate and generate missing work; regenerate one scene; and mark results approved, rejected, or needing regeneration. Manual edits become the saved source of truth. Video rendering uses the scene timeline only when every image is present, fingerprint-valid, and approved; otherwise it safely retains the existing cover or generated-background fallback.
 
 ## Verification
 
