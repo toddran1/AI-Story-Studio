@@ -12,13 +12,14 @@ import { exists, readJsonIfExists, readTextIfExists } from "../../src/storage/st
 import { withStoryLock } from "../../src/storage/story-lock.js";
 import { loadStory } from "../../src/config/load-config.js";
 import { rebuildStoryBibleBeforeChapter } from "../../src/story-bible/rebuild.js";
+import { exportManifestSchema } from "../../src/audio/audiobook.js";
 
 const slugSchema = z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/);
 export const chapterFilterSchema = z.enum(["all", "unprocessed", "warn", "fail", "complete"]);
 
 export type ChapterSummary = {
   chapter: number; originalTitle?: string; translation: string; narration: string; qa?: QaResult["status"];
-  qaScore?: number; qaIssues?: QaResult["issues"]; tts: string; audioAvailable: boolean;
+  qaScore?: number; qaIssues?: QaResult["issues"]; tts: string; audioMastering: string; audioAvailable: boolean; durationSeconds?: number;
 };
 
 export async function listStories(root: string) {
@@ -30,7 +31,7 @@ export async function listStories(root: string) {
     const story = await loadStory(paths.storyConfig); const manifestRaw = await readJsonIfExists(paths.sourceManifest);
     const manifest = manifestRaw ? sourceManifestSchema.safeParse(manifestRaw) : undefined;
     const chapters = await loadChapterSummaries(root, slug);
-    const processed = chapters.filter((item) => item.qa || item.tts === "complete");
+    const processed = chapters.filter((item) => item.audioMastering === "complete");
     return {
       slug, title: story.title, author: story.author, sourceType: story.source.type, sourceUrl: story.source.url,
       sourceLanguage: story.sourceLanguage, outputLanguage: story.outputLanguage,
@@ -46,7 +47,7 @@ export async function getStoryOverview(root: string, slug: string) {
   slugSchema.parse(slug); const story = await loadStory(storyPaths(root, slug, 1).storyConfig);
   const chapters = await loadChapterSummaries(root, slug);
   return { story, counts: { chapters: chapters.length, minChapter: chapters[0]?.chapter, maxChapter: chapters.at(-1)?.chapter,
-    ...countQa(chapters), complete: chapters.filter((item) => item.tts === "complete").length } };
+    ...countQa(chapters), complete: chapters.filter((item) => item.audioMastering === "complete").length } };
 }
 
 export async function getChapterPage(root: string, slug: string, options: { page: number; pageSize: number; filter: z.infer<typeof chapterFilterSchema>; query?: string }) {
@@ -62,7 +63,7 @@ export async function getChapterPage(root: string, slug: string, options: { page
   let chapters = await loadSummaries(root, slug, numbers, index);
   if (options.filter === "unprocessed") chapters = chapters.filter((item) => item.translation !== "complete");
   else if (options.filter === "warn" || options.filter === "fail") chapters = chapters.filter((item) => item.qa === options.filter);
-  else if (options.filter === "complete") chapters = chapters.filter((item) => item.tts === "complete");
+  else if (options.filter === "complete") chapters = chapters.filter((item) => item.audioMastering === "complete");
   const total = chapters.length; const pages = Math.max(1, Math.ceil(total / pageSize)); const safePage = Math.min(page, pages);
   return { items: chapters.slice((safePage - 1) * pageSize, safePage * pageSize), page: safePage, pageSize, total, pages };
 }
@@ -74,7 +75,7 @@ export async function getChapter(root: string, slug: string, chapter: number) {
   if (index.manifest && !index.manifestByChapter.has(chapter)) throw new Error(`Chapter ${chapter} was not found`);
   const fresh = isCurrent(metadata, index.manifestByChapter.get(chapter), Boolean(index.manifest));
   const qaRaw = fresh && metadata?.stages.qa.status === "complete" ? await readJsonIfExists<QaResult>(paths.qa) : undefined;
-  const audioAvailable = fresh && metadata?.stages.tts.status === "complete" && await exists(paths.audio);
+  const audioAvailable = fresh && metadata?.stages.audioMastering.status === "complete" && await exists(paths.audio);
   return {
     chapter, metadata, stale: !fresh, original: fresh ? await readTextIfExists(paths.original) : undefined,
     translation: fresh ? await readTextIfExists(paths.english) : undefined, narration: fresh ? await readTextIfExists(paths.narration) : undefined,
@@ -106,6 +107,8 @@ export const settingsUpdateSchema = z.object({
   narration: z.object({ provider: z.enum(["openai", "gemini"]), model: z.string().trim().min(1) }),
   qa: z.object({ provider: z.enum(["openai", "gemini"]), model: z.string().trim().min(1) }),
   tts: z.object({ referenceId: z.string().trim().optional(), speed: z.number().min(0.5).max(2) }),
+  audio: z.object({ loudnessTarget: z.number().min(-24).max(-12), truePeak: z.number().min(-6).max(-0.1), segmentGapSeconds: z.number().min(0).max(5),
+    chapterGapSeconds: z.number().min(0).max(10), bitrate: z.enum(["64k", "96k", "128k", "160k", "192k", "256k", "320k"]), sampleRate: z.union([z.literal(32000), z.literal(44100), z.literal(48000)]) }).optional(),
 }).strict();
 
 export async function updateStorySettings(root: string, slug: string, input: unknown): Promise<Story> {
@@ -114,7 +117,7 @@ export async function updateStorySettings(root: string, slug: string, input: unk
     const current = await loadStory(paths.storyConfig);
     const story = storySchema.parse({ ...current, title: update.title, sourceLanguage: update.sourceLanguage, outputLanguage: update.outputLanguage,
       context: { ...current.context, recentChapterSummaries: update.recentChapterSummaries },
-      pipeline: { ...current.pipeline, translation: update.translation, narration: update.narration, qa: update.qa,
+      audio: { ...current.audio, ...update.audio }, pipeline: { ...current.pipeline, translation: update.translation, narration: update.narration, qa: update.qa,
         tts: { ...current.pipeline.tts, referenceId: update.tts.referenceId || undefined, speed: update.tts.speed } } });
     await atomicWriteJson(paths.storyConfig, story); await atomicWriteJson(paths.pipelineConfig, story.pipeline); return story;
   });
@@ -148,11 +151,25 @@ async function loadSummaries(root: string, slug: string, numbers: number[], inde
     const metadata = parsed?.success ? parsed.data : undefined; const fresh = isCurrent(metadata, index.manifestByChapter.get(chapter), Boolean(index.manifest));
     const qaRaw = fresh && metadata?.stages.qa.status === "complete" ? await readJsonIfExists<QaResult>(chapterPaths.qa) : undefined;
     const qa = qaRaw ? qaResultSchema.safeParse(qaRaw) : undefined; const tts = fresh ? metadata?.stages.tts.status ?? "pending" : "pending";
+    const audioMastering = fresh ? metadata?.stages.audioMastering.status ?? "pending" : "pending";
     return { chapter, originalTitle: metadata?.originalTitle ?? index.titles.get(chapter), translation: fresh ? metadata?.stages.translation.status ?? "pending" : "pending",
       narration: fresh ? metadata?.stages.narration.status ?? "pending" : "pending", qa: qa?.success ? qa.data.status : undefined,
-      qaScore: qa?.success ? qa.data.score : undefined, qaIssues: qa?.success ? qa.data.issues : undefined, tts,
-      audioAvailable: tts === "complete" && await exists(chapterPaths.audio) };
+      qaScore: qa?.success ? qa.data.score : undefined, qaIssues: qa?.success ? qa.data.issues : undefined, tts, audioMastering,
+      durationSeconds: audioMastering === "complete" ? metadata?.audio?.durationSeconds : undefined,
+      audioAvailable: audioMastering === "complete" && await exists(chapterPaths.audio) };
   });
+}
+
+export async function getAudioDashboard(root: string, slug: string) {
+  slugSchema.parse(slug); const story = await loadStory(storyPaths(root, slug, 1).storyConfig); const chapters = await loadChapterSummaries(root, slug);
+  const exportsDirectory = join(storyPaths(root, slug, 1).story, "exports"); let names: string[] = [];
+  try { names = (await readdir(exportsDirectory)).filter((name) => name.endsWith(".json")); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+  const exports = (await mapLimit(names, 8, async (name) => { const raw = await readJsonIfExists(join(exportsDirectory, name)); const parsed = raw ? exportManifestSchema.safeParse(raw) : undefined; return parsed?.success ? { ...parsed.data, downloadUrl: `/api/stories/${slug}/exports/${parsed.data.from}-${parsed.data.to}.${parsed.data.format}` } : undefined; }))
+    .filter((item): item is NonNullable<typeof item> => Boolean(item)).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  const mastered = chapters.filter((item) => item.audioMastering === "complete" && item.durationSeconds);
+  return { settings: story.audio, chapters: chapters.map(({ chapter, originalTitle, audioMastering, durationSeconds, audioAvailable }) => ({ chapter, title: originalTitle, status: audioMastering, durationSeconds, audioAvailable })),
+    counts: { total: chapters.length, mastered: mastered.length },
+    totalDurationSeconds: mastered.reduce((sum, item) => sum + (item.durationSeconds ?? 0), 0) + story.audio.chapterGapSeconds * Math.max(0, mastered.length - 1), exports };
 }
 
 function isCurrent(metadata: Chapter | undefined, source: SourceManifest["chapters"][number] | undefined, hasManifest: boolean) {

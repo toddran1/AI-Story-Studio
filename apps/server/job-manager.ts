@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 
 export type JobStatus = "queued" | "running" | "completed" | "failed" | "paused";
-export type Job = { id: string; type: "batch" | "preview"; story: string; status: JobStatus; createdAt: string; updatedAt: string; progress?: unknown; result?: unknown; error?: string };
+export type Job = { id: string; type: "batch" | "preview" | "audio" | "audiobook"; story: string; status: JobStatus; createdAt: string; updatedAt: string; progress?: unknown; result?: unknown; error?: string };
 type JobControl = { update(progress: unknown): void; setPause(handler: () => void): void };
 
 export class JobConflictError extends Error {}

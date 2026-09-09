@@ -101,7 +101,7 @@ function parseArgs(values: string[]): Args {
   }
   return args;
 }
-const forceValues: ForceStage[] = ["translation", "narration", "qa", "story-bible", "tts", "all"];
+const forceValues: ForceStage[] = ["translation", "narration", "qa", "story-bible", "tts", "audio", "all"];
 function validateSlug(slug: string) { if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(slug)) usage("--story must be a lowercase kebab-case slug"); }
 function integer(value: string, key: string) { const number = Number(value); if (!Number.isInteger(number) || number < 1) usage(`${key} must be a positive integer`); return number; }
 function nonnegative(value: string, key: string) { const number = Number(value); if (!Number.isInteger(number) || number < 0) usage(`${key} must be a non-negative integer`); return number; }

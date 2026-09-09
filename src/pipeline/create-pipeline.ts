@@ -5,6 +5,7 @@ import { LLMRouter } from "../llm/router.js";
 import { FishAudioProvider } from "../tts/fish/fish-audio.provider.js";
 import { ChapterPipeline } from "./chapter-pipeline.js";
 import { LLMProvider } from "../llm/provider.js";
+import { FfmpegMasteringProcessor } from "../audio/mastering.js";
 
 export function createPipeline(env: Environment): ChapterPipeline {
   return createPipelineRuntime(env).pipeline;
@@ -16,5 +17,6 @@ export function createPipelineRuntime(env: Environment) {
       ["gemini", new GeminiProvider(env.GEMINI_API_KEY, env.PROVIDER_TIMEOUT_MS)],
     ]));
   const tts = new FishAudioProvider(env.FISH_AUDIO_API_KEY, fetch, env.PROVIDER_TIMEOUT_MS);
-  return { router, tts, pipeline: new ChapterPipeline(router, tts) };
+  const audio = new FfmpegMasteringProcessor();
+  return { router, tts, audio, pipeline: new ChapterPipeline(router, tts, audio) };
 }

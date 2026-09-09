@@ -36,7 +36,7 @@ export class MockTTS implements TTSProvider {
 
 export const testStory = (overrides: Partial<Story["pipeline"]> = {}): Story => ({
   id: "demo-story", slug: "demo-story", title: "Demo Story", sourceLanguage: "zh-CN", outputLanguage: "en-US", source: { type: "text" },
-  context: { recentChapterSummaries: 5 }, pipeline: {
+  context: { recentChapterSummaries: 5 }, audio: { loudnessTarget: -17, truePeak: -1.5, segmentGapSeconds: 0.35, chapterGapSeconds: 1.5, format: "mp3", bitrate: "128k", sampleRate: 44100 }, pipeline: {
     translation: { provider: "gemini", model: "translation-model" },
     narration: { provider: "openai", model: "narration-model" },
     qa: { provider: "openai", model: "qa-model" },

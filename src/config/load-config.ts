@@ -8,6 +8,7 @@ export function defaultStory(slug: string, env: Environment): Story {
   return storySchema.parse({
     id: slug, slug, title, sourceLanguage: "zh-CN", outputLanguage: "en-US",
     source: { type: "text" }, context: { recentChapterSummaries: 5 },
+    audio: { loudnessTarget: -17, truePeak: -1.5, segmentGapSeconds: 0.35, chapterGapSeconds: 1.5, format: "mp3", bitrate: "128k", sampleRate: 44100 },
     pipeline: {
       translation: { provider: "gemini", model: env.GEMINI_DEFAULT_MODEL },
       narration: { provider: "openai", model: env.OPENAI_DEFAULT_MODEL },

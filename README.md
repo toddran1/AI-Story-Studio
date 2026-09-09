@@ -16,10 +16,13 @@ Milestone 5 adds structured translation/narration QA, a safe TTS quality gate, c
 
 Milestone 6 adds a local browser studio backed by a localhost-only API, in-process jobs, and live SSE progress. It calls the same source, batch, QA, preview, profile, Story Bible, and TTS services used by the CLI.
 
+Milestone 7 adds FFmpeg audio mastering, durable chapter masters, and cached MP3/M4B audiobook exports with chapter markers.
+
 ## Requirements
 
 - Node.js 22 or newer (an active LTS release is recommended)
 - npm
+- FFmpeg and ffprobe (available on `PATH`, or configured with `FFMPEG_PATH` and `FFPROBE_PATH`)
 - OpenAI, Gemini, and Fish Audio API credentials
 - A Fish Audio voice/reference ID is recommended for consistent voice output
 
@@ -69,7 +72,7 @@ Run the same command again to reuse valid stages. Force a stage and every depend
 npm run story:process -- --story demo-story --chapter 1 --input ./input/chapter-001.txt --force tts
 ```
 
-Allowed values are `translation`, `narration`, `qa`, `story-bible`, `tts`, and `all`. Forcing narration, for example, also regenerates QA, the Story Bible update, and audio because those outputs depend on narration. Forcing `qa` reuses translation and narration.
+Allowed values are `translation`, `narration`, `qa`, `story-bible`, `tts`, `audio`, and `all`. Forcing narration, for example, also regenerates QA, the Story Bible update, TTS, and its audio master. Forcing `audio` remasters only and never calls TTS.
 
 ## Milestone 2 — Multi-Chapter Processing
 
@@ -132,10 +135,12 @@ stories/demo-story/
     ├── narration.txt
     ├── qa.json
     ├── story-bible-update.json
+    ├── audio-segments/
+    ├── audio-raw.mp3
     └── audio.mp3
 ```
 
-Long narration is split at paragraph and sentence boundaries. Individual MP3 responses are retained in `audio-segments/` when splitting is required, and their byte streams are concatenated into `audio.mp3`, which is supported by ordinary MP3 players. A later audio-mastering milestone can replace this join strategy with FFmpeg without affecting TTS or pipeline contracts.
+Long narration is split at paragraph and sentence boundaries. Every original TTS response remains in `audio-segments/`, `audio-raw.mp3` preserves the provider output, and the FFmpeg-mastered `audio.mp3` is the playback-ready chapter file.
 
 ## Milestone 3 — Source Ingestion
 
@@ -267,6 +272,44 @@ Create an optimized browser bundle with:
 ```sh
 npm run web:build
 ```
+
+## Milestone 7 — Audio Mastering and Audiobook Assembly
+
+FFmpeg mastering is a first-class pipeline stage after TTS. It safely joins retained TTS segments, inserts the configured inter-segment pause, normalizes loudness, applies a true-peak limiter, and verifies the result with ffprobe. The default target is **-17 LUFS** with a **-1.5 dBTP** ceiling: a clear, consistent audiobook level in the recommended -18 to -16 LUFS range without aggressive compression.
+
+Story-level settings live in `story.json` under `audio`:
+
+```json
+{
+  "audio": {
+    "loudnessTarget": -17,
+    "truePeak": -1.5,
+    "segmentGapSeconds": 0.35,
+    "chapterGapSeconds": 1.5,
+    "format": "mp3",
+    "bitrate": "128k",
+    "sampleRate": 44100
+  }
+}
+```
+
+Master or remaster a range without rerunning TTS:
+
+```sh
+npm run story:audio -- --story undead-disaster --from 1 --to 10
+npm run story:audio -- --story undead-disaster --from 1 --to 10 --force
+```
+
+Build a cached audiobook edition:
+
+```sh
+npm run story:audiobook -- --story undead-disaster --from 1 --to 100 --format m4b
+npm run story:audiobook -- --story undead-disaster --from 1 --to 100 --format mp3
+```
+
+Exports are written to `stories/<story>/exports/`. M4B files use AAC audio and include book/author metadata plus chapter titles and markers for bookmarking; an existing `cover.jpg`, `cover.jpeg`, or `cover.png` at the story root is attached when present. Artwork is never generated. Chapter mastering and audiobook assembly both use content fingerprints, so only changed work is rebuilt.
+
+The studio’s **Audio / Export** view shows chapter status and duration, total mastered runtime, current mastering settings, range/format controls, final chapter playback, export history, downloads, and live job progress.
 
 ## Verification
 

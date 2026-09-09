@@ -9,6 +9,7 @@ import { ShutdownController } from "../src/batch/shutdown.js";
 import { ChapterPipeline } from "../src/pipeline/chapter-pipeline.js";
 import { LLMRouter } from "../src/llm/router.js";
 import { MockLLM, MockTTS, testStory } from "./helpers.js";
+import { CopyingAudioProcessor } from "../src/audio/chapter-audio.js";
 
 describe("no-cost multi-chapter integration", () => {
   it("uses ChapterPipeline sequentially and carries earlier summaries forward", async () => {
@@ -16,7 +17,7 @@ describe("no-cost multi-chapter integration", () => {
     const directory = resolve("tests/fixtures/multi-chapter-story");
     const chapters = (await inspectChapterDirectory(directory)).chapters;
     const gemini = new MockLLM("gemini"); const openai = new MockLLM("openai");
-    const processor = new ChapterPipeline(new LLMRouter(new Map([["gemini", gemini], ["openai", openai]])), new MockTTS());
+    const processor = new ChapterPipeline(new LLMRouter(new Map([["gemini", gemini], ["openai", openai]])), new MockTTS(), new CopyingAudioProcessor());
     const state = createBatchState({ root, story: "demo-story", inputDirectory: directory, chapters, allowGaps: false, continueOnError: false, delayMs: 0 });
     const result = await new BatchRunner(processor).run({ root, story: testStory(), chapters, state,
       retry: { maxAttempts: 1, initialDelayMs: 0, maxDelayMs: 0 }, shutdown: new ShutdownController(), sleep: async () => undefined });

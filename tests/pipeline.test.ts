@@ -6,13 +6,16 @@ import { ChapterPipeline } from "../src/pipeline/chapter-pipeline.js";
 import { LLMRouter } from "../src/llm/router.js";
 import { storyPaths } from "../src/storage/paths.js";
 import { MockLLM, MockTTS, testStory } from "./helpers.js";
+import { CopyingAudioProcessor } from "../src/audio/chapter-audio.js";
+
+class CountingAudioProcessor extends CopyingAudioProcessor { calls = 0; override async master(inputs: string[], output: string) { this.calls++; return super.master(inputs, output); } }
 
 async function setup() {
   const root = await mkdtemp(join(tmpdir(), "story-studio-")); const input = join(root, "chapter.txt");
   await writeFile(input, "第一章\n\n林遥打开了门。", "utf8");
   const gemini = new MockLLM("gemini", ["English translation"]); const openai = new MockLLM("openai", ["Polished narration"]); const tts = new MockTTS();
-  const pipeline = new ChapterPipeline(new LLMRouter(new Map([["gemini", gemini], ["openai", openai]])), tts);
-  return { root, input, gemini, openai, tts, pipeline, paths: storyPaths(root, "demo-story", 1) };
+  const audio = new CountingAudioProcessor(); const pipeline = new ChapterPipeline(new LLMRouter(new Map([["gemini", gemini], ["openai", openai]])), tts, audio);
+  return { root, input, gemini, openai, tts, audio, pipeline, paths: storyPaths(root, "demo-story", 1) };
 }
 
 describe("chapter pipeline", () => {
@@ -95,14 +98,23 @@ describe("chapter pipeline", () => {
     expect(ctx.openai.calls.filter((call) => call.structured)).toHaveLength(previousQaCalls + 1);
   });
 
-  it("regenerates zero-byte cached audio without rerunning language stages", async () => {
+  it("remasters zero-byte final audio without rerunning TTS or language stages", async () => {
     const ctx = await setup();
     await ctx.pipeline.run({ root: ctx.root, story: testStory(), chapter: 1, inputPath: ctx.input });
     const priorLLMCalls = ctx.gemini.calls.length + ctx.openai.calls.length;
     await writeFile(ctx.paths.audio, new Uint8Array());
     await ctx.pipeline.run({ root: ctx.root, story: testStory(), chapter: 1, inputPath: ctx.input });
     expect(ctx.gemini.calls.length + ctx.openai.calls.length).toBe(priorLLMCalls);
-    expect(ctx.tts.calls).toBe(2);
+    expect(ctx.tts.calls).toBe(1);
+  });
+
+  it("remasters changed audio settings and --force audio without rerunning TTS", async () => {
+    const ctx = await setup(); const story = testStory(); await ctx.pipeline.run({ root: ctx.root, story, chapter: 1, inputPath: ctx.input });
+    const firstTtsCalls = ctx.tts.calls; const changed = { ...story, audio: { ...story.audio, loudnessTarget: -16 } };
+    await ctx.pipeline.run({ root: ctx.root, story: changed, chapter: 1, inputPath: ctx.input });
+    expect(ctx.audio.calls).toBe(2); expect(ctx.tts.calls).toBe(firstTtsCalls);
+    await ctx.pipeline.run({ root: ctx.root, story: changed, chapter: 1, inputPath: ctx.input, force: "audio" });
+    expect(ctx.audio.calls).toBe(3); expect(ctx.tts.calls).toBe(firstTtsCalls);
   });
 
   it("rejects chapter metadata copied into the wrong chapter directory", async () => {
@@ -133,7 +145,7 @@ describe("chapter pipeline", () => {
       completeness: "pass", names: "pass", numbers: "fail", terminology: "pass", dialogue: "pass", storyConsistency: "pass", narrationFidelity: "pass",
     } };
     const gemini = new MockLLM("gemini", ["The value is one hundred."]); const openai = new MockLLM("openai", ["The value was one hundred."], qa); const tts = new MockTTS();
-    const pipeline = new ChapterPipeline(new LLMRouter(new Map([["gemini", gemini], ["openai", openai]])), tts);
+    const pipeline = new ChapterPipeline(new LLMRouter(new Map([["gemini", gemini], ["openai", openai]])), tts, new CopyingAudioProcessor());
     const paths = storyPaths(root, "demo-story", 1);
     await expect(pipeline.run({ root, story: testStory(), chapter: 1, inputPath: input })).rejects.toThrow("Chapter 1 failed QA");
     expect(JSON.parse(await readFile(paths.qa, "utf8")).status).toBe("fail");
@@ -147,7 +159,7 @@ describe("chapter pipeline", () => {
       completeness: "pass", names: "pass", numbers: "pass", terminology: "warn", dialogue: "pass", storyConsistency: "pass", narrationFidelity: "pass",
     } };
     const gemini = new MockLLM("gemini", ["Text"]); const openai = new MockLLM("openai", ["Narration"], qa); const tts = new MockTTS();
-    const pipeline = new ChapterPipeline(new LLMRouter(new Map([["gemini", gemini], ["openai", openai]])), tts);
+    const pipeline = new ChapterPipeline(new LLMRouter(new Map([["gemini", gemini], ["openai", openai]])), tts, new CopyingAudioProcessor());
     const result = await pipeline.run({ root, story: testStory(), chapter: 1, inputPath: input });
     expect(result.quality?.status).toBe("warn"); expect(tts.calls).toBe(1);
   });

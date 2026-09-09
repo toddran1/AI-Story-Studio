@@ -2,7 +2,7 @@ import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { getChapter, getChapterPage, getQaDashboard, getStoryOverview, listStories, updateStorySettings } from "../apps/server/catalog.js";
+import { getAudioDashboard, getChapter, getChapterPage, getQaDashboard, getStoryOverview, listStories, updateStorySettings } from "../apps/server/catalog.js";
 import { Job, JobManager } from "../apps/server/job-manager.js";
 import { StudioOperations } from "../apps/server/operations.js";
 import { loadEnvironment } from "../src/config/env.js";
@@ -13,10 +13,15 @@ import { LLMRouter } from "../src/llm/router.js";
 import { PreviewRunner } from "../src/preview/preview-runner.js";
 import { SourceProviderRegistry } from "../src/source/registry.js";
 import { StorySourceProvider, sourceManifestSchema } from "../src/source/types.js";
-import { atomicWriteJson } from "../src/storage/atomic-write.js";
+import { atomicWrite, atomicWriteJson } from "../src/storage/atomic-write.js";
 import { storyPaths } from "../src/storage/paths.js";
 import { fingerprint } from "../src/utils/hash.js";
 import { MockLLM, MockTTS } from "./helpers.js";
+import { AudioMasteringProcessor } from "../src/audio/mastering.js";
+import { AudiobookProcessor } from "../src/audio/audiobook.js";
+
+const webAudio: AudioMasteringProcessor = { version: "web-audio-v1", master: async (_inputs, output) => { await atomicWrite(output, Buffer.from("mastered")); return { durationSeconds: 9, codec: "mp3", container: "mp3" }; } };
+const webBook: AudiobookProcessor = { version: "web-book-v1", assemble: async (_chapters, output, format) => { await atomicWrite(output, Buffer.from("book")); return { durationSeconds: 9, codec: format === "m4b" ? "aac" : "mp3", container: format === "m4b" ? "mp4" : "mp3" }; } };
 
 const env = loadEnvironment({});
 const pending = () => ({ status: "pending" as const });
@@ -60,6 +65,16 @@ describe("web service layer", () => {
     expect(finished.status).toBe("completed"); expect((finished.result as any).summary.complete).toBe(1);
   });
 
+  it("runs mastering and audiobook exports through web jobs", async () => {
+    const root = await mkdtemp(join(tmpdir(), "story-web-audio-")); const jobs = new JobManager(); const operations = new StudioOperations(root, env, jobs, { audio: webAudio, audiobook: webBook });
+    const inspection = await operations.inspectSource({ filename: "chapter.txt", file: Buffer.from("A chapter."), chapter: 1 }); const imported = await operations.importInspection("audio-story", inspection.id); const paths = storyPaths(root, imported.story.slug, 1); const manifest = sourceManifestSchema.parse(JSON.parse(await readFile(paths.sourceManifest, "utf8"))); const now = new Date().toISOString(); const complete = { status: "complete" as const, fingerprint: "input", outputFingerprint: "output" };
+    await atomicWriteJson(paths.chapterMeta, chapterSchema.parse({ chapter: 1, originalTitle: "Opening", source: { type: manifest.chapters[0]!.ref.sourceType, sourceId: manifest.chapters[0]!.ref.sourceId, fingerprint: manifest.chapters[0]!.fingerprint, metadata: manifest.chapters[0]!.ref.metadata }, sourceLanguage: imported.story.sourceLanguage, outputLanguage: imported.story.outputLanguage, counts: { originalCharacters: 10, englishWords: 2, narrationWords: 2 }, createdAt: now, updatedAt: now,
+      stages: { ingestion: complete, translation: complete, narration: complete, qa: complete, storyBible: complete, tts: complete, audioMastering: pending() } })); await atomicWrite(paths.audioRaw, Buffer.from("raw"));
+    const mastering = await waitForJob(jobs, operations.startAudio(imported.story.slug, { from: 1, to: 1 }).id); expect(mastering.status).toBe("completed"); expect((await getAudioDashboard(root, imported.story.slug)).counts.mastered).toBe(1);
+    const exportJob = await waitForJob(jobs, operations.startAudiobook(imported.story.slug, { from: 1, to: 1, format: "m4b" }).id); expect(exportJob.status).toBe("completed"); const dashboard = await getAudioDashboard(root, imported.story.slug); expect(dashboard.exports[0]).toMatchObject({ format: "m4b", from: 1, to: 1, downloadUrl: "/api/stories/audio-story/exports/1-1.m4b" });
+    await operations.close();
+  });
+
   it("keeps a failed batch result failed at the job boundary", async () => {
     const jobs = new JobManager(); const started = jobs.create("batch", "failed-story", async () => ({ status: "failed", stopReason: "Chapter 7 failed" }));
     const finished = await waitForJob(jobs, started.id);
@@ -86,7 +101,7 @@ describe("web service layer", () => {
     const now = new Date().toISOString(); const complete = { status: "complete" as const, fingerprint: "input", outputFingerprint: "output" };
     const metadata = chapterSchema.parse({ chapter: 101, source: { type: "text", sourceId: "chapter.txt", fingerprint: manifest.chapters[0]!.fingerprint, metadata: {} },
       sourceLanguage: "zh-CN", outputLanguage: "en-US", counts: { originalCharacters: 8, englishWords: 1, narrationWords: 1 }, createdAt: now, updatedAt: now,
-      stages: { ingestion: complete, translation: complete, narration: complete, qa: complete, storyBible: complete, tts: complete } });
+      stages: { ingestion: complete, translation: complete, narration: complete, qa: complete, storyBible: complete, tts: complete, audioMastering: complete } });
     await atomicWriteJson(paths.chapterMeta, metadata); await writeFile(paths.audio, Buffer.from("audio"));
     expect(await getStoryOverview(root, "stale-story")).toMatchObject({ counts: { minChapter: 101, maxChapter: 101, complete: 1 } });
     inspection = await operations.inspectSource({ filename: "chapter.txt", file: Buffer.from("Changed"), chapter: 101 }); await operations.importInspection("stale-story", inspection.id);

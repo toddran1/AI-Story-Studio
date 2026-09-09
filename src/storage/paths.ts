@@ -10,8 +10,13 @@ export function storyPaths(root: string, slug: string, chapter: number) {
     bible: join(story, "story-bible.json"), chapterMeta: join(chapterDir, "chapter.json"),
     original: join(chapterDir, "original.txt"), english: join(chapterDir, "english.txt"),
     narration: join(chapterDir, "narration.txt"), qa: join(chapterDir, "qa.json"), bibleUpdate: join(chapterDir, "story-bible-update.json"),
-    audio: join(chapterDir, "audio.mp3"), segments: join(chapterDir, "audio-segments"),
+    audioRaw: join(chapterDir, "audio-raw.mp3"), audio: join(chapterDir, "audio.mp3"), segments: join(chapterDir, "audio-segments"),
   };
+}
+
+export function exportPaths(root: string, slug: string, from: number, to: number, format: "mp3" | "m4b") {
+  const directory = join(root, "stories", slug, "exports"); const stem = `${slug}-${String(from).padStart(3, "0")}-${String(to).padStart(3, "0")}`;
+  return { directory, output: join(directory, `${stem}.${format}`), manifest: join(directory, `${stem}.${format}.json`) };
 }
 
 export function previewPaths(root: string, slug: string, id: string) {

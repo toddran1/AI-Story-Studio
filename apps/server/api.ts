@@ -2,10 +2,10 @@ import { createReadStream } from "node:fs";
 import { stat } from "node:fs/promises";
 import { IncomingMessage, ServerResponse } from "node:http";
 import { z } from "zod";
-import { getChapter, getChapterPage, getQaDashboard, getStoryBible, getStoryOverview, listStories, updateStorySettings, chapterFilterSchema } from "./catalog.js";
+import { getAudioDashboard, getChapter, getChapterPage, getQaDashboard, getStoryBible, getStoryOverview, listStories, updateStorySettings, chapterFilterSchema } from "./catalog.js";
 import { JobConflictError } from "./job-manager.js";
 import { StudioOperations } from "./operations.js";
-import { previewPaths, storyPaths } from "../../src/storage/paths.js";
+import { exportPaths, previewPaths, storyPaths } from "../../src/storage/paths.js";
 import { BatchValidationError, ConfigurationError, ProviderError, StorageError } from "../../src/pipeline/errors.js";
 import { WebHttpError } from "../../src/source/web/http-client.js";
 import { logger } from "../../src/utils/logger.js";
@@ -62,6 +62,14 @@ export function createApiHandler(operations: StudioOperations) {
       }
       const qaMatch = /^\/api\/stories\/([a-z0-9-]+)\/qa$/.exec(url.pathname);
       if (qaMatch && request.method === "GET") return send(response, 200, await getQaDashboard(operations.root, qaMatch[1]!));
+      const audioDashboardMatch = /^\/api\/stories\/([a-z0-9-]+)\/audio$/.exec(url.pathname);
+      if (audioDashboardMatch && request.method === "GET") return send(response, 200, await getAudioDashboard(operations.root, audioDashboardMatch[1]!));
+      const exportMatch = /^\/api\/stories\/([a-z0-9-]+)\/exports\/(\d+)-(\d+)\.(mp3|m4b)$/.exec(url.pathname);
+      if (exportMatch && request.method === "GET") {
+        const from = Number(exportMatch[2]); const to = Number(exportMatch[3]); const format = exportMatch[4] as "mp3" | "m4b";
+        if (to < from) throw new HttpError("Invalid export range", 400);
+        return sendFile(request, response, exportPaths(operations.root, exportMatch[1]!, from, to, format).output, format === "m4b" ? "audio/mp4" : "audio/mpeg");
+      }
       const bibleMatch = /^\/api\/stories\/([a-z0-9-]+)\/story-bible$/.exec(url.pathname);
       if (bibleMatch && request.method === "GET") return send(response, 200, await getStoryBible(operations.root, bibleMatch[1]!));
       const settingsMatch = /^\/api\/stories\/([a-z0-9-]+)\/settings$/.exec(url.pathname);
@@ -81,6 +89,10 @@ export function createApiHandler(operations: StudioOperations) {
       if (batchMatch && request.method === "POST") return send(response, 202, operations.startBatch(batchMatch[1]!, await jsonBody(request)));
       const previewMatch = /^\/api\/stories\/([a-z0-9-]+)\/jobs\/preview$/.exec(url.pathname);
       if (previewMatch && request.method === "POST") return send(response, 202, operations.startPreview(previewMatch[1]!, await jsonBody(request)));
+      const audioJobMatch = /^\/api\/stories\/([a-z0-9-]+)\/jobs\/audio$/.exec(url.pathname);
+      if (audioJobMatch && request.method === "POST") return send(response, 202, operations.startAudio(audioJobMatch[1]!, await jsonBody(request)));
+      const audiobookJobMatch = /^\/api\/stories\/([a-z0-9-]+)\/jobs\/audiobook$/.exec(url.pathname);
+      if (audiobookJobMatch && request.method === "POST") return send(response, 202, operations.startAudiobook(audiobookJobMatch[1]!, await jsonBody(request)));
       const previewResult = /^\/api\/stories\/([a-z0-9-]+)\/previews\/([A-Za-z0-9T_-]+)$/.exec(url.pathname);
       if (previewResult && request.method === "GET") return send(response, 200, await operations.getPreview(previewResult[1]!, previewResult[2]!));
       const previewAudio = /^\/api\/stories\/([a-z0-9-]+)\/previews\/([A-Za-z0-9T_-]+)\/audio-([ab])$/.exec(url.pathname);

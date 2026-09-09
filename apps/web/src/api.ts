@@ -11,11 +11,14 @@ export function put<T>(path: string, body: unknown) { return api<T>(path, { meth
 export type StoryConfig = {
   slug: string; title: string; author?: string; sourceLanguage: string; outputLanguage: string; source: { type: string; url?: string };
   context: { recentChapterSummaries: number };
+  audio: AudioSettings;
   pipeline: { translation: Model; narration: Model; qa: Model; storyBible: Model; tts: { provider: "fish"; model: string; referenceId?: string; speed: number; format: "mp3"; sampleRate: number; bitrate: number; normalize: boolean; maxCharsPerRequest: number } };
 };
+export type AudioSettings = { loudnessTarget: number; truePeak: number; segmentGapSeconds: number; chapterGapSeconds: number; format: "mp3"; bitrate: "64k" | "96k" | "128k" | "160k" | "192k" | "256k" | "320k"; sampleRate: 32000 | 44100 | 48000 };
+export type AudioDashboard = { settings: AudioSettings; chapters: Array<{ chapter: number; title?: string; status: string; durationSeconds?: number; audioAvailable: boolean }>; counts: { total: number; mastered: number }; totalDurationSeconds: number; exports: Array<{ fingerprint: string; from: number; to: number; format: "mp3" | "m4b"; createdAt: string; durationSeconds: number; downloadUrl: string }> };
 export type Model = { provider: "openai" | "gemini"; model: string };
 export type StoryCard = { slug: string; title: string; author?: string; sourceType: string; sourceUrl?: string; sourceLanguage: string; outputLanguage: string; importedChapters: number; processedChapters: number; latestProcessedChapter?: number; qa: Counts; progress: number };
 export type Counts = { pass: number; warn: number; fail: number };
-export type ChapterRow = { chapter: number; originalTitle?: string; translation: string; narration: string; qa?: "pass" | "warn" | "fail"; qaScore?: number; tts: string; audioAvailable: boolean };
+export type ChapterRow = { chapter: number; originalTitle?: string; translation: string; narration: string; qa?: "pass" | "warn" | "fail"; qaScore?: number; tts: string; audioMastering: string; durationSeconds?: number; audioAvailable: boolean };
 export type QaResult = { status: "pass" | "warn" | "fail"; score: number; issues: Array<{ category: string; severity: "warn" | "fail"; message: string; evidence: string }>; checks: Record<string, "pass" | "warn" | "fail"> };
 export type Job = { id: string; type: string; story: string; status: "queued" | "running" | "completed" | "failed" | "paused"; progress?: any; result?: any; error?: string };

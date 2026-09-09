@@ -14,3 +14,4 @@ export class QualityGateError extends PipelineError {
 }
 export class BatchValidationError extends AppError {}
 export class BatchError extends AppError {}
+export class AudioError extends AppError {}

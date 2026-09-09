@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { qaCategorySchema, qaStatusSchema } from "./qa.js";
 
-export const stageNameSchema = z.enum(["ingestion", "translation", "narration", "qa", "storyBible", "tts"]);
+export const stageNameSchema = z.enum(["ingestion", "translation", "narration", "qa", "storyBible", "tts", "audioMastering"]);
 export type StageName = z.infer<typeof stageNameSchema>;
 
 const usageSchema = z.object({
@@ -46,14 +46,18 @@ const rawChapterSchema = z.object({
   updatedAt: z.string(),
   stages: z.record(stageNameSchema, stageStateSchema),
   quality: z.object({ status: qaStatusSchema, score: z.number().min(0).max(1), issueCategories: z.array(qaCategorySchema) }).optional(),
+  audio: z.object({ durationSeconds: z.number().positive(), codec: z.string(), container: z.string(), sampleRate: z.number().positive().optional(), bitrate: z.number().positive().optional() }).optional(),
 });
 
 export const chapterSchema = z.preprocess((value) => {
   if (!value || typeof value !== "object") return value;
   const chapter = value as Record<string, unknown>;
   const stages = chapter.stages;
-  if (!stages || typeof stages !== "object" || "qa" in stages) return value;
-  return { ...chapter, stages: { ...(stages as Record<string, unknown>), qa: { status: "pending" } } };
+  if (!stages || typeof stages !== "object") return value;
+  const normalized = { ...(stages as Record<string, unknown>) };
+  if (!("qa" in normalized)) normalized.qa = { status: "pending" };
+  if (!("audioMastering" in normalized)) normalized.audioMastering = { status: "pending" };
+  return { ...chapter, stages: normalized };
 }, rawChapterSchema);
 
 export type Chapter = z.infer<typeof chapterSchema>;

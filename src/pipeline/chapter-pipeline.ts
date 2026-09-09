@@ -22,8 +22,10 @@ import { validateChapterQuality } from "../qa/validator.js";
 import { contextBeforeChapter, mergeStoryBible, normalizeStoryBibleUpdate } from "../story-bible/updater.js";
 import { rebuildStoryBibleBeforeChapter } from "../story-bible/rebuild.js";
 import { PipelineError, QualityGateError } from "./errors.js";
+import { AudioMasteringProcessor, FfmpegMasteringProcessor } from "../audio/mastering.js";
+import { masterStoredChapter } from "../audio/chapter-audio.js";
 
-export type ForceStage = "translation" | "narration" | "qa" | "story-bible" | "tts" | "all";
+export type ForceStage = "translation" | "narration" | "qa" | "story-bible" | "tts" | "audio" | "all";
 export type PipelineStageEvent = { stage: StageName; status: "started" | "completed" | "reused"; state: StageState };
 export type PipelineOptions = {
   root: string; story: Story; chapter: number; inputPath: string; force?: ForceStage;
@@ -34,7 +36,7 @@ export type PipelineOptions = {
 const pending = (): StageState => ({ status: "pending" });
 
 export class ChapterPipeline {
-  constructor(private readonly llms: LLMRouter, private readonly tts: TTSProvider) {}
+  constructor(private readonly llms: LLMRouter, private readonly tts: TTSProvider, private readonly audio: AudioMasteringProcessor = new FfmpegMasteringProcessor()) {}
 
   async run(options: PipelineOptions): Promise<Chapter> {
     const paths = storyPaths(options.root, options.story.slug, options.chapter);
@@ -43,7 +45,7 @@ export class ChapterPipeline {
     let chapter = chapterSchema.parse((await readJsonIfExists<Chapter>(paths.chapterMeta)) ?? {
       chapter: options.chapter, sourceLanguage: options.story.sourceLanguage, outputLanguage: options.story.outputLanguage,
       counts: { originalCharacters: 0, englishWords: 0, narrationWords: 0 }, createdAt: now, updatedAt: now,
-      stages: { ingestion: pending(), translation: pending(), narration: pending(), qa: pending(), storyBible: pending(), tts: pending() },
+      stages: { ingestion: pending(), translation: pending(), narration: pending(), qa: pending(), storyBible: pending(), tts: pending(), audioMastering: pending() },
     });
     if (chapter.chapter !== options.chapter) throw new PipelineError(`Chapter metadata mismatch at ${paths.chapterMeta}: expected ${options.chapter}, found ${chapter.chapter}`);
     chapter.sourceLanguage = options.story.sourceLanguage; chapter.outputLanguage = options.story.outputLanguage;
@@ -183,21 +185,24 @@ export class ChapterPipeline {
 
     const ttsConfig = options.story.pipeline.tts;
     const ttsFp = fingerprint({ narration: fingerprint(narration), config: ttsConfig });
-    await runStage("tts", ttsFp, paths.audio, { provider: ttsConfig.provider, model: ttsConfig.model }, async () => {
+    if (!(await fileFingerprint(paths.audioRaw)) && chapter.stages.tts.status === "complete" && await fileFingerprint(paths.audio)) await atomicWrite(paths.audioRaw, await readFile(paths.audio));
+    await runStage("tts", ttsFp, paths.audioRaw, { provider: ttsConfig.provider, model: ttsConfig.model }, async () => {
       const result = await this.tts.synthesize({ text: narration, model: ttsConfig.model, referenceId: ttsConfig.referenceId,
         speed: ttsConfig.speed, format: ttsConfig.format, sampleRate: ttsConfig.sampleRate, bitrate: ttsConfig.bitrate,
         normalize: ttsConfig.normalize, maxCharsPerRequest: ttsConfig.maxCharsPerRequest });
-      await atomicWrite(paths.audio, result.audio);
+      await atomicWrite(paths.audioRaw, result.audio);
       await rm(paths.segments, { recursive: true, force: true });
-      if (result.segments.length > 1) {
-        await mkdir(paths.segments, { recursive: true });
-        await Promise.all(result.segments.map((segment, index) => atomicWrite(join(paths.segments, `${String(index + 1).padStart(4, "0")}.mp3`), segment)));
-      }
+      await mkdir(paths.segments, { recursive: true });
+      await Promise.all(result.segments.map((segment, index) => atomicWrite(join(paths.segments, `${String(index + 1).padStart(4, "0")}.mp3`), segment)));
       chapter.stages.tts.usage = {
         requestId: result.requestIds?.join(","), requests: result.segments.length,
         characters: [...narration].length, bytes: result.audio.byteLength,
       };
     });
+
+    const mastered = await masterStoredChapter({ root: options.root, story: options.story, chapter: options.chapter, processor: this.audio,
+      force: isForced(options.force, "audioMastering"), onEvent: (event) => options.onStageEvent?.({ stage: "audioMastering", status: event.status, state: event.state }) });
+    chapter = mastered.chapter;
 
     return chapter;
   }
@@ -205,11 +210,12 @@ export class ChapterPipeline {
 
 function isForced(force: ForceStage | undefined, stage: StageName): boolean {
   if (force === "all") return true;
-  const order: StageName[] = ["ingestion", "translation", "narration", "qa", "storyBible", "tts"];
+  const order: StageName[] = ["ingestion", "translation", "narration", "qa", "storyBible", "tts", "audioMastering"];
   const normalized = force === "story-bible" ? "storyBible" : force;
-  if (!normalized) return false;
+  const stageName = normalized === "audio" ? "audioMastering" : normalized;
+  if (!stageName) return false;
   // Forcing an upstream transform also invalidates all dependent downstream stages.
-  return order.indexOf(stage) >= order.indexOf(normalized as StageName);
+  return order.indexOf(stage) >= order.indexOf(stageName as StageName);
 }
 
 async function requireText(path: string, stage: string): Promise<string> {
@@ -226,7 +232,7 @@ async function fileFingerprint(path: string): Promise<string | undefined> {
 }
 
 function invalidateDownstream(chapter: Chapter, stage: StageName) {
-  const order: StageName[] = ["ingestion", "translation", "narration", "qa", "storyBible", "tts"];
+  const order: StageName[] = ["ingestion", "translation", "narration", "qa", "storyBible", "tts", "audioMastering"];
   for (const dependent of order.slice(order.indexOf(stage) + 1)) chapter.stages[dependent] = pending();
   if (order.indexOf(stage) <= order.indexOf("qa")) chapter.quality = undefined;
 }
