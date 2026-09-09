@@ -2,16 +2,27 @@ import { Story } from "../src/domain/story.js";
 import { LLMProvider } from "../src/llm/provider.js";
 import { LLMRequest, StructuredLLMRequest } from "../src/llm/types.js";
 import { storyBibleUpdateSchema } from "../src/domain/story-bible.js";
+import { qaResultSchema } from "../src/domain/qa.js";
 import { TTSProvider } from "../src/tts/provider.js";
 
 export class MockLLM implements LLMProvider {
   readonly name: "openai" | "gemini";
   calls: Array<LLMRequest & { structured?: boolean }> = [];
-  constructor(name: "openai" | "gemini" = "gemini", private readonly responses = ["Faithful English translation", "Polished English narration"]) { this.name = name; }
+  constructor(
+    name: "openai" | "gemini" = "gemini",
+    private readonly responses = ["Faithful English translation", "Polished English narration"],
+    private readonly qaResponse: unknown = { status: "pass", score: 1, issues: [], checks: {
+      completeness: "pass", names: "pass", numbers: "pass", terminology: "pass", dialogue: "pass", storyConsistency: "pass", narrationFidelity: "pass",
+    } },
+  ) { this.name = name; }
   async validateConfiguration() {}
   async generateText(request: LLMRequest) { this.calls.push(request); return { text: this.responses.shift() ?? "Generated text", usage: { inputTokens: 10, outputTokens: 5 } }; }
   async generateStructured<T>(request: StructuredLLMRequest<T>) {
     this.calls.push({ ...request, structured: true });
+    if (request.schemaName === "chapter_qa") {
+      const value = qaResultSchema.parse(this.qaResponse);
+      return { value: request.schema.parse(value), usage: { inputTokens: 10, outputTokens: 5 } };
+    }
     const value = storyBibleUpdateSchema.parse({ chapterSummary: "A star lamp awakens." });
     return { value: request.schema.parse(value) };
   }
@@ -28,6 +39,7 @@ export const testStory = (overrides: Partial<Story["pipeline"]> = {}): Story => 
   context: { recentChapterSummaries: 5 }, pipeline: {
     translation: { provider: "gemini", model: "translation-model" },
     narration: { provider: "openai", model: "narration-model" },
+    qa: { provider: "openai", model: "qa-model" },
     storyBible: { provider: "gemini", model: "bible-model" },
     tts: { provider: "fish", model: "s2-pro", speed: 1, format: "mp3", sampleRate: 44100, bitrate: 128, normalize: true, maxCharsPerRequest: 4000 },
     ...overrides,

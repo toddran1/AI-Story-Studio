@@ -4,6 +4,9 @@ import { BatchState, DiscoveredChapter, RetryConfig } from "./types.js";
 import { persistBatchState } from "./batch-state.js";
 import { ShutdownController } from "./shutdown.js";
 import { withRetry } from "./retry.js";
+import { Chapter } from "../domain/chapter.js";
+import { QaCategory, QaStatus } from "../domain/qa.js";
+import { QualityGateError } from "../pipeline/errors.js";
 
 export interface ChapterProcessor { run(options: PipelineOptions): Promise<unknown>; }
 export type ProgressEvent =
@@ -32,7 +35,7 @@ export class BatchRunner {
       await persistBatchState(options.root, options.state);
       try {
         let currentAttempt = 0;
-        await withRetry(() => this.processor.run({
+        const processed = await withRetry(() => this.processor.run({
           root: options.root, story: options.story, chapter: discovered.chapter, inputPath: discovered.path,
           source: discovered.source,
           // Force is an invocation intent, not a retry intent. Later attempts
@@ -51,9 +54,12 @@ export class BatchRunner {
             await persistBatchState(options.root, options.state);
           },
         });
+        const quality = (processed as Chapter | undefined)?.quality;
+        if (quality) addQuality(options.state, quality.status, quality.issueCategories);
         entry.status = "complete"; entry.completedAt = new Date().toISOString();
         options.onProgress?.({ type: "chapter.completed", index: index + 1, total: options.chapters.length, chapter: discovered.chapter });
       } catch (error) {
+        if (error instanceof QualityGateError) addQuality(options.state, error.result.status, error.result.issues.map((issue) => issue.category));
         entry.status = "failed"; entry.error = error instanceof Error ? error.message : String(error);
         options.onProgress?.({ type: "chapter.failed", index: index + 1, total: options.chapters.length, chapter: discovered.chapter, error: entry.error, attempts: entry.attempts });
         if (options.shutdown.isRequested) {
@@ -74,6 +80,11 @@ export class BatchRunner {
     await persistBatchState(options.root, options.state);
     return options.state;
   }
+}
+
+function addQuality(state: BatchState, status: QaStatus, categories: QaCategory[]): void {
+  state.qa[status]++;
+  for (const category of new Set(categories)) state.qa.issueCategories[category] = (state.qa.issueCategories[category] ?? 0) + 1;
 }
 
 function addUsage(state: BatchState, event: PipelineStageEvent): void {

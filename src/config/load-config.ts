@@ -11,6 +11,7 @@ export function defaultStory(slug: string, env: Environment): Story {
     pipeline: {
       translation: { provider: "gemini", model: env.GEMINI_DEFAULT_MODEL },
       narration: { provider: "openai", model: env.OPENAI_DEFAULT_MODEL },
+      qa: { provider: "openai", model: env.OPENAI_DEFAULT_MODEL },
       storyBible: { provider: "gemini", model: env.GEMINI_DEFAULT_MODEL },
       tts: {
         provider: "fish", model: env.FISH_AUDIO_MODEL, referenceId: env.FISH_AUDIO_REFERENCE_ID,

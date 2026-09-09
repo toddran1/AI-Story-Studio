@@ -101,7 +101,7 @@ function parseArgs(values: string[]): Args {
   }
   return args;
 }
-const forceValues: ForceStage[] = ["translation", "narration", "story-bible", "tts", "all"];
+const forceValues: ForceStage[] = ["translation", "narration", "qa", "story-bible", "tts", "all"];
 function validateSlug(slug: string) { if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(slug)) usage("--story must be a lowercase kebab-case slug"); }
 function integer(value: string, key: string) { const number = Number(value); if (!Number.isInteger(number) || number < 1) usage(`${key} must be a positive integer`); return number; }
 function nonnegative(value: string, key: string) { const number = Number(value); if (!Number.isInteger(number) || number < 0) usage(`${key} must be a non-negative integer`); return number; }
@@ -124,6 +124,8 @@ function formatSummary(state: Awaited<ReturnType<BatchRunner["run"]>>) {
   const failed = Object.entries(state.chapters).filter(([, item]) => item.status === "failed").map(([number]) => number);
   return [`Batch ${state.status}`, `Story: ${state.story}`, `Range: ${state.selection.from}-${state.selection.to}`,
     `Total: ${state.summary.total}`, `Complete: ${state.summary.complete}`, `Failed: ${state.summary.failed}`,
+    `QA: Pass ${state.qa.pass}, Warn ${state.qa.warn}, Fail ${state.qa.fail}`,
+    `QA issue categories: ${Object.entries(state.qa.issueCategories).map(([category, count]) => `${category}: ${count}`).join(", ") || "none"}`,
     `Skipped: ${state.summary.skipped}`, `Elapsed: ${formatDuration(state.elapsedMs)}`,
     `Failed chapters: ${failed.join(", ") || "none"}`, `Usage: ${JSON.stringify(state.usage)}`,
     `Manifest: stories/${state.story}/batches/${state.id}.json`, `Outputs: stories/${state.story}/chapters/`].join("\n");

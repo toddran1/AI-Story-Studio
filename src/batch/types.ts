@@ -43,6 +43,10 @@ export const batchStateSchema = z.object({
   chapters: z.record(z.string(), batchChapterStateSchema),
   summary: z.object({ total: z.number(), complete: z.number(), failed: z.number(), pending: z.number(), skipped: z.number(), cancelled: z.number() }),
   usage: z.record(z.string(), usageTotalsSchema),
+  qa: z.object({
+    pass: z.number().int().nonnegative(), warn: z.number().int().nonnegative(), fail: z.number().int().nonnegative(),
+    issueCategories: z.record(z.string(), z.number().int().nonnegative()),
+  }).default({ pass: 0, warn: 0, fail: 0, issueCategories: {} }),
   elapsedMs: z.number().nonnegative().default(0),
 });
 

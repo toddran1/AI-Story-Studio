@@ -21,4 +21,14 @@ describe("Story Bible chronological reconstruction", () => {
     expect(beforeTwo.characters[0]?.description).toBe("Carries a lamp");
     expect(beforeTwo.chapterSummaries).toEqual({ "1": "Found a lamp" });
   });
+
+  it("ignores a stale update after its Story Bible stage is invalidated", async () => {
+    const root = await mkdtemp(join(tmpdir(), "bible-invalidated-")); const slug = "story";
+    const paths = storyPaths(root, slug, 1); const update = storyBibleUpdateSchema.parse({ chapterSummary: "Stale summary" });
+    await mkdir(dirname(paths.bibleUpdate), { recursive: true });
+    await writeFile(paths.bibleUpdate, JSON.stringify(update));
+    await writeFile(paths.chapterMeta, JSON.stringify({ stages: { storyBible: { status: "pending" } } }));
+    const rebuilt = await rebuildStoryBibleBeforeChapter(root, slug, 2);
+    expect(rebuilt.chapterSummaries).toEqual({});
+  });
 });

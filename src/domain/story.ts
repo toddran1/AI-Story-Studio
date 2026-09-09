@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { stageModelConfigSchema, ttsStageConfigSchema } from "./provider.js";
 
-export const storySchema = z.object({
+const rawStorySchema = z.object({
   id: z.string().min(1),
   slug: z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/),
   title: z.string().min(1),
@@ -21,9 +21,19 @@ export const storySchema = z.object({
   pipeline: z.object({
     translation: stageModelConfigSchema,
     narration: stageModelConfigSchema,
+    qa: stageModelConfigSchema,
     storyBible: stageModelConfigSchema,
     tts: ttsStageConfigSchema,
   }),
 });
+
+export const storySchema = z.preprocess((value) => {
+  if (!value || typeof value !== "object") return value;
+  const story = value as Record<string, unknown>;
+  const pipeline = story.pipeline;
+  if (!pipeline || typeof pipeline !== "object" || "qa" in pipeline) return value;
+  const stages = pipeline as Record<string, unknown>;
+  return { ...story, pipeline: { ...stages, qa: stages.narration ?? stages.storyBible } };
+}, rawStorySchema);
 
 export type Story = z.infer<typeof storySchema>;

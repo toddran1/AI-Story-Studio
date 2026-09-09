@@ -12,6 +12,8 @@ Milestone 3 adds provider-based local ingestion for TXT directories, TXT files, 
 
 Milestone 4 adds bounded remote ingestion with a Fanqie adapter, additive range imports, HTTP caching, and refresh discovery. Remote ingestion still feeds the same source manifest and batch pipeline.
 
+Milestone 5 adds structured translation/narration QA, a safe TTS quality gate, controlled repair, isolated A/B previews, story-level model profiles, and batch quality summaries.
+
 ## Requirements
 
 - Node.js 22 or newer (an active LTS release is recommended)
@@ -57,7 +59,7 @@ npm run story:process -- \
   --input ./input/chapter-001.txt
 ```
 
-On first use, this bootstraps `stories/demo-story/story.json` from the environment defaults. Edit that file to independently choose `openai` or `gemini` for translation, narration, and Story Bible extraction. The TTS provider is currently `fish`.
+On first use, this bootstraps `stories/demo-story/story.json` from the environment defaults. Edit that file to independently choose `openai` or `gemini` for translation, narration, QA, and Story Bible extraction. The TTS provider is currently `fish`.
 
 Run the same command again to reuse valid stages. Force a stage and every dependent stage after it with:
 
@@ -65,7 +67,7 @@ Run the same command again to reuse valid stages. Force a stage and every depend
 npm run story:process -- --story demo-story --chapter 1 --input ./input/chapter-001.txt --force tts
 ```
 
-Allowed values are `translation`, `narration`, `story-bible`, `tts`, and `all`. Forcing narration, for example, also regenerates the Story Bible update and audio because those outputs depend on narration.
+Allowed values are `translation`, `narration`, `qa`, `story-bible`, `tts`, and `all`. Forcing narration, for example, also regenerates QA, the Story Bible update, and audio because those outputs depend on narration. Forcing `qa` reuses translation and narration.
 
 ## Milestone 2 — Multi-Chapter Processing
 
@@ -126,6 +128,7 @@ stories/demo-story/
     ├── original.txt
     ├── english.txt
     ├── narration.txt
+    ├── qa.json
     ├── story-bible-update.json
     └── audio.mp3
 ```
@@ -204,6 +207,34 @@ npm run story:refresh -- --story undead-disaster --import-new
 Automatic refresh import stops if existing remote chapters were removed or reordered. Locked or unreadable bodies also fail explicitly; the adapter does not bypass account or payment access controls.
 
 Remote requests allow HTTPS only, validate redirect destinations, use bounded retries and timeouts, enforce streaming response-size limits, and are rate-limited. The file cache uses ETag and Last-Modified revalidation when supplied by the server; set `WEB_CACHE_DIR=` to disable it. Configure these behaviors with the `WEB_*` environment values shown above.
+
+## Milestone 5 — Quality Control and A/B Preview
+
+Every processed chapter now receives a structured QA review after narration and before Story Bible extraction or TTS. `qa.json` records a score, pass/warn/fail checks, and actionable issue categories for completeness, names, numbers, terminology, dialogue, story consistency, and narration fidelity. Warnings continue and appear in batch summaries; failures stop with `Chapter N failed QA` and leave downstream stages pending.
+
+Compare the current story profile (A) with an alternate translation provider (B) without changing production chapter files:
+
+```sh
+npm run story:preview -- --story undead-disaster --chapter 1
+npm run story:preview -- --story undead-disaster --chapter 1 --audio-preview
+```
+
+Override any preview model with `provider:model`, for example `--translation-b openai:gpt-5.6-terra`, `--narration-b openai:gpt-5.6-terra`, or `--qa-b gemini:gemini-3.8-flash`. Results live under `stories/<story>/previews/<preview-id>/`. Audio preview uses roughly the first 75 seconds and is skipped for a failed candidate.
+
+Save either complete preview preset as that story's future default:
+
+```sh
+npm run story:profile -- --story undead-disaster --use-preview <preview-id> --choice a
+```
+
+For a failed chapter, regenerate the stage suggested by its QA findings and rerun downstream validation. The loop is deliberately capped:
+
+```sh
+npm run story:repair -- --story undead-disaster --chapter 27
+npm run story:repair -- --story undead-disaster --chapter 27 --stage narration --max-attempts 2
+```
+
+Batch manifests and terminal summaries aggregate pass/warn/fail totals and common issue categories. To reevaluate only QA and its downstream outputs, run `npm run story:batch -- --story undead-disaster --from 1 --to 10 --force qa`.
 
 ## Verification
 

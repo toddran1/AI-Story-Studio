@@ -7,6 +7,8 @@ import { createBatchState } from "../src/batch/batch-state.js";
 import { ShutdownController } from "../src/batch/shutdown.js";
 import { batchPaths } from "../src/storage/paths.js";
 import { testStory } from "./helpers.js";
+import { QualityGateError } from "../src/pipeline/errors.js";
+import { qaResultSchema } from "../src/domain/qa.js";
 
 const discovered = [1, 2, 3, 4].map((chapter) => ({ chapter, filename: `${chapter}.txt`, path: `/input/${chapter}.txt` }));
 const retry = { maxAttempts: 1, initialDelayMs: 0, maxDelayMs: 0 };
@@ -51,6 +53,24 @@ describe("batch runner", () => {
     await ctx.runner.run({ ...ctx, story: testStory(), chapters: discovered.slice(0, 1),
       retry: { maxAttempts: 2, initialDelayMs: 0, maxDelayMs: 0 }, sleep: async () => undefined });
     expect(forces).toEqual(["narration", undefined]);
+  });
+
+  it("aggregates QA outcomes and issue categories", async () => {
+    const chapters = discovered.slice(0, 2);
+    const ctx = await setup({ run: async ({ chapter }) => ({ quality: chapter === 1
+      ? { status: "pass", score: 1, issueCategories: [] }
+      : { status: "warn", score: 0.7, issueCategories: ["terminology"] } }) }, chapters);
+    const result = await ctx.runner.run({ ...ctx, story: testStory(), chapters, retry, sleep: async () => undefined });
+    expect(result.qa).toEqual({ pass: 1, warn: 1, fail: 0, issueCategories: { terminology: 1 } });
+  });
+
+  it("aggregates a failed QA chapter", async () => {
+    const qa = qaResultSchema.parse({ status: "fail", score: 0.2, issues: [{ category: "numbers", severity: "fail", message: "Mismatch", evidence: "10 became 12" }], checks: {
+      completeness: "pass", names: "pass", numbers: "fail", terminology: "pass", dialogue: "pass", storyConsistency: "pass", narrationFidelity: "pass",
+    } });
+    const ctx = await setup({ run: async () => { throw new QualityGateError("Chapter 1 failed QA", qa); } }, discovered.slice(0, 1));
+    const result = await ctx.runner.run({ ...ctx, story: testStory(), chapters: discovered.slice(0, 1), retry, sleep: async () => undefined });
+    expect(result.qa.fail).toBe(1); expect(result.qa.issueCategories.numbers).toBe(1);
   });
   it("does not start another retry after shutdown is requested", async () => {
     const shutdown = new ShutdownController(); let calls = 0;

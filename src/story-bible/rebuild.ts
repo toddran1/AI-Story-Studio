@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { StoryBible, StoryBibleUpdate, emptyStoryBible, storyBibleUpdateSchema } from "../domain/story-bible.js";
 import { storyPaths } from "../storage/paths.js";
 import { readJsonIfExists } from "../storage/story-files.js";
+import { Chapter } from "../domain/chapter.js";
 import { mergeStoryBible, normalizeStoryBibleUpdate } from "./updater.js";
 
 /** Rebuilds canonical context solely from chronological per-chapter updates. */
@@ -15,6 +16,8 @@ export async function rebuildStoryBibleBeforeChapter(root: string, slug: string,
       .map((entry) => Number(entry.name)).filter((number) => Number.isSafeInteger(number) && number > 0 && number < chapter).sort((a, b) => a - b);
   } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
   for (const number of numbers) {
+    const metadata = await readJsonIfExists<Chapter>(storyPaths(root, slug, number).chapterMeta);
+    if (metadata && metadata.stages?.storyBible?.status !== "complete") continue;
     const raw = await readJsonIfExists<StoryBibleUpdate>(storyPaths(root, slug, number).bibleUpdate);
     if (raw) bible = mergeStoryBible(bible, normalizeStoryBibleUpdate(storyBibleUpdateSchema.parse(raw), number), number);
   }

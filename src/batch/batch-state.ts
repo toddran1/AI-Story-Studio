@@ -22,7 +22,7 @@ export function createBatchState(options: NewBatchOptions): BatchState {
     options: { allowGaps: options.allowGaps, continueOnError: options.continueOnError, delayMs: options.delayMs, force: options.force },
     chapters: Object.fromEntries(options.chapters.map((item) => [String(item.chapter), { status: "pending", input: item.path, attempts: 0 }])),
     summary: { total: options.chapters.length, complete: 0, failed: 0, pending: options.chapters.length, skipped: 0, cancelled: 0 },
-    usage: {}, elapsedMs: 0,
+    usage: {}, qa: { pass: 0, warn: 0, fail: 0, issueCategories: {} }, elapsedMs: 0,
   });
 }
 

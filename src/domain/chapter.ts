@@ -1,6 +1,7 @@
 import { z } from "zod";
+import { qaCategorySchema, qaStatusSchema } from "./qa.js";
 
-export const stageNameSchema = z.enum(["ingestion", "translation", "narration", "storyBible", "tts"]);
+export const stageNameSchema = z.enum(["ingestion", "translation", "narration", "qa", "storyBible", "tts"]);
 export type StageName = z.infer<typeof stageNameSchema>;
 
 const usageSchema = z.object({
@@ -27,7 +28,7 @@ export const stageStateSchema = z.object({
   error: z.object({ message: z.string(), cause: z.string().optional() }).optional(),
 });
 
-export const chapterSchema = z.object({
+const rawChapterSchema = z.object({
   chapter: z.number().int().positive(),
   source: z.object({
     type: z.enum(["text", "epub", "docx", "web", "fanqie", "manual", "original"]),
@@ -44,7 +45,16 @@ export const chapterSchema = z.object({
   createdAt: z.string(),
   updatedAt: z.string(),
   stages: z.record(stageNameSchema, stageStateSchema),
+  quality: z.object({ status: qaStatusSchema, score: z.number().min(0).max(1), issueCategories: z.array(qaCategorySchema) }).optional(),
 });
+
+export const chapterSchema = z.preprocess((value) => {
+  if (!value || typeof value !== "object") return value;
+  const chapter = value as Record<string, unknown>;
+  const stages = chapter.stages;
+  if (!stages || typeof stages !== "object" || "qa" in stages) return value;
+  return { ...chapter, stages: { ...(stages as Record<string, unknown>), qa: { status: "pending" } } };
+}, rawChapterSchema);
 
 export type Chapter = z.infer<typeof chapterSchema>;
 export type StageState = z.infer<typeof stageStateSchema>;

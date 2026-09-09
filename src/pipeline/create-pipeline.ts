@@ -7,11 +7,14 @@ import { ChapterPipeline } from "./chapter-pipeline.js";
 import { LLMProvider } from "../llm/provider.js";
 
 export function createPipeline(env: Environment): ChapterPipeline {
-  return new ChapterPipeline(
-    new LLMRouter(new Map<string, LLMProvider>([
+  return createPipelineRuntime(env).pipeline;
+}
+
+export function createPipelineRuntime(env: Environment) {
+  const router = new LLMRouter(new Map<string, LLMProvider>([
       ["openai", new OpenAIProvider(env.OPENAI_API_KEY, env.PROVIDER_TIMEOUT_MS)],
       ["gemini", new GeminiProvider(env.GEMINI_API_KEY, env.PROVIDER_TIMEOUT_MS)],
-    ])),
-    new FishAudioProvider(env.FISH_AUDIO_API_KEY, fetch, env.PROVIDER_TIMEOUT_MS),
-  );
+    ]));
+  const tts = new FishAudioProvider(env.FISH_AUDIO_API_KEY, fetch, env.PROVIDER_TIMEOUT_MS);
+  return { router, tts, pipeline: new ChapterPipeline(router, tts) };
 }

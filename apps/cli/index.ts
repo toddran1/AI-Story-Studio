@@ -22,7 +22,7 @@ async function main() {
 async function processChapter(args: Args & { story: string; input: string }, chapter: number) {
   const root = process.cwd(); const env = loadEnvironment(); const paths = storyPaths(root, args.story, chapter);
   const story = await exists(paths.storyConfig) ? await loadStory(paths.storyConfig) : defaultStory(args.story, env);
-  if (!(await exists(paths.storyConfig))) await atomicWriteJson(paths.storyConfig, story);
+  await atomicWriteJson(paths.storyConfig, story);
   await atomicWriteJson(paths.pipelineConfig, story.pipeline);
   const result = await createPipeline(env).run({ root, story, chapter, inputPath: resolve(args.input), force: args.force });
   process.stdout.write(`${JSON.stringify({ story: story.slug, chapter, status: "complete", stages: result.stages, output: paths.chapterDir }, null, 2)}\n`);
@@ -35,13 +35,13 @@ function parseArgs(values: string[]): Args {
     const key = values[index]; const value = values[index + 1];
     if (["--story", "--chapter", "--input", "--force"].includes(key ?? "") && (value === undefined || value.startsWith("--"))) usage(`Missing value for ${key}`);
     if (key === "--story" || key === "--chapter" || key === "--input") { result[key.slice(2) as "story" | "chapter" | "input"] = value; index++; }
-    else if (key === "--force") { if (!["translation", "narration", "story-bible", "tts", "all"].includes(value)) usage("Invalid --force stage"); result.force = value as ForceStage; index++; }
+    else if (key === "--force") { if (!["translation", "narration", "qa", "story-bible", "tts", "all"].includes(value)) usage("Invalid --force stage"); result.force = value as ForceStage; index++; }
     else usage(`Unknown argument: ${key}`);
   }
   return result;
 }
 function usage(message: string): never {
-  throw new Error(`${message}\nUsage: npm run story:process -- --story <slug> --chapter <number> --input <file> [--force translation|narration|story-bible|tts|all]`);
+  throw new Error(`${message}\nUsage: npm run story:process -- --story <slug> --chapter <number> --input <file> [--force translation|narration|qa|story-bible|tts|all]`);
 }
 main().catch((error: unknown) => {
   const cause = error instanceof Error && error.cause instanceof Error ? error.cause.message : undefined;

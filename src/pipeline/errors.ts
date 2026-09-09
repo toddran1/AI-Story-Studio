@@ -9,5 +9,8 @@ export class StoryBibleError extends AppError {}
 export class TTSError extends AppError {}
 export class StorageError extends AppError {}
 export class PipelineError extends AppError {}
+export class QualityGateError extends PipelineError {
+  constructor(message: string, public readonly result: import("../domain/qa.js").QaResult) { super(message); }
+}
 export class BatchValidationError extends AppError {}
 export class BatchError extends AppError {}

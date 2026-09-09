@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { Chapter, StageName, StageState, chapterSchema } from "../domain/chapter.js";
 import { Story } from "../domain/story.js";
 import { StoryBibleUpdate, storyBibleUpdateSchema } from "../domain/story-bible.js";
+import { QaResult, qaResultSchema } from "../domain/qa.js";
 import { LLMRouter } from "../llm/router.js";
 import { TTSProvider } from "../tts/provider.js";
 import { atomicWrite, atomicWriteJson } from "../storage/atomic-write.js";
@@ -16,11 +17,13 @@ import { NARRATION_PROMPT_VERSION } from "../narration/prompts.js";
 import { polishNarration } from "../narration/narration-editor.js";
 import { STORY_BIBLE_PROMPT_VERSION } from "../story-bible/prompts.js";
 import { extractStoryBible } from "../story-bible/extractor.js";
+import { QA_PROMPT_VERSION } from "../qa/prompts.js";
+import { validateChapterQuality } from "../qa/validator.js";
 import { contextBeforeChapter, mergeStoryBible, normalizeStoryBibleUpdate } from "../story-bible/updater.js";
 import { rebuildStoryBibleBeforeChapter } from "../story-bible/rebuild.js";
-import { PipelineError } from "./errors.js";
+import { PipelineError, QualityGateError } from "./errors.js";
 
-export type ForceStage = "translation" | "narration" | "story-bible" | "tts" | "all";
+export type ForceStage = "translation" | "narration" | "qa" | "story-bible" | "tts" | "all";
 export type PipelineStageEvent = { stage: StageName; status: "started" | "completed" | "reused"; state: StageState };
 export type PipelineOptions = {
   root: string; story: Story; chapter: number; inputPath: string; force?: ForceStage;
@@ -40,7 +43,7 @@ export class ChapterPipeline {
     let chapter = chapterSchema.parse((await readJsonIfExists<Chapter>(paths.chapterMeta)) ?? {
       chapter: options.chapter, sourceLanguage: options.story.sourceLanguage, outputLanguage: options.story.outputLanguage,
       counts: { originalCharacters: 0, englishWords: 0, narrationWords: 0 }, createdAt: now, updatedAt: now,
-      stages: { ingestion: pending(), translation: pending(), narration: pending(), storyBible: pending(), tts: pending() },
+      stages: { ingestion: pending(), translation: pending(), narration: pending(), qa: pending(), storyBible: pending(), tts: pending() },
     });
     if (chapter.chapter !== options.chapter) throw new PipelineError(`Chapter metadata mismatch at ${paths.chapterMeta}: expected ${options.chapter}, found ${chapter.chapter}`);
     chapter.sourceLanguage = options.story.sourceLanguage; chapter.outputLanguage = options.story.outputLanguage;
@@ -129,6 +132,34 @@ export class ChapterPipeline {
     });
     const narration = narrationResult ?? await requireText(paths.narration, "narration");
 
+    const qaConfig = options.story.pipeline.qa;
+    const qaFp = fingerprint({
+      source: ingestionFp, translation: fingerprint(english), narration: fingerprint(narration),
+      context: priorContext, config: qaConfig, prompt: QA_PROMPT_VERSION,
+    });
+    const qaResult = await runStage("qa", qaFp, paths.qa, {
+      provider: qaConfig.provider, model: qaConfig.model, promptVersion: QA_PROMPT_VERSION,
+    }, async () => {
+      const result = await validateChapterQuality(this.llms.forStage(qaConfig), qaConfig, {
+        chapter: options.chapter, sourceLanguage: options.story.sourceLanguage, outputLanguage: options.story.outputLanguage,
+        source, translation: english, narration, context: priorContext,
+      });
+      await atomicWriteJson(paths.qa, result.value);
+      chapter.stages.qa.usage = result.usage;
+      return result.value;
+    });
+    const quality = qaResult ?? qaResultSchema.parse(await readJsonIfExists<QaResult>(paths.qa));
+    chapter.quality = { status: quality.status, score: quality.score, issueCategories: [...new Set(quality.issues.map((issue) => issue.category))] };
+    await persist();
+    if (quality.status === "warn") logger.warn({ event: "pipeline.qa.warn", story: options.story.slug, chapter: options.chapter, score: quality.score, issues: quality.issues.length });
+    if (quality.status === "fail") {
+      chapter.stages.storyBible = pending();
+      chapter.stages.tts = pending();
+      await persist();
+      await atomicWriteJson(paths.bible, bible);
+      throw new QualityGateError(`Chapter ${options.chapter} failed QA`, quality);
+    }
+
     const bibleConfig = options.story.pipeline.storyBible;
     const bibleFp = fingerprint({ narration: fingerprint(narration), config: bibleConfig, prompt: STORY_BIBLE_PROMPT_VERSION, context: priorContext });
     const bibleResult = await runStage("storyBible", bibleFp, paths.bibleUpdate, {
@@ -173,7 +204,7 @@ export class ChapterPipeline {
 
 function isForced(force: ForceStage | undefined, stage: StageName): boolean {
   if (force === "all") return true;
-  const order: StageName[] = ["ingestion", "translation", "narration", "storyBible", "tts"];
+  const order: StageName[] = ["ingestion", "translation", "narration", "qa", "storyBible", "tts"];
   const normalized = force === "story-bible" ? "storyBible" : force;
   if (!normalized) return false;
   // Forcing an upstream transform also invalidates all dependent downstream stages.

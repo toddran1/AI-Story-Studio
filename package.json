@@ -12,6 +12,9 @@
     "story:inspect": "node --import tsx apps/cli/source.ts inspect",
     "story:import": "node --import tsx apps/cli/source.ts import",
     "story:refresh": "node --import tsx apps/cli/refresh.ts",
+    "story:repair": "node --import tsx apps/cli/repair.ts",
+    "story:preview": "node --import tsx apps/cli/preview.ts",
+    "story:profile": "node --import tsx apps/cli/profile.ts",
     "smoke": "node --import tsx apps/cli/smoke.ts",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
