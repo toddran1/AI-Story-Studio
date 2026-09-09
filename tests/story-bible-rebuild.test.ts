@@ -6,6 +6,8 @@ import { emptyStoryBible, storyBibleUpdateSchema } from "../src/domain/story-bib
 import { storyPaths } from "../src/storage/paths.js";
 import { rebuildStoryBibleBeforeChapter } from "../src/story-bible/rebuild.js";
 import { mergeStoryBible } from "../src/story-bible/updater.js";
+import { importSource } from "../src/source/importer.js";
+import { TxtSource } from "../src/source/txt-source.js";
 
 describe("Story Bible chronological reconstruction", () => {
   it("removes future facts before an earlier chapter rerun", async () => {
@@ -30,5 +32,14 @@ describe("Story Bible chronological reconstruction", () => {
     await writeFile(paths.chapterMeta, JSON.stringify({ stages: { storyBible: { status: "pending" } } }));
     const rebuilt = await rebuildStoryBibleBeforeChapter(root, slug, 2);
     expect(rebuilt.chapterSummaries).toEqual({});
+  });
+
+  it("ignores Story Bible updates whose imported source fingerprint is stale", async () => {
+    const root = await mkdtemp(join(tmpdir(), "bible-source-stale-")); const slug = "story"; const source = join(root, "chapter.txt");
+    await writeFile(source, "Original"); const inspection = await new TxtSource().inspect(source, { chapter: 1 }); await importSource(root, slug, inspection);
+    const paths = storyPaths(root, slug, 1); const update = storyBibleUpdateSchema.parse({ chapterSummary: "Stale summary" });
+    await mkdir(dirname(paths.bibleUpdate), { recursive: true }); await writeFile(paths.bibleUpdate, JSON.stringify(update));
+    await writeFile(paths.chapterMeta, JSON.stringify({ source: { fingerprint: "stale" }, stages: { storyBible: { status: "complete" } } }));
+    expect((await rebuildStoryBibleBeforeChapter(root, slug, 2)).chapterSummaries).toEqual({});
   });
 });

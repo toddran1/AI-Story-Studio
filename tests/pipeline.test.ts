@@ -51,6 +51,19 @@ describe("chapter pipeline", () => {
     expect(ctx.tts.calls).toBe(2);
   });
 
+  it("marks downstream stages stale when an upstream regeneration fails", async () => {
+    const ctx = await setup();
+    await ctx.pipeline.run({ root: ctx.root, story: testStory(), chapter: 1, inputPath: ctx.input });
+    ctx.openai.generateText = async () => { throw new Error("narration unavailable"); };
+    await expect(ctx.pipeline.run({ root: ctx.root, story: testStory(), chapter: 1, inputPath: ctx.input, force: "narration" })).rejects.toThrow("narration unavailable");
+    const metadata = JSON.parse(await readFile(ctx.paths.chapterMeta, "utf8"));
+    expect(metadata.stages.narration.status).toBe("failed");
+    expect(metadata.stages.qa.status).toBe("pending");
+    expect(metadata.stages.storyBible.status).toBe("pending");
+    expect(metadata.stages.tts.status).toBe("pending");
+    expect(metadata.quality).toBeUndefined();
+  });
+
   it("uses translation passthrough when source and output languages match", async () => {
     const ctx = await setup(); const story = testStory({ translation: { provider: "openai", model: "translation-model" } });
     story.sourceLanguage = "en-US"; story.outputLanguage = "en-US";

@@ -7,6 +7,7 @@ import { exists, readJsonIfExists } from "../storage/story-files.js";
 import { fingerprint } from "../utils/hash.js";
 import { chapterReferenceSchema, SourceInspection, SourceManifest, sourceManifestSchema } from "./types.js";
 import { chapterWarnings } from "./inspection.js";
+import { Chapter, chapterSchema, StageName } from "../domain/chapter.js";
 
 export const SOURCE_ADAPTER_VERSION = "milestone-3-v1";
 export type ImportResult = {
@@ -73,6 +74,8 @@ export async function importSource(root: string, story: string, inspection: Sour
       warnings: inspection.warnings, unnumberedSections: inspection.unnumberedSections, chapters: manifestChapters,
     });
     await atomicWriteJson(join(stage, "source.json"), manifest);
+    const changes = compareChapters(parsedPrevious?.success ? parsedPrevious.data : undefined, manifest);
+    await invalidateChangedProduction(root, story, changes);
     const hadPrevious = await exists(paths.source);
     if (hadPrevious) await rename(paths.source, backup);
     try { await rename(stage, paths.source); }
@@ -84,13 +87,27 @@ export async function importSource(root: string, story: string, inspection: Sour
       throw error;
     }
     if (hadPrevious) { try { await rm(backup, { recursive: true, force: true }); } catch { /* The installed source is valid; a stale backup is recoverable. */ } }
-    const changes = compareChapters(parsedPrevious?.success ? parsedPrevious.data : undefined, manifest);
     const unchanged = parsedPrevious?.success && previousFilesValid && parsedPrevious.data.fingerprint === manifest.fingerprint
       && !changes.added.length && !changes.modified.length && !changes.removed.length;
     return { status: unchanged ? "unchanged" : parsedPrevious?.success ? "updated" : "imported", manifest, ...changes };
   } catch (error) {
     await rm(stage, { recursive: true, force: true });
     throw error;
+  }
+}
+
+async function invalidateChangedProduction(root: string, story: string, changes: { added: number[]; modified: number[]; removed: number[] }) {
+  const changed = [...changes.added, ...changes.modified, ...changes.removed]; if (!changed.length) return;
+  const firstChanged = Math.min(...changed); const exact = new Set(changed);
+  const chaptersRoot = join(storyPaths(root, story, firstChanged).story, "chapters"); let numbers: number[] = [];
+  try { numbers = (await readdir(chaptersRoot, { withFileTypes: true })).filter((entry) => entry.isDirectory() && /^\d+$/.test(entry.name)).map((entry) => Number(entry.name)).filter((number) => number >= firstChanged); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+  const allStages: StageName[] = ["ingestion", "translation", "narration", "qa", "storyBible", "tts"];
+  for (const number of numbers) {
+    const path = storyPaths(root, story, number).chapterMeta; const raw = await readJsonIfExists<Chapter>(path); const parsed = raw ? chapterSchema.safeParse(raw) : undefined;
+    if (!parsed?.success) continue; const chapter = parsed.data; const stages = exact.has(number) ? allStages : allStages.slice(1);
+    for (const stage of stages) chapter.stages[stage] = { status: "pending" };
+    chapter.quality = undefined; chapter.updatedAt = new Date().toISOString(); await atomicWriteJson(path, chapter);
   }
 }
 

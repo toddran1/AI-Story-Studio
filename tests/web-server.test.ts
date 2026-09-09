@@ -1,8 +1,8 @@
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { getChapter, getQaDashboard, getStoryOverview, listStories, updateStorySettings } from "../apps/server/catalog.js";
+import { getChapter, getChapterPage, getQaDashboard, getStoryOverview, listStories, updateStorySettings } from "../apps/server/catalog.js";
 import { Job, JobManager } from "../apps/server/job-manager.js";
 import { StudioOperations } from "../apps/server/operations.js";
 import { loadEnvironment } from "../src/config/env.js";
@@ -58,6 +58,44 @@ describe("web service layer", () => {
     const inspection = await operations.inspectSource({ filename: "chapter.txt", file: Buffer.from("A chapter."), chapter: 1 }); await operations.importInspection("job-story", inspection.id);
     const started = operations.startBatch("job-story", { from: 1, to: 1 }); const finished = await waitForJob(jobs, started.id);
     expect(finished.status).toBe("completed"); expect((finished.result as any).summary.complete).toBe(1);
+  });
+
+  it("keeps a failed batch result failed at the job boundary", async () => {
+    const jobs = new JobManager(); const started = jobs.create("batch", "failed-story", async () => ({ status: "failed", stopReason: "Chapter 7 failed" }));
+    const finished = await waitForJob(jobs, started.id);
+    expect(finished).toMatchObject({ status: "failed", error: "Chapter 7 failed", result: { status: "failed" } });
+  });
+
+  it("reports the selected remote range separately from the available directory", async () => {
+    const root = await mkdtemp(join(tmpdir(), "story-web-range-"));
+    const directory = Array.from({ length: 10 }, (_, index) => ({ chapter: index + 1, sourceId: String(index + 1), sourceType: "fanqie" as const, metadata: {} }));
+    const provider: StorySourceProvider = { type: "fanqie", inspect: async (sourcePath) => ({ sourcePath, sourceType: "fanqie", fingerprint: fingerprint("range"),
+      chapters: directory.slice(4, 6).map((ref) => ({ ref, text: `Chapter ${ref.chapter}` })), directory, warnings: [], unnumberedSections: [], origin: { url: sourcePath },
+      remote: { lastInspectedAt: new Date().toISOString(), chapterCountAtInspection: directory.length } }) };
+    const operations = new StudioOperations(root, env, new JobManager(), { registry: new SourceProviderRegistry([provider]) });
+    const result = await operations.inspectSource({ url: "https://fanqienovel.com/page/123", from: 5, to: 6 });
+    expect(result).toMatchObject({ chapterCount: 2, availableChapterCount: 10, chapters: [{ chapter: 5 }, { chapter: 6 }] });
+    await operations.close();
+  });
+
+  it("hides stale artifacts and omits chapters removed from the current source", async () => {
+    const root = await mkdtemp(join(tmpdir(), "story-web-stale-")); const operations = new StudioOperations(root, env);
+    let inspection = await operations.inspectSource({ filename: "chapter.txt", file: Buffer.from("Original"), chapter: 101 });
+    await operations.importInspection("stale-story", inspection.id);
+    const paths = storyPaths(root, "stale-story", 101); const manifest = sourceManifestSchema.parse(JSON.parse(await readFile(paths.sourceManifest, "utf8")));
+    const now = new Date().toISOString(); const complete = { status: "complete" as const, fingerprint: "input", outputFingerprint: "output" };
+    const metadata = chapterSchema.parse({ chapter: 101, source: { type: "text", sourceId: "chapter.txt", fingerprint: manifest.chapters[0]!.fingerprint, metadata: {} },
+      sourceLanguage: "zh-CN", outputLanguage: "en-US", counts: { originalCharacters: 8, englishWords: 1, narrationWords: 1 }, createdAt: now, updatedAt: now,
+      stages: { ingestion: complete, translation: complete, narration: complete, qa: complete, storyBible: complete, tts: complete } });
+    await atomicWriteJson(paths.chapterMeta, metadata); await writeFile(paths.audio, Buffer.from("audio"));
+    expect(await getStoryOverview(root, "stale-story")).toMatchObject({ counts: { minChapter: 101, maxChapter: 101, complete: 1 } });
+    inspection = await operations.inspectSource({ filename: "chapter.txt", file: Buffer.from("Changed"), chapter: 101 }); await operations.importInspection("stale-story", inspection.id);
+    const invalidated = JSON.parse(await readFile(paths.chapterMeta, "utf8")); expect(invalidated.stages.ingestion.status).toBe("pending"); expect(invalidated.stages.tts.status).toBe("pending");
+    expect(await getChapter(root, "stale-story", 101)).toMatchObject({ stale: true, audioAvailable: false, audioUrl: undefined });
+    expect((await getChapterPage(root, "stale-story", { page: 1, pageSize: 50, filter: "all" })).items[0]).toMatchObject({ chapter: 101, translation: "pending", tts: "pending", audioAvailable: false });
+    inspection = await operations.inspectSource({ filename: "chapter.txt", file: Buffer.from("Replacement"), chapter: 102 }); await operations.importInspection("stale-story", inspection.id);
+    const page = await getChapterPage(root, "stale-story", { page: 1, pageSize: 50, filter: "all" }); expect(page.items.map((item) => item.chapter)).toEqual([102]);
+    await operations.close();
   });
 
   it("runs isolated previews and applies the selected profile", async () => {
