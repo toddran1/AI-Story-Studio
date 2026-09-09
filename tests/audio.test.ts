@@ -5,12 +5,13 @@ import { describe, expect, it } from "vitest";
 import { assembleAudiobook, audiobookMetadata, AudiobookChapter, AudiobookMetadata, AudiobookProcessor, buildAudiobookArgs, buildFfmetadata, selectExportChapters } from "../src/audio/audiobook.js";
 import { audioMasteringFingerprint, masterStoredChapter } from "../src/audio/chapter-audio.js";
 import { AudioSettings } from "../src/audio/config.js";
-import { AudioProbe, CommandRunner, FfmpegTools } from "../src/audio/ffmpeg.js";
+import { AudioProbe, CommandRunner, FfmpegTools, runCommand } from "../src/audio/ffmpeg.js";
 import { AudioMasteringProcessor, buildMasteringPlan, validateMasteredAudio } from "../src/audio/mastering.js";
 import { chapterSchema } from "../src/domain/chapter.js";
 import { atomicWrite, atomicWriteJson } from "../src/storage/atomic-write.js";
 import { storyPaths } from "../src/storage/paths.js";
 import { testStory } from "./helpers.js";
+import { fingerprint } from "../src/utils/hash.js";
 
 class RecordingMaster implements AudioMasteringProcessor {
   readonly version = "recording-master-v1"; calls = 0;
@@ -27,7 +28,7 @@ async function masteredFixture(numbers = [1]) {
     const paths = storyPaths(root, story.slug, chapter); const now = new Date().toISOString();
     const metadata = chapterSchema.parse({ chapter, originalTitle: `Original ${chapter}`, translatedTitle: `Translated ${chapter}`, sourceLanguage: story.sourceLanguage, outputLanguage: story.outputLanguage,
       counts: { originalCharacters: 1, englishWords: 1, narrationWords: 1 }, createdAt: now, updatedAt: now,
-      stages: { ingestion: complete, translation: complete, narration: complete, qa: complete, storyBible: complete, tts: { ...complete, outputFingerprint: `tts-${chapter}` }, audioMastering: { ...complete, fingerprint: `master-in-${chapter}`, outputFingerprint: `master-out-${chapter}` } },
+      stages: { ingestion: complete, translation: complete, narration: complete, qa: complete, storyBible: complete, tts: { ...complete, outputFingerprint: `tts-${chapter}` }, audioMastering: { ...complete, fingerprint: `master-in-${chapter}`, outputFingerprint: fingerprint(Buffer.from(`master-${chapter}`).toString("base64")) } },
       audio: { durationSeconds: 10 + chapter, codec: "mp3", container: "mp3" } });
     await atomicWriteJson(paths.chapterMeta, metadata); await atomicWrite(paths.audioRaw, Buffer.from(`raw-${chapter}`)); await atomicWrite(paths.audio, Buffer.from(`master-${chapter}`));
   }
@@ -61,6 +62,10 @@ describe("audio mastering", () => {
     await expect(new FfmpegTools("ffmpeg", "ffprobe", async () => ({ stdout: "{}", stderr: "" })).probe("bad.mp3")).rejects.toThrow("Invalid ffprobe output");
     expect(() => validateMasteredAudio({ durationSeconds: 1, codec: "mp3", container: "mp3" }, 20)).toThrow("implausible");
   });
+
+  it("terminates media commands that exceed their deadline", async () => {
+    await expect(runCommand(process.execPath, ["-e", "setInterval(() => {}, 1000)"], 25)).rejects.toThrow("timed out after 25ms");
+  });
 });
 
 describe("audiobook assembly", () => {
@@ -79,7 +84,13 @@ describe("audiobook assembly", () => {
     const { root, story } = await masteredFixture([1, 2]); const processor = new RecordingBook();
     const first = await assembleAudiobook({ root, story, from: 1, to: 2, format: "m4b", processor }); const second = await assembleAudiobook({ root, story, from: 1, to: 2, format: "m4b", processor });
     expect(first.reused).toBe(false); expect(second.reused).toBe(true); expect(processor.calls).toBe(1); expect(processor.chapters).toEqual([1, 2]); expect(processor.metadata?.chapters.map((item) => item.title)).toEqual(["Translated 1", "Translated 2"]);
-    const paths = storyPaths(root, story.slug, 2); const metadata = JSON.parse(await readFile(paths.chapterMeta, "utf8")); metadata.stages.audioMastering.outputFingerprint = "changed"; await atomicWriteJson(paths.chapterMeta, metadata);
+    const paths = storyPaths(root, story.slug, 2); await atomicWrite(paths.audio, Buffer.from("changed-master")); const metadata = JSON.parse(await readFile(paths.chapterMeta, "utf8")); metadata.stages.audioMastering.outputFingerprint = fingerprint(Buffer.from("changed-master").toString("base64")); await atomicWriteJson(paths.chapterMeta, metadata);
     await assembleAudiobook({ root, story, from: 1, to: 2, format: "m4b", processor }); expect(processor.calls).toBe(2);
+  });
+
+  it("invalidates an audiobook export when its cover changes", async () => {
+    const { root, story } = await masteredFixture(); const processor = new RecordingBook(); const cover = join(storyPaths(root, story.slug, 1).story, "cover.png");
+    await atomicWrite(cover, Buffer.from("cover-one")); await assembleAudiobook({ root, story, from: 1, to: 1, format: "m4b", processor }); await assembleAudiobook({ root, story, from: 1, to: 1, format: "m4b", processor }); expect(processor.calls).toBe(1);
+    await atomicWrite(cover, Buffer.from("cover-two")); await assembleAudiobook({ root, story, from: 1, to: 1, format: "m4b", processor }); expect(processor.calls).toBe(2);
   });
 });

@@ -3,7 +3,7 @@ import { AudioError } from "../pipeline/errors.js";
 
 export const AUDIO_PROCESSOR_VERSION = "ffmpeg-audio-v1";
 export type CommandResult = { stdout: string; stderr: string };
-export type CommandRunner = (command: string, args: string[]) => Promise<CommandResult>;
+export type CommandRunner = (command: string, args: string[], timeoutMs?: number) => Promise<CommandResult>;
 export type AudioProbe = { durationSeconds: number; codec: string; container: string; sampleRate?: number; bitrate?: number };
 
 export class FfmpegTools {
@@ -34,14 +34,18 @@ export class FfmpegTools {
   }
 }
 
-export async function runCommand(command: string, args: string[]): Promise<CommandResult> {
+export async function runCommand(command: string, args: string[], timeoutMs = mediaProcessTimeout()): Promise<CommandResult> {
   return new Promise((resolve, reject) => {
-    const child = spawn(command, args, { stdio: ["ignore", "pipe", "pipe"] }); let stdout = ""; let stderr = "";
+    const child = spawn(command, args, { stdio: ["ignore", "pipe", "pipe"] }); let stdout = ""; let stderr = ""; let settled = false; let timedOut = false; let killTimer: NodeJS.Timeout | undefined;
+    const timeout = setTimeout(() => { if (settled) return; timedOut = true; child.kill("SIGTERM"); killTimer = setTimeout(() => { if (!settled) child.kill("SIGKILL"); }, 5_000); killTimer.unref(); }, timeoutMs); timeout.unref();
     child.stdout.setEncoding("utf8"); child.stderr.setEncoding("utf8");
     child.stdout.on("data", (chunk: string) => { stdout = appendLimited(stdout, chunk); });
     child.stderr.on("data", (chunk: string) => { stderr = appendLimited(stderr, chunk); });
-    child.once("error", reject); child.once("close", (code, signal) => code === 0 ? resolve({ stdout, stderr }) : reject(new Error(`${command} exited with ${code ?? signal}: ${stderr.trim().slice(-4000)}`)));
+    child.once("error", (error) => finish(() => reject(error)));
+    child.once("close", (code, signal) => finish(() => code === 0 ? resolve({ stdout, stderr }) : reject(new Error(timedOut ? `${command} timed out after ${timeoutMs}ms` : `${command} exited with ${code ?? signal}: ${stderr.trim().slice(-4000)}`))));
+    function finish(action: () => void) { if (settled) return; settled = true; clearTimeout(timeout); if (killTimer) clearTimeout(killTimer); action(); }
   });
 }
 
 function appendLimited(current: string, chunk: string) { const next = current + chunk; return next.length > 1_000_000 ? next.slice(-1_000_000) : next; }
+function mediaProcessTimeout() { const configured = Number(process.env.MEDIA_PROCESS_TIMEOUT_MS); return Number.isInteger(configured) && configured >= 1_000 ? configured : 30 * 60_000; }

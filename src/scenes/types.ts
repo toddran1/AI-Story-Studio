@@ -6,6 +6,7 @@ export const sceneSettingsSchema = z.object({
   maximumDurationSeconds: z.number().min(10).max(60).default(30),
   maximumScenesPerChapter: z.number().int().min(1).max(100).default(50),
 }).refine((value) => value.maximumDurationSeconds >= value.minimumDurationSeconds, { message: "Scene maximum duration must be at least the minimum duration" })
+  .refine((value) => value.targetDurationSeconds >= value.minimumDurationSeconds && value.targetDurationSeconds <= value.maximumDurationSeconds, { message: "Scene target duration must be between the minimum and maximum duration" })
   .default({ targetDurationSeconds: 20, minimumDurationSeconds: 10, maximumDurationSeconds: 30, maximumScenesPerChapter: 50 });
 
 export const artworkSettingsSchema = z.object({

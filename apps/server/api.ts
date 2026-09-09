@@ -25,6 +25,7 @@ export function createApiHandler(operations: StudioOperations) {
   return async function handle(request: IncomingMessage, response: ServerResponse): Promise<boolean> {
     const url = new URL(request.url ?? "/", "http://localhost"); if (!url.pathname.startsWith("/api/")) return false;
     try {
+      validateLocalRequest(request);
       if (request.method === "GET" && url.pathname === "/api/health") return send(response, 200, { status: "ready", binding: "localhost", credentials: { openai: "server-only", gemini: "server-only", fish: "server-only" } });
       if (request.method === "GET" && url.pathname === "/api/stories") return send(response, 200, { stories: await listStories(operations.root) });
       if (request.method === "GET" && url.pathname === "/api/jobs") return send(response, 200, { jobs: operations.jobs.list() });
@@ -136,6 +137,24 @@ export function createApiHandler(operations: StudioOperations) {
       return send(response, status, { error: error instanceof z.ZodError ? z.prettifyError(error) : error instanceof Error ? error.message : String(error) });
     }
   };
+}
+
+export function validateLocalRequest(request: Pick<IncomingMessage, "method" | "headers">) {
+  const rawHost = request.headers.host; const host = Array.isArray(rawHost) ? rawHost[0] : rawHost;
+  if (host) {
+    let hostname: string; try { hostname = new URL(`http://${host}`).hostname.toLowerCase(); } catch { throw new HttpError("Invalid Host header", 403); }
+    if (!["localhost", "127.0.0.1", "[::1]"].includes(hostname)) throw new HttpError("Story Studio only accepts localhost requests", 403);
+  }
+  const fetchSite = request.headers["sec-fetch-site"]; if (fetchSite === "cross-site") throw new HttpError("Cross-site requests are not allowed", 403);
+  const rawOrigin = request.headers.origin; const origin = Array.isArray(rawOrigin) ? rawOrigin[0] : rawOrigin;
+  if (origin) {
+    let originHost: string; try { originHost = new URL(origin).host.toLowerCase(); } catch { throw new HttpError("Invalid Origin header", 403); }
+    if (!host || originHost !== host.toLowerCase()) throw new HttpError("Cross-origin requests are not allowed", 403);
+  }
+  if (["POST", "PUT", "PATCH", "DELETE"].includes(request.method ?? "")) {
+    const rawType = request.headers["content-type"]; const type = (Array.isArray(rawType) ? rawType[0] : rawType)?.split(";", 1)[0]?.trim().toLowerCase();
+    if (type !== "application/json" && type !== "application/octet-stream") throw new HttpError("Mutation requests require application/json or application/octet-stream", 415);
+  }
 }
 
 function send(response: ServerResponse, status: number, value: unknown): true { const output = JSON.stringify(value); response.writeHead(status, { "content-type": "application/json; charset=utf-8", "content-length": Buffer.byteLength(output), "cache-control": "no-store", "x-content-type-options": "nosniff" }); response.end(output); return true; }

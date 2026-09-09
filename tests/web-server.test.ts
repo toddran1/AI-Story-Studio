@@ -22,12 +22,13 @@ import { AudiobookProcessor } from "../src/audio/audiobook.js";
 import { VideoProcessor } from "../src/video/renderer.js";
 import { VideoExportProcessor } from "../src/video/video-export.js";
 import { ImageProvider } from "../src/artwork/provider.js";
+import { validateLocalRequest } from "../apps/server/api.js";
 
 const webAudio: AudioMasteringProcessor = { version: "web-audio-v1", master: async (_inputs, output) => { await atomicWrite(output, Buffer.from("mastered")); return { durationSeconds: 9, codec: "mp3", container: "mp3" }; } };
 const webBook: AudiobookProcessor = { version: "web-book-v1", assemble: async (_chapters, output, format) => { await atomicWrite(output, Buffer.from("book")); return { durationSeconds: 9, codec: format === "m4b" ? "aac" : "mp3", container: format === "m4b" ? "mp4" : "mp3" }; } };
 const webVideo: VideoProcessor = { version: "web-video-v1", render: async (_input, output, settings) => { await atomicWrite(output, Buffer.from("video")); return { durationSeconds: 12, videoCodec: "h264", audioCodec: "aac", width: settings.width, height: settings.height, container: "mp4" }; } };
 const webVideoExport: VideoExportProcessor = { version: "web-video-export-v1", assemble: async (_chapters, output) => { await atomicWrite(output, Buffer.from("video-export")); return { durationSeconds: 12, videoCodec: "h264", audioCodec: "aac", width: 1920, height: 1080, container: "mp4" }; } };
-const webImages: ImageProvider = { name: "openai", version: "web-images-v1", validateConfiguration: async () => undefined, generate: async () => ({ data: Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 1]), mimeType: "image/png" }) };
+const webImages: ImageProvider = { name: "openai", version: "web-images-v1", validateConfiguration: async () => undefined, generate: async () => ({ data: Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64"), mimeType: "image/png" }) };
 const webScenePlanner = new MockLLM("openai"); webScenePlanner.generateStructured = async (request: any) => ({ value: request.schema.parse({ scenes: [{ summary: "The lantern wakes.", startSeconds: 0, endSeconds: 9, characters: [], location: "Tower", visualPrompt: "A blue lantern wakes in a dark tower", importance: "major" }] }) });
 
 const env = loadEnvironment({});
@@ -40,6 +41,13 @@ async function storyFixture() {
 }
 
 describe("web service layer", () => {
+  it("rejects cross-site and non-JSON mutation requests at the localhost API boundary", () => {
+    expect(() => validateLocalRequest({ method: "POST", headers: { host: "localhost:3000", origin: "https://attacker.example", "content-type": "application/json" } })).toThrow("Cross-origin");
+    expect(() => validateLocalRequest({ method: "POST", headers: { host: "attacker.example", "content-type": "application/json" } })).toThrow("localhost");
+    expect(() => validateLocalRequest({ method: "POST", headers: { host: "localhost:3000", "content-type": "text/plain" } })).toThrow("require application/json");
+    expect(() => validateLocalRequest({ method: "POST", headers: { host: "localhost:3000", origin: "http://localhost:3000", "content-type": "application/json; charset=utf-8" } })).not.toThrow();
+  });
+
   it("lists stories without exposing environment credentials", async () => {
     const { root } = await storyFixture(); const cards = await listStories(root);
     expect(cards[0]).toMatchObject({ slug: "night-lantern", title: "Night Lantern" });

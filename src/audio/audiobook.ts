@@ -38,14 +38,15 @@ export class FfmpegAudiobookProcessor implements AudiobookProcessor {
 
 export async function assembleAudiobook(options: { root: string; story: Story; from: number; to: number; format: AudiobookFormat; processor: AudiobookProcessor; force?: boolean; onProgress?: (event: { type: string; chapter?: number; index?: number; total?: number }) => void }) {
   const chapters = await selectExportChapters(options.root, options.story, options.from, options.to); const paths = exportPaths(options.root, options.story.slug, options.from, options.to, options.format);
+  const cover = await findCover(options.root, options.story.slug); const coverFingerprint = cover ? await fileFingerprint(cover) : undefined;
   const fp = fingerprint({ story: options.story.slug, title: options.story.title, author: options.story.author, format: options.format, settings: options.story.audio,
-    processor: options.processor.version, chapters: chapters.map((chapter) => ({ chapter: chapter.chapter, fingerprint: chapter.fingerprint, title: chapter.title })) });
+    processor: options.processor.version, cover: cover ? { name: cover.split(/[\\/]/).at(-1), fingerprint: coverFingerprint } : undefined, chapters: chapters.map((chapter) => ({ chapter: chapter.chapter, fingerprint: chapter.fingerprint, title: chapter.title })) });
   const cachedRaw = await readJsonIfExists(paths.manifest); const cached = cachedRaw ? exportManifestSchema.safeParse(cachedRaw) : undefined;
   if (!options.force && cached?.success && cached.data.fingerprint === fp && await fileFingerprint(paths.output) === cached.data.outputFingerprint) return { manifest: cached.data, reused: true };
   await mkdir(paths.directory, { recursive: true }); const staged = `${paths.output}.stage-${randomUUID()}.${options.format}`;
   options.onProgress?.({ type: "audiobook.started", total: chapters.length });
   try {
-    const metadata = audiobookMetadata(options.story, chapters); const cover = await findCover(options.root, options.story.slug);
+    const metadata = audiobookMetadata(options.story, chapters);
     const probe = await options.processor.assemble(chapters, staged, options.format, options.story.audio, metadata, cover); await rename(staged, paths.output);
     const outputFingerprint = await fileFingerprint(paths.output); if (!outputFingerprint) throw new AudioError("Audiobook assembly produced an empty output");
     const manifest = exportManifestSchema.parse({ version: 1, fingerprint: fp, story: options.story.slug, from: options.from, to: options.to, format: options.format,
@@ -64,9 +65,9 @@ export async function selectExportChapters(root: string, story: Story, from: num
   const chapters: AudiobookChapter[] = [];
   for (const chapter of chapterNumbers) {
     const paths = storyPaths(root, story.slug, chapter); const raw = await readJsonIfExists<Chapter>(paths.chapterMeta); if (!raw) throw new AudioError(`Chapter ${chapter} has not been processed`);
-    const metadata = chapterSchema.parse(raw); const stage = metadata.stages.audioMastering;
-    if (stage.status !== "complete" || !stage.outputFingerprint || !metadata.audio || !(await exists(paths.audio))) throw new AudioError(`Chapter ${chapter} is not mastered`);
-    chapters.push({ chapter, title: metadata.translatedTitle ?? metadata.originalTitle ?? `Chapter ${chapter}`, path: paths.audio, durationSeconds: metadata.audio.durationSeconds, fingerprint: stage.outputFingerprint });
+    const metadata = chapterSchema.parse(raw); const stage = metadata.stages.audioMastering; const actualFingerprint = await fileFingerprint(paths.audio);
+    if (stage.status !== "complete" || !stage.outputFingerprint || stage.outputFingerprint !== actualFingerprint || !metadata.audio) throw new AudioError(`Chapter ${chapter} is not mastered or its audio changed after mastering`);
+    chapters.push({ chapter, title: metadata.translatedTitle ?? metadata.originalTitle ?? `Chapter ${chapter}`, path: paths.audio, durationSeconds: metadata.audio.durationSeconds, fingerprint: actualFingerprint });
   }
   return chapters;
 }

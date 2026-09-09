@@ -10,6 +10,9 @@ import { SourceProviderRegistry } from "../src/source/registry.js";
 import { splitText, TxtSource } from "../src/source/txt-source.js";
 import { sourceManifestSchema } from "../src/source/types.js";
 import { readSafeZip } from "../src/source/zip-safety.js";
+import { chapterSchema } from "../src/domain/chapter.js";
+import { atomicWriteJson } from "../src/storage/atomic-write.js";
+import { storyPaths } from "../src/storage/paths.js";
 
 describe("source ingestion", () => {
   it("splits English and Chinese multi-chapter TXT without lexicographic ordering", () => {
@@ -80,9 +83,12 @@ describe("source ingestion", () => {
     const root = await mkdtemp(join(tmpdir(), "source-rollback-")); const source = join(root, "novel.txt"); const provider = new TxtSource();
     await writeFile(source, "Chapter 1\nOriginal", "utf8");
     await importSource(root, "novel", await provider.inspect(source, { splitChapters: true }));
+    const chapterPath = storyPaths(root, "novel", 1).chapterMeta; const now = new Date().toISOString(); const complete = { status: "complete" as const, fingerprint: "before", outputFingerprint: "before-output" };
+    await atomicWriteJson(chapterPath, chapterSchema.parse({ chapter: 1, sourceLanguage: "en", outputLanguage: "en", counts: { originalCharacters: 8, englishWords: 1, narrationWords: 1 }, createdAt: now, updatedAt: now, stages: { ingestion: complete, translation: complete, narration: complete, qa: complete, storyBible: complete, tts: complete } })); const previousMetadata = await readFile(chapterPath, "utf8");
     await writeFile(source, "Chapter 1\nReplacement", "utf8");
     await expect(importSource(root, "novel", await provider.inspect(source, { splitChapters: true }), async () => { throw new Error("config failed"); })).rejects.toThrow("config failed");
     expect(await readFile(join(root, "stories/novel/source/chapters/0001.txt"), "utf8")).toContain("Original");
+    expect(await readFile(chapterPath, "utf8")).toBe(previousMetadata);
   });
 
   it("rejects a compressed archive whose expanded entry is too large", async () => {

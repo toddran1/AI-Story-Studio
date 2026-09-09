@@ -42,6 +42,7 @@ export async function importSource(root: string, story: string, inspection: Sour
   const stage = `${paths.source}.stage-${randomUUID()}`; const backup = `${paths.source}.backup-${randomUUID()}`;
   const chapters = [...inspection.chapters].sort((a, b) => a.ref.chapter - b.ref.chapter);
   const manifestChapters: SourceManifest["chapters"] = [];
+  let productionSnapshot: Array<{ path: string; data: Buffer }> | undefined;
   try {
     await mkdir(join(stage, "chapters"), { recursive: true });
     const incomingNumbers = new Set(chapters.map((chapter) => chapter.ref.chapter));
@@ -75,6 +76,7 @@ export async function importSource(root: string, story: string, inspection: Sour
     });
     await atomicWriteJson(join(stage, "source.json"), manifest);
     const changes = compareChapters(parsedPrevious?.success ? parsedPrevious.data : undefined, manifest);
+    productionSnapshot = await snapshotChangedProduction(root, story, changes);
     await invalidateChangedProduction(root, story, changes);
     const hadPrevious = await exists(paths.source);
     if (hadPrevious) await rename(paths.source, backup);
@@ -92,6 +94,10 @@ export async function importSource(root: string, story: string, inspection: Sour
     return { status: unchanged ? "unchanged" : parsedPrevious?.success ? "updated" : "imported", manifest, ...changes };
   } catch (error) {
     await rm(stage, { recursive: true, force: true });
+    if (productionSnapshot) {
+      try { await Promise.all(productionSnapshot.map((item) => atomicWrite(item.path, item.data))); }
+      catch (rollbackError) { throw new Error("Source import failed and production metadata rollback also failed", { cause: new AggregateError([error, rollbackError]) }); }
+    }
     throw error;
   }
 }
@@ -109,6 +115,16 @@ async function invalidateChangedProduction(root: string, story: string, changes:
     for (const stage of stages) chapter.stages[stage] = { status: "pending" };
     chapter.quality = undefined; chapter.updatedAt = new Date().toISOString(); await atomicWriteJson(path, chapter);
   }
+}
+
+async function snapshotChangedProduction(root: string, story: string, changes: { added: number[]; modified: number[]; removed: number[] }) {
+  const changed = [...changes.added, ...changes.modified, ...changes.removed]; if (!changed.length) return [];
+  const chaptersRoot = join(storyPaths(root, story, Math.min(...changed)).story, "chapters"); let numbers: number[] = [];
+  try { numbers = (await readdir(chaptersRoot, { withFileTypes: true })).filter((entry) => entry.isDirectory() && /^\d+$/.test(entry.name)).map((entry) => Number(entry.name)).filter((number) => number >= Math.min(...changed)); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+  const snapshots: Array<{ path: string; data: Buffer }> = [];
+  for (const number of numbers) { const path = storyPaths(root, story, number).chapterMeta; try { snapshots.push({ path, data: await readFile(path) }); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; } }
+  return snapshots;
 }
 
 function assertSameRemoteSource(previous: SourceManifest, inspection: SourceInspection) {
