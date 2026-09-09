@@ -10,6 +10,8 @@ Milestone 2 adds deterministic multi-chapter discovery, validation, sequential p
 
 Milestone 3 adds provider-based local ingestion for TXT directories, TXT files, EPUB, DOCX, and manual/original stories. Import remains separate from AI processing.
 
+Milestone 4 adds bounded remote ingestion with a Fanqie adapter, additive range imports, HTTP caching, and refresh discovery. Remote ingestion still feeds the same source manifest and batch pipeline.
+
 ## Requirements
 
 - Node.js 22 or newer (an active LTS release is recommended)
@@ -37,6 +39,11 @@ FISH_AUDIO_API_KEY=
 FISH_AUDIO_MODEL=s2-pro
 FISH_AUDIO_REFERENCE_ID=
 PROVIDER_TIMEOUT_MS=120000
+WEB_REQUEST_TIMEOUT_MS=30000
+WEB_REQUEST_DELAY_MS=500
+WEB_MAX_RESPONSE_BYTES=5000000
+WEB_MAX_RETRIES=2
+WEB_CACHE_DIR=.cache/ai-story-studio/web
 ```
 
 Model IDs are configuration. The defaults reflect official model identifiers available when this milestone was implemented (September 2026); change them without touching source code if account availability or model recommendations differ.
@@ -157,6 +164,47 @@ npm run story:batch -- --story my-novel --from 1 --to 10
 
 Explicit `--input` remains supported. Importing consumes no LLM or TTS credits and never changes the Story Bible; only batch processing does. When the configured source and output languages are identical, translation is persisted as a fingerprinted `passthrough` stage, while narration polish, Story Bible extraction, and TTS continue normally.
 
+## Milestone 4 — Web Novel Ingestion
+
+Fanqie book and chapter URLs are recognized automatically. Inspection retrieves book metadata and the chapter directory only; it does not download every chapter body:
+
+```sh
+npm run story:inspect -- \
+  --source https://fanqienovel.com/page/7367239434808347672
+
+# Optionally verify the first three chapter bodies.
+npm run story:inspect -- \
+  --source https://fanqienovel.com/page/7367239434808347672 \
+  --probe 3
+```
+
+Remote imports require an explicit inclusive range as a guard against accidentally downloading an entire novel:
+
+```sh
+npm run story:import -- \
+  --story undead-disaster \
+  --source https://fanqienovel.com/page/7367239434808347672 \
+  --from 1 \
+  --to 25
+```
+
+Later imports are additive. Importing `26–100` preserves `1–25`; overlapping ranges reuse unchanged chapters and report changed bodies. The materialized chapters remain under `stories/<slug>/source/chapters/`, so normal processing is unchanged:
+
+```sh
+npm run story:batch -- --story undead-disaster --from 1 --to 10
+```
+
+Check the saved remote directory snapshot for newly published chapters without importing or processing anything:
+
+```sh
+npm run story:refresh -- --story undead-disaster
+npm run story:refresh -- --story undead-disaster --import-new
+```
+
+Automatic refresh import stops if existing remote chapters were removed or reordered. Locked or unreadable bodies also fail explicitly; the adapter does not bypass account or payment access controls.
+
+Remote requests allow HTTPS only, validate redirect destinations, use bounded retries and timeouts, enforce streaming response-size limits, and are rate-limited. The file cache uses ETag and Last-Modified revalidation when supplied by the server; set `WEB_CACHE_DIR=` to disable it. Configure these behaviors with the `WEB_*` environment values shown above.
+
 ## Verification
 
 ```sh
@@ -173,6 +221,7 @@ npm run smoke
 ## Architecture notes
 
 - Vendor code exists only in `src/llm/openai`, `src/llm/gemini`, and `src/tts/fish`.
+- Generic remote transport and caching live under `src/source/web`; Fanqie URL, directory, body, and font-decoding logic lives under `src/source/fanqie`.
 - OpenAI uses the Responses API and JSON Schema structured output.
 - Gemini uses the Interactions API and JSON response format.
 - Prompts and prompt versions live outside orchestration logic.

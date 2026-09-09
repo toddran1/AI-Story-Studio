@@ -30,7 +30,7 @@ export const stageStateSchema = z.object({
 export const chapterSchema = z.object({
   chapter: z.number().int().positive(),
   source: z.object({
-    type: z.enum(["text", "epub", "docx", "manual", "original"]),
+    type: z.enum(["text", "epub", "docx", "web", "fanqie", "manual", "original"]),
     sourceId: z.string(),
     originalTitle: z.string().optional(),
     fingerprint: z.string(),

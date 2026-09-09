@@ -10,7 +10,7 @@ export const storySchema = z.object({
   sourceLanguage: z.string().min(2),
   outputLanguage: z.string().min(2),
   source: z.object({
-    type: z.enum(["text", "epub", "docx", "pdf", "web", "manual", "original"]),
+    type: z.enum(["text", "epub", "docx", "pdf", "web", "fanqie", "manual", "original"]),
     url: z.string().url().optional(),
     externalId: z.string().optional(),
     path: z.string().optional(),

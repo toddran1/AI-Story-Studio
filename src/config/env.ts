@@ -17,6 +17,11 @@ const envSchema = z.object({
   FISH_AUDIO_NORMALIZE: z.stringbool().default(true),
   FISH_AUDIO_MAX_CHARS: z.coerce.number().int().min(500).max(20_000).default(4000),
   PROVIDER_TIMEOUT_MS: z.coerce.number().int().min(1000).max(900_000).default(120_000),
+  WEB_REQUEST_TIMEOUT_MS: z.coerce.number().int().min(1000).max(120_000).default(30_000),
+  WEB_REQUEST_DELAY_MS: z.coerce.number().int().min(0).max(60_000).default(500),
+  WEB_MAX_RESPONSE_BYTES: z.coerce.number().int().min(100_000).max(50_000_000).default(5_000_000),
+  WEB_MAX_RETRIES: z.coerce.number().int().min(0).max(10).default(2),
+  WEB_CACHE_DIR: z.string().trim().transform((value) => value || undefined).optional().default(".cache/ai-story-studio/web"),
 });
 
 export type Environment = z.infer<typeof envSchema>;

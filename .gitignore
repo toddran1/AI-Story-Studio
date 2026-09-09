@@ -6,6 +6,9 @@ dist/
 stories/
 input/
 coverage/
+.cache/
 *.log
 .DS_Store
 .idea/
+/ai-story-studio-arch-goal.pages
+/milestonses.pages

@@ -1,12 +1,13 @@
 import { z } from "zod";
 
-export const sourceTypeSchema = z.enum(["text", "epub", "docx", "manual", "original"]);
+export const sourceTypeSchema = z.enum(["text", "epub", "docx", "web", "fanqie", "manual", "original"]);
 export type SourceType = z.infer<typeof sourceTypeSchema>;
 
 export const sourceWarningSchema = z.object({
   code: z.enum([
     "chapter_number_gap", "duplicate_chapter_number", "unnumbered_section", "empty_section",
     "ambiguous_heading", "unsupported_epub_structure", "missing_metadata", "invalid_filename",
+    "unavailable_chapter",
   ]),
   message: z.string(),
   sourceId: z.string().optional(),
@@ -35,6 +36,12 @@ export type SourceInspection = {
   chapters: RawChapter[];
   unnumberedSections: UnnumberedSection[];
   warnings: SourceWarning[];
+  directory?: ChapterReference[];
+  origin?: { url: string; bookId?: string };
+  metadata?: Record<string, unknown>;
+  remote?: { lastInspectedAt: string; chapterCountAtInspection: number };
+  additive?: boolean;
+  adapterVersion?: string;
 };
 
 export type SourceInspectOptions = {
@@ -42,6 +49,11 @@ export type SourceInspectOptions = {
   chapter?: number;
   allowGaps?: boolean;
   semanticType?: SourceType;
+  from?: number;
+  to?: number;
+  probe?: number;
+  chapters?: number[];
+  refresh?: boolean;
 };
 
 export interface StorySourceProvider {
@@ -50,16 +62,23 @@ export interface StorySourceProvider {
 }
 
 const sha256Schema = z.string().regex(/^[a-f0-9]{64}$/);
+const localOriginSchema = z.object({ path: z.string(), name: z.string() });
+const remoteOriginSchema = z.object({ url: z.url(), bookId: z.string().optional() });
 export const sourceManifestSchema = z.object({
   version: z.literal(1),
   adapterVersion: z.string(),
   type: sourceTypeSchema,
-  origin: z.object({ path: z.string(), name: z.string() }),
+  origin: z.union([localOriginSchema, remoteOriginSchema]),
   fingerprint: sha256Schema,
   importedAt: z.iso.datetime(),
   title: z.string().optional(),
   author: z.string().optional(),
   language: z.string().optional(),
+  metadata: z.record(z.string(), z.unknown()).optional(),
+  remote: z.object({
+    lastInspectedAt: z.iso.datetime(), chapterCountAtInspection: z.number().int().nonnegative(),
+    directory: z.array(chapterReferenceSchema),
+  }).optional(),
   warnings: z.array(sourceWarningSchema),
   unnumberedSections: z.array(z.object({ sourceId: z.string(), title: z.string().optional() })),
   chapters: z.array(z.object({
@@ -77,6 +96,18 @@ export const sourceManifestSchema = z.object({
     if (item.ref.sourceType !== manifest.type) context.addIssue({ code: "custom", path: ["chapters", index, "ref", "sourceType"], message: "Reference source type must match manifest type" });
     if (seen.has(item.chapter)) context.addIssue({ code: "custom", path: ["chapters", index, "chapter"], message: "Manifest chapter numbers must be unique" });
     seen.add(item.chapter);
+  }
+  if ((manifest.type === "fanqie" || manifest.type === "web") && (!("url" in manifest.origin) || !manifest.remote)) {
+    context.addIssue({ code: "custom", path: ["remote"], message: "Remote source manifests require URL origin and directory metadata" });
+  }
+  if (manifest.remote) {
+    const directoryNumbers = new Set<number>();
+    for (let index = 0; index < manifest.remote.directory.length; index++) {
+      const ref = manifest.remote.directory[index]!;
+      if (ref.sourceType !== manifest.type) context.addIssue({ code: "custom", path: ["remote", "directory", index, "sourceType"], message: "Remote directory source type must match manifest type" });
+      if (directoryNumbers.has(ref.chapter)) context.addIssue({ code: "custom", path: ["remote", "directory", index, "chapter"], message: "Remote directory chapter numbers must be unique" });
+      directoryNumbers.add(ref.chapter);
+    }
   }
 });
 export type SourceManifest = z.infer<typeof sourceManifestSchema>;

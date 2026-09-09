@@ -17,6 +17,6 @@ export function chapterWarnings(chapters: RawChapter[], allowGaps = false): Sour
 
 export function validateImportable(chapters: RawChapter[], warnings: SourceWarning[], allowGaps = false): void {
   if (!chapters.length) throw new Error("No numbered chapters were detected in the source");
-  const blocking = warnings.filter((warning) => warning.code === "duplicate_chapter_number" || warning.code === "empty_section" || warning.code === "invalid_filename" || (!allowGaps && warning.code === "chapter_number_gap"));
+  const blocking = warnings.filter((warning) => warning.code === "duplicate_chapter_number" || warning.code === "empty_section" || warning.code === "invalid_filename" || warning.code === "unavailable_chapter" || (!allowGaps && warning.code === "chapter_number_gap"));
   if (blocking.length) throw new Error(`Source validation failed:\n- ${blocking.map((item) => item.message).join("\n- ")}`);
 }

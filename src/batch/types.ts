@@ -5,7 +5,7 @@ export const discoveredChapterSchema = z.object({
   path: z.string().min(1),
   filename: z.string().min(1),
   source: z.object({
-    type: z.enum(["text", "epub", "docx", "manual", "original"]),
+    type: z.enum(["text", "epub", "docx", "web", "fanqie", "manual", "original"]),
     sourceId: z.string(), originalTitle: z.string().optional(), fingerprint: z.string(),
     metadata: z.record(z.string(), z.unknown()).default({}),
   }).optional(),

@@ -1,0 +1,9 @@
+Script started on Tue Sep  8 22:32:08 2026
+^Dwarning Skipping preferred cache folder "/Users/reginaldrandolph/Library/Caches/Yarn" because it is not writable.
+warning Selected the next writable cache folder in the list, will be "/var/folders/wj/ksbxnvnn3r751_6m1dm6zmdh0000gn/T/.yarn-cache-501".
+warning Cannot find a suitable global folder. Tried these: "/usr/local, /Users/reginaldrandolph/.yarn"
+zsh: locking failed for /Users/reginaldrandolph/.zsh_history: operation not permitted: reading anyway
+%                                                                               (base) reginaldrandolph@Reginalds-MacBook-Pro AI-Story-Studio % [?2004h[?2004l
+zsh: locking failed for /Users/reginaldrandolph/.zsh_history: operation not permitted
+
+Script done on Tue Sep  8 22:32:10 2026
