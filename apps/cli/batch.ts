@@ -16,9 +16,14 @@ import { ShutdownController } from "../../src/batch/shutdown.js";
 import { retryConfigSchema } from "../../src/batch/types.js";
 import { BatchValidationError } from "../../src/pipeline/errors.js";
 import { loadImportedChapters } from "../../src/source/importer.js";
+import { withStoryLock } from "../../src/storage/story-lock.js";
 
 async function main() {
   const args = parseArgs(process.argv.slice(2)); validateSlug(args.story);
+  await withStoryLock(process.cwd(), args.story, "batch", () => runBatch(args));
+}
+
+async function runBatch(args: Args) {
   const root = process.cwd();
   let directory = args.input ? resolve(args.input) : undefined;
   let imported: Awaited<ReturnType<typeof loadImportedChapters>> | undefined;
@@ -86,7 +91,7 @@ function parseArgs(values: string[]): Args {
       else if (key === "--retry-failed") args.retryFailed = true; else args.continueOnError = true;
       continue;
     }
-    const value = values[++index]; if (value === undefined) usage(`Missing value for ${key}`);
+    const value = values[++index]; if (value === undefined || value.startsWith("--")) usage(`Missing value for ${key}`);
     if (key === "--story") args.story = value; else if (key === "--input") args.input = value;
     else if (key === "--from") args.from = integer(value, key); else if (key === "--to") args.to = integer(value, key);
     else if (key === "--delay-ms") args.delayMs = nonnegative(value, key); else if (key === "--max-attempts") args.maxAttempts = integer(value, key);
@@ -110,7 +115,7 @@ function printProgress(event: ProgressEvent) {
 }
 function formatPlan(story: string, directory: string, plan: Awaited<ReturnType<typeof createBatchPlan>>) {
   return [`Batch dry run`, `Story: ${story}`, `Input: ${directory}`, `Discovered: ${plan.discovered}`,
-    `Selected: ${formatNumbers(plan.selected)}`, `Missing: ${formatNumbers(plan.missing)}`,
+    `Selected: ${formatNumbers(plan.selected)}`, `Missing: ${plan.missingCount ? plan.missingSummary : "none"}`,
     `Duplicates: ${plan.duplicates.length ? plan.duplicates.map((item) => `${item.chapter} (${item.filenames.join(", ")})`).join("; ") : "none"}`,
     `Invalid files: ${plan.invalidFiles.join(", ") || "none"}`, `Empty files: ${plan.emptyFiles.join(", ") || "none"}`,
     `Would process: ${plan.wouldProcess}`, `Already present (likely reusable): ${plan.likelyReusable.length}`].join("\n");

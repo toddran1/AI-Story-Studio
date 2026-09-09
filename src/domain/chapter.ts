@@ -16,6 +16,7 @@ const usageSchema = z.object({
 export const stageStateSchema = z.object({
   status: z.enum(["pending", "running", "complete", "failed"]),
   fingerprint: z.string().optional(),
+  outputFingerprint: z.string().optional(),
   provider: z.string().optional(),
   model: z.string().optional(),
   promptVersion: z.string().optional(),

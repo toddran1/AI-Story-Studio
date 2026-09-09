@@ -9,9 +9,9 @@ import { LLMProvider } from "../llm/provider.js";
 export function createPipeline(env: Environment): ChapterPipeline {
   return new ChapterPipeline(
     new LLMRouter(new Map<string, LLMProvider>([
-      ["openai", new OpenAIProvider(env.OPENAI_API_KEY)],
-      ["gemini", new GeminiProvider(env.GEMINI_API_KEY)],
+      ["openai", new OpenAIProvider(env.OPENAI_API_KEY, env.PROVIDER_TIMEOUT_MS)],
+      ["gemini", new GeminiProvider(env.GEMINI_API_KEY, env.PROVIDER_TIMEOUT_MS)],
     ])),
-    new FishAudioProvider(env.FISH_AUDIO_API_KEY),
+    new FishAudioProvider(env.FISH_AUDIO_API_KEY, fetch, env.PROVIDER_TIMEOUT_MS),
   );
 }

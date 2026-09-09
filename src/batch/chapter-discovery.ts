@@ -2,6 +2,7 @@ import { readdir, readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { BatchValidationError } from "../pipeline/errors.js";
 import { DiscoveredChapter } from "./types.js";
+import { findChapterGaps } from "./gaps.js";
 
 export type DiscoveryReport = {
   chapters: DiscoveredChapter[];
@@ -9,6 +10,8 @@ export type DiscoveryReport = {
   duplicateChapters: Array<{ chapter: number; filenames: string[] }>;
   emptyFiles: string[];
   missingChapters: number[];
+  missingChapterCount?: number;
+  missingChapterSummary?: string;
 };
 
 export async function inspectChapterDirectory(directory: string): Promise<DiscoveryReport> {
@@ -35,12 +38,8 @@ export async function inspectChapterDirectory(directory: string): Promise<Discov
   const emptyFiles: string[] = [];
   await Promise.all(chapters.map(async (item) => { if (!(await readFile(item.path, "utf8")).trim()) emptyFiles.push(item.filename); }));
   emptyFiles.sort();
-  const missingChapters: number[] = [];
-  if (chapters.length) {
-    const found = new Set(chapters.map((item) => item.chapter));
-    for (let chapter = chapters[0]!.chapter; chapter <= chapters.at(-1)!.chapter; chapter++) if (!found.has(chapter)) missingChapters.push(chapter);
-  }
-  return { chapters, invalidFiles, duplicateChapters, emptyFiles, missingChapters };
+  const gaps = findChapterGaps(chapters.map((item) => item.chapter));
+  return { chapters, invalidFiles, duplicateChapters, emptyFiles, missingChapters: gaps.missing, missingChapterCount: gaps.total, missingChapterSummary: gaps.summary };
 }
 
 export async function discoverChapters(directory: string, allowGaps = false): Promise<DiscoveredChapter[]> {
@@ -56,6 +55,6 @@ export function discoveryIssues(report: DiscoveryReport, allowGaps: boolean): st
   if (report.invalidFiles.length) issues.push(`Unrecognized chapter filenames: ${report.invalidFiles.join(", ")}`);
   for (const duplicate of report.duplicateChapters) issues.push(`Duplicate Chapter ${duplicate.chapter}: ${duplicate.filenames.join(", ")}`);
   if (report.emptyFiles.length) issues.push(`Empty chapter files: ${report.emptyFiles.join(", ")}`);
-  if (!allowGaps && report.missingChapters.length) issues.push(`Missing chapters: ${report.missingChapters.join(", ")}`);
+  if (!allowGaps && (report.missingChapterCount ?? report.missingChapters.length)) issues.push(`Missing chapters: ${report.missingChapterSummary ?? report.missingChapters.join(", ")}`);
   return issues;
 }

@@ -5,7 +5,7 @@ import { DiscoveryReport } from "./chapter-discovery.js";
 import { DiscoveredChapter } from "./types.js";
 
 export type BatchPlan = {
-  discovered: number; selected: number[]; missing: number[]; duplicates: DiscoveryReport["duplicateChapters"];
+  discovered: number; selected: number[]; missing: number[]; missingCount: number; missingSummary?: string; duplicates: DiscoveryReport["duplicateChapters"];
   invalidFiles: string[]; emptyFiles: string[]; wouldProcess: number; likelyReusable: number[];
 };
 
@@ -17,6 +17,7 @@ export async function createBatchPlan(root: string, story: string, report: Disco
   }
   return {
     discovered: report.chapters.length, selected: selected.map((item) => item.chapter), missing: report.missingChapters,
+    missingCount: report.missingChapterCount ?? report.missingChapters.length, missingSummary: report.missingChapterSummary,
     duplicates: report.duplicateChapters, invalidFiles: report.invalidFiles, emptyFiles: report.emptyFiles,
     wouldProcess: selected.length, likelyReusable,
   };

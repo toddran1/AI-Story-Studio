@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { emptyStoryBible, storyBibleUpdateSchema } from "../src/domain/story-bible.js";
-import { contextBeforeChapter, mergeStoryBible } from "../src/story-bible/updater.js";
+import { contextBeforeChapter, mergeStoryBible, normalizeStoryBibleUpdate } from "../src/story-bible/updater.js";
 
 describe("Story Bible", () => {
   it("validates structured responses", () => {
@@ -31,5 +31,16 @@ describe("Story Bible", () => {
     const context = contextBeforeChapter(bible, 9, 3);
     expect(Object.keys(context.chapterSummaries)).toEqual(["6", "7", "8"]);
     expect(context.characters[0]?.canonicalEnglishName).toBe("Su Ming");
+  });
+
+  it("normalizes model-supplied chronology to the chapter being processed", () => {
+    const update = storyBibleUpdateSchema.parse({
+      characters: [{ canonicalEnglishName: "Su Ming", originalName: "苏铭", description: "Traveler", firstSeenChapter: 999, lastSeenChapter: 1000 }],
+      relationships: [{ subject: "Su Ming", relationship: "knows", object: "Lin Yao", firstSeenChapter: 50, lastSeenChapter: 60 }],
+      chapterSummary: "Arrival",
+    });
+    const normalized = normalizeStoryBibleUpdate(update, 3);
+    expect(normalized.characters[0]).toMatchObject({ firstSeenChapter: 3, lastSeenChapter: 3 });
+    expect(normalized.relationships[0]).toMatchObject({ firstSeenChapter: 3, lastSeenChapter: 3 });
   });
 });

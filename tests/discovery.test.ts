@@ -26,6 +26,13 @@ describe("chapter discovery", () => {
     expect(report.emptyFiles).toEqual(["chapter-4.txt"]);
     expect(report.missingChapters).toEqual([2]);
   });
+  it("summarizes enormous chapter gaps without materializing them", async () => {
+    const directory = await fixture({ "chapter-1.txt": "one", "chapter-999999999.txt": "last" });
+    const report = await inspectChapterDirectory(directory);
+    expect(report.missingChapterCount).toBe(999_999_997);
+    expect(report.missingChapters).toHaveLength(1000);
+    expect(report.missingChapterSummary).toContain("999999997 missing");
+  });
   it("rejects an empty directory", async () => {
     const directory = await mkdtemp(join(tmpdir(), "discovery-empty-")); await mkdir(directory, { recursive: true });
     await expect(discoverChapters(directory)).rejects.toThrow(/No supported chapter/);

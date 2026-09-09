@@ -36,6 +36,7 @@ GEMINI_DEFAULT_MODEL=gemini-3.8-flash
 FISH_AUDIO_API_KEY=
 FISH_AUDIO_MODEL=s2-pro
 FISH_AUDIO_REFERENCE_ID=
+PROVIDER_TIMEOUT_MS=120000
 ```
 
 Model IDs are configuration. The defaults reflect official model identifiers available when this milestone was implemented (September 2026); change them without touching source code if account availability or model recommendations differ.
@@ -82,6 +83,8 @@ npm run story:batch -- --story my-story --input ./input/my-story --dry-run
 Chapters run strictly in ascending order because each chapter's translation depends on the Story Bible produced by earlier chapters. The default behavior stops on the first failure. `--continue-on-error` is available, but later chapters may then receive incomplete story context.
 
 Transient network, timeout, rate-limit, and server failures use bounded exponential backoff with jitter. Defaults are three attempts, a 1-second initial delay, and a 30-second cap. Configure these with `--max-attempts`, `--initial-delay-ms`, and `--max-delay-ms`; add `--delay-ms` to throttle between chapters.
+
+Each provider request also has a 120-second deadline by default. Set `PROVIDER_TIMEOUT_MS` in `.env` to adjust it. Commands that mutate one story acquire a per-story lock, so accidentally starting an import, batch, or single-chapter run for the same story twice fails clearly instead of corrupting shared state.
 
 Every run has a unique manifest under `stories/<story>/batches/`, plus `latest.json`. Rerunning the normal batch is safe: the chapter pipeline remains the authority for fingerprints and reuses valid expensive outputs. Retry only failures from the latest manifest with:
 
@@ -144,7 +147,7 @@ npm run story:import -- --story my-story --source ./drafts/my-story.txt --type o
 
 A single TXT file is one chapter by default; select its number with `--chapter 361`. Add `--split-chapters` only when one TXT contains headings such as `Chapter 1`, `第1章`, or `第一章`. TXT directories retain the Milestone 2 filename validation rules. Use `--allow-gaps` when missing numbers are intentional.
 
-Import writes normalized chapters to `stories/<slug>/source/chapters/` and a validated `source.json` manifest containing source/chapter fingerprints, titles, metadata, warnings, and the import origin. Writes are staged and finalized atomically. Re-importing unchanged content reuses the existing materialization; changed imports report added, modified, and removed chapter numbers.
+Import writes normalized chapters to `stories/<slug>/source/chapters/` and a validated `source.json` manifest containing source/chapter fingerprints, titles, metadata, warnings, and the import origin. Writes are staged and finalized atomically, interrupted staging directories are cleaned up on the next import, and a previous source is restored if configuration finalization fails. Re-importing unchanged content reuses the existing materialization; changed imports report added, modified, and removed chapter numbers. EPUB and DOCX ZIP containers are rejected when compressed, expanded, entry-size, or entry-count safety limits are exceeded.
 
 Process an imported source without repeating its path:
 
@@ -174,7 +177,7 @@ npm run smoke
 - Gemini uses the Interactions API and JSON response format.
 - Prompts and prompt versions live outside orchestration logic.
 - `chapter.json` records status, fingerprints, provider/model, timings, errors, prompt versions, and available usage/request metadata per stage.
-- Writes use same-directory temporary files followed by atomic rename.
+- Writes use same-directory temporary files followed by atomic rename, and stage reuse verifies the output file's recorded fingerprint rather than trusting metadata alone.
 - Story context contains canonical structured knowledge and earlier summaries, never every earlier chapter.
 - Existing canonical translations win during Story Bible merges; conflicting new names become aliases where applicable.
 

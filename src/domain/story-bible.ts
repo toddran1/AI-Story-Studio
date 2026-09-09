@@ -15,7 +15,7 @@ const character = namedEntity.extend({
 });
 
 const relationship = z.object({
-  subject: z.string(), object: z.string(), relationship: z.string(),
+  subject: z.string().min(1), object: z.string().min(1), relationship: z.string().min(1),
   firstSeenChapter: z.number().int().positive(), lastSeenChapter: z.number().int().positive(),
 });
 
@@ -36,7 +36,7 @@ export const storyBibleUpdateSchema = z.object({
   systemTerms: z.array(namedEntity).default([]),
   relationships: z.array(relationship).default([]),
   translationTerms: z.array(translationTerm).default([]),
-  chapterSummary: z.string(),
+  chapterSummary: z.string().min(1),
 });
 
 export const storyBibleSchema = storyBibleUpdateSchema.extend({

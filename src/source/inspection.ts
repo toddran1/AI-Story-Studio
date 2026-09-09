@@ -1,4 +1,5 @@
 import { SourceWarning, RawChapter } from "./types.js";
+import { findChapterGaps } from "../batch/gaps.js";
 
 export function chapterWarnings(chapters: RawChapter[], allowGaps = false): SourceWarning[] {
   const warnings: SourceWarning[] = [];
@@ -8,10 +9,8 @@ export function chapterWarnings(chapters: RawChapter[], allowGaps = false): Sour
     code: "duplicate_chapter_number", message: `Chapter ${number} appears ${matches.length} times`, sourceId: matches[0]!.ref.sourceId,
   });
   if (!allowGaps && chapters.length) {
-    const numbers = [...new Set(chapters.map((item) => item.ref.chapter))].sort((a, b) => a - b);
-    const missing: number[] = [];
-    for (let number = numbers[0]!; number <= numbers.at(-1)!; number++) if (!numbers.includes(number)) missing.push(number);
-    if (missing.length) warnings.push({ code: "chapter_number_gap", message: `Missing chapters: ${missing.join(", ")}` });
+    const gaps = findChapterGaps(chapters.map((item) => item.ref.chapter));
+    if (gaps.total) warnings.push({ code: "chapter_number_gap", message: `Missing chapters: ${gaps.summary}` });
   }
   return warnings;
 }

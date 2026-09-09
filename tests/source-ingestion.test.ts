@@ -9,6 +9,7 @@ import { importSource, loadImportedChapters } from "../src/source/importer.js";
 import { SourceProviderRegistry } from "../src/source/registry.js";
 import { splitText, TxtSource } from "../src/source/txt-source.js";
 import { sourceManifestSchema } from "../src/source/types.js";
+import { readSafeZip } from "../src/source/zip-safety.js";
 
 describe("source ingestion", () => {
   it("splits English and Chinese multi-chapter TXT without lexicographic ordering", () => {
@@ -27,6 +28,10 @@ describe("source ingestion", () => {
     expect(report).toMatchObject({ title: "Tiny Novel", author: "Studio Test", language: "en", sourceType: "epub" });
     expect(report.chapters.map((item) => item.ref.chapter)).toEqual([1, 2]);
     expect(report.chapters[0]?.text).toContain("First paragraph.\n\nDialogue follows.");
+    expect(report.chapters[0]?.text).toContain("Text in a div.");
+    expect(report.chapters[0]?.text).toContain("Quoted text.");
+    expect(report.chapters[0]?.text).toContain("Table text");
+    expect(report.chapters[0]?.text).not.toContain("Chapter 1: Arrival");
     expect(report.unnumberedSections).toContainEqual(expect.objectContaining({ title: "Preface" }));
     expect(report.warnings.some((warning) => warning.code === "unnumbered_section")).toBe(true);
   });
@@ -62,12 +67,28 @@ describe("source ingestion", () => {
     const manifest = sourceManifestSchema.parse(JSON.parse(await readFile(join(root, "stories/novel/source/source.json"), "utf8")));
     expect(manifest.fingerprint).toBe(changedInspection.fingerprint);
     expect(await readFile(join(root, "stories/novel/source/chapters/0001.txt"), "utf8")).toContain("Revised");
+    expect(() => sourceManifestSchema.parse({ ...manifest, chapters: [{ ...manifest.chapters[0]!, ref: { ...manifest.chapters[0]!.ref, chapter: 2 } }] })).toThrow(/Reference chapter/);
     await writeFile(join(root, "stories/novel/source/chapters/0001.txt"), "tampered", "utf8");
     expect((await importSource(root, "novel", changedInspection)).status).toBe("updated");
     expect(await readFile(join(root, "stories/novel/source/chapters/0001.txt"), "utf8")).toContain("Revised");
     const broken = { ...changedInspection, fingerprint: "broken", chapters: [{ ...changedInspection.chapters[0]!, text: "" }] };
     await expect(importSource(root, "novel", broken)).rejects.toThrow(/empty/);
     expect(await readFile(join(root, "stories/novel/source/chapters/0001.txt"), "utf8")).toContain("Revised");
+  });
+
+  it("restores the previous source when finalization fails", async () => {
+    const root = await mkdtemp(join(tmpdir(), "source-rollback-")); const source = join(root, "novel.txt"); const provider = new TxtSource();
+    await writeFile(source, "Chapter 1\nOriginal", "utf8");
+    await importSource(root, "novel", await provider.inspect(source, { splitChapters: true }));
+    await writeFile(source, "Chapter 1\nReplacement", "utf8");
+    await expect(importSource(root, "novel", await provider.inspect(source, { splitChapters: true }), async () => { throw new Error("config failed"); })).rejects.toThrow("config failed");
+    expect(await readFile(join(root, "stories/novel/source/chapters/0001.txt"), "utf8")).toContain("Original");
+  });
+
+  it("rejects a compressed archive whose expanded entry is too large", async () => {
+    const root = await mkdtemp(join(tmpdir(), "source-zip-limit-")); const path = join(root, "oversized.zip");
+    await writeFile(path, Buffer.from(zipSync({ "large.txt": new Uint8Array(25 * 1024 * 1024 + 1) })));
+    await expect(readSafeZip(path)).rejects.toThrow(/entry 'large.txt' exceeds 25 MB/);
   });
 });
 
@@ -78,7 +99,7 @@ function tinyEpub(): Buffer {
     "OEBPS/content.opf": strToU8(`<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf" version="3.0"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>Tiny Novel</dc:title><dc:creator>Studio Test</dc:creator><dc:language>en</dc:language></metadata><manifest><item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/><item id="p" href="preface.xhtml" media-type="application/xhtml+xml"/><item id="c1" href="c1.xhtml" media-type="application/xhtml+xml"/><item id="c2" href="c2.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="p"/><itemref idref="c1"/><itemref idref="c2"/></spine></package>`),
     "OEBPS/nav.xhtml": strToU8(`<html><body><nav><ol><li><a href="preface.xhtml">Preface</a></li><li><a href="c1.xhtml">Chapter 1: Arrival</a></li><li><a href="c2.xhtml">Chapter 2: City</a></li></ol></nav></body></html>`),
     "OEBPS/preface.xhtml": strToU8(`<html><body><h1>Preface</h1><p>A note.</p></body></html>`),
-    "OEBPS/c1.xhtml": strToU8(`<html><body><h1>Chapter 1: Arrival</h1><p>First paragraph.</p><p>Dialogue follows.</p><script>bad()</script></body></html>`),
+    "OEBPS/c1.xhtml": strToU8(`<html><body><h1>Chapter 1: Arrival</h1><p>First paragraph.</p><p>Dialogue follows.</p><div>Text in a div.</div><blockquote>Quoted text.</blockquote><table><tr><td>Table text</td></tr></table><script>bad()</script></body></html>`),
     "OEBPS/c2.xhtml": strToU8(`<html><body><h1>Chapter 2: City</h1><p>Second chapter.</p></body></html>`),
   }));
 }

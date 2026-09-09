@@ -59,4 +59,32 @@ describe("chapter pipeline", () => {
     expect(result.stages.translation.provider).toBe("passthrough");
     expect(ctx.openai.calls).toHaveLength(1);
   });
+
+  it("reruns a stage and its dependents when a cached output is modified", async () => {
+    const ctx = await setup();
+    await ctx.pipeline.run({ root: ctx.root, story: testStory(), chapter: 1, inputPath: ctx.input });
+    await writeFile(ctx.paths.english, "tampered translation", "utf8");
+    await ctx.pipeline.run({ root: ctx.root, story: testStory(), chapter: 1, inputPath: ctx.input });
+    expect(ctx.gemini.calls.length).toBe(4);
+    expect(ctx.openai.calls.length).toBe(2);
+    expect(ctx.tts.calls).toBe(2);
+  });
+
+  it("regenerates zero-byte cached audio without rerunning language stages", async () => {
+    const ctx = await setup();
+    await ctx.pipeline.run({ root: ctx.root, story: testStory(), chapter: 1, inputPath: ctx.input });
+    const priorLLMCalls = ctx.gemini.calls.length + ctx.openai.calls.length;
+    await writeFile(ctx.paths.audio, new Uint8Array());
+    await ctx.pipeline.run({ root: ctx.root, story: testStory(), chapter: 1, inputPath: ctx.input });
+    expect(ctx.gemini.calls.length + ctx.openai.calls.length).toBe(priorLLMCalls);
+    expect(ctx.tts.calls).toBe(2);
+  });
+
+  it("rejects chapter metadata copied into the wrong chapter directory", async () => {
+    const ctx = await setup();
+    await ctx.pipeline.run({ root: ctx.root, story: testStory(), chapter: 1, inputPath: ctx.input });
+    const metadata = JSON.parse(await readFile(ctx.paths.chapterMeta, "utf8")); metadata.chapter = 2;
+    await writeFile(ctx.paths.chapterMeta, JSON.stringify(metadata), "utf8");
+    await expect(ctx.pipeline.run({ root: ctx.root, story: testStory(), chapter: 1, inputPath: ctx.input })).rejects.toThrow(/metadata mismatch/);
+  });
 });

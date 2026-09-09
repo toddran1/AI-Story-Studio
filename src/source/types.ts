@@ -49,13 +49,14 @@ export interface StorySourceProvider {
   inspect(sourcePath: string, options?: SourceInspectOptions): Promise<SourceInspection>;
 }
 
+const sha256Schema = z.string().regex(/^[a-f0-9]{64}$/);
 export const sourceManifestSchema = z.object({
   version: z.literal(1),
   adapterVersion: z.string(),
   type: sourceTypeSchema,
   origin: z.object({ path: z.string(), name: z.string() }),
-  fingerprint: z.string(),
-  importedAt: z.string(),
+  fingerprint: sha256Schema,
+  importedAt: z.iso.datetime(),
   title: z.string().optional(),
   author: z.string().optional(),
   language: z.string().optional(),
@@ -64,8 +65,18 @@ export const sourceManifestSchema = z.object({
   chapters: z.array(z.object({
     chapter: z.number().int().positive(),
     file: z.string().regex(/^chapters\/\d{4,}\.txt$/),
-    fingerprint: z.string(),
+    fingerprint: sha256Schema,
     ref: chapterReferenceSchema,
   })),
+}).superRefine((manifest, context) => {
+  const seen = new Set<number>();
+  for (let index = 0; index < manifest.chapters.length; index++) {
+    const item = manifest.chapters[index]!; const fileNumber = Number(/^chapters\/(\d+)\.txt$/.exec(item.file)?.[1]);
+    if (item.ref.chapter !== item.chapter) context.addIssue({ code: "custom", path: ["chapters", index, "ref", "chapter"], message: "Reference chapter must match manifest chapter" });
+    if (fileNumber !== item.chapter) context.addIssue({ code: "custom", path: ["chapters", index, "file"], message: "Materialized filename must match manifest chapter" });
+    if (item.ref.sourceType !== manifest.type) context.addIssue({ code: "custom", path: ["chapters", index, "ref", "sourceType"], message: "Reference source type must match manifest type" });
+    if (seen.has(item.chapter)) context.addIssue({ code: "custom", path: ["chapters", index, "chapter"], message: "Manifest chapter numbers must be unique" });
+    seen.add(item.chapter);
+  }
 });
 export type SourceManifest = z.infer<typeof sourceManifestSchema>;

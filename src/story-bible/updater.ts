@@ -33,6 +33,14 @@ export function mergeStoryBible(existing: StoryBible, update: StoryBibleUpdate, 
   return storyBibleSchema.parse(result);
 }
 
+export function normalizeStoryBibleUpdate(update: StoryBibleUpdate, chapter: number): StoryBibleUpdate {
+  const normalized = structuredClone(update);
+  for (const key of ["characters", "locations", "factions", "abilities", "classes", "ranks", "items", "creatures", "systemTerms", "relationships", "translationTerms"] as const) {
+    for (const item of normalized[key]) { item.firstSeenChapter = chapter; item.lastSeenChapter = chapter; }
+  }
+  return normalized;
+}
+
 function mergeUnique<T extends { firstSeenChapter: number; lastSeenChapter: number }>(existing: T[], incoming: T[], key: (item: T) => string): T[] {
   const out = structuredClone(existing);
   for (const item of incoming) {

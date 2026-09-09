@@ -1,4 +1,4 @@
-import { mkdir, readFile } from "node:fs/promises";
+import { mkdir, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { Chapter, StageName, StageState, chapterSchema } from "../domain/chapter.js";
 import { Story } from "../domain/story.js";
@@ -6,7 +6,7 @@ import { StoryBibleUpdate, storyBibleUpdateSchema } from "../domain/story-bible.
 import { LLMRouter } from "../llm/router.js";
 import { TTSProvider } from "../tts/provider.js";
 import { atomicWrite, atomicWriteJson } from "../storage/atomic-write.js";
-import { exists, readJsonIfExists, readTextIfExists } from "../storage/story-files.js";
+import { readJsonIfExists, readTextIfExists } from "../storage/story-files.js";
 import { storyPaths } from "../storage/paths.js";
 import { fingerprint } from "../utils/hash.js";
 import { logger } from "../utils/logger.js";
@@ -16,7 +16,7 @@ import { NARRATION_PROMPT_VERSION } from "../narration/prompts.js";
 import { polishNarration } from "../narration/narration-editor.js";
 import { STORY_BIBLE_PROMPT_VERSION } from "../story-bible/prompts.js";
 import { extractStoryBible } from "../story-bible/extractor.js";
-import { contextBeforeChapter, mergeStoryBible } from "../story-bible/updater.js";
+import { contextBeforeChapter, mergeStoryBible, normalizeStoryBibleUpdate } from "../story-bible/updater.js";
 import { rebuildStoryBibleBeforeChapter } from "../story-bible/rebuild.js";
 import { PipelineError } from "./errors.js";
 
@@ -42,6 +42,8 @@ export class ChapterPipeline {
       counts: { originalCharacters: 0, englishWords: 0, narrationWords: 0 }, createdAt: now, updatedAt: now,
       stages: { ingestion: pending(), translation: pending(), narration: pending(), storyBible: pending(), tts: pending() },
     });
+    if (chapter.chapter !== options.chapter) throw new PipelineError(`Chapter metadata mismatch at ${paths.chapterMeta}: expected ${options.chapter}, found ${chapter.chapter}`);
+    chapter.sourceLanguage = options.story.sourceLanguage; chapter.outputLanguage = options.story.outputLanguage;
     if (options.source) {
       chapter.source = options.source;
       chapter.originalTitle = options.source.originalTitle;
@@ -54,10 +56,12 @@ export class ChapterPipeline {
 
     const persist = async () => { chapter.updatedAt = new Date().toISOString(); await atomicWriteJson(paths.chapterMeta, chapter); };
     if (options.source) await persist();
-    const runStage = async <T>(stage: StageName, fp: string, outputExists: boolean, details: Partial<StageState>, action: () => Promise<T>): Promise<T | undefined> => {
+    const runStage = async <T>(stage: StageName, fp: string, outputPath: string, details: Partial<StageState>, action: () => Promise<T>): Promise<T | undefined> => {
       const state = chapter.stages[stage];
       const forced = isForced(options.force, stage);
-      if (!forced && state.status === "complete" && state.fingerprint === fp && outputExists) {
+      const currentOutputFingerprint = await fileFingerprint(outputPath);
+      if (!forced && state.status === "complete" && state.fingerprint === fp && currentOutputFingerprint && (!state.outputFingerprint || state.outputFingerprint === currentOutputFingerprint)) {
+        if (!state.outputFingerprint) { state.outputFingerprint = currentOutputFingerprint; await persist(); }
         logger.info({ event: "pipeline.stage.reused", story: options.story.slug, chapter: options.chapter, stage });
         options.onStageEvent?.({ stage, status: "reused", state });
         return undefined;
@@ -69,7 +73,9 @@ export class ChapterPipeline {
       logger.info({ event: "pipeline.stage.started", story: options.story.slug, chapter: options.chapter, stage, provider: details.provider, model: details.model });
       try {
         const value = await action();
-        chapter.stages[stage] = { ...chapter.stages[stage], status: "complete", completedAt: new Date().toISOString(), durationMs: Date.now() - started, error: undefined };
+        const producedFingerprint = await fileFingerprint(outputPath);
+        if (!producedFingerprint) throw new Error(`Stage '${stage}' did not produce a non-empty output at ${outputPath}`);
+        chapter.stages[stage] = { ...chapter.stages[stage], status: "complete", outputFingerprint: producedFingerprint, completedAt: new Date().toISOString(), durationMs: Date.now() - started, error: undefined };
         await persist();
         options.onStageEvent?.({ stage, status: "completed", state: chapter.stages[stage] });
         logger.info({ event: "pipeline.stage.completed", story: options.story.slug, chapter: options.chapter, stage, provider: details.provider, model: details.model, durationMs: Date.now() - started });
@@ -83,7 +89,7 @@ export class ChapterPipeline {
     };
 
     const ingestionFp = fingerprint({ source, sourceLanguage: options.story.sourceLanguage, outputLanguage: options.story.outputLanguage });
-    await runStage("ingestion", ingestionFp, await exists(paths.original), {}, async () => {
+    await runStage("ingestion", ingestionFp, paths.original, {}, async () => {
       await atomicWrite(paths.original, source);
       chapter.counts.originalCharacters = [...source].length;
     });
@@ -91,7 +97,7 @@ export class ChapterPipeline {
     const translationConfig = options.story.pipeline.translation;
     const passthroughTranslation = sameLanguage(options.story.sourceLanguage, options.story.outputLanguage);
     const translationFp = fingerprint({ source: ingestionFp, config: passthroughTranslation ? "passthrough" : translationConfig, prompt: passthroughTranslation ? "passthrough-v1" : TRANSLATION_PROMPT_VERSION, context: priorContext });
-    const translationResult = await runStage("translation", translationFp, await exists(paths.english), {
+    const translationResult = await runStage("translation", translationFp, paths.english, {
       provider: passthroughTranslation ? "passthrough" : translationConfig.provider,
       model: passthroughTranslation ? undefined : translationConfig.model,
       promptVersion: passthroughTranslation ? "passthrough-v1" : TRANSLATION_PROMPT_VERSION,
@@ -102,7 +108,7 @@ export class ChapterPipeline {
         return source;
       }
       const provider = this.llms.forStage(translationConfig);
-      const result = await translate(provider, translationConfig, source, priorContext);
+      const result = await translate(provider, translationConfig, source, priorContext, options.story.sourceLanguage, options.story.outputLanguage);
       await atomicWrite(paths.english, result.text);
       chapter.counts.englishWords = wordCount(result.text);
       chapter.stages.translation.usage = result.usage;
@@ -111,11 +117,11 @@ export class ChapterPipeline {
     const english = translationResult ?? await requireText(paths.english, "translation");
 
     const narrationConfig = options.story.pipeline.narration;
-    const narrationFp = fingerprint({ english: translationFp, config: narrationConfig, prompt: NARRATION_PROMPT_VERSION });
-    const narrationResult = await runStage("narration", narrationFp, await exists(paths.narration), {
+    const narrationFp = fingerprint({ english: fingerprint(english), config: narrationConfig, prompt: NARRATION_PROMPT_VERSION });
+    const narrationResult = await runStage("narration", narrationFp, paths.narration, {
       provider: narrationConfig.provider, model: narrationConfig.model, promptVersion: NARRATION_PROMPT_VERSION,
     }, async () => {
-      const result = await polishNarration(this.llms.forStage(narrationConfig), narrationConfig, english);
+      const result = await polishNarration(this.llms.forStage(narrationConfig), narrationConfig, english, options.story.outputLanguage);
       await atomicWrite(paths.narration, result.text);
       chapter.counts.narrationWords = wordCount(result.text);
       chapter.stages.narration.usage = result.usage;
@@ -124,12 +130,12 @@ export class ChapterPipeline {
     const narration = narrationResult ?? await requireText(paths.narration, "narration");
 
     const bibleConfig = options.story.pipeline.storyBible;
-    const bibleFp = fingerprint({ narration: narrationFp, config: bibleConfig, prompt: STORY_BIBLE_PROMPT_VERSION, context: priorContext });
-    const bibleResult = await runStage("storyBible", bibleFp, await exists(paths.bibleUpdate) && await exists(paths.bible), {
+    const bibleFp = fingerprint({ narration: fingerprint(narration), config: bibleConfig, prompt: STORY_BIBLE_PROMPT_VERSION, context: priorContext });
+    const bibleResult = await runStage("storyBible", bibleFp, paths.bibleUpdate, {
       provider: bibleConfig.provider, model: bibleConfig.model, promptVersion: STORY_BIBLE_PROMPT_VERSION,
     }, async () => {
       const result = await extractStoryBible(this.llms.forStage(bibleConfig), bibleConfig, options.chapter, narration, priorContext);
-      const update = storyBibleUpdateSchema.parse(result.value);
+      const update = normalizeStoryBibleUpdate(storyBibleUpdateSchema.parse(result.value), options.chapter);
       await atomicWriteJson(paths.bibleUpdate, update);
       bible = mergeStoryBible(bible, update, options.chapter);
       await atomicWriteJson(paths.bible, bible);
@@ -144,12 +150,13 @@ export class ChapterPipeline {
     }
 
     const ttsConfig = options.story.pipeline.tts;
-    const ttsFp = fingerprint({ narration: narrationFp, config: ttsConfig });
-    await runStage("tts", ttsFp, await exists(paths.audio), { provider: ttsConfig.provider, model: ttsConfig.model }, async () => {
+    const ttsFp = fingerprint({ narration: fingerprint(narration), config: ttsConfig });
+    await runStage("tts", ttsFp, paths.audio, { provider: ttsConfig.provider, model: ttsConfig.model }, async () => {
       const result = await this.tts.synthesize({ text: narration, model: ttsConfig.model, referenceId: ttsConfig.referenceId,
         speed: ttsConfig.speed, format: ttsConfig.format, sampleRate: ttsConfig.sampleRate, bitrate: ttsConfig.bitrate,
         normalize: ttsConfig.normalize, maxCharsPerRequest: ttsConfig.maxCharsPerRequest });
       await atomicWrite(paths.audio, result.audio);
+      await rm(paths.segments, { recursive: true, force: true });
       if (result.segments.length > 1) {
         await mkdir(paths.segments, { recursive: true });
         await Promise.all(result.segments.map((segment, index) => atomicWrite(join(paths.segments, `${String(index + 1).padStart(4, "0")}.mp3`), segment)));
@@ -181,3 +188,7 @@ async function requireText(path: string, stage: string): Promise<string> {
 
 const wordCount = (text: string) => text.trim() ? text.trim().split(/\s+/).length : 0;
 const sameLanguage = (source: string, output: string) => source.trim().toLowerCase().replaceAll("_", "-") === output.trim().toLowerCase().replaceAll("_", "-");
+async function fileFingerprint(path: string): Promise<string | undefined> {
+  try { const data = await readFile(path); return data.length ? fingerprint(data.toString("base64")) : undefined; }
+  catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; }
+}

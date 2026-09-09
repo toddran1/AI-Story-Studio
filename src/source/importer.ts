@@ -1,4 +1,4 @@
-import { mkdir, readFile, rename, rm } from "node:fs/promises";
+import { mkdir, readFile, readdir, rename, rm, stat } from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import { atomicWrite, atomicWriteJson } from "../storage/atomic-write.js";
@@ -17,11 +17,15 @@ export type ImportResult = {
   removed: number[];
 };
 
-export async function importSource(root: string, story: string, inspection: SourceInspection): Promise<ImportResult> {
+export async function importSource(root: string, story: string, inspection: SourceInspection, finalize?: () => Promise<void>): Promise<ImportResult> {
   const paths = storyPaths(root, story, inspection.chapters[0]?.ref.chapter ?? 1);
-  const previous = await readJsonIfExists<SourceManifest>(paths.sourceManifest);
+  await recoverInterruptedImport(paths.story, paths.source);
+  let previous: SourceManifest | undefined;
+  try { previous = await readJsonIfExists<SourceManifest>(paths.sourceManifest); }
+  catch (error) { if (!(error instanceof SyntaxError)) throw error; }
   const parsedPrevious = previous ? sourceManifestSchema.safeParse(previous) : undefined;
   if (parsedPrevious?.success && parsedPrevious.data.fingerprint === inspection.fingerprint && await manifestFilesExist(paths.source, parsedPrevious.data)) {
+    await finalize?.();
     return { status: "unchanged", manifest: parsedPrevious.data, added: [], modified: [], removed: [] };
   }
 
@@ -52,12 +56,33 @@ export async function importSource(root: string, story: string, inspection: Sour
     if (hadPrevious) await rename(paths.source, backup);
     try { await rename(stage, paths.source); }
     catch (error) { if (hadPrevious && await exists(backup)) await rename(backup, paths.source); throw error; }
-    if (hadPrevious) await rm(backup, { recursive: true, force: true });
+    try { await finalize?.(); }
+    catch (error) {
+      await rm(paths.source, { recursive: true, force: true });
+      if (hadPrevious && await exists(backup)) await rename(backup, paths.source);
+      throw error;
+    }
+    if (hadPrevious) { try { await rm(backup, { recursive: true, force: true }); } catch { /* The installed source is valid; a stale backup is recoverable. */ } }
     const changes = compareChapters(parsedPrevious?.success ? parsedPrevious.data : undefined, manifest);
     return { status: parsedPrevious?.success ? "updated" : "imported", manifest, ...changes };
   } catch (error) {
     await rm(stage, { recursive: true, force: true });
     throw error;
+  }
+}
+
+async function recoverInterruptedImport(storyRoot: string, sourceRoot: string) {
+  let entries: string[] = [];
+  try { entries = await readdir(storyRoot); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+  const backups = entries.filter((name) => name.startsWith("source.backup-"));
+  const stages = entries.filter((name) => name.startsWith("source.stage-"));
+  if (!(await exists(sourceRoot)) && backups.length) {
+    const dated = await Promise.all(backups.map(async (name) => ({ name, modified: (await stat(join(storyRoot, name))).mtimeMs })));
+    dated.sort((a, b) => a.modified - b.modified);
+    await rename(join(storyRoot, dated.at(-1)!.name), sourceRoot);
+  }
+  for (const name of [...backups, ...stages]) {
+    const path = join(storyRoot, name); if (path !== sourceRoot && await exists(path)) await rm(path, { recursive: true, force: true });
   }
 }
 

@@ -1,12 +1,12 @@
-import { readFile } from "node:fs/promises";
 import { basename, posix, resolve } from "node:path";
-import { strFromU8, unzipSync } from "fflate";
+import { strFromU8 } from "fflate";
 import { load } from "cheerio";
 import { XMLParser } from "fast-xml-parser";
 import { fingerprint } from "../utils/hash.js";
 import { extractHtmlSections } from "./html-chapters.js";
 import { chapterWarnings } from "./inspection.js";
 import { SourceInspectOptions, SourceInspection, SourceWarning, StorySourceProvider } from "./types.js";
+import { readSafeZip } from "./zip-safety.js";
 
 const ADAPTER_VERSION = "epub-v1";
 const xml = new XMLParser({ ignoreAttributes: false, attributeNamePrefix: "", removeNSPrefix: true });
@@ -14,7 +14,7 @@ const xml = new XMLParser({ ignoreAttributes: false, attributeNamePrefix: "", re
 export class EpubSource implements StorySourceProvider {
   readonly type = "epub" as const;
   async inspect(sourcePath: string, options: SourceInspectOptions = {}): Promise<SourceInspection> {
-    const absolute = resolve(sourcePath); const bytes = await readFile(absolute); const archive = unzipSync(bytes);
+    const absolute = resolve(sourcePath); const { bytes, archive } = await readSafeZip(absolute);
     const entries = new Map(Object.entries(archive).map(([name, data]) => [normalize(name), data]));
     const container = textEntry(entries, "META-INF/container.xml");
     const containerDoc = xml.parse(container) as Record<string, unknown>;

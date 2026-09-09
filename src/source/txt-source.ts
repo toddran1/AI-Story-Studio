@@ -12,6 +12,7 @@ export class TxtSource implements StorySourceProvider {
   readonly type: SourceType = "text";
   async inspect(sourcePath: string, options: SourceInspectOptions = {}): Promise<SourceInspection> {
     const absolute = resolve(sourcePath); const info = await stat(absolute);
+    if (info.isDirectory() && (options.chapter || options.splitChapters)) throw new Error("--chapter and --split-chapters cannot be used with a TXT directory");
     return info.isDirectory() ? this.inspectDirectory(absolute, options) : this.inspectFile(absolute, options);
   }
 
