@@ -9,6 +9,7 @@ import "@fontsource/ibm-plex-mono/400.css";
 import "./styles.css";
 import "./enhancements.css";
 import "./audio.css";
+import "./video.css";
 import { App } from "./App.js";
 
 createRoot(document.getElementById("root")!).render(<React.StrictMode><App /></React.StrictMode>);

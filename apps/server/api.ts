@@ -2,10 +2,10 @@ import { createReadStream } from "node:fs";
 import { stat } from "node:fs/promises";
 import { IncomingMessage, ServerResponse } from "node:http";
 import { z } from "zod";
-import { getAudioDashboard, getChapter, getChapterPage, getQaDashboard, getStoryBible, getStoryOverview, listStories, updateStorySettings, chapterFilterSchema } from "./catalog.js";
+import { getAudioDashboard, getChapter, getChapterPage, getQaDashboard, getStoryBible, getStoryOverview, getVideoDashboard, listStories, updateStorySettings, chapterFilterSchema } from "./catalog.js";
 import { JobConflictError } from "./job-manager.js";
 import { StudioOperations } from "./operations.js";
-import { exportPaths, previewPaths, storyPaths } from "../../src/storage/paths.js";
+import { exportPaths, previewPaths, storyPaths, videoExportPaths } from "../../src/storage/paths.js";
 import { BatchValidationError, ConfigurationError, ProviderError, StorageError } from "../../src/pipeline/errors.js";
 import { WebHttpError } from "../../src/source/web/http-client.js";
 import { logger } from "../../src/utils/logger.js";
@@ -60,16 +60,24 @@ export function createApiHandler(operations: StudioOperations) {
         if (!chapter.audioAvailable) return send(response, 404, { error: "Current chapter audio was not found" });
         return sendFile(request, response, storyPaths(operations.root, audioMatch[1]!, Number(audioMatch[2])).audio, "audio/mpeg");
       }
+      const subtitleFileMatch = /^\/api\/stories\/([a-z0-9-]+)\/chapters\/(\d+)\/subtitles\.(srt|vtt)$/.exec(url.pathname);
+      if (subtitleFileMatch && request.method === "GET") { const chapter = await getChapter(operations.root, subtitleFileMatch[1]!, Number(subtitleFileMatch[2])); if (!chapter.subtitles) return send(response, 404, { error: "Chapter subtitles were not found" }); const paths = storyPaths(operations.root, subtitleFileMatch[1]!, Number(subtitleFileMatch[2])); return sendFile(request, response, subtitleFileMatch[3] === "srt" ? paths.subtitlesSrt : paths.subtitlesVtt, subtitleFileMatch[3] === "srt" ? "application/x-subrip" : "text/vtt; charset=utf-8"); }
+      const chapterVideoMatch = /^\/api\/stories\/([a-z0-9-]+)\/chapters\/(\d+)\/video$/.exec(url.pathname);
+      if (chapterVideoMatch && request.method === "GET") { const chapter = await getChapter(operations.root, chapterVideoMatch[1]!, Number(chapterVideoMatch[2])); if (!chapter.videoUrl) return send(response, 404, { error: "Chapter video was not found" }); return sendFile(request, response, storyPaths(operations.root, chapterVideoMatch[1]!, Number(chapterVideoMatch[2])).video, "video/mp4"); }
       const qaMatch = /^\/api\/stories\/([a-z0-9-]+)\/qa$/.exec(url.pathname);
       if (qaMatch && request.method === "GET") return send(response, 200, await getQaDashboard(operations.root, qaMatch[1]!));
       const audioDashboardMatch = /^\/api\/stories\/([a-z0-9-]+)\/audio$/.exec(url.pathname);
       if (audioDashboardMatch && request.method === "GET") return send(response, 200, await getAudioDashboard(operations.root, audioDashboardMatch[1]!));
+      const videoDashboardMatch = /^\/api\/stories\/([a-z0-9-]+)\/video$/.exec(url.pathname);
+      if (videoDashboardMatch && request.method === "GET") return send(response, 200, await getVideoDashboard(operations.root, videoDashboardMatch[1]!));
       const exportMatch = /^\/api\/stories\/([a-z0-9-]+)\/exports\/(\d+)-(\d+)\.(mp3|m4b)$/.exec(url.pathname);
       if (exportMatch && request.method === "GET") {
         const from = Number(exportMatch[2]); const to = Number(exportMatch[3]); const format = exportMatch[4] as "mp3" | "m4b";
         if (to < from) throw new HttpError("Invalid export range", 400);
         return sendFile(request, response, exportPaths(operations.root, exportMatch[1]!, from, to, format).output, format === "m4b" ? "audio/mp4" : "audio/mpeg");
       }
+      const videoExportMatch = /^\/api\/stories\/([a-z0-9-]+)\/video-exports\/(\d+)-(\d+)\.mp4$/.exec(url.pathname);
+      if (videoExportMatch && request.method === "GET") { const from = Number(videoExportMatch[2]); const to = Number(videoExportMatch[3]); if (to < from) throw new HttpError("Invalid video export range", 400); return sendFile(request, response, videoExportPaths(operations.root, videoExportMatch[1]!, from, to).output, "video/mp4"); }
       const bibleMatch = /^\/api\/stories\/([a-z0-9-]+)\/story-bible$/.exec(url.pathname);
       if (bibleMatch && request.method === "GET") return send(response, 200, await getStoryBible(operations.root, bibleMatch[1]!));
       const settingsMatch = /^\/api\/stories\/([a-z0-9-]+)\/settings$/.exec(url.pathname);
@@ -93,6 +101,12 @@ export function createApiHandler(operations: StudioOperations) {
       if (audioJobMatch && request.method === "POST") return send(response, 202, operations.startAudio(audioJobMatch[1]!, await jsonBody(request)));
       const audiobookJobMatch = /^\/api\/stories\/([a-z0-9-]+)\/jobs\/audiobook$/.exec(url.pathname);
       if (audiobookJobMatch && request.method === "POST") return send(response, 202, operations.startAudiobook(audiobookJobMatch[1]!, await jsonBody(request)));
+      const subtitleJobMatch = /^\/api\/stories\/([a-z0-9-]+)\/jobs\/subtitles$/.exec(url.pathname);
+      if (subtitleJobMatch && request.method === "POST") return send(response, 202, operations.startSubtitles(subtitleJobMatch[1]!, await jsonBody(request)));
+      const videoJobMatch = /^\/api\/stories\/([a-z0-9-]+)\/jobs\/video$/.exec(url.pathname);
+      if (videoJobMatch && request.method === "POST") return send(response, 202, operations.startVideo(videoJobMatch[1]!, await jsonBody(request)));
+      const videoExportJobMatch = /^\/api\/stories\/([a-z0-9-]+)\/jobs\/video-export$/.exec(url.pathname);
+      if (videoExportJobMatch && request.method === "POST") return send(response, 202, operations.startVideoExport(videoExportJobMatch[1]!, await jsonBody(request)));
       const previewResult = /^\/api\/stories\/([a-z0-9-]+)\/previews\/([A-Za-z0-9T_-]+)$/.exec(url.pathname);
       if (previewResult && request.method === "GET") return send(response, 200, await operations.getPreview(previewResult[1]!, previewResult[2]!));
       const previewAudio = /^\/api\/stories\/([a-z0-9-]+)\/previews\/([A-Za-z0-9T_-]+)\/audio-([ab])$/.exec(url.pathname);

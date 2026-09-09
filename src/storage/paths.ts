@@ -11,7 +11,13 @@ export function storyPaths(root: string, slug: string, chapter: number) {
     original: join(chapterDir, "original.txt"), english: join(chapterDir, "english.txt"),
     narration: join(chapterDir, "narration.txt"), qa: join(chapterDir, "qa.json"), bibleUpdate: join(chapterDir, "story-bible-update.json"),
     audioRaw: join(chapterDir, "audio-raw.mp3"), audio: join(chapterDir, "audio.mp3"), segments: join(chapterDir, "audio-segments"),
+    subtitlesSrt: join(chapterDir, "subtitles.srt"), subtitlesVtt: join(chapterDir, "subtitles.vtt"), video: join(chapterDir, "video.mp4"),
   };
+}
+
+export function videoExportPaths(root: string, slug: string, from: number, to: number) {
+  const directory = join(root, "stories", slug, "exports"); const stem = `${slug}-${String(from).padStart(3, "0")}-${String(to).padStart(3, "0")}`;
+  return { directory, output: join(directory, `${stem}.mp4`), manifest: join(directory, `${stem}.mp4.json`) };
 }
 
 export function exportPaths(root: string, slug: string, from: number, to: number, format: "mp3" | "m4b") {

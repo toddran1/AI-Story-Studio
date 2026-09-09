@@ -45,7 +45,7 @@ export class ChapterPipeline {
     let chapter = chapterSchema.parse((await readJsonIfExists<Chapter>(paths.chapterMeta)) ?? {
       chapter: options.chapter, sourceLanguage: options.story.sourceLanguage, outputLanguage: options.story.outputLanguage,
       counts: { originalCharacters: 0, englishWords: 0, narrationWords: 0 }, createdAt: now, updatedAt: now,
-      stages: { ingestion: pending(), translation: pending(), narration: pending(), qa: pending(), storyBible: pending(), tts: pending(), audioMastering: pending() },
+      stages: { ingestion: pending(), translation: pending(), narration: pending(), qa: pending(), storyBible: pending(), tts: pending(), audioMastering: pending(), subtitles: pending(), video: pending() },
     });
     if (chapter.chapter !== options.chapter) throw new PipelineError(`Chapter metadata mismatch at ${paths.chapterMeta}: expected ${options.chapter}, found ${chapter.chapter}`);
     chapter.sourceLanguage = options.story.sourceLanguage; chapter.outputLanguage = options.story.outputLanguage;
@@ -210,7 +210,7 @@ export class ChapterPipeline {
 
 function isForced(force: ForceStage | undefined, stage: StageName): boolean {
   if (force === "all") return true;
-  const order: StageName[] = ["ingestion", "translation", "narration", "qa", "storyBible", "tts", "audioMastering"];
+  const order: StageName[] = ["ingestion", "translation", "narration", "qa", "storyBible", "tts", "audioMastering", "subtitles", "video"];
   const normalized = force === "story-bible" ? "storyBible" : force;
   const stageName = normalized === "audio" ? "audioMastering" : normalized;
   if (!stageName) return false;
@@ -232,7 +232,7 @@ async function fileFingerprint(path: string): Promise<string | undefined> {
 }
 
 function invalidateDownstream(chapter: Chapter, stage: StageName) {
-  const order: StageName[] = ["ingestion", "translation", "narration", "qa", "storyBible", "tts", "audioMastering"];
+  const order: StageName[] = ["ingestion", "translation", "narration", "qa", "storyBible", "tts", "audioMastering", "subtitles", "video"];
   for (const dependent of order.slice(order.indexOf(stage) + 1)) chapter.stages[dependent] = pending();
   if (order.indexOf(stage) <= order.indexOf("qa")) chapter.quality = undefined;
 }

@@ -30,15 +30,21 @@ import { logger } from "../../src/utils/logger.js";
 import { AudioMasteringProcessor, FfmpegMasteringProcessor } from "../../src/audio/mastering.js";
 import { masterStoredChapter } from "../../src/audio/chapter-audio.js";
 import { AudiobookFormat, AudiobookProcessor, FfmpegAudiobookProcessor, assembleAudiobook } from "../../src/audio/audiobook.js";
+import { generateStoredSubtitles } from "../../src/subtitles/chapter-subtitles.js";
+import { FfmpegVideoProcessor, VideoProcessor } from "../../src/video/renderer.js";
+import { renderStoredChapterVideo } from "../../src/video/chapter-video.js";
+import { assembleVideoExport, FfmpegVideoExportProcessor, VideoExportProcessor } from "../../src/video/video-export.js";
 
 const slugSchema = z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/);
 const batchInputSchema = z.object({ from: z.number().int().positive().optional(), to: z.number().int().positive().optional(), force: z.enum(["translation", "narration", "qa", "story-bible", "tts", "audio", "all"]).optional() }).strict();
 const previewInputSchema = z.object({ chapter: z.number().int().positive(), audioPreview: z.boolean().default(false), presets: z.object({ a: previewPresetSchema, b: previewPresetSchema }) }).strict();
 const audioInputSchema = z.object({ from: z.number().int().positive().optional(), to: z.number().int().positive().optional(), force: z.boolean().default(false) }).strict();
 const audiobookInputSchema = z.object({ from: z.number().int().positive(), to: z.number().int().positive(), format: z.enum(["mp3", "m4b"]), force: z.boolean().default(false) }).strict();
+const rangeJobSchema = z.object({ from: z.number().int().positive().optional(), to: z.number().int().positive().optional(), force: z.boolean().default(false) }).strict();
+const videoJobSchema = rangeJobSchema.extend({ subtitleMode: z.enum(["none", "burn", "soft", "both"]).optional() }).strict();
 
 type InspectionRecord = { inspection: SourceInspection; temporaryDirectory?: string; createdAt: number; bytes: number };
-export type OperationsDependencies = { pipeline?: ChapterProcessor; preview?: PreviewRunner; registry?: SourceProviderRegistry; audio?: AudioMasteringProcessor; audiobook?: AudiobookProcessor };
+export type OperationsDependencies = { pipeline?: ChapterProcessor; preview?: PreviewRunner; registry?: SourceProviderRegistry; audio?: AudioMasteringProcessor; audiobook?: AudiobookProcessor; video?: VideoProcessor; videoExport?: VideoExportProcessor };
 
 export class StudioOperations {
   private static readonly maxInspections = 10;
@@ -46,11 +52,13 @@ export class StudioOperations {
   private readonly inspections = new Map<string, InspectionRecord>();
   private readonly pipeline: ChapterProcessor; private readonly preview: PreviewRunner; private readonly registry: SourceProviderRegistry;
   private readonly audio: AudioMasteringProcessor; private readonly audiobook: AudiobookProcessor;
+  private readonly video: VideoProcessor; private readonly videoExport: VideoExportProcessor;
   private readonly inspectionTimer: NodeJS.Timeout; private inspectionBytes = 0;
   constructor(public readonly root: string, private readonly env: Environment, public readonly jobs = new JobManager(), dependencies: OperationsDependencies = {}) {
     const runtime = createPipelineRuntime(env); this.pipeline = dependencies.pipeline ?? runtime.pipeline; this.preview = dependencies.preview ?? new PreviewRunner(runtime.router, runtime.tts);
     this.registry = dependencies.registry ?? new SourceProviderRegistry(undefined, createWebHttpClient(root, env));
     this.audio = dependencies.audio ?? runtime.audio ?? new FfmpegMasteringProcessor(); this.audiobook = dependencies.audiobook ?? new FfmpegAudiobookProcessor();
+    this.video = dependencies.video ?? new FfmpegVideoProcessor(); this.videoExport = dependencies.videoExport ?? new FfmpegVideoExportProcessor();
     this.inspectionTimer = setInterval(() => this.expireInspections(), 60_000); this.inspectionTimer.unref();
   }
 
@@ -143,6 +151,12 @@ export class StudioOperations {
         processor: this.audiobook, force: input.force, onProgress: (event) => control.update(event) });
     }));
   }
+
+  startSubtitles(slug: string, raw: unknown) { slugSchema.parse(slug); const input = rangeJobSchema.parse(raw); return this.jobs.create("subtitles", slug, async (control) => withStoryLock(this.root, slug, "web subtitle generation", async () => { const story = await loadStory(storyPaths(this.root, slug, 1).storyConfig); const selected = selectChapterRange((await loadImportedChapters(this.root, slug)).chapters, input.from, input.to); const shutdown = new ShutdownController(); control.setPause(() => shutdown.request()); let generated = 0; let reused = 0; for (let index = 0; index < selected.length; index++) { if (shutdown.isRequested) return { status: "paused", generated, reused }; const chapter = selected[index]!.chapter; control.update({ type: "subtitles.chapter.started", chapter, index: index + 1, total: selected.length }); const result = await generateStoredSubtitles({ root: this.root, story, chapter, force: input.force }); result.reused ? reused++ : generated++; control.update({ type: "subtitles.chapter.completed", chapter, index: index + 1, total: selected.length, reused: result.reused }); } return { generated, reused, total: selected.length }; })); }
+
+  startVideo(slug: string, raw: unknown) { slugSchema.parse(slug); const input = videoJobSchema.parse(raw); return this.jobs.create("video", slug, async (control) => withStoryLock(this.root, slug, "web chapter video rendering", async () => { let story = await loadStory(storyPaths(this.root, slug, 1).storyConfig); if (input.subtitleMode) story = { ...story, video: { ...story.video, subtitleMode: input.subtitleMode } }; const selected = selectChapterRange((await loadImportedChapters(this.root, slug)).chapters, input.from, input.to); const shutdown = new ShutdownController(); control.setPause(() => shutdown.request()); let rendered = 0; let reused = 0; for (let index = 0; index < selected.length; index++) { if (shutdown.isRequested) return { status: "paused", rendered, reused }; const chapter = selected[index]!.chapter; if (story.video.subtitleMode !== "none") await generateStoredSubtitles({ root: this.root, story, chapter }); control.update({ type: "video.chapter.started", chapter, index: index + 1, total: selected.length }); const result = await renderStoredChapterVideo({ root: this.root, story, chapter, processor: this.video, force: input.force }); result.reused ? reused++ : rendered++; control.update({ type: "video.chapter.completed", chapter, index: index + 1, total: selected.length, reused: result.reused }); } return { rendered, reused, total: selected.length }; })); }
+
+  startVideoExport(slug: string, raw: unknown) { slugSchema.parse(slug); const input = rangeJobSchema.parse(raw); return this.jobs.create("videoExport", slug, async (control) => withStoryLock(this.root, slug, "web combined video export", async () => { const story = await loadStory(storyPaths(this.root, slug, 1).storyConfig); const selected = selectChapterRange((await loadImportedChapters(this.root, slug)).chapters, input.from, input.to); for (let index = 0; index < selected.length; index++) { const chapter = selected[index]!.chapter; if (story.video.subtitleMode !== "none") await generateStoredSubtitles({ root: this.root, story, chapter }); const rendered = await renderStoredChapterVideo({ root: this.root, story, chapter, processor: this.video }); control.update({ type: "video.chapter.completed", chapter, index: index + 1, total: selected.length, reused: rendered.reused }); } return assembleVideoExport({ root: this.root, story, from: selected[0]!.chapter, to: selected.at(-1)!.chapter, processor: this.videoExport, force: input.force, onProgress: (event) => control.update(event) }); })); }
 
   async getPreview(slug: string, id: string) {
     slugSchema.parse(slug); if (!/^[A-Za-z0-9T_-]+$/.test(id)) throw new Error("Invalid preview id"); const paths = previewPaths(this.root, slug, id);

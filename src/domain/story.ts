@@ -1,6 +1,8 @@
 import { z } from "zod";
 import { stageModelConfigSchema, ttsStageConfigSchema } from "./provider.js";
 import { audioSettingsSchema } from "../audio/config.js";
+import { subtitleSettingsSchema } from "../subtitles/types.js";
+import { videoSettingsSchema } from "../video/config.js";
 
 const rawStorySchema = z.object({
   id: z.string().min(1),
@@ -20,6 +22,8 @@ const rawStorySchema = z.object({
     recentChapterSummaries: z.number().int().min(0).max(100).default(5),
   }).default({ recentChapterSummaries: 5 }),
   audio: audioSettingsSchema,
+  subtitles: subtitleSettingsSchema,
+  video: videoSettingsSchema,
   pipeline: z.object({
     translation: stageModelConfigSchema,
     narration: stageModelConfigSchema,
@@ -32,7 +36,7 @@ const rawStorySchema = z.object({
 export const storySchema = z.preprocess((value) => {
   if (!value || typeof value !== "object") return value;
   const story = value as Record<string, unknown>;
-  const withAudio = "audio" in story ? story : { ...story, audio: undefined };
+  const withAudio = { ...story, audio: "audio" in story ? story.audio : undefined, subtitles: "subtitles" in story ? story.subtitles : undefined, video: "video" in story ? story.video : undefined };
   const pipeline = story.pipeline;
   if (!pipeline || typeof pipeline !== "object" || "qa" in pipeline) return withAudio;
   const stages = pipeline as Record<string, unknown>;

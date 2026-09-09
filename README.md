@@ -18,6 +18,8 @@ Milestone 6 adds a local browser studio backed by a localhost-only API, in-proce
 
 Milestone 7 adds FFmpeg audio mastering, durable chapter masters, and cached MP3/M4B audiobook exports with chapter markers.
 
+Milestone 8 adds deterministic SRT/WebVTT timing, cached H.264 chapter videos, cover or fallback backgrounds, and combined MP4 editions.
+
 ## Requirements
 
 - Node.js 22 or newer (an active LTS release is recommended)
@@ -137,7 +139,10 @@ stories/demo-story/
     ├── story-bible-update.json
     ├── audio-segments/
     ├── audio-raw.mp3
-    └── audio.mp3
+    ├── audio.mp3
+    ├── subtitles.srt
+    ├── subtitles.vtt
+    └── video.mp4
 ```
 
 Long narration is split at paragraph and sentence boundaries. Every original TTS response remains in `audio-segments/`, `audio-raw.mp3` preserves the provider output, and the FFmpeg-mastered `audio.mp3` is the playback-ready chapter file.
@@ -310,6 +315,25 @@ npm run story:audiobook -- --story undead-disaster --from 1 --to 100 --format mp
 Exports are written to `stories/<story>/exports/`. M4B files use AAC audio and include book/author metadata plus chapter titles and markers for bookmarking; an existing `cover.jpg`, `cover.jpeg`, or `cover.png` at the story root is attached when present. Artwork is never generated. Chapter mastering and audiobook assembly both use content fingerprints, so only changed work is rebuilt.
 
 The studio’s **Audio / Export** view shows chapter status and duration, total mastered runtime, current mastering settings, range/format controls, final chapter playback, export history, downloads, and live job progress.
+
+## Milestone 8 — Subtitles and Video Rendering
+
+Subtitle timing is local and deterministic: narration is split into sentence/phrase-sized captions, weighted by estimated speech content, and distributed across the mastered chapter duration. The generated `subtitles.srt` and `subtitles.vtt` are cached from the narration fingerprint, mastered-audio fingerprint, subtitle settings, and generator version. No provider call is made.
+
+```sh
+npm run story:subtitles -- --story undead-disaster --from 1 --to 10
+npm run story:video -- --story undead-disaster --from 1 --to 10
+npm run story:video -- --story undead-disaster --from 1 --to 10 --subtitles none --force
+npm run story:video-export -- --story undead-disaster --from 1 --to 100
+```
+
+Each chapter produces `video.mp4` beside its mastered audio and subtitle files. The default is 1920×1080 H.264/AAC at 30 FPS with a three-second title card and burned captions. `--subtitles` accepts `none`, `burn`, `soft`, or `both`; SRT and WebVTT remain separate regardless of the render choice. An existing story cover is used when present, Ken Burns motion is available, and a clean dark fallback is generated when no cover exists.
+
+Burned captions require FFmpeg’s `subtitles` filter (libass), and title cards require `drawtext` (FreeType). The renderer checks these capabilities before starting and reports exactly which filter is missing. A minimal FFmpeg build can still render with `introDurationSeconds: 0` and subtitle mode `none` or `soft`.
+
+Combined exports are written to `stories/<story>/exports/<story>-<from>-<to>.mp4` in numeric chapter order with container chapter markers. ffprobe validation requires H.264 video, AAC audio, the configured resolution, and a plausible duration. Subtitle and video fingerprints are independent: formatting changes do not rerun TTS or mastering, and video-setting changes invalidate only video.
+
+The studio’s **Video** workspace presents the production as a real edit rail—mastered audio, subtitle timing, visual field, and chapter renders—alongside range controls, caption mode, playback, combined editions, downloads, and live job progress. Chapter detail pages include subtitle preview and MP4 playback.
 
 ## Verification
 
