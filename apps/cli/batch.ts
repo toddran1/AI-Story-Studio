@@ -15,11 +15,13 @@ import { BatchRunner, ProgressEvent } from "../../src/batch/batch-runner.js";
 import { ShutdownController } from "../../src/batch/shutdown.js";
 import { retryConfigSchema } from "../../src/batch/types.js";
 import { BatchValidationError } from "../../src/pipeline/errors.js";
+import { loadImportedChapters } from "../../src/source/importer.js";
 
 async function main() {
   const args = parseArgs(process.argv.slice(2)); validateSlug(args.story);
   const root = process.cwd();
   let directory = args.input ? resolve(args.input) : undefined;
+  let imported: Awaited<ReturnType<typeof loadImportedChapters>> | undefined;
   let retryNumbers: Set<number> | undefined;
   if (args.retryFailed) {
     const previous = await loadLatestBatch(root, args.story);
@@ -27,9 +29,19 @@ async function main() {
     retryNumbers = new Set(Object.entries(previous.chapters).filter(([, state]) => state.status === "failed").map(([number]) => Number(number)));
     if (!retryNumbers.size) throw new BatchValidationError(`Latest batch '${previous.id}' has no failed chapters`);
   }
-  if (!directory) usage("--input is required unless --retry-failed can use a previous batch directory");
+  if (!directory) { imported = await loadImportedChapters(root, args.story); directory = imported.directory; }
 
   const report = await inspectChapterDirectory(directory);
+  if (!imported) {
+    try {
+      const candidate = await loadImportedChapters(root, args.story);
+      if (resolve(candidate.directory) === resolve(directory)) imported = candidate;
+    } catch { /* Explicit legacy input directories do not need a source manifest. */ }
+  }
+  if (imported) {
+    const metadata = new Map(imported.chapters.map((chapter) => [chapter.chapter, chapter.source]));
+    report.chapters = report.chapters.map((chapter) => ({ ...chapter, source: metadata.get(chapter.chapter) }));
+  }
   const selectedByRange = selectChapterRange(report.chapters, args.from, args.to);
   const selected = retryNumbers ? selectedByRange.filter((item) => retryNumbers!.has(item.chapter)) : selectedByRange;
   if (!selected.length) throw new BatchValidationError("No chapters match the requested retry/range selection");
@@ -88,7 +100,7 @@ const forceValues: ForceStage[] = ["translation", "narration", "story-bible", "t
 function validateSlug(slug: string) { if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(slug)) usage("--story must be a lowercase kebab-case slug"); }
 function integer(value: string, key: string) { const number = Number(value); if (!Number.isInteger(number) || number < 1) usage(`${key} must be a positive integer`); return number; }
 function nonnegative(value: string, key: string) { const number = Number(value); if (!Number.isInteger(number) || number < 0) usage(`${key} must be a non-negative integer`); return number; }
-function usage(message: string): never { throw new Error(`${message}\nUsage: npm run story:batch -- --story <slug> --input <directory> [--from N] [--to N] [--allow-gaps] [--dry-run] [--retry-failed] [--force stage]`); }
+function usage(message: string): never { throw new Error(`${message}\nUsage: npm run story:batch -- --story <slug> [--input <directory>] [--from N] [--to N] [--allow-gaps] [--dry-run] [--retry-failed] [--force stage]`); }
 function printProgress(event: ProgressEvent) {
   if (event.type === "chapter.started") process.stdout.write(`[${event.index}/${event.total}] Chapter ${event.chapter}\n`);
   else if (event.type === "stage") process.stdout.write(`  ${event.event.status === "completed" ? "✓" : event.event.status === "reused" ? "↺" : "→"} ${event.event.stage}${event.event.status === "reused" ? " (reused)" : ""}\n`);

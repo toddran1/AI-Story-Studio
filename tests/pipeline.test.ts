@@ -50,4 +50,13 @@ describe("chapter pipeline", () => {
     expect(ctx.openai.calls.length).toBe(2);
     expect(ctx.tts.calls).toBe(2);
   });
+
+  it("uses translation passthrough when source and output languages match", async () => {
+    const ctx = await setup(); const story = testStory({ translation: { provider: "openai", model: "translation-model" } });
+    story.sourceLanguage = "en-US"; story.outputLanguage = "en-US";
+    const result = await ctx.pipeline.run({ root: ctx.root, story, chapter: 1, inputPath: ctx.input });
+    expect(await readFile(ctx.paths.english, "utf8")).toContain("林遥");
+    expect(result.stages.translation.provider).toBe("passthrough");
+    expect(ctx.openai.calls).toHaveLength(1);
+  });
 });

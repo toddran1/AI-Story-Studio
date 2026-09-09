@@ -8,6 +8,8 @@ The pipeline preserves every intermediate artifact, fingerprints stage inputs, a
 
 Milestone 2 adds deterministic multi-chapter discovery, validation, sequential processing, retries, durable batch history, graceful pause/resume, and progress summaries.
 
+Milestone 3 adds provider-based local ingestion for TXT directories, TXT files, EPUB, DOCX, and manual/original stories. Import remains separate from AI processing.
+
 ## Requirements
 
 - Node.js 22 or newer (an active LTS release is recommended)
@@ -119,6 +121,38 @@ stories/demo-story/
 ```
 
 Long narration is split at paragraph and sentence boundaries. Individual MP3 responses are retained in `audio-segments/` when splitting is required, and their byte streams are concatenated into `audio.mp3`, which is supported by ordinary MP3 players. A later audio-mastering milestone can replace this join strategy with FFmpeg without affecting TTS or pipeline contracts.
+
+## Milestone 3 — Source Ingestion
+
+Inspect a source before importing it:
+
+```sh
+npm run story:inspect -- --source ./books/my-novel.epub
+npm run story:inspect -- --source ./drafts/my-story.docx
+npm run story:inspect -- --source ./drafts/my-story.txt --split-chapters
+```
+
+Inspection detects the source type, prints available title/author/language metadata, lists numbered chapters and titles, and surfaces unnumbered sections and structured warnings. It does not write story state or call an LLM or TTS provider.
+
+Import the inspected source into a story:
+
+```sh
+npm run story:import -- --story my-novel --source ./books/my-novel.epub
+npm run story:import -- --story my-story --source ./drafts/my-story.docx
+npm run story:import -- --story my-story --source ./drafts/my-story.txt --type original --split-chapters
+```
+
+A single TXT file is one chapter by default; select its number with `--chapter 361`. Add `--split-chapters` only when one TXT contains headings such as `Chapter 1`, `第1章`, or `第一章`. TXT directories retain the Milestone 2 filename validation rules. Use `--allow-gaps` when missing numbers are intentional.
+
+Import writes normalized chapters to `stories/<slug>/source/chapters/` and a validated `source.json` manifest containing source/chapter fingerprints, titles, metadata, warnings, and the import origin. Writes are staged and finalized atomically. Re-importing unchanged content reuses the existing materialization; changed imports report added, modified, and removed chapter numbers.
+
+Process an imported source without repeating its path:
+
+```sh
+npm run story:batch -- --story my-novel --from 1 --to 10
+```
+
+Explicit `--input` remains supported. Importing consumes no LLM or TTS credits and never changes the Story Bible; only batch processing does. When the configured source and output languages are identical, translation is persisted as a fingerprinted `passthrough` stage, while narration polish, Story Bible extraction, and TTS continue normally.
 
 ## Verification
 

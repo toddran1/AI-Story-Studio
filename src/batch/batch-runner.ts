@@ -34,6 +34,7 @@ export class BatchRunner {
         let currentAttempt = 0;
         await withRetry(() => this.processor.run({
           root: options.root, story: options.story, chapter: discovered.chapter, inputPath: discovered.path,
+          source: discovered.source,
           // Force is an invocation intent, not a retry intent. Later attempts
           // rely on ChapterPipeline fingerprints to avoid repeating paid work.
           force: currentAttempt === 1 ? options.state.options.force as PipelineOptions["force"] : undefined,

@@ -9,13 +9,19 @@
   "scripts": {
     "story:process": "node --import tsx apps/cli/index.ts process",
     "story:batch": "node --import tsx apps/cli/batch.ts",
+    "story:inspect": "node --import tsx apps/cli/source.ts inspect",
+    "story:import": "node --import tsx apps/cli/source.ts import",
     "smoke": "node --import tsx apps/cli/smoke.ts",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@google/genai": "^2.3.0",
+    "cheerio": "^1.2.0",
     "dotenv": "^17.0.0",
+    "fast-xml-parser": "^5.11.1",
+    "fflate": "^0.8.3",
+    "mammoth": "^1.12.2",
     "openai": "^6.0.0",
     "pino": "^9.0.0",
     "zod": "^4.0.0"

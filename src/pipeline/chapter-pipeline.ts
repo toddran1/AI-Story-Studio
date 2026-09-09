@@ -24,6 +24,7 @@ export type ForceStage = "translation" | "narration" | "story-bible" | "tts" | "
 export type PipelineStageEvent = { stage: StageName; status: "started" | "completed" | "reused"; state: StageState };
 export type PipelineOptions = {
   root: string; story: Story; chapter: number; inputPath: string; force?: ForceStage;
+  source?: Chapter["source"];
   onStageEvent?: (event: PipelineStageEvent) => void;
 };
 
@@ -41,6 +42,10 @@ export class ChapterPipeline {
       counts: { originalCharacters: 0, englishWords: 0, narrationWords: 0 }, createdAt: now, updatedAt: now,
       stages: { ingestion: pending(), translation: pending(), narration: pending(), storyBible: pending(), tts: pending() },
     });
+    if (options.source) {
+      chapter.source = options.source;
+      chapter.originalTitle = options.source.originalTitle;
+    }
     let bible = await rebuildStoryBibleBeforeChapter(options.root, options.story.slug, options.chapter);
     const priorContext = contextBeforeChapter(bible, options.chapter, options.story.context.recentChapterSummaries);
 
@@ -48,6 +53,7 @@ export class ChapterPipeline {
     if (!source.trim()) throw new PipelineError(`Input file is empty: ${options.inputPath}`);
 
     const persist = async () => { chapter.updatedAt = new Date().toISOString(); await atomicWriteJson(paths.chapterMeta, chapter); };
+    if (options.source) await persist();
     const runStage = async <T>(stage: StageName, fp: string, outputExists: boolean, details: Partial<StageState>, action: () => Promise<T>): Promise<T | undefined> => {
       const state = chapter.stages[stage];
       const forced = isForced(options.force, stage);
@@ -83,10 +89,18 @@ export class ChapterPipeline {
     });
 
     const translationConfig = options.story.pipeline.translation;
-    const translationFp = fingerprint({ source: ingestionFp, config: translationConfig, prompt: TRANSLATION_PROMPT_VERSION, context: priorContext });
+    const passthroughTranslation = sameLanguage(options.story.sourceLanguage, options.story.outputLanguage);
+    const translationFp = fingerprint({ source: ingestionFp, config: passthroughTranslation ? "passthrough" : translationConfig, prompt: passthroughTranslation ? "passthrough-v1" : TRANSLATION_PROMPT_VERSION, context: priorContext });
     const translationResult = await runStage("translation", translationFp, await exists(paths.english), {
-      provider: translationConfig.provider, model: translationConfig.model, promptVersion: TRANSLATION_PROMPT_VERSION,
+      provider: passthroughTranslation ? "passthrough" : translationConfig.provider,
+      model: passthroughTranslation ? undefined : translationConfig.model,
+      promptVersion: passthroughTranslation ? "passthrough-v1" : TRANSLATION_PROMPT_VERSION,
     }, async () => {
+      if (passthroughTranslation) {
+        await atomicWrite(paths.english, source);
+        chapter.counts.englishWords = wordCount(source);
+        return source;
+      }
       const provider = this.llms.forStage(translationConfig);
       const result = await translate(provider, translationConfig, source, priorContext);
       await atomicWrite(paths.english, result.text);
@@ -166,3 +180,4 @@ async function requireText(path: string, stage: string): Promise<string> {
 }
 
 const wordCount = (text: string) => text.trim() ? text.trim().split(/\s+/).length : 0;
+const sameLanguage = (source: string, output: string) => source.trim().toLowerCase().replaceAll("_", "-") === output.trim().toLowerCase().replaceAll("_", "-");

@@ -13,6 +13,7 @@ export const storySchema = z.object({
     type: z.enum(["text", "epub", "docx", "pdf", "web", "manual", "original"]),
     url: z.string().url().optional(),
     externalId: z.string().optional(),
+    path: z.string().optional(),
   }),
   context: z.object({
     recentChapterSummaries: z.number().int().min(0).max(100).default(5),
