@@ -1,0 +1,27 @@
+import { readFile, rename, rm } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { join } from "node:path";
+import { Chapter, StageState, chapterSchema } from "../domain/chapter.js";
+import { Story } from "../domain/story.js";
+import { VideoError } from "../pipeline/errors.js";
+import { atomicWriteJson } from "../storage/atomic-write.js";
+import { storyPaths } from "../storage/paths.js";
+import { exists, readJsonIfExists } from "../storage/story-files.js";
+import { fingerprint } from "../utils/hash.js";
+import { ChapterVideoInput, VideoProcessor } from "./renderer.js";
+
+export type VideoEvent = { status: "started" | "completed" | "reused"; chapter: number; state: StageState };
+export async function renderStoredChapterVideo(options: { root: string; story: Story; chapter: number; processor: VideoProcessor; force?: boolean; onEvent?: (event: VideoEvent) => void }) {
+  const paths = storyPaths(options.root, options.story.slug, options.chapter); const raw = await readJsonIfExists<Chapter>(paths.chapterMeta); if (!raw) throw new VideoError(`Chapter ${options.chapter} has no pipeline metadata`); const chapter = chapterSchema.parse(raw);
+  if (chapter.stages.audioMastering.status !== "complete" || !chapter.audio || !(await exists(paths.audio))) throw new VideoError(`Chapter ${options.chapter} audio is not mastered`);
+  const needsSubtitles = options.story.video.subtitleMode !== "none"; if (needsSubtitles && (chapter.stages.subtitles.status !== "complete" || !(await exists(paths.subtitlesSrt)))) throw new VideoError(`Chapter ${options.chapter} subtitles are not ready`);
+  const availableCover = await findCover(options.root, options.story.slug); const cover = options.story.video.backgroundMode === "gradient" ? undefined : availableCover; const coverFingerprint = cover ? await fileFingerprint(cover) : "generated-fallback-v1"; const audioFingerprint = await fileFingerprint(paths.audio); const subtitleFileFingerprint = needsSubtitles ? await fileFingerprint(paths.subtitlesSrt) : undefined; const inputFingerprint = videoFingerprint(audioFingerprint, subtitleFileFingerprint, coverFingerprint, options.story.video, chapter.translatedTitle ?? chapter.originalTitle);
+  const currentOutput = await fileFingerprint(paths.video); if (!options.force && chapter.stages.video.status === "complete" && chapter.stages.video.fingerprint === inputFingerprint && currentOutput === chapter.stages.video.outputFingerprint && chapter.video) { options.onEvent?.({ status: "reused", chapter: options.chapter, state: chapter.stages.video }); return { chapter, reused: true, cover: Boolean(cover) }; }
+  const started = Date.now(); chapter.video = undefined; chapter.stages.video = { status: "running", provider: "ffmpeg", model: options.processor.version, fingerprint: inputFingerprint, startedAt: new Date().toISOString() }; await persist(paths.chapterMeta, chapter); options.onEvent?.({ status: "started", chapter: options.chapter, state: chapter.stages.video }); const staged = `${paths.video}.stage-${randomUUID()}.mp4`;
+  try { const input: ChapterVideoInput = { audio: paths.audio, subtitles: needsSubtitles ? paths.subtitlesSrt : undefined, cover, storyTitle: options.story.title, chapterLabel: `Chapter ${options.chapter}`, chapterTitle: chapter.translatedTitle ?? chapter.originalTitle, audioDurationSeconds: chapter.audio.durationSeconds }; const probe = await options.processor.render(input, staged, options.story.video); await rename(staged, paths.video); const outputFingerprint = await fileFingerprint(paths.video); if (!outputFingerprint) throw new VideoError("Video renderer produced an empty output"); chapter.video = { durationSeconds: probe.durationSeconds, codec: probe.videoCodec, width: probe.width, height: probe.height }; chapter.stages.video = { ...chapter.stages.video, status: "complete", outputFingerprint, completedAt: new Date().toISOString(), durationMs: Date.now() - started }; await persist(paths.chapterMeta, chapter); options.onEvent?.({ status: "completed", chapter: options.chapter, state: chapter.stages.video }); return { chapter, reused: false, cover: Boolean(cover) };
+  } catch (error) { await rm(staged, { force: true }); chapter.stages.video = { ...chapter.stages.video, status: "failed", durationMs: Date.now() - started, error: { message: error instanceof Error ? error.message : String(error) } }; await persist(paths.chapterMeta, chapter); throw new VideoError(`Chapter ${options.chapter} video rendering failed: ${chapter.stages.video.error?.message}`, { cause: error }); }
+}
+export function videoFingerprint(audio: string | undefined, subtitles: string | undefined, background: string | undefined, settings: Story["video"], title?: string) { return fingerprint({ audio, subtitles, background, settings, title, version: "chapter-video-v1" }); }
+async function findCover(root: string, slug: string) { for (const name of ["cover.jpg", "cover.jpeg", "cover.png"]) { const path = join(storyPaths(root, slug, 1).story, name); if (await exists(path)) return path; } return undefined; }
+async function fileFingerprint(path: string) { try { const data = await readFile(path); return data.length ? fingerprint(data.toString("base64")) : undefined; } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; } }
+async function persist(path: string, chapter: Chapter) { chapter.updatedAt = new Date().toISOString(); await atomicWriteJson(path, chapterSchema.parse(chapter)); }

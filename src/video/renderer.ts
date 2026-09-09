@@ -1,0 +1,28 @@
+import { VideoError } from "../pipeline/errors.js";
+import { VideoSettings } from "./config.js";
+import { FfmpegVideoTools, VideoProbe, VIDEO_PROCESSOR_VERSION } from "./ffmpeg-video.js";
+
+export type ChapterVideoInput = { audio: string; subtitles?: string; cover?: string; storyTitle: string; chapterLabel: string; chapterTitle?: string; audioDurationSeconds: number };
+export interface VideoProcessor { readonly version: string; render(input: ChapterVideoInput, output: string, settings: VideoSettings): Promise<VideoProbe>; }
+export class FfmpegVideoProcessor implements VideoProcessor {
+  readonly version = VIDEO_PROCESSOR_VERSION; constructor(private readonly tools = new FfmpegVideoTools()) {}
+  async render(input: ChapterVideoInput, output: string, settings: VideoSettings) { await this.tools.validateAvailability(); await this.tools.validateFilters([...(settings.introDurationSeconds > 0 ? ["drawtext"] : []), ...((settings.subtitleMode === "burn" || settings.subtitleMode === "both") && input.subtitles ? ["subtitles"] : [])]); const args = buildVideoArgs(input, output, settings); await this.tools.ffmpeg(args); const probe = await this.tools.probe(output); validateChapterVideo(probe, settings, input.audioDurationSeconds + settings.introDurationSeconds); return probe; }
+}
+export function buildVideoArgs(input: ChapterVideoInput, output: string, settings: VideoSettings) {
+  const args: string[] = []; const duration = input.audioDurationSeconds + settings.introDurationSeconds; const hasCover = Boolean(input.cover);
+  if (hasCover) args.push("-loop", "1", "-framerate", String(settings.fps), "-i", input.cover!); else args.push("-f", "lavfi", "-i", `color=c=0x11131a:s=${settings.width}x${settings.height}:r=${settings.fps}:d=${duration}`);
+  args.push("-i", input.audio); const soft = (settings.subtitleMode === "soft" || settings.subtitleMode === "both") && input.subtitles; if (soft) args.push("-itsoffset", String(settings.introDurationSeconds), "-i", input.subtitles!);
+  const filters: string[] = []; let visual = "[0:v]";
+  if (hasCover && settings.backgroundMode === "kenBurns") { filters.push(`[0:v]scale=${Math.ceil(settings.width * 1.08)}:${Math.ceil(settings.height * 1.08)}:force_original_aspect_ratio=increase,crop=${settings.width}:${settings.height},zoompan=z='min(zoom+0.00015,1.08)':d=1:s=${settings.width}x${settings.height}:fps=${settings.fps}[background]`); visual = "[background]"; }
+  else if (hasCover) { filters.push(`[0:v]scale=${settings.width}:${settings.height}:force_original_aspect_ratio=increase,crop=${settings.width}:${settings.height}[background]`); visual = "[background]"; }
+  else { filters.push("[0:v]null[background]"); visual = "[background]"; }
+  if (settings.introDurationSeconds > 0) { const title = [input.storyTitle, input.chapterLabel, input.chapterTitle].filter((value): value is string => Boolean(value)).map(escapeDrawtext).join("\\n"); const fontSize = Math.round(settings.height * .055); filters.push(`${visual}drawtext=text='${title}':fontcolor=white:fontsize=${fontSize}:line_spacing=${Math.round(fontSize * .35)}:x=(w-text_w)/2:y=(h-text_h)/2:enable='between(t,0,${settings.introDurationSeconds})'[titled]`); visual = "[titled]"; }
+  if ((settings.subtitleMode === "burn" || settings.subtitleMode === "both") && input.subtitles) { const style = subtitleStyle(settings); filters.push(`${visual}setpts=PTS-${settings.introDurationSeconds}/TB,subtitles=filename='${escapeFilterPath(input.subtitles)}':force_style='${style}',setpts=PTS+${settings.introDurationSeconds}/TB[captioned]`); visual = "[captioned]"; }
+  if (settings.introDurationSeconds > 0) filters.push(`anullsrc=r=44100:cl=stereo:d=${settings.introDurationSeconds}[intro];[intro][1:a]concat=n=2:v=0:a=1[audio]`); else filters.push("[1:a]anull[audio]");
+  args.push("-filter_complex", filters.join(";"), "-map", visual, "-map", "[audio]"); if (soft) args.push("-map", "2:s:0", "-c:s", "mov_text", "-metadata:s:s:0", "language=eng");
+  args.push("-t", String(duration), "-r", String(settings.fps), "-c:v", settings.codec, "-crf", String(settings.quality), "-preset", "medium", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", output); return args;
+}
+export function validateChapterVideo(probe: VideoProbe, settings: VideoSettings, expectedDuration: number) { if (probe.videoCodec !== "h264" || probe.audioCodec !== "aac") throw new VideoError(`Expected H.264/AAC video, received ${probe.videoCodec}/${probe.audioCodec}`); if (probe.width !== settings.width || probe.height !== settings.height) throw new VideoError(`Expected ${settings.width}x${settings.height}, received ${probe.width}x${probe.height}`); if (probe.durationSeconds < expectedDuration * .9 || probe.durationSeconds > expectedDuration * 1.1 + 1) throw new VideoError(`Video duration ${probe.durationSeconds.toFixed(2)}s is implausible for expected ${expectedDuration.toFixed(2)}s`); }
+function subtitleStyle(settings: VideoSettings) { const size = settings.subtitleStyle === "large" ? 34 : settings.subtitleStyle === "minimal" ? 24 : 29; return `FontName=Arial,FontSize=${size},PrimaryColour=&H00FFFFFF,OutlineColour=&H80000000,BorderStyle=1,Outline=2,Shadow=0,MarginV=54,Alignment=2`; }
+function escapeFilterPath(value: string) { return value.replace(/\\/g, "\\\\").replace(/'/g, "\\'").replace(/:/g, "\\:").replace(/,/g, "\\,").replace(/\[/g, "\\[").replace(/\]/g, "\\]"); }
+function escapeDrawtext(value: string) { return value.replace(/\\/g, "\\\\").replace(/'/g, "\\'").replace(/:/g, "\\:").replace(/%/g, "\\%").replace(/\n/g, " "); }
