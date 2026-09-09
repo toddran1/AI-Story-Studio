@@ -1,12 +1,18 @@
-import { readFile } from "node:fs/promises";
+import { createReadStream } from "node:fs";
+import { stat } from "node:fs/promises";
 import { IncomingMessage, ServerResponse } from "node:http";
 import { z } from "zod";
 import { getChapter, getChapterPage, getQaDashboard, getStoryBible, getStoryOverview, listStories, updateStorySettings, chapterFilterSchema } from "./catalog.js";
 import { JobConflictError } from "./job-manager.js";
 import { StudioOperations } from "./operations.js";
 import { previewPaths, storyPaths } from "../../src/storage/paths.js";
+import { BatchValidationError, ConfigurationError, ProviderError, StorageError } from "../../src/pipeline/errors.js";
+import { WebHttpError } from "../../src/source/web/http-client.js";
+import { logger } from "../../src/utils/logger.js";
 
 const MAX_BODY_BYTES = 50_000_000;
+const MAX_JSON_BYTES = 1_000_000;
+class HttpError extends Error { constructor(message: string, readonly status: number) { super(message); } }
 const sourceInspectJsonSchema = z.object({
   url: z.url(), type: z.enum(["web", "fanqie"]).optional(), from: z.number().int().positive().optional(),
   to: z.number().int().positive().optional(), chapter: z.number().int().positive().optional(),
@@ -27,9 +33,16 @@ export function createApiHandler(operations: StudioOperations) {
       if (pauseMatch && request.method === "POST") return operations.jobs.pause(pauseMatch[1]!) ? send(response, 202, { status: "pause_requested" }) : send(response, 409, { error: "Job is not running or cannot be paused" });
       const eventMatch = /^\/api\/jobs\/([a-f0-9-]+)\/events$/.exec(url.pathname);
       if (eventMatch && request.method === "GET") {
+        if (!operations.jobs.get(eventMatch[1]!)) return send(response, 404, { error: "Job not found" });
         response.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive", "x-accel-buffering": "no" });
-        const unsubscribe = operations.jobs.subscribe(eventMatch[1]!, (job) => { response.write(`event: job\ndata: ${JSON.stringify(job)}\n\n`); if (["completed", "failed", "paused"].includes(job.status)) response.end(); });
-        if (!unsubscribe) { response.end(); return true; } request.on("close", unsubscribe); return true;
+        let closed = false; let unsubscribe: () => void = () => undefined;
+        const heartbeat = setInterval(() => { if (!closed) response.write(": heartbeat\n\n"); }, 15_000); heartbeat.unref();
+        const cleanup = () => { if (closed) return; closed = true; clearInterval(heartbeat); unsubscribe(); };
+        unsubscribe = operations.jobs.subscribe(eventMatch[1]!, (job) => {
+          if (closed || response.destroyed) return; response.write(`event: job\ndata: ${JSON.stringify(job)}\n\n`);
+          if (["completed", "failed", "paused"].includes(job.status)) { cleanup(); response.end(); }
+        }) ?? (() => undefined);
+        response.on("close", cleanup); return true;
       }
 
       const storyMatch = /^\/api\/stories\/([a-z0-9-]+)$/.exec(url.pathname);
@@ -42,7 +55,11 @@ export function createApiHandler(operations: StudioOperations) {
       const chapterMatch = /^\/api\/stories\/([a-z0-9-]+)\/chapters\/(\d+)$/.exec(url.pathname);
       if (chapterMatch && request.method === "GET") return send(response, 200, await getChapter(operations.root, chapterMatch[1]!, Number(chapterMatch[2])));
       const audioMatch = /^\/api\/stories\/([a-z0-9-]+)\/chapters\/(\d+)\/audio$/.exec(url.pathname);
-      if (audioMatch && request.method === "GET") return sendFile(response, storyPaths(operations.root, audioMatch[1]!, Number(audioMatch[2])).audio, "audio/mpeg");
+      if (audioMatch && request.method === "GET") {
+        const chapter = await getChapter(operations.root, audioMatch[1]!, Number(audioMatch[2]));
+        if (!chapter.audioAvailable) return send(response, 404, { error: "Current chapter audio was not found" });
+        return sendFile(request, response, storyPaths(operations.root, audioMatch[1]!, Number(audioMatch[2])).audio, "audio/mpeg");
+      }
       const qaMatch = /^\/api\/stories\/([a-z0-9-]+)\/qa$/.exec(url.pathname);
       if (qaMatch && request.method === "GET") return send(response, 200, await getQaDashboard(operations.root, qaMatch[1]!));
       const bibleMatch = /^\/api\/stories\/([a-z0-9-]+)\/story-bible$/.exec(url.pathname);
@@ -67,23 +84,52 @@ export function createApiHandler(operations: StudioOperations) {
       const previewResult = /^\/api\/stories\/([a-z0-9-]+)\/previews\/([A-Za-z0-9T_-]+)$/.exec(url.pathname);
       if (previewResult && request.method === "GET") return send(response, 200, await operations.getPreview(previewResult[1]!, previewResult[2]!));
       const previewAudio = /^\/api\/stories\/([a-z0-9-]+)\/previews\/([A-Za-z0-9T_-]+)\/audio-([ab])$/.exec(url.pathname);
-      if (previewAudio && request.method === "GET") { const paths = previewPaths(operations.root, previewAudio[1]!, previewAudio[2]!); return sendFile(response, previewAudio[3] === "a" ? paths.audioA : paths.audioB, "audio/mpeg"); }
+      if (previewAudio && request.method === "GET") { const paths = previewPaths(operations.root, previewAudio[1]!, previewAudio[2]!); return sendFile(request, response, previewAudio[3] === "a" ? paths.audioA : paths.audioB, "audio/mpeg"); }
       const profileMatch = /^\/api\/stories\/([a-z0-9-]+)\/profile$/.exec(url.pathname);
       if (profileMatch && request.method === "POST") { const input = z.object({ previewId: z.string(), choice: z.enum(["a", "b"]) }).parse(await jsonBody(request)); return send(response, 200, { story: await operations.selectPreview(profileMatch[1]!, input.previewId, input.choice) }); }
       const refreshMatch = /^\/api\/stories\/([a-z0-9-]+)\/source\/refresh$/.exec(url.pathname);
       if (refreshMatch && request.method === "POST") { const input = z.object({ importNew: z.boolean().default(false) }).parse(await jsonBody(request)); return send(response, 200, await operations.refreshRemote(refreshMatch[1]!, input.importNew)); }
       return send(response, 404, { error: "API route not found" });
     } catch (error) {
-      const status = error instanceof z.ZodError ? 400 : error instanceof JobConflictError || /locked by PID|already has active job/.test(String(error)) ? 409 : /not found|does not exist/.test(String(error)) ? 404 : 400;
+      const status = statusFor(error);
+      if (status >= 500) logger.error({ event: "web.api.failed", method: request.method, path: url.pathname, status, error: error instanceof Error ? error.message : String(error) });
       return send(response, status, { error: error instanceof z.ZodError ? z.prettifyError(error) : error instanceof Error ? error.message : String(error) });
     }
   };
 }
 
-function send(response: ServerResponse, status: number, value: unknown): true { const output = JSON.stringify(value); response.writeHead(status, { "content-type": "application/json; charset=utf-8", "content-length": Buffer.byteLength(output), "cache-control": "no-store" }); response.end(output); return true; }
-async function sendFile(response: ServerResponse, path: string, contentType: string): Promise<true> { try { const data = await readFile(path); response.writeHead(200, { "content-type": contentType, "content-length": data.length, "cache-control": "no-store" }); response.end(data); } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return send(response, 404, { error: "File not found" }); throw error; } return true; }
-async function body(request: IncomingMessage): Promise<Buffer> { const parts: Buffer[] = []; let size = 0; for await (const chunk of request) { const part = Buffer.from(chunk); size += part.length; if (size > MAX_BODY_BYTES) throw new Error("Request body exceeds 50 MB"); parts.push(part); } return Buffer.concat(parts); }
-async function jsonBody(request: IncomingMessage): Promise<unknown> { const raw = await body(request); if (!raw.length) return {}; try { return JSON.parse(raw.toString("utf8")); } catch { throw new Error("Request body must be valid JSON"); } }
+function send(response: ServerResponse, status: number, value: unknown): true { const output = JSON.stringify(value); response.writeHead(status, { "content-type": "application/json; charset=utf-8", "content-length": Buffer.byteLength(output), "cache-control": "no-store", "x-content-type-options": "nosniff" }); response.end(output); return true; }
+async function sendFile(request: IncomingMessage, response: ServerResponse, path: string, contentType: string): Promise<true> {
+  let info; try { info = await stat(path); } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return send(response, 404, { error: "File not found" }); throw error; }
+  const range = parseRange(request.headers.range, info.size); const status = range ? 206 : 200; const start = range?.start ?? 0; const end = range?.end ?? info.size - 1;
+  response.writeHead(status, { "content-type": contentType, "content-length": Math.max(0, end - start + 1), "cache-control": "no-store", "accept-ranges": "bytes",
+    "x-content-type-options": "nosniff", ...(range ? { "content-range": `bytes ${start}-${end}/${info.size}` } : {}) });
+  const stream = createReadStream(path, { start, end }); stream.on("error", (error) => response.destroy(error)); stream.pipe(response); return true;
+}
+async function body(request: IncomingMessage, limit = MAX_BODY_BYTES): Promise<Buffer> { const parts: Buffer[] = []; let size = 0; for await (const chunk of request) { const part = Buffer.from(chunk); size += part.length; if (size > limit) throw new HttpError(`Request body exceeds ${Math.floor(limit / 1_000_000)} MB`, 413); parts.push(part); } return Buffer.concat(parts); }
+async function jsonBody(request: IncomingMessage): Promise<unknown> { const raw = await body(request, MAX_JSON_BYTES); if (!raw.length) return {}; try { return JSON.parse(raw.toString("utf8")); } catch { throw new HttpError("Request body must be valid JSON", 400); } }
 function integerParam(value: string | null, fallback: number) { if (value === null) return fallback; const number = Number(value); if (!Number.isInteger(number) || number < 1) throw new Error("Pagination values must be positive integers"); return number; }
 function optionalInteger(value: string | null) { if (value === null) return undefined; return integerParam(value, 1); }
 function optionalString(value: string | null) { return value?.trim() || undefined; }
+
+function parseRange(header: string | undefined, size: number): { start: number; end: number } | undefined {
+  if (!header) return undefined; const match = /^bytes=(\d*)-(\d*)$/.exec(header);
+  if (!match || (!match[1] && !match[2])) throw new HttpError("Invalid byte range", 416);
+  const suffix = !match[1] ? Number(match[2]) : undefined; const start = suffix !== undefined ? Math.max(0, size - suffix) : Number(match[1]);
+  const end = match[2] && match[1] ? Number(match[2]) : size - 1;
+  if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0 || start >= size || end < start) throw new HttpError("Requested byte range is not satisfiable", 416);
+  return { start, end: Math.min(end, size - 1) };
+}
+
+function statusFor(error: unknown): number {
+  if (error instanceof HttpError) return error.status;
+  if (error instanceof z.ZodError) return 400;
+  if (error instanceof JobConflictError || /locked by PID|already has active job/.test(String(error))) return 409;
+  if (/not found|does not exist/.test(String(error))) return 404;
+  if (error instanceof ConfigurationError || error instanceof BatchValidationError) return 422;
+  if (error instanceof WebHttpError) return isTimeout(error) ? 504 : 502;
+  if (error instanceof ProviderError) return isTimeout(error) ? 504 : 502;
+  if (error instanceof StorageError) return 500;
+  return 500;
+}
+function isTimeout(error: unknown) { for (let value: unknown = error, depth = 0; value && depth < 8; depth++, value = typeof value === "object" ? (value as { cause?: unknown }).cause : undefined) if (value instanceof Error && /timeout|timed out/i.test(`${value.name} ${value.message}`)) return true; return false; }

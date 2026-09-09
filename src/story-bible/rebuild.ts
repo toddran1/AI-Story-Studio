@@ -5,11 +5,15 @@ import { storyPaths } from "../storage/paths.js";
 import { readJsonIfExists } from "../storage/story-files.js";
 import { Chapter } from "../domain/chapter.js";
 import { mergeStoryBible, normalizeStoryBibleUpdate } from "./updater.js";
+import { SourceManifest, sourceManifestSchema } from "../source/types.js";
 
 /** Rebuilds canonical context solely from chronological per-chapter updates. */
 export async function rebuildStoryBibleBeforeChapter(root: string, slug: string, chapter: number): Promise<StoryBible> {
   let bible = emptyStoryBible();
-  const chaptersDir = join(storyPaths(root, slug, chapter).story, "chapters");
+  const paths = storyPaths(root, slug, chapter); const chaptersDir = join(paths.story, "chapters");
+  const manifestRaw = await readJsonIfExists<SourceManifest>(paths.sourceManifest);
+  const manifest = manifestRaw ? sourceManifestSchema.safeParse(manifestRaw) : undefined;
+  const currentSources = manifest?.success ? new Map(manifest.data.chapters.map((item) => [item.chapter, item.fingerprint])) : undefined;
   let numbers: number[] = [];
   try {
     numbers = (await readdir(chaptersDir, { withFileTypes: true })).filter((entry) => entry.isDirectory() && /^\d+$/.test(entry.name))
@@ -18,6 +22,7 @@ export async function rebuildStoryBibleBeforeChapter(root: string, slug: string,
   for (const number of numbers) {
     const metadata = await readJsonIfExists<Chapter>(storyPaths(root, slug, number).chapterMeta);
     if (metadata && metadata.stages?.storyBible?.status !== "complete") continue;
+    if (currentSources && metadata?.source?.fingerprint !== currentSources.get(number)) continue;
     const raw = await readJsonIfExists<StoryBibleUpdate>(storyPaths(root, slug, number).bibleUpdate);
     if (raw) bible = mergeStoryBible(bible, normalizeStoryBibleUpdate(storyBibleUpdateSchema.parse(raw), number), number);
   }

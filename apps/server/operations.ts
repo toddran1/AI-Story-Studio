@@ -26,20 +26,25 @@ import { exists, readJsonIfExists } from "../../src/storage/story-files.js";
 import { withStoryLock } from "../../src/storage/story-lock.js";
 import { ShutdownController } from "../../src/batch/shutdown.js";
 import { JobManager } from "./job-manager.js";
+import { logger } from "../../src/utils/logger.js";
 
 const slugSchema = z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/);
 const batchInputSchema = z.object({ from: z.number().int().positive().optional(), to: z.number().int().positive().optional(), force: z.enum(["translation", "narration", "qa", "story-bible", "tts", "all"]).optional() }).strict();
 const previewInputSchema = z.object({ chapter: z.number().int().positive(), audioPreview: z.boolean().default(false), presets: z.object({ a: previewPresetSchema, b: previewPresetSchema }) }).strict();
 
-type InspectionRecord = { inspection: SourceInspection; temporaryDirectory?: string; createdAt: number };
+type InspectionRecord = { inspection: SourceInspection; temporaryDirectory?: string; createdAt: number; bytes: number };
 export type OperationsDependencies = { pipeline?: ChapterProcessor; preview?: PreviewRunner; registry?: SourceProviderRegistry };
 
 export class StudioOperations {
+  private static readonly maxInspections = 10;
+  private static readonly maxInspectionBytes = 100 * 1024 * 1024;
   private readonly inspections = new Map<string, InspectionRecord>();
   private readonly pipeline: ChapterProcessor; private readonly preview: PreviewRunner; private readonly registry: SourceProviderRegistry;
+  private readonly inspectionTimer: NodeJS.Timeout; private inspectionBytes = 0;
   constructor(public readonly root: string, private readonly env: Environment, public readonly jobs = new JobManager(), dependencies: OperationsDependencies = {}) {
     const runtime = createPipelineRuntime(env); this.pipeline = dependencies.pipeline ?? runtime.pipeline; this.preview = dependencies.preview ?? new PreviewRunner(runtime.router, runtime.tts);
     this.registry = dependencies.registry ?? new SourceProviderRegistry(undefined, createWebHttpClient(root, env));
+    this.inspectionTimer = setInterval(() => this.expireInspections(), 60_000); this.inspectionTimer.unref();
   }
 
   async inspectSource(input: { url?: string; file?: Uint8Array; filename?: string; type?: SourceType; from?: number; to?: number; chapter?: number; splitChapters?: boolean; allowGaps?: boolean }) {
@@ -55,24 +60,30 @@ export class StudioOperations {
       const { provider, semanticType } = await this.registry.resolve(source, type); const remote = semanticType === "fanqie" || semanticType === "web";
       if (remote && ((input.from === undefined) !== (input.to === undefined))) throw new Error("Remote chapter ranges require both from and to");
       const inspection = await provider.inspect(source, { semanticType, from: input.from, to: input.to, chapter: input.chapter, splitChapters: input.splitChapters, allowGaps: input.allowGaps });
-      const id = randomUUID(); this.inspections.set(id, { inspection, temporaryDirectory, createdAt: Date.now() });
-      const directory = inspection.directory ?? inspection.chapters.map((item) => item.ref);
+      const bytes = inspection.chapters.reduce((sum, item) => sum + Buffer.byteLength(item.text), 0);
+      if (this.inspections.size >= StudioOperations.maxInspections || this.inspectionBytes + bytes > StudioOperations.maxInspectionBytes) {
+        throw new Error("Too many pending source inspections; import an existing inspection or wait for it to expire");
+      }
+      const id = randomUUID(); this.inspections.set(id, { inspection, temporaryDirectory, createdAt: Date.now(), bytes }); this.inspectionBytes += bytes;
+      const selected = inspection.chapters.map((item) => item.ref); const available = inspection.directory?.length ?? selected.length;
       return { id, type: inspection.sourceType, title: inspection.title, author: inspection.author, language: inspection.language,
-        chapterCount: directory.length, chapters: directory.slice(0, 200), truncated: directory.length > 200, warnings: inspection.warnings, metadata: inspection.metadata };
+        chapterCount: selected.length, availableChapterCount: available, chapters: selected.slice(0, 200), truncated: selected.length > 200,
+        warnings: inspection.warnings, metadata: inspection.metadata };
     } catch (error) { if (temporaryDirectory) await rm(temporaryDirectory, { recursive: true, force: true }); throw error; }
   }
 
   async importInspection(slug: string, inspectionId: string, allowGaps = false) {
     slugSchema.parse(slug); const record = this.inspections.get(inspectionId); if (!record) throw new Error("Inspection expired or was not found");
     validateImportable(record.inspection.chapters, record.inspection.warnings, allowGaps);
-    try {
-      return await withStoryLock(this.root, slug, "web source import", async () => {
+    const result = await withStoryLock(this.root, slug, "web source import", async () => {
         const paths = storyPaths(this.root, slug, record.inspection.chapters[0]?.ref.chapter ?? 1); const existed = await exists(paths.storyConfig);
         let story = existed ? await loadStory(paths.storyConfig) : defaultStory(slug, this.env); story = applySourceMetadata(story, record.inspection, !existed);
         const result = await importSource(this.root, slug, record.inspection, async () => { await atomicWriteJson(paths.storyConfig, story); await atomicWriteJson(paths.pipelineConfig, story.pipeline); });
         return { status: result.status, story, added: result.added, modified: result.modified, removed: result.removed, chapters: result.manifest.chapters.length };
       });
-    } finally { this.inspections.delete(inspectionId); if (record.temporaryDirectory) await rm(record.temporaryDirectory, { recursive: true, force: true }); }
+    try { await this.discardInspection(inspectionId); }
+    catch (error) { logger.warn({ event: "web.inspection.cleanup_failed", inspectionId, error: error instanceof Error ? error.message : String(error) }); }
+    return result;
   }
 
   startBatch(slug: string, raw: unknown) {
@@ -117,11 +128,17 @@ export class StudioOperations {
         if (comparison.removed.length || comparison.reordered.length) throw new Error("Cannot import automatically because existing chapters were removed or reordered");
         const inspection = await provider.inspect(manifest.origin.url, { chapters: comparison.added.map((item) => item.chapter) }); const result = await importSource(this.root, slug, inspection); imported = result.added;
       }
-      return { ...comparison, imported };
+      return { ...comparison, previousImportedCount: manifest.chapters.length, imported };
     });
   }
 
-  private expireInspections() { const cutoff = Date.now() - 30 * 60_000; for (const [id, record] of this.inspections) if (record.createdAt < cutoff) { this.inspections.delete(id); if (record.temporaryDirectory) void rm(record.temporaryDirectory, { recursive: true, force: true }); } }
+  async close() { clearInterval(this.inspectionTimer); await Promise.all([...this.inspections.keys()].map((id) => this.discardInspection(id))); }
+  private expireInspections() { const cutoff = Date.now() - 30 * 60_000; for (const [id, record] of this.inspections) if (record.createdAt < cutoff) void this.discardInspection(id).catch((error) => logger.warn({ event: "web.inspection.cleanup_failed", inspectionId: id, error: error instanceof Error ? error.message : String(error) })); }
+  private async discardInspection(id: string) {
+    const record = this.inspections.get(id); if (!record) return;
+    this.inspections.delete(id); this.inspectionBytes = Math.max(0, this.inspectionBytes - record.bytes);
+    if (record.temporaryDirectory) await rm(record.temporaryDirectory, { recursive: true, force: true });
+  }
 }
 
 async function readFileSafe(path: string) { try { return await readFile(path, "utf8"); } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; } }

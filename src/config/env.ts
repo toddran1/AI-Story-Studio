@@ -22,6 +22,7 @@ const envSchema = z.object({
   WEB_MAX_RESPONSE_BYTES: z.coerce.number().int().min(100_000).max(50_000_000).default(5_000_000),
   WEB_MAX_RETRIES: z.coerce.number().int().min(0).max(10).default(2),
   WEB_CACHE_DIR: z.string().trim().transform((value) => value || undefined).optional().default(".cache/ai-story-studio/web"),
+  WEB_PORT: z.coerce.number().int().min(1).max(65_535).default(3000),
 });
 
 export type Environment = z.infer<typeof envSchema>;

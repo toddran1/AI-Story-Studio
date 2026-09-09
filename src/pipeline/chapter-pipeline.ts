@@ -70,6 +70,7 @@ export class ChapterPipeline {
         return undefined;
       }
       const started = Date.now();
+      invalidateDownstream(chapter, stage);
       chapter.stages[stage] = { ...details, status: "running", fingerprint: fp, startedAt: new Date().toISOString() };
       await persist();
       options.onStageEvent?.({ stage, status: "started", state: chapter.stages[stage] });
@@ -222,4 +223,10 @@ const sameLanguage = (source: string, output: string) => source.trim().toLowerCa
 async function fileFingerprint(path: string): Promise<string | undefined> {
   try { const data = await readFile(path); return data.length ? fingerprint(data.toString("base64")) : undefined; }
   catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; }
+}
+
+function invalidateDownstream(chapter: Chapter, stage: StageName) {
+  const order: StageName[] = ["ingestion", "translation", "narration", "qa", "storyBible", "tts"];
+  for (const dependent of order.slice(order.indexOf(stage) + 1)) chapter.stages[dependent] = pending();
+  if (order.indexOf(stage) <= order.indexOf("qa")) chapter.quality = undefined;
 }
