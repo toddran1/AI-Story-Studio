@@ -1,0 +1,31 @@
+.source-url {
+  position: absolute;
+  right: 20px;
+  bottom: 19px;
+  color: #5f5e68;
+  font: 8px var(--mono);
+}
+
+.refresh-banner {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  border: 1px solid rgba(54, 184, 138, .22);
+  background: rgba(54, 184, 138, .055);
+  border-radius: 8px;
+  padding: 13px 16px;
+  margin: 0 0 14px;
+}
+
+.refresh-banner b { display: block; font: 11px var(--mono); margin: 6px 0; }
+.refresh-banner p { font-size: 9px; color: #8e8c96; margin: 0; }
+.active-profile { display: block; color: #666570; font: 8px/1.6 var(--mono); margin-top: 10px; max-width: 720px; }
+.job-actions { display: flex; justify-content: flex-end; margin-top: 8px; }
+.job-actions button { border: 0; background: transparent; color: #aaa8b2; font-size: 9px; cursor: pointer; }
+
+@media (max-width: 720px) {
+  .refresh-banner { align-items: flex-start; gap: 14px; }
+  .source-url { display: none; }
+  .settings-group .model-editor { grid-template-columns: 1fr 1.5fr; }
+  .settings-group .model-editor label { grid-column: 1 / -1; }
+}

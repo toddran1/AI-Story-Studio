@@ -1,0 +1,15 @@
+import { renderToStaticMarkup } from "react-dom/server";
+import { describe, expect, it } from "vitest";
+import { App } from "../apps/web/src/App.js";
+import { pretty } from "../apps/web/src/format.js";
+
+describe("web UI", () => {
+  it("uses readable labels for pipeline identifiers", () => {
+    expect(pretty("storyBible")).toBe("Story Bible"); expect(pretty("narrationFidelity")).toBe("Narration Fidelity");
+  });
+  it("renders the studio shell and accessible navigation", () => {
+    Object.defineProperty(globalThis, "location", { value: { pathname: "/" }, configurable: true });
+    const html = renderToStaticMarkup(<App />);
+    expect(html).toContain("Studio navigation"); expect(html).toContain("Your story shelf"); expect(html).toContain("Import a story");
+  });
+});

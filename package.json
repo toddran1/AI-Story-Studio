@@ -15,11 +15,16 @@
     "story:repair": "node --import tsx apps/cli/repair.ts",
     "story:preview": "node --import tsx apps/cli/preview.ts",
     "story:profile": "node --import tsx apps/cli/profile.ts",
+    "web": "node --import tsx apps/server/index.ts --dev",
+    "web:build": "vite build",
     "smoke": "node --import tsx apps/cli/smoke.ts",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@fontsource/ibm-plex-mono": "^5.3.0",
+    "@fontsource/newsreader": "^5.3.0",
+    "@fontsource/plus-jakarta-sans": "^5.3.0",
     "@google/genai": "^2.3.0",
     "cheerio": "^1.2.0",
     "dotenv": "^17.0.0",
@@ -28,12 +33,18 @@
     "mammoth": "^1.12.2",
     "openai": "^6.0.0",
     "pino": "^9.0.0",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
     "zod": "^4.0.0"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.7",
+    "@vitejs/plugin-react": "^6.1.1",
     "tsx": "^4.20.0",
     "typescript": "^5.9.0",
+    "vite": "^8.2.2",
     "vitest": "^5.0.0"
   },
   "packageManager": "yarn@1.22.22+sha512.a6b2f7906b721bba3d67d4aff083df04dad64c399707841b7acf00f6b133b7ac24255f2652fa22ae3534329dc6180534e98d17432037ff6fd140556e2bb3137e"

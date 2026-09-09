@@ -2,7 +2,6 @@
 import { resolve } from "node:path";
 import { loadEnvironment } from "../../src/config/env.js";
 import { defaultStory, loadStory } from "../../src/config/load-config.js";
-import { Story } from "../../src/domain/story.js";
 import { atomicWriteJson } from "../../src/storage/atomic-write.js";
 import { storyPaths } from "../../src/storage/paths.js";
 import { exists } from "../../src/storage/story-files.js";
@@ -12,6 +11,7 @@ import { SourceProviderRegistry } from "../../src/source/registry.js";
 import { sourceTypeSchema, SourceInspection, SourceType } from "../../src/source/types.js";
 import { withStoryLock } from "../../src/storage/story-lock.js";
 import { createWebHttpClient } from "../../src/source/web/create-client.js";
+import { applySourceMetadata } from "../../src/source/story-metadata.js";
 
 async function main() {
   const command = process.argv[2]; if (command !== "inspect" && command !== "import") usage("Expected inspect or import");
@@ -59,21 +59,6 @@ function parseArgs(values: string[]): Args {
   return args;
 }
 
-function applySourceMetadata(story: Story, inspection: SourceInspection, isNew: boolean): Story {
-  return {
-    ...story,
-    title: isNew && inspection.title ? inspection.title : story.title,
-    author: story.author ?? inspection.author,
-    sourceLanguage: isNew && inspection.language ? normalizeLanguage(inspection.language) : story.sourceLanguage,
-    source: inspection.origin ? { type: inspection.sourceType, path: "source", url: inspection.origin.url, externalId: inspection.origin.bookId } : { type: inspection.sourceType, path: "source" },
-  };
-}
-function normalizeLanguage(language: string) {
-  const normalized = language.trim().replace(/_/g, "-");
-  if (normalized.toLowerCase() === "en") return "en-US";
-  if (normalized.toLowerCase() === "zh") return "zh-CN";
-  return normalized;
-}
 function formatInspection(inspection: SourceInspection) {
   const directory = inspection.directory ?? inspection.chapters.map((item) => item.ref);
   const lines = [`Source: ${inspection.sourcePath}`, `Type: ${inspection.sourceType.toUpperCase()}`, `Title: ${inspection.title ?? "unknown"}`, `Author: ${inspection.author ?? "unknown"}`, `Language: ${inspection.language ?? "unknown"}`, `Detected chapters: ${directory.length}`];

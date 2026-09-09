@@ -14,6 +14,8 @@ Milestone 4 adds bounded remote ingestion with a Fanqie adapter, additive range 
 
 Milestone 5 adds structured translation/narration QA, a safe TTS quality gate, controlled repair, isolated A/B previews, story-level model profiles, and batch quality summaries.
 
+Milestone 6 adds a local browser studio backed by a localhost-only API, in-process jobs, and live SSE progress. It calls the same source, batch, QA, preview, profile, Story Bible, and TTS services used by the CLI.
+
 ## Requirements
 
 - Node.js 22 or newer (an active LTS release is recommended)
@@ -235,6 +237,36 @@ npm run story:repair -- --story undead-disaster --chapter 27 --stage narration -
 ```
 
 Batch manifests and terminal summaries aggregate pass/warn/fail totals and common issue categories. To reevaluate only QA and its downstream outputs, run `npm run story:batch -- --story undead-disaster --from 1 --to 10 --force qa`.
+
+## Milestone 6 — Local Web Studio
+
+Start the browser interface:
+
+```sh
+npm run web
+```
+
+Open [http://localhost:3000](http://localhost:3000). The server binds to `127.0.0.1` by default and keeps all provider credentials server-side. Set `WEB_PORT` if port 3000 is already in use.
+
+The studio provides:
+
+- A story shelf with import, processing, and QA status
+- A paginated chapter ledger and original/translation/narration comparison desk
+- Structured QA findings with messages and evidence
+- TXT, EPUB, DOCX, and ranged Fanqie inspection/import
+- Batch jobs with server-sent progress events and safe pause requests
+- Isolated A/B model previews with short audio samples and profile selection
+- A searchable, read-only Story Bible
+- Zod-validated story, model, context, and Fish Audio settings
+- Remote chapter discovery and optional additive import
+
+Browser operations use validated story slugs and chapter numbers rather than arbitrary filesystem paths. Concurrent mutations for the same story are rejected by the job registry or existing story lock. Batch manifests remain durable even though the local job registry is intentionally in memory.
+
+Create an optimized browser bundle with:
+
+```sh
+npm run web:build
+```
 
 ## Verification
 

@@ -1,0 +1,94 @@
+import { mkdtemp } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { describe, expect, it } from "vitest";
+import { getChapter, getQaDashboard, getStoryOverview, listStories, updateStorySettings } from "../apps/server/catalog.js";
+import { Job, JobManager } from "../apps/server/job-manager.js";
+import { StudioOperations } from "../apps/server/operations.js";
+import { loadEnvironment } from "../src/config/env.js";
+import { defaultStory } from "../src/config/load-config.js";
+import { chapterSchema } from "../src/domain/chapter.js";
+import { qaResultSchema } from "../src/domain/qa.js";
+import { LLMRouter } from "../src/llm/router.js";
+import { PreviewRunner } from "../src/preview/preview-runner.js";
+import { SourceProviderRegistry } from "../src/source/registry.js";
+import { StorySourceProvider, sourceManifestSchema } from "../src/source/types.js";
+import { atomicWriteJson } from "../src/storage/atomic-write.js";
+import { storyPaths } from "../src/storage/paths.js";
+import { fingerprint } from "../src/utils/hash.js";
+import { MockLLM, MockTTS } from "./helpers.js";
+
+const env = loadEnvironment({});
+const pending = () => ({ status: "pending" as const });
+
+async function storyFixture() {
+  const root = await mkdtemp(join(tmpdir(), "story-web-")); const story = defaultStory("night-lantern", env); story.title = "Night Lantern";
+  const paths = storyPaths(root, story.slug, 1); await atomicWriteJson(paths.storyConfig, story); await atomicWriteJson(paths.pipelineConfig, story.pipeline);
+  return { root, story, paths };
+}
+
+describe("web service layer", () => {
+  it("lists stories without exposing environment credentials", async () => {
+    const { root } = await storyFixture(); const cards = await listStories(root);
+    expect(cards[0]).toMatchObject({ slug: "night-lantern", title: "Night Lantern" });
+    expect(JSON.stringify(cards)).not.toMatch(/API_KEY|secret|credential/i);
+  });
+
+  it("loads chapter stages and structured QA", async () => {
+    const { root, story, paths } = await storyFixture(); const now = new Date().toISOString();
+    const complete = { status: "complete" as const, fingerprint: "in", outputFingerprint: "out" };
+    const chapter = chapterSchema.parse({ chapter: 1, sourceLanguage: story.sourceLanguage, outputLanguage: story.outputLanguage, counts: { originalCharacters: 10, englishWords: 8, narrationWords: 8 }, createdAt: now, updatedAt: now,
+      stages: { ingestion: complete, translation: complete, narration: complete, qa: complete, storyBible: pending(), tts: pending() } });
+    const qa = qaResultSchema.parse({ status: "warn", score: .76, issues: [{ category: "terminology", severity: "warn", message: "Term drift", evidence: "Bone Cage differs from the canonical term." }], checks: { completeness: "pass", names: "pass", numbers: "pass", terminology: "warn", dialogue: "pass", storyConsistency: "pass", narrationFidelity: "pass" } });
+    await atomicWriteJson(paths.chapterMeta, chapter); await atomicWriteJson(paths.qa, qa);
+    const detail = await getChapter(root, story.slug, 1); const dashboard = await getQaDashboard(root, story.slug);
+    expect(detail.qa?.status).toBe("warn"); expect(dashboard.counts.warn).toBe(1); expect(dashboard.categories.terminology).toBe(1);
+  });
+
+  it("inspects and imports an uploaded TXT through existing source services", async () => {
+    const root = await mkdtemp(join(tmpdir(), "story-web-import-")); const operations = new StudioOperations(root, env);
+    const inspection = await operations.inspectSource({ filename: "chapter.txt", file: Buffer.from("Chapter 1\n\nA lantern wakes."), chapter: 1 });
+    expect(inspection.type).toBe("text"); const result = await operations.importInspection("uploaded-story", inspection.id);
+    expect(result.chapters).toBe(1); expect((await getStoryOverview(root, "uploaded-story")).counts.chapters).toBe(1);
+  });
+
+  it("starts a batch job and exposes terminal status", async () => {
+    const root = await mkdtemp(join(tmpdir(), "story-web-job-")); const jobs = new JobManager();
+    const operations = new StudioOperations(root, env, jobs, { pipeline: { run: async ({ chapter }) => ({ chapter, quality: { status: "pass", score: 1, issueCategories: [] } }) } });
+    const inspection = await operations.inspectSource({ filename: "chapter.txt", file: Buffer.from("A chapter."), chapter: 1 }); await operations.importInspection("job-story", inspection.id);
+    const started = operations.startBatch("job-story", { from: 1, to: 1 }); const finished = await waitForJob(jobs, started.id);
+    expect(finished.status).toBe("completed"); expect((finished.result as any).summary.complete).toBe(1);
+  });
+
+  it("runs isolated previews and applies the selected profile", async () => {
+    const root = await mkdtemp(join(tmpdir(), "story-web-preview-")); const jobs = new JobManager();
+    const gemini = new MockLLM("gemini", ["Translation A"]); const openai = new MockLLM("openai", ["Narration A", "Translation B", "Narration B"]);
+    const preview = new PreviewRunner(new LLMRouter(new Map([["gemini", gemini], ["openai", openai]])), new MockTTS());
+    const operations = new StudioOperations(root, env, jobs, { preview }); const inspection = await operations.inspectSource({ filename: "chapter.txt", file: Buffer.from("A chapter."), chapter: 1 }); const imported = await operations.importInspection("preview-story", inspection.id); const story = imported.story;
+    const a = { translation: story.pipeline.translation, narration: story.pipeline.narration, qa: story.pipeline.qa, tts: story.pipeline.tts };
+    const b = { ...a, translation: { provider: "openai" as const, model: "translation-b" } };
+    const started = operations.startPreview(story.slug, { chapter: 1, audioPreview: true, presets: { a, b } }); const finished = await waitForJob(jobs, started.id);
+    expect(finished.status).toBe("completed"); const id = (finished.result as any).id; const result = await operations.getPreview(story.slug, id);
+    expect(result.translationA).toBe("Translation A"); const selected = await operations.selectPreview(story.slug, id, "b"); expect(selected.pipeline.translation).toEqual(b.translation);
+  });
+
+  it("validates settings and rejects credential-shaped fields", async () => {
+    const { root, story } = await storyFixture(); const valid = { title: "Revised", sourceLanguage: story.sourceLanguage, outputLanguage: story.outputLanguage, recentChapterSummaries: 4,
+      translation: story.pipeline.translation, narration: story.pipeline.narration, qa: story.pipeline.qa, tts: { referenceId: "voice", speed: 1.1 } };
+    expect((await updateStorySettings(root, story.slug, valid)).title).toBe("Revised");
+    await expect(updateStorySettings(root, story.slug, { ...valid, OPENAI_API_KEY: "must-not-pass" })).rejects.toThrow();
+  });
+
+  it("refreshes a remote directory with the existing comparison service", async () => {
+    const { root, story, paths } = await storyFixture(); story.source = { type: "fanqie", url: "https://fanqienovel.com/page/123", path: "source" }; await atomicWriteJson(paths.storyConfig, story);
+    const first = { chapter: 1, sourceId: "one", sourceType: "fanqie" as const, metadata: {} }; const second = { chapter: 2, sourceId: "two", sourceType: "fanqie" as const, metadata: {} };
+    const manifest = sourceManifestSchema.parse({ version: 1, adapterVersion: "test", type: "fanqie", origin: { url: story.source.url, bookId: "123" }, fingerprint: "a".repeat(64), importedAt: new Date().toISOString(), remote: { lastInspectedAt: new Date().toISOString(), chapterCountAtInspection: 1, directory: [first] }, warnings: [], unnumberedSections: [], chapters: [] }); await atomicWriteJson(paths.sourceManifest, manifest);
+    const provider: StorySourceProvider = { type: "fanqie", inspect: async (sourcePath) => ({ sourcePath, sourceType: "fanqie", fingerprint: fingerprint("remote"), chapters: [], directory: [first, second], warnings: [], unnumberedSections: [], origin: { url: sourcePath }, remote: { lastInspectedAt: new Date().toISOString(), chapterCountAtInspection: 2 } }) };
+    const operations = new StudioOperations(root, env, new JobManager(), { registry: new SourceProviderRegistry([provider]) }); const result = await operations.refreshRemote(story.slug, false);
+    expect(result.currentCount).toBe(2); expect(result.added.map((item) => item.chapter)).toEqual([2]);
+  });
+});
+
+function waitForJob(jobs: JobManager, id: string): Promise<Job> {
+  return new Promise((resolve, reject) => { const timeout = setTimeout(() => reject(new Error("Job timed out")), 3000); const unsubscribe = jobs.subscribe(id, (job) => { if (["completed", "failed", "paused"].includes(job.status)) { clearTimeout(timeout); unsubscribe?.(); resolve(job); } }); });
+}
