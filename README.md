@@ -22,6 +22,8 @@ Milestone 8 adds deterministic SRT/WebVTT timing, cached H.264 chapter videos, c
 
 Milestone 9 adds structured scene planning, reviewable still-art generation, character visual references, and approved scene timelines for chapter video.
 
+Milestone 10 adds one dependency-aware production orchestrator with resumable manifests, bounded QA repair, cost-safe planning, optional artwork, and final audiobook/video assembly.
+
 ## Requirements
 
 - Node.js 22 or newer (an active LTS release is recommended)
@@ -78,6 +80,30 @@ npm run story:process -- --story demo-story --chapter 1 --input ./input/chapter-
 ```
 
 Allowed values are `translation`, `narration`, `qa`, `story-bible`, `tts`, `audio`, and `all`. Forcing narration, for example, also regenerates QA, the Story Bible update, TTS, and its audio master. Forcing `audio` remasters only and never calls TTS.
+
+## End-to-end production
+
+Produce finished content from an already imported story with one command:
+
+```sh
+npm run story:produce -- \
+  --story undead-disaster \
+  --from 1 \
+  --to 25 \
+  --profile audiobook
+```
+
+Built-in profiles are `audio`, `audiobook`, `story-video`, and `everything`. Profiles live in `story.json` under `productionProfiles` and may be customized. Explicit `--output audio|audiobook|video|all`, `--artwork`/`--no-artwork`, and `--repair-qa`/`--no-repair-qa` flags override profile choices. Audiobooks default to M4B; use `--format mp3` when needed.
+
+Preview dependencies and paid-operation counts without calling a paid provider or changing source state:
+
+```sh
+npm run story:produce -- --story undead-disaster --from 1 --to 25 --profile story-video --dry-run
+```
+
+Use `--refresh` for a remote story to check and import only newly available chapters inside the explicit requested range. Use `--force <stage>` to regenerate a stage and its production dependents. Ctrl+C requests a safe pause after the current chapter; running the same command resumes the matching manifest under `stories/<story>/production-runs/` and skips completed, still-valid chapters.
+
+QA warnings continue and are reported for review. QA failures stop that chapter while other chapters remain safe; profiles enable at most two targeted repair attempts by default. Final audiobook or combined-video assembly only runs when every required chapter is ready. The local web studio exposes the same planner and orchestrator from the **Production** page with live SSE progress and download links.
 
 ## Milestone 2 — Multi-Chapter Processing
 

@@ -5,7 +5,7 @@ import { pretty } from "../apps/web/src/format.js";
 
 describe("web UI", () => {
   it("uses readable labels for pipeline identifiers", () => {
-    expect(pretty("storyBible")).toBe("Story Bible"); expect(pretty("narrationFidelity")).toBe("Narration Fidelity");
+    expect(pretty("storyBible")).toBe("Story Bible"); expect(pretty("narrationFidelity")).toBe("Narration Fidelity"); expect(pretty("qa")).toBe("QA"); expect(pretty("tts")).toBe("TTS");
   });
   it("renders the studio shell and accessible navigation", () => {
     Object.defineProperty(globalThis, "location", { value: { pathname: "/" }, configurable: true });

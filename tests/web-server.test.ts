@@ -80,6 +80,13 @@ describe("web service layer", () => {
     expect(finished.status).toBe("completed"); expect((finished.result as any).summary.complete).toBe(1);
   });
 
+  it("plans and runs a no-cost production job through the web job boundary", async () => {
+    const root = await mkdtemp(join(tmpdir(), "story-web-production-")); const jobs = new JobManager(); const operations = new StudioOperations(root, env, jobs, { pipeline: { run: async ({ chapter }) => ({ chapter, quality: { status: "pass", score: 1, issueCategories: [] } }) } });
+    const inspection = await operations.inspectSource({ filename: "chapter.txt", file: Buffer.from("A chapter."), chapter: 1 }); await operations.importInspection("production-story", inspection.id);
+    const plan = await operations.productionPlan("production-story", { from: 1, to: 1, outputs: ["audio"] }); expect(plan.stages).toContain("audioMastering"); expect(plan.stages).not.toContain("video");
+    const finished = await waitForJob(jobs, operations.startProduction("production-story", { from: 1, to: 1, outputs: ["audio"] }).id); expect(finished.status).toBe("completed"); expect((finished.result as any).summary.completed).toBe(1); await operations.close();
+  });
+
   it("runs mastering and audiobook exports through web jobs", async () => {
     const root = await mkdtemp(join(tmpdir(), "story-web-audio-")); const jobs = new JobManager(); const operations = new StudioOperations(root, env, jobs, { audio: webAudio, audiobook: webBook, video: webVideo, videoExport: webVideoExport, scenePlanner: webScenePlanner, image: webImages });
     const inspection = await operations.inspectSource({ filename: "chapter.txt", file: Buffer.from("A chapter."), chapter: 1 }); const imported = await operations.importInspection("audio-story", inspection.id); const paths = storyPaths(root, imported.story.slug, 1); const manifest = sourceManifestSchema.parse(JSON.parse(await readFile(paths.sourceManifest, "utf8"))); const now = new Date().toISOString(); const complete = { status: "complete" as const, fingerprint: "input", outputFingerprint: "output" };

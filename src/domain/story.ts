@@ -4,6 +4,7 @@ import { audioSettingsSchema } from "../audio/config.js";
 import { subtitleSettingsSchema } from "../subtitles/types.js";
 import { videoSettingsSchema } from "../video/config.js";
 import { artworkSettingsSchema, sceneSettingsSchema } from "../scenes/types.js";
+import { productionProfilesSchema } from "../production/types.js";
 
 const rawStorySchema = z.object({
   id: z.string().min(1),
@@ -27,6 +28,7 @@ const rawStorySchema = z.object({
   video: videoSettingsSchema,
   scenes: sceneSettingsSchema,
   artwork: artworkSettingsSchema,
+  productionProfiles: productionProfilesSchema,
   pipeline: z.object({
     translation: stageModelConfigSchema,
     narration: stageModelConfigSchema,

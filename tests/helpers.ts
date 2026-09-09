@@ -4,6 +4,7 @@ import { LLMRequest, StructuredLLMRequest } from "../src/llm/types.js";
 import { storyBibleUpdateSchema } from "../src/domain/story-bible.js";
 import { qaResultSchema } from "../src/domain/qa.js";
 import { TTSProvider } from "../src/tts/provider.js";
+import { defaultProductionProfiles } from "../src/production/types.js";
 
 export class MockLLM implements LLMProvider {
   readonly name: "openai" | "gemini";
@@ -44,5 +45,5 @@ export const testStory = (overrides: Partial<Story["pipeline"]> = {}): Story => 
     scenePlanner: { provider: "openai", model: "scene-model" },
     tts: { provider: "fish", model: "s2-pro", speed: 1, format: "mp3", sampleRate: 44100, bitrate: 128, normalize: true, maxCharsPerRequest: 4000 },
     ...overrides,
-  }, subtitles: { maxCharactersPerLine: 42, maxLines: 2, minimumDurationSeconds: 1.2, maximumDurationSeconds: 6 }, video: { width: 1920, height: 1080, fps: 30, codec: "libx264", quality: 20, subtitleMode: "burn", subtitleStyle: "default", backgroundMode: "cover", introDurationSeconds: 3 }, scenes: { targetDurationSeconds: 20, minimumDurationSeconds: 10, maximumDurationSeconds: 30, maximumScenesPerChapter: 50 }, artwork: { provider: "openai", model: "gpt-image-1", stylePrompt: "cinematic illustrated fiction", aspectRatio: "16:9", quality: "medium", size: "1536x1024", outputFormat: "png" },
+  }, subtitles: { maxCharactersPerLine: 42, maxLines: 2, minimumDurationSeconds: 1.2, maximumDurationSeconds: 6 }, video: { width: 1920, height: 1080, fps: 30, codec: "libx264", quality: 20, subtitleMode: "burn", subtitleStyle: "default", backgroundMode: "cover", introDurationSeconds: 3 }, scenes: { targetDurationSeconds: 20, minimumDurationSeconds: 10, maximumDurationSeconds: 30, maximumScenesPerChapter: 50 }, artwork: { provider: "openai", model: "gpt-image-1", stylePrompt: "cinematic illustrated fiction", aspectRatio: "16:9", quality: "medium", size: "1536x1024", outputFormat: "png" }, productionProfiles: defaultProductionProfiles,
 });

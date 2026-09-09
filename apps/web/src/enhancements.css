@@ -29,3 +29,27 @@
   .settings-group .model-editor { grid-template-columns: 1fr 1.5fr; }
   .settings-group .model-editor label { grid-column: 1 / -1; }
 }
+.production-controls { display:grid; grid-template-columns:repeat(3,minmax(120px,1fr)); gap:1rem; padding:1.2rem; border:1px solid var(--line); background:var(--paper); }
+.production-options { display:flex; flex-wrap:wrap; gap:.65rem 1rem; align-content:center; grid-column:span 3; }
+.production-options > span { width:100%; color:var(--muted); font-size:.72rem; text-transform:uppercase; letter-spacing:.12em; }
+.production-options label { display:flex; align-items:center; gap:.4rem; }
+.production-plan,.production-run { margin-top:1.25rem; padding:1.25rem; border:1px solid var(--line); background:var(--paper); }
+.plan-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(120px,1fr)); gap:.65rem; }
+.plan-grid article { padding:.8rem; background:var(--ink-soft); color:var(--paper); display:grid; gap:.2rem; }
+.plan-grid article b { font:500 1.65rem var(--serif); }
+.plan-grid article small { opacity:.65; }
+.cost-note { color:var(--muted); font-size:.86rem; margin-top:1rem; }
+.summary-strip { display:flex; flex-wrap:wrap; gap:1.5rem; padding-bottom:1rem; border-bottom:1px solid var(--line); }
+.summary-strip span { display:grid; color:var(--muted); font-size:.75rem; text-transform:uppercase; letter-spacing:.08em; }
+.summary-strip b { color:var(--ink); font:500 1.6rem var(--serif); }
+.production-table { display:grid; gap:.65rem; margin-top:1rem; }
+.production-table article { padding:.8rem 0; border-bottom:1px solid var(--line); }
+.production-table header { display:flex; justify-content:space-between; align-items:center; margin-bottom:.55rem; }
+.production-table article > div { display:flex; flex-wrap:wrap; gap:.4rem .8rem; }
+.production-table article > div span { color:var(--muted); font-size:.75rem; }
+.production-table article > div span i { display:inline-block; width:6px; height:6px; margin-right:.3rem; border-radius:50%; background:var(--line-strong); }
+.production-table article > div span.complete i { background:var(--success); }
+.production-table article > div span.running i { background:var(--accent); }
+.production-table article > div span.failed i { background:var(--danger); }
+.export-links { display:flex; gap:.75rem; margin-top:1rem; }
+@media (max-width:800px) { .production-controls { grid-template-columns:1fr 1fr; } .production-options { grid-column:span 2; } }

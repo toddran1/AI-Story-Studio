@@ -14,6 +14,7 @@ export type StoryConfig = {
   audio: AudioSettings;
   subtitles: SubtitleSettings; video: VideoSettings; scenes: SceneSettings; artwork: ArtworkSettings;
   pipeline: { translation: Model; narration: Model; qa: Model; storyBible: Model; scenePlanner: Model; tts: { provider: "fish"; model: string; referenceId?: string; speed: number; format: "mp3"; sampleRate: number; bitrate: number; normalize: boolean; maxCharsPerRequest: number } };
+  productionProfiles: Record<string, { outputs: Array<"audio" | "audiobook" | "video">; artwork: boolean; repairQa: boolean; audiobookFormat: "mp3" | "m4b" }>;
 };
 export type AudioSettings = { loudnessTarget: number; truePeak: number; segmentGapSeconds: number; chapterGapSeconds: number; format: "mp3"; bitrate: "64k" | "96k" | "128k" | "160k" | "192k" | "256k" | "320k"; sampleRate: 32000 | 44100 | 48000 };
 export type SubtitleSettings = { maxCharactersPerLine: number; maxLines: number; minimumDurationSeconds: number; maximumDurationSeconds: number };
@@ -32,3 +33,5 @@ export type Counts = { pass: number; warn: number; fail: number };
 export type ChapterRow = { chapter: number; originalTitle?: string; translation: string; narration: string; qa?: "pass" | "warn" | "fail"; qaScore?: number; tts: string; audioMastering: string; durationSeconds?: number; audioAvailable: boolean };
 export type QaResult = { status: "pass" | "warn" | "fail"; score: number; issues: Array<{ category: string; severity: "warn" | "fail"; message: string; evidence: string }>; checks: Record<string, "pass" | "warn" | "fail"> };
 export type Job = { id: string; type: string; story: string; status: "queued" | "running" | "completed" | "failed" | "paused"; progress?: any; result?: any; error?: string };
+export type ProductionPlan = { story: string; from: number; to: number; chapters: number[]; outputs: string[]; artwork: boolean; stages: string[]; counts: Record<string, { required: number; reusable: number }>; estimates: { llmOperations: number; ttsOperations: number; imageOperations: number; imagesPendingPlanning: number }; finalOutputs: string[] };
+export type ProductionManifest = { id: string; status: string; selection: { from: number; to: number }; options: { outputs: string[]; audiobookFormat: string }; current: { chapter?: number; stage?: string }; chapters: Record<string, { chapter: number; status: string; qa?: string; operations: Record<string, { status: string; reused: boolean }> }>; failures: Array<{ chapter?: number; stage: string; message: string }>; summary: { chapters: number; completed: number; needsReview: number; failed: number; reusedStages: number; newStages: number; qaWarnings: number; qaFailures: number; exports: Record<string, string>; elapsedMs: number } };
