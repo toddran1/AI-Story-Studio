@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { loadEnvironment } from "../../src/config/env.js";
+import { loadEnvironment, resolveStudioRoot } from "../../src/config/env.js";
 import { loadStory } from "../../src/config/load-config.js";
 import { QaResult, qaResultSchema } from "../../src/domain/qa.js";
 import { createPipeline } from "../../src/pipeline/create-pipeline.js";
@@ -11,7 +11,7 @@ import { readJsonIfExists } from "../../src/storage/story-files.js";
 import { withStoryLock } from "../../src/storage/story-lock.js";
 
 async function main() {
-  const args = parseArgs(process.argv.slice(2)); const root = process.cwd(); const env = loadEnvironment();
+  const args = parseArgs(process.argv.slice(2)); const env = loadEnvironment(); const root = resolveStudioRoot(env);
   await withStoryLock(root, args.story, `repair chapter ${args.chapter}`, async () => {
     const paths = storyPaths(root, args.story, args.chapter); const story = await loadStory(paths.storyConfig);
     const imported = await loadImportedChapters(root, args.story); const source = imported.chapters.find((item) => item.chapter === args.chapter);

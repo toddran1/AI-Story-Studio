@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { loadEnvironment } from "../../src/config/env.js";
+import { loadEnvironment, resolveStudioRoot } from "../../src/config/env.js";
 import { loadStory } from "../../src/config/load-config.js";
 import { createPipelineRuntime } from "../../src/pipeline/create-pipeline.js";
 import { ProductionForce, ProductionOutput, productionForceSchema, productionOutputSchema } from "../../src/production/types.js";
@@ -15,7 +15,7 @@ import { FfmpegAudiobookProcessor } from "../../src/audio/audiobook.js";
 import { FfmpegVideoProcessor } from "../../src/video/renderer.js";
 import { FfmpegVideoExportProcessor } from "../../src/video/video-export.js";
 
-async function main() { const args = parse(process.argv.slice(2)); const root = process.cwd(); const env = loadEnvironment(); await withStoryLock(root, args.story, "end-to-end production", async () => {
+async function main() { const args = parse(process.argv.slice(2)); const env = loadEnvironment(); const root = resolveStudioRoot(env); await withStoryLock(root, args.story, "end-to-end production", async () => {
   const story = await loadStory(storyPaths(root, args.story, 1).storyConfig); const runtime = createPipelineRuntime(env); const registry = new SourceProviderRegistry(undefined, createWebHttpClient(root, env)); const shutdown = new ShutdownController(); const stop = () => { shutdown.request(); process.stderr.write("\nPause requested; stopping after the current chapter.\n"); }; process.once("SIGINT", stop); process.once("SIGTERM", stop);
   try { const result = await runProduction({ root, story, from: args.from, to: args.to, profile: args.profile, outputs: args.outputs, artwork: args.artwork, repairQa: args.repairQa, refresh: args.refresh, dryRun: args.dryRun, force: args.force, audiobookFormat: args.format, pause: shutdown, onProgress: printProgress }, { pipeline: runtime.pipeline, loadChapters: async () => (await loadImportedChapters(root, story.slug)).chapters, refresh: (from, to) => refreshProductionRange({ root, story, from, to, registry }), scenePlanner: runtime.router.forStage(story.pipeline.scenePlanner), image: runtime.images.forName(story.artwork.provider), video: new FfmpegVideoProcessor(), videoExport: new FfmpegVideoExportProcessor(), audiobook: new FfmpegAudiobookProcessor() });
     process.stdout.write(args.dryRun ? formatPlan(result.plan) : formatSummary(result.manifest)); if (["completed_with_errors", "failed"].includes(result.manifest.status)) process.exitCode = 1; if (result.manifest.status === "paused") process.exitCode = 130;

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { resolve } from "node:path";
-import { loadEnvironment } from "../../src/config/env.js";
+import { loadEnvironment, resolveStudioRoot } from "../../src/config/env.js";
 import { defaultStory, loadStory } from "../../src/config/load-config.js";
 import { createPipeline } from "../../src/pipeline/create-pipeline.js";
 import { ForceStage } from "../../src/pipeline/chapter-pipeline.js";
@@ -16,11 +16,12 @@ async function main() {
   if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(args.story)) usage("--story must be a lowercase kebab-case slug");
   const chapter = Number(args.chapter);
   if (!Number.isInteger(chapter) || chapter < 1) usage("--chapter must be a positive integer");
-  await withStoryLock(process.cwd(), args.story, `process chapter ${chapter}`, () => processChapter({ ...args, story: args.story!, input: args.input! }, chapter));
+  const env = loadEnvironment(); const root = resolveStudioRoot(env);
+  await withStoryLock(root, args.story, `process chapter ${chapter}`, () => processChapter({ ...args, story: args.story!, input: args.input! }, chapter, root, env));
 }
 
-async function processChapter(args: Args & { story: string; input: string }, chapter: number) {
-  const root = process.cwd(); const env = loadEnvironment(); const paths = storyPaths(root, args.story, chapter);
+async function processChapter(args: Args & { story: string; input: string }, chapter: number, root: string, env: ReturnType<typeof loadEnvironment>) {
+  const paths = storyPaths(root, args.story, chapter);
   const story = await exists(paths.storyConfig) ? await loadStory(paths.storyConfig) : defaultStory(args.story, env);
   await atomicWriteJson(paths.storyConfig, story);
   await atomicWriteJson(paths.pipelineConfig, story.pipeline);

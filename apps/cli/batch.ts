@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { resolve } from "node:path";
-import { loadEnvironment } from "../../src/config/env.js";
+import { loadEnvironment, resolveStudioRoot } from "../../src/config/env.js";
 import { defaultStory, loadStory } from "../../src/config/load-config.js";
 import { createPipeline } from "../../src/pipeline/create-pipeline.js";
 import { ForceStage } from "../../src/pipeline/chapter-pipeline.js";
@@ -20,11 +20,11 @@ import { withStoryLock } from "../../src/storage/story-lock.js";
 
 async function main() {
   const args = parseArgs(process.argv.slice(2)); validateSlug(args.story);
-  await withStoryLock(process.cwd(), args.story, "batch", () => runBatch(args));
+  const root = resolveStudioRoot(loadEnvironment());
+  await withStoryLock(root, args.story, "batch", () => runBatch(args, root));
 }
 
-async function runBatch(args: Args) {
-  const root = process.cwd();
+async function runBatch(args: Args, root: string) {
   let directory = args.input ? resolve(args.input) : undefined;
   let imported: Awaited<ReturnType<typeof loadImportedChapters>> | undefined;
   let retryNumbers: Set<number> | undefined;

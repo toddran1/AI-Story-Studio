@@ -1,6 +1,5 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { z } from "zod";
 import { BatchRunner, ChapterProcessor, ProgressEvent } from "../../src/batch/batch-runner.js";
@@ -89,13 +88,13 @@ export class StudioOperations {
       if (input.url) { const url = new URL(input.url); if (url.protocol !== "https:") throw new Error("Only HTTPS source URLs are allowed"); source = url.toString(); }
       else if (input.files) {
         if (!input.files.length || input.files.length > 2_000) throw new Error("Select between 1 and 2,000 TXT chapter files");
-        temporaryDirectory = join(tmpdir(), `ai-story-studio-${randomUUID()}`); await mkdir(temporaryDirectory); let total = 0; const names = new Set<string>();
+        temporaryDirectory = join(this.root, ".ai-story-studio", "tmp", `source-${randomUUID()}`); await mkdir(temporaryDirectory, { recursive: true }); let total = 0; const names = new Set<string>();
         for (const file of input.files) { const safeName = basename(file.name); if (safeName !== file.name || !safeName.toLowerCase().endsWith(".txt")) throw new Error("Chapter folders may contain only top-level TXT files"); if (names.has(safeName.toLowerCase())) throw new Error(`Duplicate chapter filename: ${safeName}`); names.add(safeName.toLowerCase()); total += Buffer.byteLength(file.text); if (total > 50 * 1024 * 1024) throw new Error("Chapter folder exceeds the 50 MB inspection limit"); await writeFile(join(temporaryDirectory, safeName), file.text, "utf8"); }
         source = temporaryDirectory;
       } else {
         if (!input.file?.length || !input.filename) throw new Error("Select a TXT, EPUB, or DOCX file");
         const safeName = basename(input.filename); if (safeName !== input.filename || !/\.(txt|epub|docx)$/i.test(safeName)) throw new Error("Only top-level TXT, EPUB, and DOCX files are supported");
-        temporaryDirectory = join(tmpdir(), `ai-story-studio-${randomUUID()}`); await mkdir(temporaryDirectory); source = join(temporaryDirectory, safeName); await writeFile(source, input.file);
+        temporaryDirectory = join(this.root, ".ai-story-studio", "tmp", `source-${randomUUID()}`); await mkdir(temporaryDirectory, { recursive: true }); source = join(temporaryDirectory, safeName); await writeFile(source, input.file);
       }
       const { provider, semanticType } = await this.registry.resolve(source, type); const remote = semanticType === "fanqie" || semanticType === "web";
       if (remote && ((input.from === undefined) !== (input.to === undefined))) throw new Error("Remote chapter ranges require both from and to");

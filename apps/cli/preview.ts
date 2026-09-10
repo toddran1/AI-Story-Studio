@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { resolve } from "node:path";
-import { loadEnvironment, Environment } from "../../src/config/env.js";
+import { loadEnvironment, resolveStudioRoot, Environment } from "../../src/config/env.js";
 import { loadStory } from "../../src/config/load-config.js";
 import { StageModelConfig } from "../../src/domain/provider.js";
 import { createPipelineRuntime } from "../../src/pipeline/create-pipeline.js";
@@ -13,7 +13,7 @@ import { withStoryLock } from "../../src/storage/story-lock.js";
 type Args = { story: string; chapter: number; input?: string; audioPreview: boolean; values: Partial<Record<"translationA" | "translationB" | "narrationA" | "narrationB" | "qaA" | "qaB", string>> };
 
 async function main() {
-  const args = parseArgs(process.argv.slice(2)); const root = process.cwd(); const env = loadEnvironment();
+  const args = parseArgs(process.argv.slice(2)); const env = loadEnvironment(); const root = resolveStudioRoot(env);
   await withStoryLock(root, args.story, `preview chapter ${args.chapter}`, async () => {
     const story = await loadStory(storyPaths(root, args.story, args.chapter).storyConfig);
     let inputPath = args.input ? resolve(args.input) : undefined;

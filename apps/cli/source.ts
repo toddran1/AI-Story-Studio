@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { resolve } from "node:path";
-import { loadEnvironment } from "../../src/config/env.js";
+import { loadEnvironment, resolveStudioRoot } from "../../src/config/env.js";
 import { defaultStory, loadStory } from "../../src/config/load-config.js";
 import { atomicWriteJson } from "../../src/storage/atomic-write.js";
 import { storyPaths } from "../../src/storage/paths.js";
@@ -18,7 +18,7 @@ async function main() {
   const args = parseArgs(process.argv.slice(3)); if (!args.source) usage("--source is required");
   if (command === "import" && !args.story) usage("--story is required for import");
   if (args.story && !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(args.story)) usage("--story must be a lowercase kebab-case slug");
-  const root = process.cwd(); const env = loadEnvironment();
+  const env = loadEnvironment(); const root = resolveStudioRoot(env);
   const sourcePath = isUrl(args.source) ? args.source : resolve(args.source); const registry = new SourceProviderRegistry(undefined, createWebHttpClient(root, env));
   const { provider, semanticType } = await registry.resolve(sourcePath, args.type);
   if (args.chapter && args.splitChapters) usage("--chapter and --split-chapters cannot be used together");

@@ -43,7 +43,7 @@ Milestone 13 adds a Postgres-backed production queue with chronological chapter 
 - OpenAI, Gemini, and Fish Audio API credentials
 - A Fish Audio voice/reference ID is recommended for consistent voice output
 
-Postgres coordinates durable queue state only. Filesystem manifests and fingerprints remain authoritative for generated content.
+Postgres coordinates durable queue state only. Filesystem manifests and fingerprints remain authoritative for generated content. The Compose service bind-mounts its data at `POSTGRES_DATA_DIR` rather than using an opaque Docker volume.
 
 ## Setup
 
@@ -57,6 +57,8 @@ npm run db:migrate
 Fill in `.env`:
 
 ```dotenv
+STUDIO_DATA_ROOT=/Volumes/ReggieSSD/Mac/coding-projects/python/ai_story_studio
+POSTGRES_DATA_DIR=/Volumes/ReggieSSD/Mac/coding-projects/python/ai_story_studio/postgres
 DATABASE_URL=postgresql://ai_story_studio:ai_story_studio@127.0.0.1:5433/ai_story_studio
 OPENAI_API_KEY=
 OPENAI_DEFAULT_MODEL=gpt-5.6-terra
@@ -71,8 +73,10 @@ WEB_REQUEST_TIMEOUT_MS=30000
 WEB_REQUEST_DELAY_MS=500
 WEB_MAX_RESPONSE_BYTES=5000000
 WEB_MAX_RETRIES=2
-WEB_CACHE_DIR=.cache/ai-story-studio/web
+WEB_CACHE_DIR=cache/web
 ```
+
+`STUDIO_DATA_ROOT` is the durable application-data location. Story imports, source chapters, intermediate files, audio, artwork, video, exports, backups, queue reconciliation manifests, and relative web caches are stored beneath it. `POSTGRES_DATA_DIR` is the matching Docker bind-mount location for the database; keep both on persistent storage. The source checkout can be moved or replaced without moving production data.
 
 ## Durable production queue
 

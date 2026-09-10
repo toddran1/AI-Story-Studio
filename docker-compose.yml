@@ -8,12 +8,9 @@ services:
     ports:
       - "127.0.0.1:5433:5432"
     volumes:
-      - ai-story-studio-postgres:/var/lib/postgresql/data
+      - "${POSTGRES_DATA_DIR:-./.data/postgres}:/var/lib/postgresql/data"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ai_story_studio -d ai_story_studio"]
       interval: 5s
       timeout: 3s
       retries: 12
-
-volumes:
-  ai-story-studio-postgres:

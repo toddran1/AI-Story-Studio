@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { loadEnvironment, requireProviderKey } from "../src/config/env.js";
+import { loadEnvironment, requireProviderKey, resolveStudioRoot } from "../src/config/env.js";
 import { storySchema } from "../src/domain/story.js";
 
 describe("configuration", () => {
@@ -12,6 +12,11 @@ describe("configuration", () => {
   it("reports a missing provider key without revealing secrets", () => {
     const env = loadEnvironment({});
     expect(() => requireProviderKey(env, "openai")).toThrow(/OPENAI_API_KEY/);
+  });
+
+  it("resolves persistent data independently from the source checkout", () => {
+    expect(resolveStudioRoot(loadEnvironment({ STUDIO_DATA_ROOT: "../studio-data" }), "/project/app")).toBe("/project/studio-data");
+    expect(resolveStudioRoot(loadEnvironment({ STUDIO_DATA_ROOT: "/Volumes/Studio/data" }), "/project/app")).toBe("/Volumes/Studio/data");
   });
 
   it("rejects invalid provider names", () => {

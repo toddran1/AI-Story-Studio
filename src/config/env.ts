@@ -1,9 +1,11 @@
 import "dotenv/config";
+import { resolve } from "node:path";
 import { z } from "zod";
 import { ConfigurationError } from "../pipeline/errors.js";
 
 const optionalSecret = z.string().trim().min(1).optional().or(z.literal("").transform(() => undefined));
 const envSchema = z.object({
+  STUDIO_DATA_ROOT: optionalSecret,
   DATABASE_URL: optionalSecret,
   OPENAI_API_KEY: optionalSecret,
   OPENAI_DEFAULT_MODEL: z.string().default("gpt-5.6-terra"),
@@ -23,7 +25,7 @@ const envSchema = z.object({
   WEB_REQUEST_DELAY_MS: z.coerce.number().int().min(0).max(60_000).default(500),
   WEB_MAX_RESPONSE_BYTES: z.coerce.number().int().min(100_000).max(50_000_000).default(5_000_000),
   WEB_MAX_RETRIES: z.coerce.number().int().min(0).max(10).default(2),
-  WEB_CACHE_DIR: z.string().trim().transform((value) => value || undefined).optional().default(".cache/ai-story-studio/web"),
+  WEB_CACHE_DIR: z.string().trim().transform((value) => value || undefined).optional().default("cache/web"),
   WEB_PORT: z.coerce.number().int().min(1).max(65_535).default(3000),
   QUEUE_POLL_MS: z.coerce.number().int().min(250).max(60_000).default(1000),
   QUEUE_LEASE_MS: z.coerce.number().int().min(30_000).max(3_600_000).default(300_000),
@@ -38,6 +40,11 @@ export function loadEnvironment(source: NodeJS.ProcessEnv = process.env): Enviro
   const result = envSchema.safeParse(source);
   if (!result.success) throw new ConfigurationError(`Invalid environment configuration: ${z.prettifyError(result.error)}`);
   return result.data;
+}
+
+/** Resolve the persistent data root independently from the source checkout. */
+export function resolveStudioRoot(env: Environment, workingDirectory = process.cwd()): string {
+  return resolve(workingDirectory, env.STUDIO_DATA_ROOT ?? ".");
 }
 
 export function requireProviderKey(env: Environment, provider: "openai" | "gemini" | "fish"): string {

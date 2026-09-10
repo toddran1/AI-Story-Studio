@@ -1,11 +1,12 @@
 #!/usr/bin/env node
 import { loadStory } from "../../src/config/load-config.js";
+import { loadEnvironment, resolveStudioRoot } from "../../src/config/env.js";
 import { applyPreviewProfile } from "../../src/preview/profile.js";
 import { storyPaths } from "../../src/storage/paths.js";
 import { withStoryLock } from "../../src/storage/story-lock.js";
 
 async function main() {
-  const args = parseArgs(process.argv.slice(2)); const root = process.cwd();
+  const args = parseArgs(process.argv.slice(2)); const root = resolveStudioRoot(loadEnvironment());
   await withStoryLock(root, args.story, `select preview ${args.preview}`, async () => {
     const story = await loadStory(storyPaths(root, args.story, 1).storyConfig);
     const updated = await applyPreviewProfile(root, story, args.preview, args.choice);

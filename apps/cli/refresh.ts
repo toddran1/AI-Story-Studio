@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { loadEnvironment } from "../../src/config/env.js";
+import { loadEnvironment, resolveStudioRoot } from "../../src/config/env.js";
 import { loadStory } from "../../src/config/load-config.js";
 import { SourceProviderRegistry } from "../../src/source/registry.js";
 import { importSource } from "../../src/source/importer.js";
@@ -14,14 +14,15 @@ import { withStoryLock } from "../../src/storage/story-lock.js";
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(args.story)) usage("--story must be a lowercase kebab-case slug");
-  await withStoryLock(process.cwd(), args.story, "source refresh", () => refresh(args.story, args.importNew));
+  const env = loadEnvironment(); const root = resolveStudioRoot(env);
+  await withStoryLock(root, args.story, "source refresh", () => refresh(args.story, args.importNew, root, env));
 }
 
-async function refresh(slug: string, importNew: boolean) {
-  const root = process.cwd(); const paths = storyPaths(root, slug, 1);
+async function refresh(slug: string, importNew: boolean, root: string, env: ReturnType<typeof loadEnvironment>) {
+  const paths = storyPaths(root, slug, 1);
   const raw = await readJsonIfExists<SourceManifest>(paths.sourceManifest); if (!raw) throw new Error(`Story '${slug}' has no imported source manifest`);
   const manifest = sourceManifestSchema.parse(raw); if (!("url" in manifest.origin) || !manifest.remote) throw new Error(`Story '${slug}' does not use a refreshable remote source`);
-  const env = loadEnvironment(); const registry = new SourceProviderRegistry(undefined, createWebHttpClient(root, env));
+  const registry = new SourceProviderRegistry(undefined, createWebHttpClient(root, env));
   const { provider } = await registry.resolve(manifest.origin.url, manifest.type);
   const directoryInspection = await provider.inspect(manifest.origin.url, { refresh: true }); const comparison = compareRemoteDirectory(manifest, directoryInspection);
   process.stdout.write(`${formatRefresh(slug, comparison)}\n`);

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { loadEnvironment } from "../../src/config/env.js";
+import { loadEnvironment, resolveStudioRoot } from "../../src/config/env.js";
 import { loadStory } from "../../src/config/load-config.js";
 import { loadImportedChapters } from "../../src/source/importer.js";
 import { selectChapterRange } from "../../src/batch/range.js";
@@ -9,12 +9,12 @@ import { FfmpegMasteringProcessor } from "../../src/audio/mastering.js";
 import { masterStoredChapter } from "../../src/audio/chapter-audio.js";
 
 async function main() {
-  const args = parse(process.argv.slice(2)); loadEnvironment();
-  await withStoryLock(process.cwd(), args.story, "audio mastering", async () => {
-    const story = await loadStory(storyPaths(process.cwd(), args.story, 1).storyConfig); const imported = await loadImportedChapters(process.cwd(), args.story);
+  const args = parse(process.argv.slice(2)); const root = resolveStudioRoot(loadEnvironment());
+  await withStoryLock(root, args.story, "audio mastering", async () => {
+    const story = await loadStory(storyPaths(root, args.story, 1).storyConfig); const imported = await loadImportedChapters(root, args.story);
     const selected = selectChapterRange(imported.chapters, args.from, args.to); const processor = new FfmpegMasteringProcessor();
     for (let index = 0; index < selected.length; index++) {
-      const item = selected[index]!; const result = await masterStoredChapter({ root: process.cwd(), story, chapter: item.chapter, processor, force: args.force });
+      const item = selected[index]!; const result = await masterStoredChapter({ root, story, chapter: item.chapter, processor, force: args.force });
       process.stdout.write(`[${index + 1}/${selected.length}] Chapter ${item.chapter}: ${result.reused ? "reused" : `mastered (${result.probe.durationSeconds.toFixed(1)}s)`}\n`);
     }
   });
