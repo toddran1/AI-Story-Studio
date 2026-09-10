@@ -8,7 +8,7 @@ type Route = { page: string; story?: string; chapter?: number };
 export function App() {
   const [route, setRoute] = useState<Route>(() => parseRoute(location.pathname)); const [stories, setStories] = useState<StoryCard[]>([]); const [storiesError, setStoriesError] = useState(""); const [job, setJob] = useState<Job>();
   useEffect(() => { const handler = () => setRoute(parseRoute(location.pathname)); addEventListener("popstate", handler); return () => removeEventListener("popstate", handler); }, []);
-  useEffect(() => { setStoriesError(""); api<{ stories: StoryCard[] }>("/stories").then((value) => setStories(value.stories)).catch((error) => { setStories([]); setStoriesError(message(error)); }); }, [route.page]);
+  useEffect(() => { setStoriesError(""); api<{ stories: StoryCard[]; warnings?: string[] }>("/stories").then((value) => { setStories(value.stories); setStoriesError(value.warnings?.join(" ") ?? ""); }).catch((error) => { setStories([]); setStoriesError(message(error)); }); }, [route.page]);
   const navigate = (path: string) => { history.pushState({}, "", path); setRoute(parseRoute(path)); window.scrollTo({ top: 0, behavior: "smooth" }); };
   const active = route.story ? stories.find((story) => story.slug === route.story) : undefined;
   return <div className="studio-shell">

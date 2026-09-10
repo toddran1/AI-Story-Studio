@@ -1,5 +1,6 @@
 export async function api<T>(path: string, options?: RequestInit): Promise<T> {
-  const response = await fetch(`/api${path}`, { ...options, headers: { ...(options?.body instanceof ArrayBuffer ? {} : { "content-type": "application/json" }), ...options?.headers } });
+  const binary = options?.body instanceof ArrayBuffer || (typeof Blob !== "undefined" && options?.body instanceof Blob);
+  const response = await fetch(`/api${path}`, { ...options, headers: { ...(binary ? {} : { "content-type": "application/json" }), ...options?.headers } });
   const value = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(value.error ?? `Request failed (${response.status})`);
   return value as T;

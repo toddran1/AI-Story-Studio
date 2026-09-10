@@ -1,4 +1,5 @@
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -15,6 +16,7 @@ import { SourceProviderRegistry } from "../src/source/registry.js";
 import { StorySourceProvider, sourceManifestSchema } from "../src/source/types.js";
 import { atomicWrite, atomicWriteJson } from "../src/storage/atomic-write.js";
 import { storyPaths } from "../src/storage/paths.js";
+import { exists } from "../src/storage/story-files.js";
 import { fingerprint } from "../src/utils/hash.js";
 import { MockLLM, MockTTS } from "./helpers.js";
 import { AudioMasteringProcessor } from "../src/audio/mastering.js";
@@ -22,7 +24,7 @@ import { AudiobookProcessor } from "../src/audio/audiobook.js";
 import { VideoProcessor } from "../src/video/renderer.js";
 import { VideoExportProcessor } from "../src/video/video-export.js";
 import { ImageProvider } from "../src/artwork/provider.js";
-import { validateLocalRequest } from "../apps/server/api.js";
+import { publicJob, validateLocalRequest } from "../apps/server/api.js";
 
 const webAudio: AudioMasteringProcessor = { version: "web-audio-v1", master: async (_inputs, output) => { await atomicWrite(output, Buffer.from("mastered")); return { durationSeconds: 9, codec: "mp3", container: "mp3" }; } };
 const webBook: AudiobookProcessor = { version: "web-book-v1", assemble: async (_chapters, output, format) => { await atomicWrite(output, Buffer.from("book")); return { durationSeconds: 9, codec: format === "m4b" ? "aac" : "mp3", container: format === "m4b" ? "mp4" : "mp3" }; } };
@@ -48,10 +50,20 @@ describe("web service layer", () => {
     expect(() => validateLocalRequest({ method: "POST", headers: { host: "localhost:3000", origin: "http://localhost:3000", "content-type": "application/json; charset=utf-8" } })).not.toThrow();
   });
 
+  it("removes local filesystem paths from public job payloads", () => {
+    const publicValue = publicJob({ status: "completed", result: { output: "/Users/example/story.mp4", url: "/api/stories/example/video" }, progress: { temporary: "/tmp/render.mp4" }, error: "Failed under /Users/example/stories/example" }, "/Users/example");
+    expect(publicValue).toEqual({ status: "completed", result: { url: "/api/stories/example/video" }, progress: {}, error: "Failed under [project]/stories/example" });
+  });
+
   it("lists stories without exposing environment credentials", async () => {
     const { root } = await storyFixture(); const cards = await listStories(root);
     expect(cards[0]).toMatchObject({ slug: "night-lantern", title: "Night Lantern" });
     expect(JSON.stringify(cards)).not.toMatch(/API_KEY|secret|credential/i);
+  });
+
+  it("keeps healthy library entries when another project is corrupt", async () => {
+    const { root } = await storyFixture(); const broken = storyPaths(root, "broken-story", 1); await atomicWriteJson(broken.storyConfig, { title: "missing required fields" });
+    const warnings: string[] = []; const cards = await listStories(root, warnings); expect(cards.map((item) => item.slug)).toEqual(["night-lantern"]); expect(warnings[0]).toContain("broken-story");
   });
 
   it("loads chapter stages and structured QA", async () => {
@@ -78,6 +90,17 @@ describe("web service layer", () => {
     expect(inspection.chapters.map((item) => item.chapter)).toEqual([2, 10]); await operations.close();
   });
 
+  it("cleans inspection temp data when validation fails during file setup", async () => {
+    const root = await mkdtemp(join(tmpdir(), "story-web-cleanup-")); const operations = new StudioOperations(root, env); const before = new Set((await readdir(tmpdir())).filter((name) => name.startsWith("ai-story-studio-")));
+    await expect(operations.inspectSource({ files: [{ name: "chapter.txt", text: "one" }, { name: "CHAPTER.TXT", text: "two" }] })).rejects.toThrow("Duplicate chapter filename");
+    const leaked = (await readdir(tmpdir())).filter((name) => name.startsWith("ai-story-studio-") && !before.has(name)); expect(leaked).toEqual([]); await operations.close();
+  });
+
+  it("rolls back a newly created project when its inspection cannot be imported", async () => {
+    const root = await mkdtemp(join(tmpdir(), "story-web-transaction-")); const operations = new StudioOperations(root, env);
+    await expect(operations.createStoryWithInspection({ ...metadataFor("atomic-story") }, randomUUID())).rejects.toThrow("Inspection expired"); expect(await exists(storyPaths(root, "atomic-story", 1).story)).toBe(false); await operations.close();
+  });
+
   it("starts a batch job and exposes terminal status", async () => {
     const root = await mkdtemp(join(tmpdir(), "story-web-job-")); const jobs = new JobManager();
     const operations = new StudioOperations(root, env, jobs, { pipeline: { run: async ({ chapter }) => ({ chapter, quality: { status: "pass", score: 1, issueCategories: [] } }) } });
@@ -99,7 +122,7 @@ describe("web service layer", () => {
     await atomicWriteJson(paths.chapterMeta, chapterSchema.parse({ chapter: 1, originalTitle: "Opening", source: { type: manifest.chapters[0]!.ref.sourceType, sourceId: manifest.chapters[0]!.ref.sourceId, fingerprint: manifest.chapters[0]!.fingerprint, metadata: manifest.chapters[0]!.ref.metadata }, sourceLanguage: imported.story.sourceLanguage, outputLanguage: imported.story.outputLanguage, counts: { originalCharacters: 10, englishWords: 2, narrationWords: 2 }, createdAt: now, updatedAt: now,
       stages: { ingestion: complete, translation: complete, narration: complete, qa: complete, storyBible: complete, tts: complete, audioMastering: pending() } })); await atomicWrite(paths.narration, "The chapter opens. The lantern burns brightly."); await atomicWrite(paths.audioRaw, Buffer.from("raw"));
     const mastering = await waitForJob(jobs, operations.startAudio(imported.story.slug, { from: 1, to: 1 }).id); expect(mastering.status).toBe("completed"); expect((await getAudioDashboard(root, imported.story.slug)).counts.mastered).toBe(1);
-    const exportJob = await waitForJob(jobs, operations.startAudiobook(imported.story.slug, { from: 1, to: 1, format: "m4b" }).id); expect(exportJob.status).toBe("completed"); const dashboard = await getAudioDashboard(root, imported.story.slug); expect(dashboard.exports[0]).toMatchObject({ format: "m4b", from: 1, to: 1, downloadUrl: "/api/stories/audio-story/exports/1-1.m4b" });
+    const exportJob = await waitForJob(jobs, operations.startAudiobook(imported.story.slug, { from: 1, to: 1, format: "m4b" }).id); expect(exportJob.status).toBe("completed"); const dashboard = await getAudioDashboard(root, imported.story.slug); expect(dashboard.exports[0]).toMatchObject({ format: "m4b", from: 1, to: 1, downloadUrl: "/api/stories/audio-story/exports/1-1.m4b" }); expect(dashboard.exports[0]).not.toHaveProperty("output"); expect(JSON.stringify(dashboard)).not.toContain(root);
     expect((await waitForJob(jobs, operations.startSubtitles(imported.story.slug, { from: 1, to: 1 }).id)).status).toBe("completed"); expect((await waitForJob(jobs, operations.startVideo(imported.story.slug, { from: 1, to: 1 }).id)).status).toBe("completed"); expect((await waitForJob(jobs, operations.startVideoExport(imported.story.slug, { from: 1, to: 1 }).id)).status).toBe("completed"); const videoDashboard = await getVideoDashboard(root, imported.story.slug); expect(videoDashboard.counts).toMatchObject({ subtitles: 1, videos: 1 }); expect(videoDashboard.exports[0]?.downloadUrl).toBe("/api/stories/audio-story/video-exports/1-1.mp4");
     expect((await waitForJob(jobs, operations.startScenes(imported.story.slug, { from: 1, to: 1 }).id)).status).toBe("completed"); const estimate = await waitForJob(jobs, operations.startArtwork(imported.story.slug, { from: 1, to: 1, dryRun: true }).id); expect(estimate.result).toMatchObject({ dryRun: true, imageCountEstimate: 1 }); expect((await waitForJob(jobs, operations.startArtwork(imported.story.slug, { from: 1, to: 1 }).id)).status).toBe("completed"); const scenes = await getScenesDashboard(root, imported.story.slug, 1); expect(scenes.manifest?.scenes[0]).toMatchObject({ summary: "The lantern wakes.", imageUrl: "/api/stories/audio-story/chapters/1/scenes/scene-001.png" });
     await operations.close();
@@ -175,3 +198,5 @@ describe("web service layer", () => {
 function waitForJob(jobs: JobManager, id: string): Promise<Job> {
   return new Promise((resolve, reject) => { const timeout = setTimeout(() => reject(new Error("Job timed out")), 3000); const unsubscribe = jobs.subscribe(id, (job) => { if (["completed", "failed", "paused"].includes(job.status)) { clearTimeout(timeout); unsubscribe?.(); resolve(job); } }); });
 }
+
+function metadataFor(slug: string) { return { slug, title: "Atomic Story", description: "", tags: [], notes: "", sourceLanguage: "zh-CN", outputLanguage: "en-US" }; }

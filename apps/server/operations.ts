@@ -44,8 +44,8 @@ import { productionForceSchema, productionOutputSchema } from "../../src/product
 import { refreshProductionRange } from "../../src/production/refresh.js";
 import { TTSProvider } from "../../src/tts/provider.js";
 import { addManualBibleEntry, bibleCategorySchema, chapterTextEditSchema, deleteBibleEntry, saveChapterTextEdit, saveVoicePreview, updateManualBibleEntry, voicePreviewSchema } from "../../src/studio/workflow.js";
-import { getStoryBible } from "./catalog.js";
-import { buildStoryBackup, cleanupKindSchema, cleanupStory, createBlankStory, deleteStory, duplicateStory, getStorageUsage, loadGlobalSettings, readActivity, recordActivity, restoreStoryBackup, saveCover, saveGlobalSettings, systemStatus, updateStoryMetadata } from "../../src/studio/projects.js";
+import { getStoryBible, invalidateCatalogCache } from "./catalog.js";
+import { buildStoryBackup, cleanupKindSchema, cleanupStory, createBlankStory, deleteStory, duplicateStory, getStorageUsage, loadGlobalSettings, readActivity, recordActivity, restoreStoryBackupFile, saveCover, saveGlobalSettings, systemStatus, updateStoryMetadata } from "../../src/studio/projects.js";
 
 const slugSchema = z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/);
 const batchInputSchema = z.object({ from: z.number().int().positive().optional(), to: z.number().int().positive().optional(), force: z.enum(["translation", "narration", "qa", "story-bible", "tts", "audio", "all"]).optional() }).strict();
@@ -82,18 +82,18 @@ export class StudioOperations {
   async inspectSource(input: { url?: string; file?: Uint8Array; filename?: string; files?: Array<{ name: string; text: string }>; type?: SourceType; from?: number; to?: number; chapter?: number; splitChapters?: boolean; allowGaps?: boolean }) {
     this.expireInspections(); let source: string; let temporaryDirectory: string | undefined;
     const type = input.type === undefined ? undefined : sourceTypeSchema.parse(input.type);
-    if (input.url) { const url = new URL(input.url); if (url.protocol !== "https:") throw new Error("Only HTTPS source URLs are allowed"); source = url.toString(); }
-    else if (input.files) {
-      if (!input.files.length || input.files.length > 2_000) throw new Error("Select between 1 and 2,000 TXT chapter files");
-      temporaryDirectory = join(tmpdir(), `ai-story-studio-${randomUUID()}`); await mkdir(temporaryDirectory); let total = 0; const names = new Set<string>();
-      for (const file of input.files) { const safeName = basename(file.name); if (safeName !== file.name || !safeName.toLowerCase().endsWith(".txt")) throw new Error("Chapter folders may contain only top-level TXT files"); if (names.has(safeName.toLowerCase())) throw new Error(`Duplicate chapter filename: ${safeName}`); names.add(safeName.toLowerCase()); total += Buffer.byteLength(file.text); if (total > 50 * 1024 * 1024) throw new Error("Chapter folder exceeds the 50 MB inspection limit"); await writeFile(join(temporaryDirectory, safeName), file.text, "utf8"); }
-      source = temporaryDirectory;
-    } else {
-      if (!input.file?.length || !input.filename) throw new Error("Select a TXT, EPUB, or DOCX file");
-      const safeName = basename(input.filename); if (!/\.(txt|epub|docx)$/i.test(safeName)) throw new Error("Only TXT, EPUB, and DOCX files are supported");
-      temporaryDirectory = join(tmpdir(), `ai-story-studio-${randomUUID()}`); await mkdir(temporaryDirectory); source = join(temporaryDirectory, safeName); await writeFile(source, input.file);
-    }
     try {
+      if (input.url) { const url = new URL(input.url); if (url.protocol !== "https:") throw new Error("Only HTTPS source URLs are allowed"); source = url.toString(); }
+      else if (input.files) {
+        if (!input.files.length || input.files.length > 2_000) throw new Error("Select between 1 and 2,000 TXT chapter files");
+        temporaryDirectory = join(tmpdir(), `ai-story-studio-${randomUUID()}`); await mkdir(temporaryDirectory); let total = 0; const names = new Set<string>();
+        for (const file of input.files) { const safeName = basename(file.name); if (safeName !== file.name || !safeName.toLowerCase().endsWith(".txt")) throw new Error("Chapter folders may contain only top-level TXT files"); if (names.has(safeName.toLowerCase())) throw new Error(`Duplicate chapter filename: ${safeName}`); names.add(safeName.toLowerCase()); total += Buffer.byteLength(file.text); if (total > 50 * 1024 * 1024) throw new Error("Chapter folder exceeds the 50 MB inspection limit"); await writeFile(join(temporaryDirectory, safeName), file.text, "utf8"); }
+        source = temporaryDirectory;
+      } else {
+        if (!input.file?.length || !input.filename) throw new Error("Select a TXT, EPUB, or DOCX file");
+        const safeName = basename(input.filename); if (safeName !== input.filename || !/\.(txt|epub|docx)$/i.test(safeName)) throw new Error("Only top-level TXT, EPUB, and DOCX files are supported");
+        temporaryDirectory = join(tmpdir(), `ai-story-studio-${randomUUID()}`); await mkdir(temporaryDirectory); source = join(temporaryDirectory, safeName); await writeFile(source, input.file);
+      }
       const { provider, semanticType } = await this.registry.resolve(source, type); const remote = semanticType === "fanqie" || semanticType === "web";
       if (remote && ((input.from === undefined) !== (input.to === undefined))) throw new Error("Remote chapter ranges require both from and to");
       const inspection = await provider.inspect(source, { semanticType, from: input.from, to: input.to, chapter: input.chapter, splitChapters: input.splitChapters, allowGaps: input.allowGaps });
@@ -120,22 +120,27 @@ export class StudioOperations {
       });
     try { await this.discardInspection(inspectionId); }
     catch (error) { logger.warn({ event: "web.inspection.cleanup_failed", inspectionId, error: error instanceof Error ? error.message : String(error) }); }
-    await recordActivity(this.root, slug, "source.imported", `Imported ${result.added.length} new and updated ${result.modified.length} chapters`); return result;
+    await recordActivity(this.root, slug, "source.imported", `Imported ${result.added.length} new and updated ${result.modified.length} chapters`); invalidateCatalogCache(this.root, slug); return result;
   }
 
   getGlobalSettings() { return loadGlobalSettings(this.root, this.env); }
   updateGlobalSettings(raw: unknown) { return saveGlobalSettings(this.root, raw); }
   getSystemStatus() { return systemStatus(this.env); }
-  createStory(raw: unknown) { return createBlankStory(this.root, this.env, raw); }
-  updateMetadata(slug: string, raw: unknown) { return updateStoryMetadata(this.root, slug, raw); }
-  updateCover(slug: string, filename: string, bytes: Uint8Array) { return saveCover(this.root, slug, filename, bytes); }
-  duplicateProject(slug: string, raw: unknown) { const input = z.object({ slug: slugSchema, mode: z.enum(["settings", "full"]) }).strict().parse(raw); return duplicateStory(this.root, slug, input.slug, input.mode); }
-  deleteProject(slug: string, raw: unknown) { const input = z.object({ confirmation: z.string() }).strict().parse(raw); return deleteStory(this.root, slug, input.confirmation); }
+  async createStory(raw: unknown) { const story = await createBlankStory(this.root, this.env, raw); invalidateCatalogCache(this.root, story.slug); return story; }
+  async createStoryWithInspection(raw: unknown, inspectionId: string) {
+    const created = await createBlankStory(this.root, this.env, raw);
+    try { const story = (await this.importInspection(created.slug, inspectionId)).story; invalidateCatalogCache(this.root, created.slug); return story; }
+    catch (error) { await rm(storyPaths(this.root, created.slug, 1).story, { recursive: true, force: true }); invalidateCatalogCache(this.root, created.slug); throw error; }
+  }
+  async updateMetadata(slug: string, raw: unknown) { const story = await updateStoryMetadata(this.root, slug, raw); invalidateCatalogCache(this.root, slug); return story; }
+  async updateCover(slug: string, filename: string, bytes: Uint8Array) { const result = await saveCover(this.root, slug, filename, bytes); invalidateCatalogCache(this.root, slug); return result; }
+  async duplicateProject(slug: string, raw: unknown) { const input = z.object({ slug: slugSchema, mode: z.enum(["settings", "full"]) }).strict().parse(raw); const result = await duplicateStory(this.root, slug, input.slug, input.mode); invalidateCatalogCache(this.root, result.slug); return result; }
+  async deleteProject(slug: string, raw: unknown) { const input = z.object({ confirmation: z.string() }).strict().parse(raw); const result = await deleteStory(this.root, slug, input.confirmation); invalidateCatalogCache(this.root, slug); return result; }
   createBackup(slug: string, raw: unknown) { const input = z.object({ includeMedia: z.boolean().default(false) }).strict().parse(raw); return buildStoryBackup(this.root, slug, input.includeMedia); }
-  restoreBackup(bytes: Uint8Array) { return restoreStoryBackup(this.root, bytes); }
+  restoreBackup(path: string) { return restoreStoryBackupFile(this.root, path); }
   storageUsage(slug: string) { return getStorageUsage(this.root, slug); }
   recentActivity(slug: string, limit?: number) { return readActivity(this.root, slug, limit); }
-  cleanup(slug: string, raw: unknown) { const input = z.object({ kind: cleanupKindSchema }).strict().parse(raw); return cleanupStory(this.root, slug, input.kind); }
+  async cleanup(slug: string, raw: unknown) { const input = z.object({ kind: cleanupKindSchema }).strict().parse(raw); const result = await cleanupStory(this.root, slug, input.kind); invalidateCatalogCache(this.root, slug); return result; }
 
   startBatch(slug: string, raw: unknown) {
     slugSchema.parse(slug); const input = batchInputSchema.parse(raw);

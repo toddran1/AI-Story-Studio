@@ -1,6 +1,7 @@
+import { randomUUID } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { stat } from "node:fs/promises";
-import { join } from "node:path";
+import { mkdir, open, rm, stat } from "node:fs/promises";
+import { isAbsolute, join } from "node:path";
 import { IncomingMessage, ServerResponse } from "node:http";
 import { z } from "zod";
 import { getAudioDashboard, getChapter, getChapterPage, getOutputsLibrary, getQaDashboard, getScenesDashboard, getStoryBibleView, getStoryDashboard, getStoryOverview, getVideoDashboard, listStories, updateStorySettings, chapterFilterSchema } from "./catalog.js";
@@ -12,7 +13,6 @@ import { readJsonIfExists } from "../../src/storage/story-files.js";
 import { BatchValidationError, ConfigurationError, ProviderError, StorageError } from "../../src/pipeline/errors.js";
 import { WebHttpError } from "../../src/source/web/http-client.js";
 import { logger } from "../../src/utils/logger.js";
-import { loadLatestProduction } from "../../src/production/manifest.js";
 import { backupPath } from "../../src/studio/projects.js";
 import { exists } from "../../src/storage/story-files.js";
 
@@ -32,17 +32,18 @@ export function createApiHandler(operations: StudioOperations) {
     try {
       validateLocalRequest(request);
       if (request.method === "GET" && url.pathname === "/api/health") return send(response, 200, { status: "ready", binding: "localhost", credentials: { openai: "server-only", gemini: "server-only", fish: "server-only" } });
-      if (request.method === "GET" && url.pathname === "/api/stories") return send(response, 200, { stories: await listStories(operations.root) });
+      if (request.method === "GET" && url.pathname === "/api/stories") { const warnings: string[] = []; const stories = await listStories(operations.root, warnings); return send(response, 200, { stories, warnings }); }
       if (request.method === "POST" && url.pathname === "/api/stories") return send(response, 201, { story: await operations.createStory(await jsonBody(request)) });
+      if (request.method === "POST" && url.pathname === "/api/stories/from-inspection") { const input = z.object({ inspectionId: z.string().uuid(), story: z.unknown() }).strict().parse(await jsonBody(request)); return send(response, 201, { story: await operations.createStoryWithInspection(input.story, input.inspectionId) }); }
       if (request.method === "GET" && url.pathname === "/api/settings") return send(response, 200, { settings: await operations.getGlobalSettings(), system: await operations.getSystemStatus() });
       if (request.method === "PUT" && url.pathname === "/api/settings") return send(response, 200, { settings: await operations.updateGlobalSettings(await jsonBody(request)) });
-      if (request.method === "POST" && url.pathname === "/api/backups/restore") return send(response, 201, await operations.restoreBackup(await body(request, 100 * 1024 * 1024)));
+      if (request.method === "POST" && url.pathname === "/api/backups/restore") { const upload = await receiveUpload(request, operations.root, 4 * 1024 * 1024 * 1024); try { return send(response, 201, await operations.restoreBackup(upload)); } finally { await rm(upload, { force: true }); } }
       const backupDownload = /^\/api\/backups\/([a-f0-9-]{36})\.zip$/.exec(url.pathname);
       if (backupDownload && request.method === "GET") return sendFile(request, response, backupPath(operations.root, backupDownload[1]!), "application/zip");
-      if (request.method === "GET" && url.pathname === "/api/jobs") return send(response, 200, { jobs: operations.jobs.list() });
+      if (request.method === "GET" && url.pathname === "/api/jobs") return send(response, 200, { jobs: operations.jobs.list().map((job) => publicJob(job, operations.root)) });
 
       const jobMatch = /^\/api\/jobs\/([a-f0-9-]+)$/.exec(url.pathname);
-      if (jobMatch && request.method === "GET") { const job = operations.jobs.get(jobMatch[1]!); if (!job) return send(response, 404, { error: "Job not found" }); return send(response, 200, job); }
+      if (jobMatch && request.method === "GET") { const job = operations.jobs.get(jobMatch[1]!); if (!job) return send(response, 404, { error: "Job not found" }); return send(response, 200, publicJob(job, operations.root)); }
       const pauseMatch = /^\/api\/jobs\/([a-f0-9-]+)\/pause$/.exec(url.pathname);
       if (pauseMatch && request.method === "POST") return operations.jobs.pause(pauseMatch[1]!) ? send(response, 202, { status: "pause_requested" }) : send(response, 409, { error: "Job is not running or cannot be paused" });
       const eventMatch = /^\/api\/jobs\/([a-f0-9-]+)\/events$/.exec(url.pathname);
@@ -53,7 +54,7 @@ export function createApiHandler(operations: StudioOperations) {
         const heartbeat = setInterval(() => { if (!closed) response.write(": heartbeat\n\n"); }, 15_000); heartbeat.unref();
         const cleanup = () => { if (closed) return; closed = true; clearInterval(heartbeat); unsubscribe(); };
         unsubscribe = operations.jobs.subscribe(eventMatch[1]!, (job) => {
-          if (closed || response.destroyed) return; response.write(`event: job\ndata: ${JSON.stringify(job)}\n\n`);
+          if (closed || response.destroyed) return; response.write(`event: job\ndata: ${JSON.stringify(publicJob(job, operations.root))}\n\n`);
           if (["completed", "failed", "paused"].includes(job.status)) { cleanup(); response.end(); }
         }) ?? (() => undefined);
         response.on("close", cleanup); return true;
@@ -111,7 +112,7 @@ export function createApiHandler(operations: StudioOperations) {
       const scenesDashboardMatch = /^\/api\/stories\/([a-z0-9-]+)\/scenes$/.exec(url.pathname);
       if (scenesDashboardMatch && request.method === "GET") return send(response, 200, await getScenesDashboard(operations.root, scenesDashboardMatch[1]!, optionalInteger(url.searchParams.get("chapter"))));
       const productionMatch = /^\/api\/stories\/([a-z0-9-]+)\/production$/.exec(url.pathname);
-      if (productionMatch && request.method === "GET") return send(response, 200, { latest: await loadLatestProduction(operations.root, productionMatch[1]!) });
+      if (productionMatch && request.method === "GET") return send(response, 200, { latest: (await getStoryDashboard(operations.root, productionMatch[1]!)).latestProduction });
       const productionPlanMatch = /^\/api\/stories\/([a-z0-9-]+)\/production\/plan$/.exec(url.pathname);
       if (productionPlanMatch && request.method === "POST") return send(response, 200, await operations.productionPlan(productionPlanMatch[1]!, await jsonBody(request)));
       const scenesEditMatch = /^\/api\/stories\/([a-z0-9-]+)\/chapters\/(\d+)\/scenes$/.exec(url.pathname);
@@ -241,3 +242,17 @@ function statusFor(error: unknown): number {
   return 500;
 }
 function isTimeout(error: unknown) { for (let value: unknown = error, depth = 0; value && depth < 8; depth++, value = typeof value === "object" ? (value as { cause?: unknown }).cause : undefined) if (value instanceof Error && /timeout|timed out/i.test(`${value.name} ${value.message}`)) return true; return false; }
+
+async function receiveUpload(request: IncomingMessage, root: string, limit: number) {
+  const directory = join(root, ".ai-story-studio", "restore-uploads"); const path = join(directory, `${randomUUID()}.zip`); await mkdir(directory, { recursive: true }); const file = await open(path, "wx"); let size = 0; let complete = false;
+  try { for await (const chunk of request) { const data = Buffer.from(chunk); size += data.length; if (size > limit) throw new HttpError("Backup upload exceeds the 4 GB limit", 413); await file.write(data); } if (!size) throw new HttpError("Backup upload is empty", 400); complete = true; return path; }
+  finally { await file.close(); if (!complete) await rm(path, { force: true }); }
+}
+
+export function publicJob<T>(job: T, root: string): T { return redactLocalPaths(job, root) as T; }
+function redactLocalPaths(value: unknown, root: string): unknown {
+  if (typeof value === "string") { if (value.startsWith("/api/")) return value; if (isAbsolute(value)) return undefined; return value.includes(root) ? value.replaceAll(root, "[project]") : value; }
+  if (Array.isArray(value)) return value.map((item) => redactLocalPaths(item, root)).filter((item) => item !== undefined);
+  if (value && typeof value === "object") { const result: Record<string, unknown> = {}; for (const [key, item] of Object.entries(value)) { const safe = redactLocalPaths(item, root); if (safe !== undefined) result[key] = safe; } return result; }
+  return value;
+}
