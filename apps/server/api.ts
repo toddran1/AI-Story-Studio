@@ -15,6 +15,9 @@ import { WebHttpError } from "../../src/source/web/http-client.js";
 import { logger } from "../../src/utils/logger.js";
 import { backupPath } from "../../src/studio/projects.js";
 import { exists } from "../../src/storage/story-files.js";
+import { durableJobStatusSchema } from "../../src/queue/types.js";
+import { QueueConflictError, QueueNotFoundError } from "../../src/queue/repository.js";
+import { productionForceSchema } from "../../src/production/types.js";
 
 const MAX_BODY_BYTES = 50_000_000;
 const MAX_JSON_BYTES = 1_000_000;
@@ -41,6 +44,17 @@ export function createApiHandler(operations: StudioOperations) {
       const backupDownload = /^\/api\/backups\/([a-f0-9-]{36})\.zip$/.exec(url.pathname);
       if (backupDownload && request.method === "GET") return sendFile(request, response, backupPath(operations.root, backupDownload[1]!), "application/zip");
       if (request.method === "GET" && url.pathname === "/api/jobs") return send(response, 200, { jobs: operations.jobs.list().map((job) => publicJob(job, operations.root)) });
+      if (request.method === "GET" && url.pathname === "/api/queue/summary") return send(response, 200, await requireQueue(operations).repository.summary());
+      if (request.method === "GET" && url.pathname === "/api/queue/jobs") return send(response, 200, await requireQueue(operations).repository.listJobs({ page: integerParam(url.searchParams.get("page"),1), pageSize: boundedPageSize(url.searchParams.get("pageSize")), status: url.searchParams.has("status") ? durableJobStatusSchema.parse(url.searchParams.get("status")) : undefined, story: optionalString(url.searchParams.get("story")) }));
+      if (request.method === "GET" && url.pathname === "/api/queue/review") return send(response, 200, await requireQueue(operations).repository.listNeedsReview({ page: integerParam(url.searchParams.get("page"),1), pageSize: boundedPageSize(url.searchParams.get("pageSize")) }));
+      const queueJobMatch = /^\/api\/queue\/jobs\/([a-f0-9-]+)$/.exec(url.pathname);
+      if (queueJobMatch && request.method === "GET") { const repository=requireQueue(operations).repository;const job=await repository.getJob(queueJobMatch[1]!);if(!job)return send(response,404,{error:"Queue job not found"});const page=integerParam(url.searchParams.get("page"),1);const pageSize=boundedPageSize(url.searchParams.get("pageSize"));return send(response,200,{job,workItems:await repository.listWorkItems(job.id,{page,pageSize}),events:await repository.listRecentEvents(job.id,100)}); }
+      const queueControlMatch = /^\/api\/queue\/jobs\/([a-f0-9-]+)\/(pause|resume|cancel)$/.exec(url.pathname);
+      if(queueControlMatch&&request.method==="POST"){const repository=requireQueue(operations).repository;const action=queueControlMatch[2];const job=action==="pause"?await repository.requestPause(queueControlMatch[1]!):action==="resume"?await repository.resume(queueControlMatch[1]!):await repository.requestCancel(queueControlMatch[1]!);return send(response,202,{job});}
+      const queueItemMatch=/^\/api\/queue\/items\/(\d+)\/(retry|resolve|skip)$/.exec(url.pathname);
+      if(queueItemMatch&&request.method==="POST"){const repository=requireQueue(operations).repository;const action=queueItemMatch[2];const input=action==="retry"?z.object({stage:productionForceSchema.optional()}).strict().parse(await jsonBody(request)):{};if(action==="retry")await repository.retryItem(queueItemMatch[1]!,input.stage);else await repository.resolveItem(queueItemMatch[1]!,action==="skip");return send(response,202,{status:action});}
+      const queueEventMatch=/^\/api\/queue\/jobs\/([a-f0-9-]+)\/events$/.exec(url.pathname);
+      if(queueEventMatch&&request.method==="GET"){const repository=requireQueue(operations).repository;const initial=await repository.getJob(queueEventMatch[1]!);if(!initial)return send(response,404,{error:"Queue job not found"});response.writeHead(200,{"content-type":"text/event-stream","cache-control":"no-cache",connection:"keep-alive","x-accel-buffering":"no"});let closed=false;let last=Number(request.headers["last-event-id"]??0);const push=async()=>{if(closed||response.destroyed)return;for(const item of await repository.listEvents(initial.id,last,100)){last=Number(item.id);response.write(`id: ${item.id}\nevent: queue\ndata: ${JSON.stringify(item)}\n\n`);}const job=await repository.getJob(initial.id);if(job)response.write(`event: job\ndata: ${JSON.stringify(job)}\n\n`);};await push();const timer=setInterval(()=>void push().catch(()=>undefined),1000);timer.unref();const cleanup=()=>{if(closed)return;closed=true;clearInterval(timer);};response.on("close",cleanup);return true;}
 
       const jobMatch = /^\/api\/jobs\/([a-f0-9-]+)$/.exec(url.pathname);
       if (jobMatch && request.method === "GET") { const job = operations.jobs.get(jobMatch[1]!); if (!job) return send(response, 404, { error: "Job not found" }); return send(response, 200, publicJob(job, operations.root)); }
@@ -165,7 +179,7 @@ export function createApiHandler(operations: StudioOperations) {
       const artworkJobMatch = /^\/api\/stories\/([a-z0-9-]+)\/jobs\/artwork$/.exec(url.pathname);
       if (artworkJobMatch && request.method === "POST") return send(response, 202, operations.startArtwork(artworkJobMatch[1]!, await jsonBody(request)));
       const productionJobMatch = /^\/api\/stories\/([a-z0-9-]+)\/jobs\/production$/.exec(url.pathname);
-      if (productionJobMatch && request.method === "POST") return send(response, 202, operations.startProduction(productionJobMatch[1]!, await jsonBody(request)));
+      if (productionJobMatch && request.method === "POST") return send(response, 202, await operations.submitProduction(productionJobMatch[1]!, await jsonBody(request)));
       const voicePreviewJobMatch = /^\/api\/stories\/([a-z0-9-]+)\/jobs\/voice-preview$/.exec(url.pathname);
       if (voicePreviewJobMatch && request.method === "POST") return send(response, 202, operations.startVoicePreview(voicePreviewJobMatch[1]!, await jsonBody(request)));
       const voicePreviewMatch = /^\/api\/stories\/([a-z0-9-]+)\/voice-previews\/([a-f0-9-]{36})\.mp3$/.exec(url.pathname);
@@ -218,6 +232,8 @@ async function jsonBody(request: IncomingMessage, limit = MAX_JSON_BYTES): Promi
 function integerParam(value: string | null, fallback: number) { if (value === null) return fallback; const number = Number(value); if (!Number.isInteger(number) || number < 1) throw new Error("Pagination values must be positive integers"); return number; }
 function optionalInteger(value: string | null) { if (value === null) return undefined; return integerParam(value, 1); }
 function optionalString(value: string | null) { return value?.trim() || undefined; }
+function boundedPageSize(value:string|null){const size=integerParam(value,50);if(size>200)throw new HttpError("Page size cannot exceed 200",400);return size;}
+function requireQueue(operations:StudioOperations){if(!operations.queue)throw new HttpError("Durable production queue is not configured. Set DATABASE_URL, run `npm run db:migrate`, and restart the studio.",503);return operations.queue;}
 
 function parseRange(header: string | undefined, size: number): { start: number; end: number } | undefined {
   if (!header) return undefined; const match = /^bytes=(\d*)-(\d*)$/.exec(header);
@@ -232,6 +248,8 @@ function statusFor(error: unknown): number {
   if (error instanceof HttpError) return error.status;
   if (error instanceof z.ZodError) return 400;
   if (error instanceof JobConflictError || /locked by PID|already has active job/.test(String(error))) return 409;
+  if (error instanceof QueueConflictError) return 409;
+  if (error instanceof QueueNotFoundError) return 404;
   if (/already exists/.test(String(error))) return 409;
   if (/Confirmation|Unsafe backup|invalid ZIP|Backup must|Cover must|Select between|Select a |Chapter folder|Only HTTPS|exceeds the .* limit|Duplicate chapter/.test(String(error))) return 400;
   if (/not found|does not exist/.test(String(error))) return 404;

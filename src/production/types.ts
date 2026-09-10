@@ -33,7 +33,7 @@ export type ProductionManifest = z.infer<typeof productionManifestSchema>;
 export type ProductionOperation = z.infer<typeof operationSchema>;
 
 export type ProductionPlan = {
-  story: string; from: number; to: number; chapters: number[]; outputs: ProductionOutput[]; artwork: boolean; stages: ProductionStage[];
+  story: string; from: number; to: number; chapters: number[]; requiredChapters: number[]; chapterRequirements: Record<string, ProductionStage[]>; outputs: ProductionOutput[]; artwork: boolean; stages: ProductionStage[];
   counts: Record<string, { required: number; reusable: number }>; estimates: { llmOperations: number; ttsOperations: number; imageOperations: number; imagesPendingPlanning: number };
   finalOutputs: string[];
 };

@@ -32,26 +32,32 @@ Milestone 9 adds structured scene planning, reviewable still-art generation, cha
 
 Milestone 10 adds one dependency-aware production orchestrator with resumable manifests, bounded QA repair, cost-safe planning, optional artwork, and final audiobook/video assembly.
 
+Milestone 13 adds a Postgres-backed production queue with chronological chapter claims, worker leases, durable retries and provider cooldowns, restart reconciliation against filesystem artifacts, persistent controls, and paginated queue/review workspaces.
+
 ## Requirements
 
 - Node.js 22 or newer (an active LTS release is recommended)
 - npm
 - FFmpeg and ffprobe (available on `PATH`, or configured with `FFMPEG_PATH` and `FFPROBE_PATH`)
+- Postgres 15 or newer for durable web production jobs (the synchronous CLI remains available without Postgres)
 - OpenAI, Gemini, and Fish Audio API credentials
 - A Fish Audio voice/reference ID is recommended for consistent voice output
 
-Postgres is the intended durable store for later multi-job milestones. Milestone 1 deliberately uses the requested filesystem/JSON persistence so the single-chapter workflow remains local and easy to inspect; storage access is isolated so a database implementation can be introduced later.
+Postgres coordinates durable queue state only. Filesystem manifests and fingerprints remain authoritative for generated content.
 
 ## Setup
 
 ```sh
 npm install
 cp .env.example .env
+docker compose up -d postgres
+npm run db:migrate
 ```
 
 Fill in `.env`:
 
 ```dotenv
+DATABASE_URL=postgresql://ai_story_studio:ai_story_studio@127.0.0.1:5433/ai_story_studio
 OPENAI_API_KEY=
 OPENAI_DEFAULT_MODEL=gpt-5.6-terra
 GEMINI_API_KEY=
@@ -67,6 +73,31 @@ WEB_MAX_RESPONSE_BYTES=5000000
 WEB_MAX_RETRIES=2
 WEB_CACHE_DIR=.cache/ai-story-studio/web
 ```
+
+## Durable production queue
+
+Milestone 13 uses Postgres only for operational coordination. Chapter files, manifests, fingerprints, Story Bible data, and finished media remain authoritative on disk. The included Compose service binds Postgres to localhost port `5433`; change `DATABASE_URL` if you use another local Postgres instance.
+
+Run migrations explicitly after starting or upgrading Postgres:
+
+```sh
+docker compose up -d postgres
+npm run db:migrate
+```
+
+`npm run web` starts one conservative production worker alongside the studio when `DATABASE_URL` is set. It claims one chapter at a time in chronological order, persists leases and bounded retries, and resumes expired work after a crash. Run a worker separately when desired:
+
+```sh
+npm run story:worker
+```
+
+Submit without changing the synchronous `story:produce` behavior:
+
+```sh
+npm run story:queue -- --story undead-disaster --from 1 --to 1600 --profile audiobook
+```
+
+The browser’s **Production queue** and **Needs review** screens read canonical status from Postgres with paginated chapter lists. Pause and cancel finish the current safe chapter; already-generated artifacts are never deleted. Concise events are retained for 90 days by default. Tune polling, leases, maximum durable attempts, provider spacing, and retention with the `QUEUE_*` and `PROVIDER_MIN_SPACING_MS` values in `.env.example`.
 
 Model IDs are configuration. The defaults reflect official model identifiers available when this milestone was implemented (September 2026); change them without touching source code if account availability or model recommendations differ.
 

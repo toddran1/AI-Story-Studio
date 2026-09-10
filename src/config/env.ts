@@ -4,6 +4,7 @@ import { ConfigurationError } from "../pipeline/errors.js";
 
 const optionalSecret = z.string().trim().min(1).optional().or(z.literal("").transform(() => undefined));
 const envSchema = z.object({
+  DATABASE_URL: optionalSecret,
   OPENAI_API_KEY: optionalSecret,
   OPENAI_DEFAULT_MODEL: z.string().default("gpt-5.6-terra"),
   GEMINI_API_KEY: optionalSecret,
@@ -24,6 +25,11 @@ const envSchema = z.object({
   WEB_MAX_RETRIES: z.coerce.number().int().min(0).max(10).default(2),
   WEB_CACHE_DIR: z.string().trim().transform((value) => value || undefined).optional().default(".cache/ai-story-studio/web"),
   WEB_PORT: z.coerce.number().int().min(1).max(65_535).default(3000),
+  QUEUE_POLL_MS: z.coerce.number().int().min(250).max(60_000).default(1000),
+  QUEUE_LEASE_MS: z.coerce.number().int().min(30_000).max(3_600_000).default(300_000),
+  QUEUE_MAX_ATTEMPTS: z.coerce.number().int().min(1).max(20).default(5),
+  QUEUE_EVENT_RETENTION_DAYS: z.coerce.number().int().min(1).max(3650).default(90),
+  PROVIDER_MIN_SPACING_MS: z.coerce.number().int().min(0).max(60_000).default(0),
 });
 
 export type Environment = z.infer<typeof envSchema>;

@@ -12,6 +12,8 @@ import "./audio.css";
 import "./video.css";
 import "./scenes.css";
 import "./milestone12.css";
+import "./queue.css";
+import "./queue-extras.css";
 import { App } from "./App.js";
 
 createRoot(document.getElementById("root")!).render(<React.StrictMode><App /></React.StrictMode>);

@@ -27,7 +27,7 @@ export type ProductionDependencies = {
   pipeline: Processor; loadChapters: () => Promise<DiscoveredChapter[]>; refresh?: (from: number, to: number) => Promise<unknown>;
   scenePlanner?: LLMProvider; image?: ImageProvider; video: VideoProcessor; videoExport: VideoExportProcessor; audiobook: AudiobookProcessor;
 };
-export type ProductionRequest = { root: string; story: Story; from: number; to: number; profile?: string; outputs?: ProductionOutput[]; artwork?: boolean; repairQa?: boolean; refresh?: boolean; dryRun?: boolean; force?: ProductionForce; audiobookFormat?: "mp3" | "m4b"; resume?: boolean; pause?: { readonly isRequested: boolean }; onProgress?: (event: Record<string, unknown>) => void };
+export type ProductionRequest = { root: string; story: Story; from: number; to: number; profile?: string; outputs?: ProductionOutput[]; artwork?: boolean; repairQa?: boolean; refresh?: boolean; dryRun?: boolean; force?: ProductionForce; audiobookFormat?: "mp3" | "m4b"; resume?: boolean; deferExports?: boolean; propagateChapterErrors?: boolean; pause?: { readonly isRequested: boolean }; onProgress?: (event: Record<string, unknown>) => void };
 
 export async function planProduction(request: ProductionRequest, dependencies: Pick<ProductionDependencies, "loadChapters" | "refresh">): Promise<{ plan: ProductionPlan; chapters: DiscoveredChapter[]; resolved: ReturnType<typeof resolveProductionOptions> }> {
   validateRange(request.from, request.to); if (request.refresh && !request.dryRun) { if (!dependencies.refresh) throw new Error("Remote refresh is not available"); await dependencies.refresh(request.from, request.to); }
@@ -49,7 +49,7 @@ export async function runProduction(request: ProductionRequest, dependencies: Pr
     if (!request.force && run.status === "complete" && await canResumeChapter(request.root, request.story, source.chapter, plan.stages)) { request.onProgress?.({ type: "production.chapter.resumed", chapter: source.chapter, index: index + 1, total: chapters.length }); continue; }
     run.status = "running"; run.error = undefined; manifest.current = { chapter: source.chapter }; request.onProgress?.({ type: "production.chapter.started", chapter: source.chapter, index: index + 1, total: chapters.length }); await persistProductionManifest(request.root, manifest);
     let writeChain = Promise.resolve(); const stageEvent = (event: PipelineStageEvent) => { updateOperation(run.operations, event.stage, event.status); manifest.current = { chapter: source.chapter, stage: event.stage }; request.onProgress?.({ type: "production.stage", chapter: source.chapter, stage: event.stage, status: event.status }); writeChain = writeChain.then(() => persistProductionManifest(request.root, manifest)); };
-    try {
+    let chapterError: unknown; try {
       let produced: unknown; let repairs = 0; let requestedForce = coreForce(request.force);
       const runCore = (force: PipelineOptions["force"]) => { let attempt = 0; return withRetry(() => dependencies.pipeline.run({ root: request.root, story: request.story, chapter: source.chapter, inputPath: source.path, source: source.source, force: attempt === 1 ? force : undefined, onStageEvent: stageEvent }), retryConfigSchema.parse({ maxAttempts: manifest.retry.maxProviderAttempts }), { shouldStop: () => Boolean(request.pause?.isRequested), onAttempt: (value) => { attempt = value; if (value > 1) request.onProgress?.({ type: "production.chapter.retrying", chapter: source.chapter, attempt: value, maximum: manifest.retry.maxProviderAttempts }); } }); };
       while (true) {
@@ -68,12 +68,14 @@ export async function runProduction(request: ProductionRequest, dependencies: Pr
       }
       request.onProgress?.({ type: "production.chapter.completed", chapter: source.chapter, index: index + 1, total: chapters.length, qa: run.qa });
     } catch (error) {
+      chapterError = error;
       await writeChain; const gate = findQualityGate(error); run.qa = gate?.result.status ?? run.qa; run.status = gate ? "needs-review" : "failed"; run.error = error instanceof Error ? error.message : String(error); const stage = manifest.current.stage ?? "qa"; if (run.operations[stage]) run.operations[stage] = { ...run.operations[stage]!, status: "failed", error: run.error }; manifest.failures.push({ chapter: source.chapter, stage, message: run.error, at: new Date().toISOString() }); request.onProgress?.({ type: "production.chapter.failed", chapter: source.chapter, error: run.error, needsReview: Boolean(gate) });
     }
     manifest.summary = summarize(manifest, Date.now() - started); await persistProductionManifest(request.root, manifest);
+    if (request.propagateChapterErrors && chapterError) throw chapterError;
     if (request.pause?.isRequested) { manifest.status = "paused"; break; }
   }
-  if (manifest.status !== "paused") await buildExports(request, dependencies, manifest, plan, resolved.audiobookFormat);
+  if (manifest.status !== "paused" && !request.deferExports) await buildExports(request, dependencies, manifest, plan, resolved.audiobookFormat);
   manifest.summary = summarize(manifest, Date.now() - started); manifest.current = {}; if (manifest.status !== "paused") { manifest.status = manifest.summary.failed || manifest.summary.needsReview ? "completed_with_errors" : "completed"; manifest.completedAt = new Date().toISOString(); } await persistProductionManifest(request.root, manifest); request.onProgress?.({ type: "production.completed", status: manifest.status, summary: manifest.summary }); return { manifest, plan };
 }
 
