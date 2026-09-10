@@ -9,7 +9,7 @@ import { SourceManifest, sourceManifestSchema } from "../source/types.js";
 import { applyManualBibleOverlay } from "../studio/workflow.js";
 
 /** Rebuilds canonical context solely from chronological per-chapter updates. */
-export async function rebuildStoryBibleBeforeChapter(root: string, slug: string, chapter: number): Promise<StoryBible> {
+export async function rebuildStoryBibleBeforeChapter(root: string, slug: string, chapter: number, options: { includeCanonicalOverlay?: boolean } = {}): Promise<StoryBible> {
   let bible = emptyStoryBible();
   const paths = storyPaths(root, slug, chapter); const chaptersDir = join(paths.story, "chapters");
   const manifestRaw = await readJsonIfExists<SourceManifest>(paths.sourceManifest);
@@ -27,5 +27,5 @@ export async function rebuildStoryBibleBeforeChapter(root: string, slug: string,
     const raw = await readJsonIfExists<StoryBibleUpdate>(storyPaths(root, slug, number).bibleUpdate);
     if (raw) bible = mergeStoryBible(bible, normalizeStoryBibleUpdate(storyBibleUpdateSchema.parse(raw), number), number);
   }
-  return (await applyManualBibleOverlay(root, slug, bible)).bible;
+  return (await applyManualBibleOverlay(root, slug, bible, { includeCanonical: options.includeCanonicalOverlay !== false })).bible;
 }

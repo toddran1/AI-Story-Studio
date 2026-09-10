@@ -7,8 +7,8 @@ import { polishNarration } from "../narration/narration-editor.js";
 import { validateChapterQuality } from "../qa/validator.js";
 import { atomicWrite, atomicWriteJson } from "../storage/atomic-write.js";
 import { previewPaths } from "../storage/paths.js";
-import { contextBeforeChapter } from "../story-bible/updater.js";
 import { rebuildStoryBibleBeforeChapter } from "../story-bible/rebuild.js";
+import { retrieveRelevantContext } from "../story-bible/retrieval.js";
 import { TTSProvider } from "../tts/provider.js";
 import { translate } from "../translation/translator.js";
 import { fingerprint } from "../utils/hash.js";
@@ -21,7 +21,7 @@ export class PreviewRunner {
     const source = await readFile(options.inputPath, "utf8");
     if (!source.trim()) throw new Error(`Input file is empty: ${options.inputPath}`);
     const bible = await rebuildStoryBibleBeforeChapter(options.root, options.story.slug, options.chapter);
-    const context = contextBeforeChapter(bible, options.chapter, options.story.context.recentChapterSummaries);
+    const context = retrieveRelevantContext(bible, source, options.chapter, { recentSummaryCount: options.story.context.recentChapterSummaries });
     const id = options.id ?? `${new Date().toISOString().replace(/[-:.]/g, "").replace("Z", "Z")}-${randomUUID().slice(0, 8)}`;
     const paths = previewPaths(options.root, options.story.slug, id);
 
@@ -30,7 +30,7 @@ export class PreviewRunner {
       const translation = sameLanguage(options.story.sourceLanguage, options.story.outputLanguage)
         ? source
         : (await translate(this.llms.forStage(preset.translation), preset.translation, source, context, options.story.sourceLanguage, options.story.outputLanguage)).text;
-      const narration = (await polishNarration(this.llms.forStage(preset.narration), preset.narration, translation, options.story.outputLanguage)).text;
+      const narration = (await polishNarration(this.llms.forStage(preset.narration), preset.narration, translation, options.story.outputLanguage, context)).text;
       const qa = (await validateChapterQuality(this.llms.forStage(preset.qa), preset.qa, {
         chapter: options.chapter, sourceLanguage: options.story.sourceLanguage, outputLanguage: options.story.outputLanguage,
         source, translation, narration, context,

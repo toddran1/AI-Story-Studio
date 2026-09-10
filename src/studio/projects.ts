@@ -96,11 +96,11 @@ export async function systemStatus(env: Environment, root = process.cwd()) { con
 
 export async function invalidateStoryForConfigChange(root: string, slug: string, before: Story, after: Story) {
   const stages = new Set<string>(); const changed = (left: unknown, right: unknown) => JSON.stringify(left) !== JSON.stringify(right); const add = (...items: string[]) => items.forEach((item) => stages.add(item));
-  if (before.sourceLanguage !== after.sourceLanguage || before.outputLanguage !== after.outputLanguage) add("translation", "narration", "qa", "storyBible", "tts", "audioMastering", "alignment", "subtitles", "scenePlanning", "artwork", "video");
-  if (changed(before.pipeline.translation, after.pipeline.translation) || changed(before.context, after.context)) add("translation", "narration", "qa", "storyBible", "tts", "audioMastering", "alignment", "subtitles", "scenePlanning", "artwork", "video");
-  if (changed(before.pipeline.narration, after.pipeline.narration)) add("narration", "qa", "tts", "audioMastering", "alignment", "subtitles", "scenePlanning", "artwork", "video");
+  if (before.sourceLanguage !== after.sourceLanguage || before.outputLanguage !== after.outputLanguage) add("translation", "narration", "qa", "storyBible", "continuity", "tts", "audioMastering", "alignment", "subtitles", "scenePlanning", "artwork", "video");
+  if (changed(before.pipeline.translation, after.pipeline.translation) || changed(before.context, after.context)) add("translation", "narration", "qa", "storyBible", "continuity", "tts", "audioMastering", "alignment", "subtitles", "scenePlanning", "artwork", "video");
+  if (changed(before.pipeline.narration, after.pipeline.narration)) add("narration", "qa", "storyBible", "continuity", "tts", "audioMastering", "alignment", "subtitles", "scenePlanning", "artwork", "video");
   if (changed(before.pipeline.qa, after.pipeline.qa)) add("qa");
-  if (changed(before.pipeline.storyBible, after.pipeline.storyBible)) add("storyBible");
+  if (changed(before.pipeline.storyBible, after.pipeline.storyBible)) add("storyBible", "continuity");
   if (changed(before.pipeline.tts, after.pipeline.tts)) add("tts", "audioMastering", "alignment", "subtitles", "scenePlanning", "artwork", "video");
   if (changed(before.audio, after.audio)) add("audioMastering", "alignment", "subtitles", "scenePlanning", "artwork", "video");
   if (changed(before.subtitles, after.subtitles)) add("subtitles", "video");

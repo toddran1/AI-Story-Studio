@@ -7,7 +7,7 @@ import { readJsonIfExists } from "../storage/story-files.js";
 import { fingerprint } from "../utils/hash.js";
 import { ProductionForce, ProductionOutput, ProductionPlan, ProductionProfile, ProductionStage, defaultProductionProfiles, productionProfileSchema } from "./types.js";
 
-const core: StageName[] = ["ingestion", "translation", "narration", "qa", "storyBible", "tts", "audioMastering"];
+const core: StageName[] = ["ingestion", "translation", "narration", "qa", "storyBible", "continuity", "tts", "audioMastering"];
 
 export function resolveProductionOptions(story: Story, input: { profile?: string; outputs?: ProductionOutput[]; artwork?: boolean; repairQa?: boolean; audiobookFormat?: "mp3" | "m4b"; alignment?: boolean }) {
   const profiles = story.productionProfiles ?? defaultProductionProfiles; const named = input.profile ? profiles[input.profile] : undefined;
@@ -51,6 +51,7 @@ export async function buildProductionPlan(options: { root: string; story: Story;
 export function isProductionStageForced(force: ProductionForce | undefined, stage: ProductionStage) {
   if (!force) return false; if (force === "all") return true;
   const aliases: Record<string, ProductionStage> = { "story-bible": "storyBible", audio: "audioMastering", scenes: "scenePlanning", "video-export": "videoExport" }; const normalized = aliases[force] ?? force as ProductionStage;
+  if (normalized === "continuity") return stage === "continuity";
   const coreIndex = core.indexOf(normalized as StageName); if (coreIndex >= 0) return core.includes(stage as StageName) ? core.indexOf(stage as StageName) >= coreIndex : stage !== "refresh";
   const dependents: Partial<Record<ProductionStage, ProductionStage[]>> = { alignment: ["alignment", "subtitles", "video", "videoExport"], subtitles: ["subtitles", "video", "videoExport"], scenePlanning: ["scenePlanning", "artwork", "video", "videoExport"], artwork: ["artwork", "video", "videoExport"], video: ["video", "videoExport"], audiobook: ["audiobook"], videoExport: ["videoExport"] };
   return dependents[normalized]?.includes(stage) ?? false;
@@ -58,7 +59,7 @@ export function isProductionStageForced(force: ProductionForce | undefined, stag
 
 async function stageLooksReusable(chapter: Chapter, stage: StageName, paths: ReturnType<typeof storyPaths>) {
   const state = chapter.stages[stage]; if (state.status !== "complete") return false;
-  const files: Partial<Record<StageName, string[]>> = { ingestion: [paths.original], translation: [paths.english], narration: [paths.narration], qa: [paths.qa], storyBible: [paths.bibleUpdate], tts: [paths.audioRaw], audioMastering: [paths.audio], alignment: [paths.alignment], subtitles: [paths.subtitlesSrt, paths.subtitlesVtt, paths.subtitlesDocument], scenePlanning: [paths.scenesManifest], video: [paths.video] };
+  const files: Partial<Record<StageName, string[]>> = { ingestion: [paths.original], translation: [paths.english], narration: [paths.narration], qa: [paths.qa], storyBible: [paths.bibleUpdate], continuity: [paths.continuityAnalysis], tts: [paths.audioRaw], audioMastering: [paths.audio], alignment: [paths.alignment], subtitles: [paths.subtitlesSrt, paths.subtitlesVtt, paths.subtitlesDocument], scenePlanning: [paths.scenesManifest], video: [paths.video] };
   if (stage === "artwork") return chapter.scenes?.generated === chapter.scenes?.total;
   const selected = files[stage] ?? []; if (!(await Promise.all(selected.map(nonEmpty))).every(Boolean)) return false;
   if (!state.outputFingerprint) return true;

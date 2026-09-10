@@ -108,7 +108,7 @@ async function invalidateChangedProduction(root: string, story: string, changes:
   const chaptersRoot = join(storyPaths(root, story, firstChanged).story, "chapters"); let numbers: number[] = [];
   try { numbers = (await readdir(chaptersRoot, { withFileTypes: true })).filter((entry) => entry.isDirectory() && /^\d+$/.test(entry.name)).map((entry) => Number(entry.name)).filter((number) => number >= firstChanged); }
   catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
-  const allStages: StageName[] = ["ingestion", "translation", "narration", "qa", "storyBible", "tts", "audioMastering", "alignment", "subtitles", "scenePlanning", "artwork", "video"];
+  const allStages: StageName[] = ["ingestion", "translation", "narration", "qa", "storyBible", "continuity", "tts", "audioMastering", "alignment", "subtitles", "scenePlanning", "artwork", "video"];
   for (const number of numbers) {
     const path = storyPaths(root, story, number).chapterMeta; const raw = await readJsonIfExists<Chapter>(path); const parsed = raw ? chapterSchema.safeParse(raw) : undefined;
     if (!parsed?.success) continue; const chapter = parsed.data; const stages = exact.has(number) ? allStages : allStages.slice(1);

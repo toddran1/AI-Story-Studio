@@ -8,6 +8,7 @@ import { atomicWriteJson } from "../storage/atomic-write.js";
 import { storyPaths } from "../storage/paths.js";
 import { readJsonIfExists, readTextIfExists } from "../storage/story-files.js";
 import { rebuildStoryBibleBeforeChapter } from "../story-bible/rebuild.js";
+import { retrieveRelevantContext } from "../story-bible/retrieval.js";
 import { fingerprint } from "../utils/hash.js";
 import { withRetry } from "../batch/retry.js";
 import { retryConfigSchema } from "../batch/types.js";
@@ -21,7 +22,7 @@ export async function planStoredScenes(options: { root: string; story: Story; ch
   if (chapter.stages.audioMastering.status !== "complete" || !chapter.audio) throw new SceneError(`Chapter ${options.chapter} audio is not mastered`);
   const audioDurationSeconds = chapter.audio.durationSeconds;
   const narration = await readTextIfExists(paths.narration); if (!narration?.trim()) throw new SceneError(`Chapter ${options.chapter} narration is missing`);
-  const bible = await rebuildStoryBibleBeforeChapter(options.root, options.story.slug, options.chapter + 1); const config = options.story.pipeline.scenePlanner;
+  const fullBible = await rebuildStoryBibleBeforeChapter(options.root, options.story.slug, options.chapter + 1); const bible = retrieveRelevantContext(fullBible, narration, options.chapter + 1, { recentSummaryCount: options.story.context.recentChapterSummaries }); const config = options.story.pipeline.scenePlanner;
   const inputFingerprint = scenePlanningFingerprint(fingerprint(narration), fingerprint(bible), options.story.scenes, config.provider, config.model);
   const cachedRaw = await readJsonIfExists<SceneManifest>(paths.scenesManifest); const cached = cachedRaw ? sceneManifestSchema.safeParse(cachedRaw) : undefined;
   if (!options.force && cached?.success && cached.data.planningFingerprint === inputFingerprint && chapter.stages.scenePlanning.status === "complete") return { manifest: cached.data, reused: true };

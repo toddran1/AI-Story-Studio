@@ -7,6 +7,7 @@ import { atomicWrite, atomicWriteJson } from "../storage/atomic-write.js";
 import { storyPaths, voicePreviewPaths } from "../storage/paths.js";
 import { readJsonIfExists } from "../storage/story-files.js";
 import { fingerprint } from "../utils/hash.js";
+import { applyCanonicalOverlay, findDuplicateSuggestions } from "../story-bible/canonical.js";
 
 export const bibleCategorySchema = z.enum(["characters", "locations", "factions", "abilities", "classes", "ranks", "items", "creatures", "systemTerms", "relationships", "translationTerms"]);
 export type BibleCategory = z.infer<typeof bibleCategorySchema>;
@@ -14,7 +15,7 @@ const bibleMutationSchema = z.object({ id: z.string().uuid(), category: bibleCat
 const bibleOverlaySchema = z.object({ version: z.literal(1), mutations: z.array(bibleMutationSchema).default([]) });
 export type BibleEntry = { id: string; category: BibleCategory; key: string; value: Record<string, unknown>; manual: boolean };
 
-export async function applyManualBibleOverlay(root: string, slug: string, base: StoryBible) {
+export async function applyManualBibleOverlay(root: string, slug: string, base: StoryBible, options: { includeCanonical?: boolean } = {}) {
   const overlay = bibleOverlaySchema.parse((await readJsonIfExists(storyPaths(root, slug, 1).bibleManual)) ?? { version: 1, mutations: [] });
   const result = structuredClone(base);
   const entries: BibleEntry[] = [];
@@ -26,7 +27,8 @@ export async function applyManualBibleOverlay(root: string, slug: string, base: 
     entries.push(...automatic.map((value) => ({ id: `auto-${fingerprint({ category, key: entryKey(category, value) }).slice(0, 16)}`, category, key: entryKey(category, value), value, manual: false })));
     entries.push(...mutations.filter((item) => item.action === "upsert" && item.value).map((item) => ({ id: item.id, category, key: item.key, value: item.value!, manual: true })));
   }
-  return { bible: storyBibleSchema.parse(result), entries };
+  const parsed = storyBibleSchema.parse(result); const canonical = options.includeCanonical === false ? { bible: parsed } : await applyCanonicalOverlay(root, slug, parsed);
+  return { bible: canonical.bible, entries, canonicalEntities: canonical.bible.canonicalEntities, canonicalRelationships: canonical.bible.canonicalRelationships, timeline: canonical.bible.entityTimeline, merges: canonical.bible.merges, duplicateSuggestions: findDuplicateSuggestions(canonical.bible.canonicalEntities) };
 }
 
 export async function addManualBibleEntry(root: string, slug: string, base: StoryBible, category: BibleCategory, value: Record<string, unknown>, replacementKey?: string) {
@@ -54,7 +56,7 @@ export async function saveChapterTextEdit(root: string, slug: string, chapterNum
   const { field, text } = chapterTextEditSchema.parse(input); const paths = storyPaths(root, slug, chapterNumber); const raw = await readJsonIfExists<Chapter>(paths.chapterMeta); if (!raw) throw new Error(`Chapter ${chapterNumber} has not been processed`); const chapter = chapterSchema.parse(raw);
   const stage: StageName = field; const output = field === "translation" ? paths.english : paths.narration; const now = new Date().toISOString(); const outputFingerprint = fingerprint(Buffer.from(text).toString("base64"));
   await atomicWrite(output, text); chapter.stages[stage] = { status: "complete", provider: "manual", model: "studio-editor", fingerprint: `manual:${outputFingerprint}`, outputFingerprint, completedAt: now };
-  const order: StageName[] = ["translation", "narration", "qa", "storyBible", "tts", "audioMastering", "alignment", "subtitles", "scenePlanning", "artwork", "video"];
+  const order: StageName[] = ["translation", "narration", "qa", "storyBible", "continuity", "tts", "audioMastering", "alignment", "subtitles", "scenePlanning", "artwork", "video"];
   const invalidated = order.slice(order.indexOf(stage) + 1); for (const name of invalidated) chapter.stages[name] = { status: "pending" };
   if (field === "translation") chapter.counts.englishWords = wordCount(text); else chapter.counts.narrationWords = wordCount(text); chapter.quality = undefined; chapter.audio = undefined; chapter.alignment = undefined; chapter.subtitle = undefined; chapter.video = undefined; chapter.scenes = undefined; chapter.updatedAt = now; await atomicWriteJson(paths.chapterMeta, chapter);
   return { chapter, invalidated };

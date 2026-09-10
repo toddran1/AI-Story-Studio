@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { qaCategorySchema, qaStatusSchema } from "./qa.js";
 
-export const stageNameSchema = z.enum(["ingestion", "translation", "narration", "qa", "storyBible", "tts", "audioMastering", "alignment", "subtitles", "scenePlanning", "artwork", "video"]);
+export const stageNameSchema = z.enum(["ingestion", "translation", "narration", "qa", "storyBible", "continuity", "tts", "audioMastering", "alignment", "subtitles", "scenePlanning", "artwork", "video"]);
 export type StageName = z.infer<typeof stageNameSchema>;
 
 const usageSchema = z.object({
@@ -61,6 +61,7 @@ export const chapterSchema = z.preprocess((value) => {
   const normalized = { ...(stages as Record<string, unknown>) };
   if (!("qa" in normalized)) normalized.qa = { status: "pending" };
   if (!("audioMastering" in normalized)) normalized.audioMastering = { status: "pending" };
+  if (!("continuity" in normalized)) normalized.continuity = { status: "pending" };
   if (!("alignment" in normalized)) normalized.alignment = { status: "pending" };
   if (!("subtitles" in normalized)) normalized.subtitles = { status: "pending" };
   if (!("scenePlanning" in normalized)) normalized.scenePlanning = { status: "pending" };

@@ -490,6 +490,21 @@ Each story’s **Manage project** screen supports metadata and cover changes, se
 
 Application defaults live in `.ai-story-studio/settings.json` and apply only when a new story is created. Existing story configurations are not rewritten when these defaults change.
 
+## Milestone 15 — Advanced Story Bible and Continuity
+
+The Story Bible now keeps portable canonical entities with stable IDs, canonical names and aliases, chronological status/timeline events, entity-to-entity relationships, confidence, and chapter provenance. Characters, locations, organizations, abilities, items, and broader concepts share the same relationship model. Automatic extraction never silently merges uncertain duplicates; the studio presents deterministic suggestions for explicit approval.
+
+Manual canonical-name locks, alias edits, notes, and merges live in `story-bible-canonical-manual.json`. These protected overlays survive chronological rebuilds, and approved merges preserve aliases, history, relationships, provenance, and stable references. Merges can be undone from the entity detail view.
+
+Every successfully extracted chapter runs a separately fingerprinted, local continuity stage. Findings are stored in `continuity-review.json`, with lightweight chapter references rather than copied manuscript passages. The **Continuity Review** workspace explains the supporting facts and lets an editor accept new information, retain the canonical record, mark an intentional inconsistency, correct the Bible, record a merge, or persistently dismiss a false positive. Re-run only this analysis with:
+
+```sh
+npm run story:continuity -- --story undead-disaster
+npm run story:produce -- --story undead-disaster --from 1 --to 100 --force continuity
+```
+
+Translation, narration, QA, preview, and scene planning receive a deterministic, inspectable subset of the Bible instead of the full long-story history. The context is selected from chapter mentions, known aliases, locks, recent events, and relevant relationships, and is bounded before it reaches a provider. The canonical browser is server-paginated and supports type, name, alias, appearance, lock, provenance, duplicate, and conflict review for stories with thousands of entities.
+
 ## Verification
 
 ```sh

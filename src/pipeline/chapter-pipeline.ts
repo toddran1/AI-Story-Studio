@@ -19,13 +19,15 @@ import { STORY_BIBLE_PROMPT_VERSION } from "../story-bible/prompts.js";
 import { extractStoryBible } from "../story-bible/extractor.js";
 import { QA_PROMPT_VERSION } from "../qa/prompts.js";
 import { validateChapterQuality } from "../qa/validator.js";
-import { contextBeforeChapter, mergeStoryBible, normalizeStoryBibleUpdate } from "../story-bible/updater.js";
+import { mergeStoryBible, normalizeStoryBibleUpdate } from "../story-bible/updater.js";
 import { rebuildStoryBibleBeforeChapter } from "../story-bible/rebuild.js";
 import { PipelineError, QualityGateError } from "./errors.js";
 import { AudioMasteringProcessor, FfmpegMasteringProcessor } from "../audio/mastering.js";
 import { masterStoredChapter } from "../audio/chapter-audio.js";
+import { retrieveRelevantContext } from "../story-bible/retrieval.js";
+import { analyzeAndPersistContinuity } from "../story-bible/continuity.js";
 
-export type ForceStage = "translation" | "narration" | "qa" | "story-bible" | "tts" | "audio" | "all";
+export type ForceStage = "translation" | "narration" | "qa" | "story-bible" | "continuity" | "tts" | "audio" | "all";
 export type PipelineStageEvent = { stage: StageName; status: "started" | "completed" | "reused"; state: StageState };
 export type PipelineOptions = {
   root: string; story: Story; chapter: number; inputPath: string; force?: ForceStage;
@@ -45,7 +47,7 @@ export class ChapterPipeline {
     let chapter = chapterSchema.parse((await readJsonIfExists<Chapter>(paths.chapterMeta)) ?? {
       chapter: options.chapter, sourceLanguage: options.story.sourceLanguage, outputLanguage: options.story.outputLanguage,
       counts: { originalCharacters: 0, englishWords: 0, narrationWords: 0 }, createdAt: now, updatedAt: now,
-      stages: { ingestion: pending(), translation: pending(), narration: pending(), qa: pending(), storyBible: pending(), tts: pending(), audioMastering: pending(), alignment: pending(), subtitles: pending(), scenePlanning: pending(), artwork: pending(), video: pending() },
+      stages: { ingestion: pending(), translation: pending(), narration: pending(), qa: pending(), storyBible: pending(), continuity: pending(), tts: pending(), audioMastering: pending(), alignment: pending(), subtitles: pending(), scenePlanning: pending(), artwork: pending(), video: pending() },
     });
     if (chapter.chapter !== options.chapter) throw new PipelineError(`Chapter metadata mismatch at ${paths.chapterMeta}: expected ${options.chapter}, found ${chapter.chapter}`);
     chapter.sourceLanguage = options.story.sourceLanguage; chapter.outputLanguage = options.story.outputLanguage;
@@ -53,11 +55,11 @@ export class ChapterPipeline {
       chapter.source = options.source;
       chapter.originalTitle = options.source.originalTitle;
     }
-    let bible = await rebuildStoryBibleBeforeChapter(options.root, options.story.slug, options.chapter);
-    const priorContext = contextBeforeChapter(bible, options.chapter, options.story.context.recentChapterSummaries);
-
     const source = await readFile(options.inputPath, "utf8");
     if (!source.trim()) throw new PipelineError(`Input file is empty: ${options.inputPath}`);
+    let bible = await rebuildStoryBibleBeforeChapter(options.root, options.story.slug, options.chapter);
+    const priorContext = retrieveRelevantContext(bible, source, options.chapter, { recentSummaryCount: options.story.context.recentChapterSummaries });
+    await atomicWriteJson(paths.storyContext, priorContext);
 
     const persist = async () => { chapter.updatedAt = new Date().toISOString(); await atomicWriteJson(paths.chapterMeta, chapter); };
     if (options.source) await persist();
@@ -128,11 +130,11 @@ export class ChapterPipeline {
     const english = translationResult ?? await requireText(paths.english, "translation");
 
     const narrationConfig = options.story.pipeline.narration;
-    const narrationFp = fingerprint({ english: fingerprint(english), config: narrationConfig, prompt: NARRATION_PROMPT_VERSION });
+    const narrationFp = fingerprint({ english: fingerprint(english), context: priorContext, config: narrationConfig, prompt: NARRATION_PROMPT_VERSION });
     const narrationResult = await runStage("narration", narrationFp, paths.narration, {
       provider: narrationConfig.provider, model: narrationConfig.model, promptVersion: NARRATION_PROMPT_VERSION,
     }, async () => {
-      const result = await polishNarration(this.llms.forStage(narrationConfig), narrationConfig, english, options.story.outputLanguage);
+      const result = await polishNarration(this.llms.forStage(narrationConfig), narrationConfig, english, options.story.outputLanguage, priorContext);
       await atomicWrite(paths.narration, result.text);
       chapter.counts.narrationWords = wordCount(result.text);
       chapter.stages.narration.usage = result.usage;
@@ -162,6 +164,7 @@ export class ChapterPipeline {
     if (quality.status === "warn") logger.warn({ event: "pipeline.qa.warn", story: options.story.slug, chapter: options.chapter, score: quality.score, issues: quality.issues.length });
     if (quality.status === "fail") {
       chapter.stages.storyBible = pending();
+      chapter.stages.continuity = pending();
       chapter.stages.tts = pending();
       await persist();
       await atomicWriteJson(paths.bible, bible);
@@ -187,6 +190,9 @@ export class ChapterPipeline {
       bible = mergeStoryBible(bible, cachedUpdate, options.chapter);
       await atomicWriteJson(paths.bible, bible);
     }
+
+    const continuityFp = fingerprint({ bible: bible.version, entities: bible.canonicalEntities, relationships: bible.canonicalRelationships, timeline: bible.entityTimeline });
+    await runStage("continuity", continuityFp, paths.continuityAnalysis, { provider: "local", model: "deterministic-continuity-v1" }, async () => analyzeAndPersistContinuity(options.root, options.story.slug, bible, options.chapter));
 
     const ttsConfig = options.story.pipeline.tts;
     const ttsFp = fingerprint({ narration: fingerprint(narration), config: ttsConfig });
@@ -215,10 +221,11 @@ export class ChapterPipeline {
 
 function isForced(force: ForceStage | undefined, stage: StageName): boolean {
   if (force === "all") return true;
-  const order: StageName[] = ["ingestion", "translation", "narration", "qa", "storyBible", "tts", "audioMastering", "alignment", "subtitles", "scenePlanning", "artwork", "video"];
+  const order: StageName[] = ["ingestion", "translation", "narration", "qa", "storyBible", "continuity", "tts", "audioMastering", "alignment", "subtitles", "scenePlanning", "artwork", "video"];
   const normalized = force === "story-bible" ? "storyBible" : force;
   const stageName = normalized === "audio" ? "audioMastering" : normalized;
   if (!stageName) return false;
+  if (stageName === "continuity") return stage === "continuity";
   // Forcing an upstream transform also invalidates all dependent downstream stages.
   return order.indexOf(stage) >= order.indexOf(stageName as StageName);
 }
@@ -237,7 +244,9 @@ async function fileFingerprint(path: string): Promise<string | undefined> {
 }
 
 function invalidateDownstream(chapter: Chapter, stage: StageName) {
-  const order: StageName[] = ["ingestion", "translation", "narration", "qa", "storyBible", "tts", "audioMastering", "alignment", "subtitles", "scenePlanning", "artwork", "video"];
+  // Continuity is an independently retryable analysis branch, not an input to paid production stages.
+  if (stage === "continuity") return;
+  const order: StageName[] = ["ingestion", "translation", "narration", "qa", "storyBible", "continuity", "tts", "audioMastering", "alignment", "subtitles", "scenePlanning", "artwork", "video"];
   for (const dependent of order.slice(order.indexOf(stage) + 1)) chapter.stages[dependent] = pending();
   if (order.indexOf(stage) <= order.indexOf("qa")) chapter.quality = undefined;
 }

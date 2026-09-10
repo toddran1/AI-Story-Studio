@@ -36,7 +36,7 @@ function parseArgs(values: string[]): Args {
     const key = values[index]; const value = values[index + 1];
     if (["--story", "--chapter", "--input", "--force"].includes(key ?? "") && (value === undefined || value.startsWith("--"))) usage(`Missing value for ${key}`);
     if (key === "--story" || key === "--chapter" || key === "--input") { result[key.slice(2) as "story" | "chapter" | "input"] = value; index++; }
-    else if (key === "--force") { if (!["translation", "narration", "qa", "story-bible", "tts", "audio", "all"].includes(value)) usage("Invalid --force stage"); result.force = value as ForceStage; index++; }
+    else if (key === "--force") { if (!["translation", "narration", "qa", "story-bible", "continuity", "tts", "audio", "all"].includes(value)) usage("Invalid --force stage"); result.force = value as ForceStage; index++; }
     else usage(`Unknown argument: ${key}`);
   }
   return result;

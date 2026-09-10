@@ -23,6 +23,8 @@ import { fingerprint } from "../../src/utils/hash.js";
 import { logger } from "../../src/utils/logger.js";
 import { AlignmentArtifact, alignmentArtifactSchema } from "../../src/alignment/types.js";
 import { SubtitleDocument, subtitleDocumentSchema } from "../../src/subtitles/types.js";
+import { continuityReviewSchema } from "../../src/story-bible/continuity.js";
+import { applyCanonicalOverlay, findDuplicateSuggestions } from "../../src/story-bible/canonical.js";
 
 const slugSchema = z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/);
 export const chapterFilterSchema = z.enum(["all", "unprocessed", "warn", "fail", "complete"]);
@@ -33,7 +35,7 @@ export function invalidateCatalogCache(root: string, slug: string) { const key =
 
 export type ChapterSummary = {
   chapter: number; originalTitle?: string; translation: string; narration: string; qa?: QaResult["status"];
-  qaScore?: number; qaIssues?: QaResult["issues"]; tts: string; audioMastering: string; alignment: string; subtitles: string; scenePlanning: string; artwork: string; video: string; audioAvailable: boolean; videoAvailable: boolean; durationSeconds?: number;
+  qaScore?: number; qaIssues?: QaResult["issues"]; tts: string; audioMastering: string; continuity: string; alignment: string; subtitles: string; scenePlanning: string; artwork: string; video: string; audioAvailable: boolean; videoAvailable: boolean; durationSeconds?: number;
 };
 
 export async function listStories(root: string, warnings: string[] = []) {
@@ -68,9 +70,9 @@ export async function getStoryOverview(root: string, slug: string) {
 
 export async function getStoryDashboard(root: string, slug: string) {
   slugSchema.parse(slug); const overview = await getStoryOverview(root, slug); const chapters = await loadChapterSummaries(root, slug); const latest = await loadLatestProduction(root, slug); const sourceRaw = await readJsonIfExists<SourceManifest>(storyPaths(root, slug, 1).sourceManifest); const source = sourceRaw ? sourceManifestSchema.safeParse(sourceRaw) : undefined;
-  const completedStages = chapters.reduce((sum, chapter) => sum + [chapter.translation, chapter.narration, chapter.tts, chapter.audioMastering, chapter.alignment, chapter.subtitles, chapter.scenePlanning, chapter.artwork, chapter.video].filter((status) => status === "complete").length, 0);
+  const completedStages = chapters.reduce((sum, chapter) => sum + [chapter.translation, chapter.narration, chapter.tts, chapter.audioMastering, chapter.continuity, chapter.alignment, chapter.subtitles, chapter.scenePlanning, chapter.artwork, chapter.video].filter((status) => status === "complete").length, 0);
   const current = latest?.story === slug && latest.storyFingerprint === fingerprint(overview.story) ? publicProductionManifest(latest, slug) : undefined;
-  return { ...overview, source: source?.success ? { type: source.data.type, origin: "url" in source.data.origin ? { url: source.data.origin.url } : { name: source.data.origin.name }, importedAt: source.data.importedAt, chapterCount: source.data.chapters.length } : undefined, progress: { processed: chapters.filter((item) => item.translation === "complete").length, audio: chapters.filter((item) => item.audioMastering === "complete").length, artwork: chapters.filter((item) => item.artwork === "complete").length, video: chapters.filter((item) => item.video === "complete").length }, latestProduction: current, currentProfile: current?.options.profile, estimatedRemainingStages: Math.max(0, chapters.length * 9 - completedStages) };
+  return { ...overview, source: source?.success ? { type: source.data.type, origin: "url" in source.data.origin ? { url: source.data.origin.url } : { name: source.data.origin.name }, importedAt: source.data.importedAt, chapterCount: source.data.chapters.length } : undefined, progress: { processed: chapters.filter((item) => item.translation === "complete").length, audio: chapters.filter((item) => item.audioMastering === "complete").length, artwork: chapters.filter((item) => item.artwork === "complete").length, video: chapters.filter((item) => item.video === "complete").length }, latestProduction: current, currentProfile: current?.options.profile, estimatedRemainingStages: Math.max(0, chapters.length * 10 - completedStages) };
 }
 
 export async function getChapterPage(root: string, slug: string, options: { page: number; pageSize: number; filter: z.infer<typeof chapterFilterSchema>; query?: string }) {
@@ -106,7 +108,7 @@ export async function getChapter(root: string, slug: string, chapter: number) {
   return {
     chapter, metadata, stale: !fresh, original: fresh ? await readTextIfExists(paths.original) : undefined,
     translation: fresh ? await readTextIfExists(paths.english) : undefined, narration: fresh ? await readTextIfExists(paths.narration) : undefined,
-    qa: qaRaw ? qaResultSchema.parse(qaRaw) : undefined, audioAvailable, alignment: alignment?.success ? alignment.data : undefined, subtitleDocument: subtitleDocument?.success ? subtitleDocument.data : undefined,
+    qa: qaRaw ? qaResultSchema.parse(qaRaw) : undefined, storyContext: fresh ? await readJsonIfExists(paths.storyContext) : undefined, audioAvailable, alignment: alignment?.success ? alignment.data : undefined, subtitleDocument: subtitleDocument?.success ? subtitleDocument.data : undefined,
     audioUrl: audioAvailable ? `/api/stories/${slug}/chapters/${chapter}/audio` : undefined,
     subtitles: fresh && metadata?.stages.subtitles.status === "complete" ? await readTextIfExists(paths.subtitlesVtt) : undefined,
     subtitlesUrl: fresh && metadata?.stages.subtitles.status === "complete" ? `/api/stories/${slug}/chapters/${chapter}/subtitles.vtt` : undefined,
@@ -124,13 +126,19 @@ export async function getQaDashboard(root: string, slug: string) {
   return { counts: countQa(chapters), categories: issues, chapters: items };
 }
 
-export async function getStoryBible(root: string, slug: string): Promise<StoryBible> {
+export async function getStoryBible(root: string, slug: string, options: { includeCanonicalOverlay?: boolean } = {}): Promise<StoryBible> {
   slugSchema.parse(slug); const index = await loadChapterIndex(root, slug);
-  if (index.manifest) return rebuildStoryBibleBeforeChapter(root, slug, (index.numbers.at(-1) ?? 0) + 1);
-  const raw = await readJsonIfExists<StoryBible>(storyPaths(root, slug, 1).bible); return raw ? storyBibleSchema.parse(raw) : emptyStoryBible();
+  if (index.manifest) return rebuildStoryBibleBeforeChapter(root, slug, (index.numbers.at(-1) ?? 0) + 1, options);
+  const raw = await readJsonIfExists<StoryBible>(storyPaths(root, slug, 1).bible); const bible = raw ? storyBibleSchema.parse(raw) : emptyStoryBible(); return options.includeCanonicalOverlay === false ? bible : (await applyCanonicalOverlay(root, slug, bible)).bible;
 }
 
 export async function getStoryBibleView(root: string, slug: string) { const bible = await getStoryBible(root, slug); return applyManualBibleOverlay(root, slug, bible); }
+
+export async function getCanonicalEntitiesPage(root: string, slug: string, options: { page: number; pageSize: number; type?: string; query?: string; sort?: string }) { const bible = await getStoryBible(root, slug); let entities = bible.canonicalEntities; const query = options.query?.trim().toLocaleLowerCase(); if (options.type && options.type !== "all") entities = entities.filter((item) => item.type === options.type); if (query) entities = entities.filter((item) => [item.canonicalName, item.originalName, item.description, item.notes, ...item.aliases].some((value) => value.toLocaleLowerCase().includes(query))); const direction = options.sort === "last" ? (a: typeof entities[number], b: typeof entities[number]) => b.lastKnownAppearance - a.lastKnownAppearance : options.sort === "first" ? (a: typeof entities[number], b: typeof entities[number]) => a.firstAppearance - b.firstAppearance : (a: typeof entities[number], b: typeof entities[number]) => a.canonicalName.localeCompare(b.canonicalName); entities = [...entities].sort(direction); const pageSize = Math.min(100, Math.max(1, Math.floor(options.pageSize))); const pages = Math.max(1, Math.ceil(entities.length / pageSize)); const page = Math.min(pages, Math.max(1, Math.floor(options.page))); const reviewRaw = await readJsonIfExists(storyPaths(root, slug, 1).continuityReview); const review = reviewRaw ? continuityReviewSchema.safeParse(reviewRaw) : undefined; const openCounts = new Map<string, number>(); if (review?.success) for (const finding of review.data.findings.filter((item) => item.status === "open")) for (const id of finding.entityIds) openCounts.set(id, (openCounts.get(id) ?? 0) + 1); return { items: entities.slice((page - 1) * pageSize, page * pageSize).map((item) => ({ ...item, conflictCount: openCounts.get(item.id) ?? 0 })), page, pageSize, pages, total: entities.length, counts: Object.fromEntries(["character", "location", "organization", "ability", "item", "concept"].map((type) => [type, bible.canonicalEntities.filter((item) => item.type === type).length])), duplicateSuggestions: page === 1 && !query ? findDuplicateSuggestions(bible.canonicalEntities).slice(0, 50) : [] }; }
+
+export async function getCanonicalEntityDetail(root: string, slug: string, id: string) { const bible = await getStoryBible(root, slug); const entity = bible.canonicalEntities.find((item) => item.id === id); if (!entity) throw new Error("Canonical entity was not found"); const related = bible.canonicalRelationships.filter((item) => item.sourceEntityId === id || item.targetEntityId === id); const relatedIds = new Set(related.flatMap((item) => [item.sourceEntityId, item.targetEntityId])); const names = Object.fromEntries(bible.canonicalEntities.filter((item) => relatedIds.has(item.id)).map((item) => [item.id, item.canonicalName])); const reviewRaw = await readJsonIfExists(storyPaths(root, slug, 1).continuityReview); const review = reviewRaw ? continuityReviewSchema.safeParse(reviewRaw) : undefined; return { entity, timeline: bible.entityTimeline.filter((item) => item.entityId === id).sort((a, b) => a.chapter - b.chapter), relationships: related, relatedNames: names, issues: review?.success ? review.data.findings.filter((item) => item.entityIds.includes(id)) : [], merges: bible.merges.filter((item) => item.targetEntityId === id || item.sourceEntityIds.includes(id)) }; }
+
+export async function getContinuityReview(root: string, slug: string, status?: string) { const raw = await readJsonIfExists(storyPaths(root, slug, 1).continuityReview); const parsed = raw ? continuityReviewSchema.parse(raw) : continuityReviewSchema.parse({ version: 1, analyzedThroughChapter: 0, inputFingerprint: "none", updatedAt: new Date(0).toISOString(), findings: [] }); const findings = status && status !== "all" ? parsed.findings.filter((item) => item.status === status) : parsed.findings; const bible = await getStoryBible(root, slug); const names = Object.fromEntries(bible.canonicalEntities.map((item) => [item.id, item.canonicalName])); return { ...parsed, findings, names, counts: { open: parsed.findings.filter((item) => item.status === "open").length, resolved: parsed.findings.filter((item) => item.status !== "open").length } }; }
 
 export async function getOutputsLibrary(root: string, slug: string) {
   slugSchema.parse(slug); const [audio, video] = await Promise.all([getAudioDashboard(root, slug), getVideoDashboard(root, slug)]); const items: Array<Record<string, unknown>> = [];
@@ -200,10 +208,10 @@ async function loadSummaries(root: string, slug: string, numbers: number[], inde
     const metadata = parsed?.success ? parsed.data : undefined; const fresh = isCurrent(metadata, index.manifestByChapter.get(chapter), Boolean(index.manifest));
     const qaRaw = fresh && metadata?.stages.qa.status === "complete" ? await readJsonIfExists<QaResult>(chapterPaths.qa) : undefined;
     const qa = qaRaw ? qaResultSchema.safeParse(qaRaw) : undefined; const tts = fresh ? metadata?.stages.tts.status ?? "pending" : "pending";
-    const audioMastering = fresh ? metadata?.stages.audioMastering.status ?? "pending" : "pending"; const alignment = fresh ? metadata?.stages.alignment.status ?? "pending" : "pending"; const subtitles = fresh ? metadata?.stages.subtitles.status ?? "pending" : "pending"; const scenePlanning = fresh ? metadata?.stages.scenePlanning.status ?? "pending" : "pending"; const artwork = fresh ? metadata?.stages.artwork.status ?? "pending" : "pending"; const video = fresh ? metadata?.stages.video.status ?? "pending" : "pending";
+    const audioMastering = fresh ? metadata?.stages.audioMastering.status ?? "pending" : "pending"; const continuity = fresh ? metadata?.stages.continuity.status ?? "pending" : "pending"; const alignment = fresh ? metadata?.stages.alignment.status ?? "pending" : "pending"; const subtitles = fresh ? metadata?.stages.subtitles.status ?? "pending" : "pending"; const scenePlanning = fresh ? metadata?.stages.scenePlanning.status ?? "pending" : "pending"; const artwork = fresh ? metadata?.stages.artwork.status ?? "pending" : "pending"; const video = fresh ? metadata?.stages.video.status ?? "pending" : "pending";
     return { chapter, originalTitle: metadata?.originalTitle ?? index.titles.get(chapter), translation: fresh ? metadata?.stages.translation.status ?? "pending" : "pending",
       narration: fresh ? metadata?.stages.narration.status ?? "pending" : "pending", qa: qa?.success ? qa.data.status : undefined,
-      qaScore: qa?.success ? qa.data.score : undefined, qaIssues: qa?.success ? qa.data.issues : undefined, tts, audioMastering, alignment, subtitles, scenePlanning, artwork, video,
+      qaScore: qa?.success ? qa.data.score : undefined, qaIssues: qa?.success ? qa.data.issues : undefined, tts, audioMastering, continuity, alignment, subtitles, scenePlanning, artwork, video,
       durationSeconds: audioMastering === "complete" ? metadata?.audio?.durationSeconds : undefined,
       audioAvailable: audioMastering === "complete" && await exists(chapterPaths.audio), videoAvailable: video === "complete" && await exists(chapterPaths.video) };
   });

@@ -17,7 +17,7 @@ export const productionProfilesSchema = z.record(z.string().regex(/^[a-z0-9]+(?:
 
 export const productionStageSchema = z.union([stageNameSchema, z.enum(["audiobook", "videoExport", "refresh"])]);
 export type ProductionStage = z.infer<typeof productionStageSchema>;
-export const productionForceSchema = z.enum(["ingestion", "translation", "narration", "qa", "story-bible", "tts", "audio", "alignment", "subtitles", "scenes", "artwork", "video", "audiobook", "video-export", "all"]);
+export const productionForceSchema = z.enum(["ingestion", "translation", "narration", "qa", "story-bible", "continuity", "tts", "audio", "alignment", "subtitles", "scenes", "artwork", "video", "audiobook", "video-export", "all"]);
 export type ProductionForce = z.infer<typeof productionForceSchema>;
 
 const operationSchema = z.object({ status: z.enum(["pending", "running", "complete", "skipped", "failed"]), reused: z.boolean().default(false), attempts: z.number().int().nonnegative().default(0), startedAt: z.string().optional(), completedAt: z.string().optional(), error: z.string().optional() });
