@@ -1,5 +1,13 @@
 # AI Story Studio
 
+## Production Studio workflow
+
+The browser studio is the primary local workflow. Open a story dashboard to see import, QA, audio, artwork, video, and the most recent durable production run in one place. **Set up production** opens a guided flow: choose a chapter range and output, review the dry-run plan and cached versus provider-backed operations, then explicitly start production.
+
+The chapter workspace supports side-by-side source, translation, and narration review. Saving a manual translation or narration edit marks dependent stages stale but never starts paid regeneration. Story Bible corrections are stored in `story-bible-manual.json` as a protected overlay, so later extraction runs cannot silently replace deliberate edits. Voice tests are similarly isolated under `voice-previews/` and never become chapter artifacts.
+
+The Outputs library exposes only known chapter and export artifacts through validated localhost API routes; arbitrary filesystem paths are never accepted from the browser. Production can be paused after the current chapter and resumed from its durable manifest after a page reload or server restart.
+
 Milestone 1 is a CLI-first, provider-agnostic vertical slice:
 
 `Chinese TXT → translation → narration polish → Story Bible → Fish Audio → MP3`

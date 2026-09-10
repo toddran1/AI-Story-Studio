@@ -65,6 +65,11 @@ export class ChapterPipeline {
       const state = chapter.stages[stage];
       const forced = isForced(options.force, stage);
       const currentOutputFingerprint = await fileFingerprint(outputPath);
+      if (!forced && state.status === "complete" && state.provider === "manual" && currentOutputFingerprint && state.outputFingerprint === currentOutputFingerprint) {
+        logger.info({ event: "pipeline.stage.reused_manual", story: options.story.slug, chapter: options.chapter, stage });
+        options.onStageEvent?.({ stage, status: "reused", state });
+        return undefined;
+      }
       if (!forced && state.status === "complete" && state.fingerprint === fp && currentOutputFingerprint && (!state.outputFingerprint || state.outputFingerprint === currentOutputFingerprint)) {
         if (!state.outputFingerprint) { state.outputFingerprint = currentOutputFingerprint; await persist(); }
         logger.info({ event: "pipeline.stage.reused", story: options.story.slug, chapter: options.chapter, stage });

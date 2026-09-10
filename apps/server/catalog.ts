@@ -1,4 +1,4 @@
-import { readdir } from "node:fs/promises";
+import { readdir, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { z } from "zod";
 import { Chapter, chapterSchema } from "../../src/domain/chapter.js";
@@ -7,7 +7,7 @@ import { Story, storySchema } from "../../src/domain/story.js";
 import { StoryBible, emptyStoryBible, storyBibleSchema } from "../../src/domain/story-bible.js";
 import { SourceManifest, sourceManifestSchema } from "../../src/source/types.js";
 import { atomicWriteJson } from "../../src/storage/atomic-write.js";
-import { sceneImagePath, storyPaths } from "../../src/storage/paths.js";
+import { exportPaths, sceneImagePath, storyPaths, videoExportPaths } from "../../src/storage/paths.js";
 import { exists, readJsonIfExists, readTextIfExists } from "../../src/storage/story-files.js";
 import { withStoryLock } from "../../src/storage/story-lock.js";
 import { loadStory } from "../../src/config/load-config.js";
@@ -15,6 +15,8 @@ import { rebuildStoryBibleBeforeChapter } from "../../src/story-bible/rebuild.js
 import { exportManifestSchema } from "../../src/audio/audiobook.js";
 import { videoExportManifestSchema } from "../../src/video/video-export.js";
 import { SceneManifest, artworkSettingsSchema, sceneManifestSchema, sceneSettingsSchema } from "../../src/scenes/types.js";
+import { loadLatestProduction } from "../../src/production/manifest.js";
+import { applyManualBibleOverlay } from "../../src/studio/workflow.js";
 
 const slugSchema = z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/);
 export const chapterFilterSchema = z.enum(["all", "unprocessed", "warn", "fail", "complete"]);
@@ -50,6 +52,12 @@ export async function getStoryOverview(root: string, slug: string) {
   const chapters = await loadChapterSummaries(root, slug);
   return { story, counts: { chapters: chapters.length, minChapter: chapters[0]?.chapter, maxChapter: chapters.at(-1)?.chapter,
     ...countQa(chapters), complete: chapters.filter((item) => item.audioMastering === "complete").length } };
+}
+
+export async function getStoryDashboard(root: string, slug: string) {
+  slugSchema.parse(slug); const overview = await getStoryOverview(root, slug); const chapters = await loadChapterSummaries(root, slug); const latest = await loadLatestProduction(root, slug); const sourceRaw = await readJsonIfExists<SourceManifest>(storyPaths(root, slug, 1).sourceManifest); const source = sourceRaw ? sourceManifestSchema.safeParse(sourceRaw) : undefined;
+  const completedStages = chapters.reduce((sum, chapter) => sum + [chapter.translation, chapter.narration, chapter.tts, chapter.audioMastering, chapter.subtitles, chapter.scenePlanning, chapter.artwork, chapter.video].filter((status) => status === "complete").length, 0);
+  return { ...overview, source: source?.success ? { type: source.data.type, origin: "url" in source.data.origin ? { url: source.data.origin.url } : { name: source.data.origin.name }, importedAt: source.data.importedAt, chapterCount: source.data.chapters.length } : undefined, progress: { processed: chapters.filter((item) => item.translation === "complete").length, audio: chapters.filter((item) => item.audioMastering === "complete").length, artwork: chapters.filter((item) => item.artwork === "complete").length, video: chapters.filter((item) => item.video === "complete").length }, latestProduction: latest, currentProfile: latest?.options.profile, estimatedRemainingStages: chapters.length * 8 - completedStages };
 }
 
 export async function getChapterPage(root: string, slug: string, options: { page: number; pageSize: number; filter: z.infer<typeof chapterFilterSchema>; query?: string }) {
@@ -104,6 +112,21 @@ export async function getStoryBible(root: string, slug: string): Promise<StoryBi
   if (index.manifest) return rebuildStoryBibleBeforeChapter(root, slug, (index.numbers.at(-1) ?? 0) + 1);
   const raw = await readJsonIfExists<StoryBible>(storyPaths(root, slug, 1).bible); return raw ? storyBibleSchema.parse(raw) : emptyStoryBible();
 }
+
+export async function getStoryBibleView(root: string, slug: string) { const bible = await getStoryBible(root, slug); return applyManualBibleOverlay(root, slug, bible); }
+
+export async function getOutputsLibrary(root: string, slug: string) {
+  slugSchema.parse(slug); const [audio, video] = await Promise.all([getAudioDashboard(root, slug), getVideoDashboard(root, slug)]); const items: Array<Record<string, unknown>> = [];
+  for (const chapter of audio.chapters) if (chapter.audioAvailable) items.push(await outputItem(storyPaths(root, slug, chapter.chapter).audio, { id: `chapter-audio-${chapter.chapter}`, group: "chapterAudio", chapter: chapter.chapter, format: "mp3", url: `/api/stories/${slug}/chapters/${chapter.chapter}/audio` }));
+  for (const item of audio.exports) items.push(await outputItem(exportPaths(root, slug, item.from, item.to, item.format).output, { id: `audiobook-${item.fingerprint}`, group: "audiobooks", from: item.from, to: item.to, format: item.format, createdAt: item.createdAt, durationSeconds: item.durationSeconds, url: item.downloadUrl }));
+  for (const chapter of video.chapters) if (chapter.videoAvailable) items.push(await outputItem(storyPaths(root, slug, chapter.chapter).video, { id: `chapter-video-${chapter.chapter}`, group: "chapterVideos", chapter: chapter.chapter, format: "mp4", url: `/api/stories/${slug}/chapters/${chapter.chapter}/video` }));
+  for (const item of video.exports) items.push(await outputItem(videoExportPaths(root, slug, item.from, item.to).output, { id: `video-${item.fingerprint}`, group: "combinedVideos", from: item.from, to: item.to, format: "mp4", createdAt: item.createdAt, durationSeconds: item.durationSeconds, url: item.downloadUrl }));
+  for (const chapter of video.chapters) if (chapter.subtitleStatus === "complete") for (const format of ["srt", "vtt"] as const) items.push(await outputItem(format === "srt" ? storyPaths(root, slug, chapter.chapter).subtitlesSrt : storyPaths(root, slug, chapter.chapter).subtitlesVtt, { id: `subtitle-${format}-${chapter.chapter}`, group: "subtitles", chapter: chapter.chapter, format, url: `/api/stories/${slug}/chapters/${chapter.chapter}/subtitles.${format}` }));
+  for (const chapter of video.chapters) { const raw = await readJsonIfExists<SceneManifest>(storyPaths(root, slug, chapter.chapter).scenesManifest); const manifest = raw ? sceneManifestSchema.safeParse(raw) : undefined; if (!manifest?.success) continue; for (const scene of manifest.data.scenes) { const path = sceneImagePath(root, slug, chapter.chapter, scene.id); if (scene.artwork.status === "complete" && await exists(path)) items.push(await outputItem(path, { id: `artwork-${chapter.chapter}-${scene.id}`, group: "artwork", chapter: chapter.chapter, format: "png", url: `/api/stories/${slug}/chapters/${chapter.chapter}/scenes/${scene.id}.png` })); } }
+  return { items: items.filter((item) => !item.missing) };
+}
+
+async function outputItem(path: string, value: Record<string, unknown>) { try { const info = await stat(path); return { ...value, bytes: info.size, createdAt: value.createdAt ?? info.mtime.toISOString() }; } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return { ...value, bytes: 0, missing: true }; throw error; } }
 
 export const settingsUpdateSchema = z.object({
   title: z.string().trim().min(1), sourceLanguage: z.string().trim().min(2), outputLanguage: z.string().trim().min(2),

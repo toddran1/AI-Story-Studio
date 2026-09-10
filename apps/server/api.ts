@@ -2,10 +2,10 @@ import { createReadStream } from "node:fs";
 import { stat } from "node:fs/promises";
 import { IncomingMessage, ServerResponse } from "node:http";
 import { z } from "zod";
-import { getAudioDashboard, getChapter, getChapterPage, getQaDashboard, getScenesDashboard, getStoryBible, getStoryOverview, getVideoDashboard, listStories, updateStorySettings, chapterFilterSchema } from "./catalog.js";
+import { getAudioDashboard, getChapter, getChapterPage, getOutputsLibrary, getQaDashboard, getScenesDashboard, getStoryBibleView, getStoryDashboard, getStoryOverview, getVideoDashboard, listStories, updateStorySettings, chapterFilterSchema } from "./catalog.js";
 import { JobConflictError } from "./job-manager.js";
 import { StudioOperations } from "./operations.js";
-import { exportPaths, previewPaths, sceneImagePath, storyPaths, videoExportPaths } from "../../src/storage/paths.js";
+import { exportPaths, previewPaths, sceneImagePath, storyPaths, videoExportPaths, voicePreviewPaths } from "../../src/storage/paths.js";
 import { SceneManifest, sceneManifestSchema } from "../../src/scenes/types.js";
 import { readJsonIfExists } from "../../src/storage/story-files.js";
 import { BatchValidationError, ConfigurationError, ProviderError, StorageError } from "../../src/pipeline/errors.js";
@@ -51,6 +51,10 @@ export function createApiHandler(operations: StudioOperations) {
 
       const storyMatch = /^\/api\/stories\/([a-z0-9-]+)$/.exec(url.pathname);
       if (storyMatch && request.method === "GET") return send(response, 200, await getStoryOverview(operations.root, storyMatch[1]!));
+      const dashboardMatch = /^\/api\/stories\/([a-z0-9-]+)\/dashboard$/.exec(url.pathname);
+      if (dashboardMatch && request.method === "GET") return send(response, 200, await getStoryDashboard(operations.root, dashboardMatch[1]!));
+      const outputsMatch = /^\/api\/stories\/([a-z0-9-]+)\/outputs$/.exec(url.pathname);
+      if (outputsMatch && request.method === "GET") return send(response, 200, await getOutputsLibrary(operations.root, outputsMatch[1]!));
       const chapterList = /^\/api\/stories\/([a-z0-9-]+)\/chapters$/.exec(url.pathname);
       if (chapterList && request.method === "GET") return send(response, 200, await getChapterPage(operations.root, chapterList[1]!, {
         page: integerParam(url.searchParams.get("page"), 1), pageSize: integerParam(url.searchParams.get("pageSize"), 50),
@@ -58,6 +62,8 @@ export function createApiHandler(operations: StudioOperations) {
       }));
       const chapterMatch = /^\/api\/stories\/([a-z0-9-]+)\/chapters\/(\d+)$/.exec(url.pathname);
       if (chapterMatch && request.method === "GET") return send(response, 200, await getChapter(operations.root, chapterMatch[1]!, Number(chapterMatch[2])));
+      const chapterTextMatch = /^\/api\/stories\/([a-z0-9-]+)\/chapters\/(\d+)\/text$/.exec(url.pathname);
+      if (chapterTextMatch && request.method === "PUT") return send(response, 200, await operations.editChapterText(chapterTextMatch[1]!, Number(chapterTextMatch[2]), await jsonBody(request)));
       const audioMatch = /^\/api\/stories\/([a-z0-9-]+)\/chapters\/(\d+)\/audio$/.exec(url.pathname);
       if (audioMatch && request.method === "GET") {
         const chapter = await getChapter(operations.root, audioMatch[1]!, Number(audioMatch[2]));
@@ -95,7 +101,11 @@ export function createApiHandler(operations: StudioOperations) {
       const videoExportMatch = /^\/api\/stories\/([a-z0-9-]+)\/video-exports\/(\d+)-(\d+)\.mp4$/.exec(url.pathname);
       if (videoExportMatch && request.method === "GET") { const from = Number(videoExportMatch[2]); const to = Number(videoExportMatch[3]); if (to < from) throw new HttpError("Invalid video export range", 400); return sendFile(request, response, videoExportPaths(operations.root, videoExportMatch[1]!, from, to).output, "video/mp4"); }
       const bibleMatch = /^\/api\/stories\/([a-z0-9-]+)\/story-bible$/.exec(url.pathname);
-      if (bibleMatch && request.method === "GET") return send(response, 200, await getStoryBible(operations.root, bibleMatch[1]!));
+      if (bibleMatch && request.method === "GET") return send(response, 200, await getStoryBibleView(operations.root, bibleMatch[1]!));
+      if (bibleMatch && request.method === "POST") return send(response, 201, await operations.addBibleEntry(bibleMatch[1]!, await jsonBody(request)));
+      const bibleEntryMatch = /^\/api\/stories\/([a-z0-9-]+)\/story-bible\/([a-f0-9-]+|auto-[a-f0-9]+)$/.exec(url.pathname);
+      if (bibleEntryMatch && request.method === "PUT") return send(response, 200, await operations.updateBibleEntry(bibleEntryMatch[1]!, bibleEntryMatch[2]!, await jsonBody(request)));
+      if (bibleEntryMatch && request.method === "DELETE") return send(response, 200, await operations.deleteBibleEntry(bibleEntryMatch[1]!, bibleEntryMatch[2]!));
       const settingsMatch = /^\/api\/stories\/([a-z0-9-]+)\/settings$/.exec(url.pathname);
       if (settingsMatch && request.method === "PUT") return send(response, 200, { story: await updateStorySettings(operations.root, settingsMatch[1]!, await jsonBody(request)) });
 
@@ -129,6 +139,10 @@ export function createApiHandler(operations: StudioOperations) {
       if (artworkJobMatch && request.method === "POST") return send(response, 202, operations.startArtwork(artworkJobMatch[1]!, await jsonBody(request)));
       const productionJobMatch = /^\/api\/stories\/([a-z0-9-]+)\/jobs\/production$/.exec(url.pathname);
       if (productionJobMatch && request.method === "POST") return send(response, 202, operations.startProduction(productionJobMatch[1]!, await jsonBody(request)));
+      const voicePreviewJobMatch = /^\/api\/stories\/([a-z0-9-]+)\/jobs\/voice-preview$/.exec(url.pathname);
+      if (voicePreviewJobMatch && request.method === "POST") return send(response, 202, operations.startVoicePreview(voicePreviewJobMatch[1]!, await jsonBody(request)));
+      const voicePreviewMatch = /^\/api\/stories\/([a-z0-9-]+)\/voice-previews\/([a-f0-9-]{36})\.mp3$/.exec(url.pathname);
+      if (voicePreviewMatch && request.method === "GET") { const paths = voicePreviewPaths(operations.root, voicePreviewMatch[1]!, voicePreviewMatch[2]!); if (!(await readJsonIfExists(paths.manifest))) return send(response, 404, { error: "Voice preview was not found" }); return sendFile(request, response, paths.audio, "audio/mpeg"); }
       const previewResult = /^\/api\/stories\/([a-z0-9-]+)\/previews\/([A-Za-z0-9T_-]+)$/.exec(url.pathname);
       if (previewResult && request.method === "GET") return send(response, 200, await operations.getPreview(previewResult[1]!, previewResult[2]!));
       const previewAudio = /^\/api\/stories\/([a-z0-9-]+)\/previews\/([A-Za-z0-9T_-]+)\/audio-([ab])$/.exec(url.pathname);

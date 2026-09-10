@@ -7,6 +7,7 @@ import { LLMRouter } from "../src/llm/router.js";
 import { storyPaths } from "../src/storage/paths.js";
 import { MockLLM, MockTTS, testStory } from "./helpers.js";
 import { CopyingAudioProcessor } from "../src/audio/chapter-audio.js";
+import { saveChapterTextEdit } from "../src/studio/workflow.js";
 
 class CountingAudioProcessor extends CopyingAudioProcessor { calls = 0; override async master(inputs: string[], output: string) { this.calls++; return super.master(inputs, output); } }
 
@@ -44,6 +45,16 @@ describe("chapter pipeline", () => {
     await ctx.pipeline.run({ root: ctx.root, story: testStory(), chapter: 1, inputPath: ctx.input });
     expect(ctx.gemini.calls.length + ctx.openai.calls.length).toBe(previousLLMCalls);
     expect(ctx.tts.calls).toBe(2);
+  });
+
+  it("keeps a manual narration authoritative until that stage is explicitly forced", async () => {
+    const ctx = await setup(); await ctx.pipeline.run({ root: ctx.root, story: testStory(), chapter: 1, inputPath: ctx.input });
+    await saveChapterTextEdit(ctx.root, "demo-story", 1, { field: "narration", text: "The producer's deliberate narration." });
+    const narrationCalls = ctx.openai.calls.filter((call) => !call.structured).length;
+    await ctx.pipeline.run({ root: ctx.root, story: testStory(), chapter: 1, inputPath: ctx.input });
+    expect(await readFile(ctx.paths.narration, "utf8")).toBe("The producer's deliberate narration."); expect(ctx.openai.calls.filter((call) => !call.structured)).toHaveLength(narrationCalls);
+    await ctx.pipeline.run({ root: ctx.root, story: testStory(), chapter: 1, inputPath: ctx.input, force: "narration" });
+    expect(ctx.openai.calls.filter((call) => !call.structured)).toHaveLength(narrationCalls + 1);
   });
 
   it("forces one stage and its downstream dependents", async () => {

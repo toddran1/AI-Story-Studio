@@ -7,13 +7,19 @@ export function storyPaths(root: string, slug: string, chapter: number) {
   return {
     story, source, sourceManifest: join(source, "source.json"), sourceChapters: join(source, "chapters"), chapterDir,
     storyConfig: join(story, "story.json"), pipelineConfig: join(story, "pipeline.json"),
-    bible: join(story, "story-bible.json"), chapterMeta: join(chapterDir, "chapter.json"),
+    bible: join(story, "story-bible.json"), bibleManual: join(story, "story-bible-manual.json"), chapterMeta: join(chapterDir, "chapter.json"),
     original: join(chapterDir, "original.txt"), english: join(chapterDir, "english.txt"),
     narration: join(chapterDir, "narration.txt"), qa: join(chapterDir, "qa.json"), bibleUpdate: join(chapterDir, "story-bible-update.json"),
     audioRaw: join(chapterDir, "audio-raw.mp3"), audio: join(chapterDir, "audio.mp3"), segments: join(chapterDir, "audio-segments"),
     subtitlesSrt: join(chapterDir, "subtitles.srt"), subtitlesVtt: join(chapterDir, "subtitles.vtt"), video: join(chapterDir, "video.mp4"),
     scenesManifest: join(chapterDir, "scenes.json"), scenesDirectory: join(chapterDir, "scenes"),
   };
+}
+
+export function voicePreviewPaths(root: string, slug: string, id: string) {
+  if (!/^[a-f0-9-]{36}$/.test(id)) throw new Error("Invalid voice preview ID");
+  const directory = join(root, "stories", slug, "voice-previews");
+  return { directory, audio: join(directory, `${id}.mp3`), manifest: join(directory, `${id}.json`) };
 }
 
 export function sceneImagePath(root: string, slug: string, chapter: number, sceneId: string) {
