@@ -113,6 +113,10 @@ export function createApiHandler(operations: StudioOperations) {
       }
       const subtitleFileMatch = /^\/api\/stories\/([a-z0-9-]+)\/chapters\/(\d+)\/subtitles\.(srt|vtt)$/.exec(url.pathname);
       if (subtitleFileMatch && request.method === "GET") { const chapter = await getChapter(operations.root, subtitleFileMatch[1]!, Number(subtitleFileMatch[2])); if (!chapter.subtitles) return send(response, 404, { error: "Chapter subtitles were not found" }); const paths = storyPaths(operations.root, subtitleFileMatch[1]!, Number(subtitleFileMatch[2])); return sendFile(request, response, subtitleFileMatch[3] === "srt" ? paths.subtitlesSrt : paths.subtitlesVtt, subtitleFileMatch[3] === "srt" ? "application/x-subrip" : "text/vtt; charset=utf-8"); }
+      const subtitleEditMatch = /^\/api\/stories\/([a-z0-9-]+)\/chapters\/(\d+)\/subtitles$/.exec(url.pathname);
+      if (subtitleEditMatch && request.method === "PUT") return send(response, 200, await operations.editSubtitles(subtitleEditMatch[1]!, Number(subtitleEditMatch[2]), await jsonBody(request)));
+      const subtitleResetMatch = /^\/api\/stories\/([a-z0-9-]+)\/chapters\/(\d+)\/subtitles\/reset$/.exec(url.pathname);
+      if (subtitleResetMatch && request.method === "POST") return send(response, 200, await operations.resetSubtitles(subtitleResetMatch[1]!, Number(subtitleResetMatch[2])));
       const chapterVideoMatch = /^\/api\/stories\/([a-z0-9-]+)\/chapters\/(\d+)\/video$/.exec(url.pathname);
       if (chapterVideoMatch && request.method === "GET") { const chapter = await getChapter(operations.root, chapterVideoMatch[1]!, Number(chapterVideoMatch[2])); if (!chapter.videoUrl) return send(response, 404, { error: "Chapter video was not found" }); return sendFile(request, response, storyPaths(operations.root, chapterVideoMatch[1]!, Number(chapterVideoMatch[2])).video, "video/mp4"); }
       const sceneImageMatch = /^\/api\/stories\/([a-z0-9-]+)\/chapters\/(\d+)\/scenes\/(scene-\d{3})\.png$/.exec(url.pathname);
@@ -170,6 +174,8 @@ export function createApiHandler(operations: StudioOperations) {
       if (audiobookJobMatch && request.method === "POST") return send(response, 202, operations.startAudiobook(audiobookJobMatch[1]!, await jsonBody(request)));
       const subtitleJobMatch = /^\/api\/stories\/([a-z0-9-]+)\/jobs\/subtitles$/.exec(url.pathname);
       if (subtitleJobMatch && request.method === "POST") return send(response, 202, operations.startSubtitles(subtitleJobMatch[1]!, await jsonBody(request)));
+      const alignmentJobMatch = /^\/api\/stories\/([a-z0-9-]+)\/jobs\/alignment$/.exec(url.pathname);
+      if (alignmentJobMatch && request.method === "POST") return send(response, 202, operations.startAlignment(alignmentJobMatch[1]!, await jsonBody(request)));
       const videoJobMatch = /^\/api\/stories\/([a-z0-9-]+)\/jobs\/video$/.exec(url.pathname);
       if (videoJobMatch && request.method === "POST") return send(response, 202, operations.startVideo(videoJobMatch[1]!, await jsonBody(request)));
       const videoExportJobMatch = /^\/api\/stories\/([a-z0-9-]+)\/jobs\/video-export$/.exec(url.pathname);

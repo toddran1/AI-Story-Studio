@@ -18,6 +18,7 @@
     "story:audio": "node --import tsx apps/cli/audio.ts",
     "story:audiobook": "node --import tsx apps/cli/audiobook.ts",
     "story:subtitles": "node --import tsx apps/cli/subtitles.ts",
+    "story:align": "node --import tsx apps/cli/align.ts",
     "story:video": "node --import tsx apps/cli/video.ts",
     "story:video-export": "node --import tsx apps/cli/video-export.ts",
     "story:scenes": "node --import tsx apps/cli/scenes.ts",

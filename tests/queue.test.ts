@@ -10,6 +10,7 @@ describe("durable queue policy", () => {
     expect(classifyQueueFailure(Object.assign(new Error("OpenAI rate limit"), { status: 429, headers: { "retry-after": "12" } }))).toMatchObject({ category: "rate_limit", retryable: true, retryAfterMs: 12_000, provider: "openai" });
     expect(classifyQueueFailure(Object.assign(new Error("service unavailable"), { status: 503 }))).toMatchObject({ category: "transient", retryable: true });
     expect(classifyQueueFailure(new ConfigurationError("FFmpeg unavailable"))).toMatchObject({ category: "configuration", retryable: false });
+    expect(classifyQueueFailure(new Error("Whisper.cpp alignment model was not found"))).toMatchObject({ category: "configuration", retryable: false });
     expect(classifyQueueFailure(new QualityGateError("QA failed", failedQa()))).toMatchObject({ category: "content_qa", retryable: false });
     expect(classifyQueueFailure(new Error("Corrupt source chapter"))).toMatchObject({ category: "permanent", retryable: false });
   });

@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { qaCategorySchema, qaStatusSchema } from "./qa.js";
 
-export const stageNameSchema = z.enum(["ingestion", "translation", "narration", "qa", "storyBible", "tts", "audioMastering", "subtitles", "scenePlanning", "artwork", "video"]);
+export const stageNameSchema = z.enum(["ingestion", "translation", "narration", "qa", "storyBible", "tts", "audioMastering", "alignment", "subtitles", "scenePlanning", "artwork", "video"]);
 export type StageName = z.infer<typeof stageNameSchema>;
 
 const usageSchema = z.object({
@@ -47,7 +47,8 @@ const rawChapterSchema = z.object({
   stages: z.record(stageNameSchema, stageStateSchema),
   quality: z.object({ status: qaStatusSchema, score: z.number().min(0).max(1), issueCategories: z.array(qaCategorySchema) }).optional(),
   audio: z.object({ durationSeconds: z.number().positive(), codec: z.string(), container: z.string(), sampleRate: z.number().positive().optional(), bitrate: z.number().positive().optional() }).optional(),
-  subtitle: z.object({ cueCount: z.number().int().positive(), durationSeconds: z.number().positive() }).optional(),
+  alignment: z.object({ mode: z.enum(["aligned", "estimated"]), engine: z.string(), matchedWordPercentage: z.number().min(0).max(100), averageConfidence: z.number().min(0).max(1).optional(), unmatchedWordCount: z.number().int().nonnegative(), audioDurationSeconds: z.number().positive(), warning: z.string().optional() }).optional(),
+  subtitle: z.object({ cueCount: z.number().int().positive(), durationSeconds: z.number().positive(), timingMode: z.enum(["aligned", "estimated"]).default("estimated"), engine: z.string().optional(), manual: z.boolean().default(false), warning: z.string().optional() }).optional(),
   video: z.object({ durationSeconds: z.number().positive(), codec: z.string(), width: z.number().int().positive(), height: z.number().int().positive() }).optional(),
   scenes: z.object({ total: z.number().int().positive(), generated: z.number().int().nonnegative(), approved: z.number().int().nonnegative() }).optional(),
 });
@@ -60,6 +61,7 @@ export const chapterSchema = z.preprocess((value) => {
   const normalized = { ...(stages as Record<string, unknown>) };
   if (!("qa" in normalized)) normalized.qa = { status: "pending" };
   if (!("audioMastering" in normalized)) normalized.audioMastering = { status: "pending" };
+  if (!("alignment" in normalized)) normalized.alignment = { status: "pending" };
   if (!("subtitles" in normalized)) normalized.subtitles = { status: "pending" };
   if (!("scenePlanning" in normalized)) normalized.scenePlanning = { status: "pending" };
   if (!("artwork" in normalized)) normalized.artwork = { status: "pending" };

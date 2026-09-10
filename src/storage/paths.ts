@@ -11,6 +11,7 @@ export function storyPaths(root: string, slug: string, chapter: number) {
     original: join(chapterDir, "original.txt"), english: join(chapterDir, "english.txt"),
     narration: join(chapterDir, "narration.txt"), qa: join(chapterDir, "qa.json"), bibleUpdate: join(chapterDir, "story-bible-update.json"),
     audioRaw: join(chapterDir, "audio-raw.mp3"), audio: join(chapterDir, "audio.mp3"), segments: join(chapterDir, "audio-segments"),
+    alignment: join(chapterDir, "alignment.json"), subtitlesDocument: join(chapterDir, "subtitles.json"), subtitlesManual: join(chapterDir, "subtitles.manual.json"),
     subtitlesSrt: join(chapterDir, "subtitles.srt"), subtitlesVtt: join(chapterDir, "subtitles.vtt"), video: join(chapterDir, "video.mp4"),
     scenesManifest: join(chapterDir, "scenes.json"), scenesDirectory: join(chapterDir, "scenes"),
   };

@@ -37,7 +37,7 @@ describe("production studio workflow", () => {
     const { root, story, paths } = await fixture(); const now = new Date().toISOString(); const complete = { status: "complete" as const, fingerprint: "old", outputFingerprint: "old" };
     await atomicWriteJson(paths.chapterMeta, chapterSchema.parse({ chapter: 1, sourceLanguage: story.sourceLanguage, outputLanguage: story.outputLanguage, counts: { originalCharacters: 4, englishWords: 2, narrationWords: 2 }, createdAt: now, updatedAt: now, stages: { ingestion: complete, translation: complete, narration: complete, qa: complete, storyBible: complete, tts: complete, audioMastering: complete, subtitles: complete, scenePlanning: complete, artwork: complete, video: complete } }));
     const result = await saveChapterTextEdit(root, story.slug, 1, { field: "narration", text: "A deliberate new narration." });
-    expect(result.invalidated).toEqual(["qa", "storyBible", "tts", "audioMastering", "subtitles", "scenePlanning", "artwork", "video"]); expect(result.chapter.stages.narration).toMatchObject({ status: "complete", provider: "manual" }); expect(result.chapter.stages.tts.status).toBe("pending"); expect(await readFile(paths.narration, "utf8")).toBe("A deliberate new narration.");
+    expect(result.invalidated).toEqual(["qa", "storyBible", "tts", "audioMastering", "alignment", "subtitles", "scenePlanning", "artwork", "video"]); expect(result.chapter.stages.narration).toMatchObject({ status: "complete", provider: "manual" }); expect(result.chapter.stages.tts.status).toBe("pending"); expect(await readFile(paths.narration, "utf8")).toBe("A deliberate new narration.");
   });
 
   it("generates voice previews outside chapter artifacts", async () => {
@@ -49,7 +49,7 @@ describe("production studio workflow", () => {
   it("aggregates dashboard progress without provider work", async () => {
     const { root, story, paths } = await fixture(); const now = new Date().toISOString(); const complete = { status: "complete" as const, fingerprint: "x", outputFingerprint: "x" };
     await atomicWriteJson(paths.chapterMeta, chapterSchema.parse({ chapter: 1, sourceLanguage: story.sourceLanguage, outputLanguage: story.outputLanguage, counts: { originalCharacters: 1, englishWords: 1, narrationWords: 1 }, createdAt: now, updatedAt: now, stages: { ingestion: complete, translation: complete, narration: complete, qa: pending(), storyBible: pending(), tts: pending(), audioMastering: pending() } }));
-    const dashboard = await getStoryDashboard(root, story.slug); expect(dashboard.progress.processed).toBe(1); expect(dashboard.estimatedRemainingStages).toBe(6);
+    const dashboard = await getStoryDashboard(root, story.slug); expect(dashboard.progress.processed).toBe(1); expect(dashboard.estimatedRemainingStages).toBe(7);
   });
 
   it("lists only safe API URLs for output files", async () => {

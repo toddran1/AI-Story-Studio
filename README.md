@@ -34,11 +34,14 @@ Milestone 10 adds one dependency-aware production orchestrator with resumable ma
 
 Milestone 13 adds a Postgres-backed production queue with chronological chapter claims, worker leases, durable retries and provider cooldowns, restart reconciliation against filesystem artifacts, persistent controls, and paginated queue/review workspaces.
 
+Milestone 14 adds local narration-to-audio forced alignment, durable word timestamps, alignment-aware subtitle segmentation, quality metrics, protected manual timing edits, and deterministic estimated timing when the aligner is unavailable or produces unusable results.
+
 ## Requirements
 
 - Node.js 22 or newer (an active LTS release is recommended)
 - npm
 - FFmpeg and ffprobe (available on `PATH`, or configured with `FFMPEG_PATH` and `FFPROBE_PATH`)
+- whisper.cpp's `whisper-cli` plus a local GGML model for true forced alignment (optional; estimated subtitle timing remains available)
 - Postgres 15 or newer for durable web production jobs (the synchronous CLI remains available without Postgres)
 - OpenAI, Gemini, and Fish Audio API credentials
 - A Fish Audio voice/reference ID is recommended for consistent voice output
@@ -69,6 +72,14 @@ FISH_AUDIO_MODEL=s2-pro
 FISH_AUDIO_REFERENCE_ID=
 PROVIDER_TIMEOUT_MS=120000
 MEDIA_PROCESS_TIMEOUT_MS=1800000
+ALIGNMENT_ENGINE=whisper-cpp
+ALIGNMENT_EXECUTABLE=whisper-cli
+ALIGNMENT_MODEL=models/ggml-base.en.bin
+ALIGNMENT_DEVICE=auto
+ALIGNMENT_MIN_MATCH_PERCENT=85
+ALIGNMENT_MIN_CONFIDENCE=0.45
+ALIGNMENT_MAX_GAP_SECONDS=15
+ALIGNMENT_TIMEOUT_MS=1800000
 WEB_REQUEST_TIMEOUT_MS=30000
 WEB_REQUEST_DELAY_MS=500
 WEB_MAX_RESPONSE_BYTES=5000000
@@ -77,6 +88,28 @@ WEB_CACHE_DIR=cache/web
 ```
 
 `STUDIO_DATA_ROOT` is the durable application-data location. Story imports, source chapters, intermediate files, audio, artwork, video, exports, backups, queue reconciliation manifests, and relative web caches are stored beneath it. `POSTGRES_DATA_DIR` is the matching Docker bind-mount location for the database; keep both on persistent storage. The source checkout can be moved or replaced without moving production data.
+
+## Forced alignment and subtitles
+
+Alignment runs after audio mastering and before subtitle generation. The canonical artifact is `chapters/<chapter>/alignment.json`; it records narration and audio hashes, engine/model/version configuration, word timestamps, match percentage, confidence, gap checks, and whether timing is truly aligned or estimated. Changing narration, mastered audio, the model, device, engine version, or thresholds invalidates only alignment and its downstream subtitle/video work. Audio and TTS remain reusable.
+
+The default backend is the maintained `whisper-cli` executable from whisper.cpp. Put a compatible GGML model under the durable data root (the default resolves to `$STUDIO_DATA_ROOT/models/ggml-base.en.bin`) or set `ALIGNMENT_MODEL` to an absolute path. No audio bytes are sent to a remote service. The application passes the mastered audio by path and hashes it as a stream, so large chapter files are not loaded into memory for alignment or subtitle cache checks.
+
+```sh
+# Align one chapter, using deterministic fallback if the local engine is unavailable.
+npm run story:align -- --story undead-disaster --chapter 1
+
+# Require true aligned timestamps and fail clearly instead of falling back.
+npm run story:align -- --story undead-disaster --from 1 --to 10 --require-aligned
+
+# Explicitly rebuild deterministic estimated timing.
+npm run story:subtitles -- --story undead-disaster --chapter 1 --estimated --force
+
+# Production enables alignment by default for video; this opts out explicitly.
+npm run story:produce -- --story undead-disaster --from 1 --to 10 --output video --no-alignment
+```
+
+Low match percentage, low confidence, suspicious gaps, invalid timestamp order, or audio-bound violations prevent an aligned artifact from being trusted. Normal production writes a warning-bearing estimated artifact and continues deterministically; `--require-aligned` is available when review policy requires a hard failure. The chapter **Subtitles** workspace shows the timing mode and quality metrics, supports explicit regeneration, and validates manual cue order and audio bounds. Saved manual cues are protected from automatic regeneration until **Reset manual edits** is chosen.
 
 ## Durable production queue
 

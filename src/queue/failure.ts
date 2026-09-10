@@ -14,7 +14,7 @@ export function classifyQueueFailure(error: unknown): ClassifiedFailure {
     return { category: "rate_limit", retryable: true, retryAfterMs, message, recommendedAction: "Wait for the provider cooldown; the chapter will retry automatically.", provider };
   if (status !== undefined && status >= 500 || /timeout|timed out|network|ECONN|EAI_AGAIN|socket hang up|temporar(?:y|ily) unavailable|fetch failed/i.test(message))
     return { category: "transient", retryable: true, retryAfterMs, message, recommendedAction: "No action is required unless retries are exhausted.", provider };
-  if (values.some((value) => value instanceof ConfigurationError) || /api key|credential|invalid model|voice|reference id|ffmpeg.*(?:unavailable|not found)|ffprobe.*(?:unavailable|not found)/i.test(message))
+  if (values.some((value) => value instanceof ConfigurationError) || /api key|credential|invalid model|voice|reference id|ffmpeg.*(?:unavailable|not found)|ffprobe.*(?:unavailable|not found)|whisper.*(?:unavailable|not found)|alignment (?:model|engine|executable)/i.test(message))
     return { category: "configuration", retryable: false, message, recommendedAction: "Fix the story or environment configuration, then resume the job.", provider };
   return { category: "permanent", retryable: false, message, recommendedAction: "Inspect the source and project artifacts before retrying.", provider };
 }

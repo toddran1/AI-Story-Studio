@@ -54,9 +54,9 @@ export async function saveChapterTextEdit(root: string, slug: string, chapterNum
   const { field, text } = chapterTextEditSchema.parse(input); const paths = storyPaths(root, slug, chapterNumber); const raw = await readJsonIfExists<Chapter>(paths.chapterMeta); if (!raw) throw new Error(`Chapter ${chapterNumber} has not been processed`); const chapter = chapterSchema.parse(raw);
   const stage: StageName = field; const output = field === "translation" ? paths.english : paths.narration; const now = new Date().toISOString(); const outputFingerprint = fingerprint(Buffer.from(text).toString("base64"));
   await atomicWrite(output, text); chapter.stages[stage] = { status: "complete", provider: "manual", model: "studio-editor", fingerprint: `manual:${outputFingerprint}`, outputFingerprint, completedAt: now };
-  const order: StageName[] = ["translation", "narration", "qa", "storyBible", "tts", "audioMastering", "subtitles", "scenePlanning", "artwork", "video"];
+  const order: StageName[] = ["translation", "narration", "qa", "storyBible", "tts", "audioMastering", "alignment", "subtitles", "scenePlanning", "artwork", "video"];
   const invalidated = order.slice(order.indexOf(stage) + 1); for (const name of invalidated) chapter.stages[name] = { status: "pending" };
-  if (field === "translation") chapter.counts.englishWords = wordCount(text); else chapter.counts.narrationWords = wordCount(text); chapter.quality = undefined; chapter.audio = undefined; chapter.subtitle = undefined; chapter.video = undefined; chapter.scenes = undefined; chapter.updatedAt = now; await atomicWriteJson(paths.chapterMeta, chapter);
+  if (field === "translation") chapter.counts.englishWords = wordCount(text); else chapter.counts.narrationWords = wordCount(text); chapter.quality = undefined; chapter.audio = undefined; chapter.alignment = undefined; chapter.subtitle = undefined; chapter.video = undefined; chapter.scenes = undefined; chapter.updatedAt = now; await atomicWriteJson(paths.chapterMeta, chapter);
   return { chapter, invalidated };
 }
 

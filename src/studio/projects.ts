@@ -14,6 +14,7 @@ import { atomicWrite, atomicWriteJson } from "../storage/atomic-write.js";
 import { storyPaths } from "../storage/paths.js";
 import { exists, readJsonIfExists } from "../storage/story-files.js";
 import { withStoryLock } from "../storage/story-lock.js";
+import { alignmentConfig, createAlignmentEngine } from "../alignment/config.js";
 
 const MAX_BACKUP_ARCHIVE_BYTES = 4 * 1024 * 1024 * 1024;
 const MAX_BACKUP_ENTRY_BYTES = 4 * 1024 * 1024 * 1024;
@@ -91,17 +92,17 @@ export async function recordActivity(root: string, slug: string, type: string, m
   const update = previous.catch(() => undefined).then(async () => { const items = activitySchema.parse((await readJsonIfExists(path)) ?? []); items.push({ id: randomUUID(), type, message, at: new Date().toISOString() }); await atomicWriteJson(path, items.slice(-500)); });
   activityQueues.set(path, update); try { await update; } finally { if (activityQueues.get(path) === update) activityQueues.delete(path); }
 }
-export async function systemStatus(env: Environment) { const tools = new FfmpegTools(); let ffmpeg = false; let ffprobe = false; try { await runCommand(tools.ffmpegPath, ["-version"], 5_000); ffmpeg = true; } catch {} try { await runCommand(tools.ffprobePath, ["-version"], 5_000); ffprobe = true; } catch {} return { providers: { openai: Boolean(env.OPENAI_API_KEY), gemini: Boolean(env.GEMINI_API_KEY), fish: Boolean(env.FISH_AUDIO_API_KEY) }, dependencies: { ffmpeg, ffprobe } }; }
+export async function systemStatus(env: Environment, root = process.cwd()) { const tools = new FfmpegTools(); let ffmpeg = false; let ffprobe = false; let alignment = false; let alignmentMessage: string | undefined; try { await runCommand(tools.ffmpegPath, ["-version"], 5_000); ffmpeg = true; } catch {} try { await runCommand(tools.ffprobePath, ["-version"], 5_000); ffprobe = true; } catch {} const config = alignmentConfig(env, root); const engine = createAlignmentEngine(config); if (engine) try { await engine.validateConfiguration(); alignment = true; } catch (error) { alignmentMessage = error instanceof Error ? error.message : String(error); } else alignmentMessage = "Alignment is disabled"; return { providers: { openai: Boolean(env.OPENAI_API_KEY), gemini: Boolean(env.GEMINI_API_KEY), fish: Boolean(env.FISH_AUDIO_API_KEY) }, dependencies: { ffmpeg, ffprobe, alignment, alignmentEngine: config.engine, alignmentMessage } }; }
 
 export async function invalidateStoryForConfigChange(root: string, slug: string, before: Story, after: Story) {
   const stages = new Set<string>(); const changed = (left: unknown, right: unknown) => JSON.stringify(left) !== JSON.stringify(right); const add = (...items: string[]) => items.forEach((item) => stages.add(item));
-  if (before.sourceLanguage !== after.sourceLanguage || before.outputLanguage !== after.outputLanguage) add("translation", "narration", "qa", "storyBible", "tts", "audioMastering", "subtitles", "scenePlanning", "artwork", "video");
-  if (changed(before.pipeline.translation, after.pipeline.translation) || changed(before.context, after.context)) add("translation", "narration", "qa", "storyBible", "tts", "audioMastering", "subtitles", "scenePlanning", "artwork", "video");
-  if (changed(before.pipeline.narration, after.pipeline.narration)) add("narration", "qa", "tts", "audioMastering", "subtitles", "scenePlanning", "artwork", "video");
+  if (before.sourceLanguage !== after.sourceLanguage || before.outputLanguage !== after.outputLanguage) add("translation", "narration", "qa", "storyBible", "tts", "audioMastering", "alignment", "subtitles", "scenePlanning", "artwork", "video");
+  if (changed(before.pipeline.translation, after.pipeline.translation) || changed(before.context, after.context)) add("translation", "narration", "qa", "storyBible", "tts", "audioMastering", "alignment", "subtitles", "scenePlanning", "artwork", "video");
+  if (changed(before.pipeline.narration, after.pipeline.narration)) add("narration", "qa", "tts", "audioMastering", "alignment", "subtitles", "scenePlanning", "artwork", "video");
   if (changed(before.pipeline.qa, after.pipeline.qa)) add("qa");
   if (changed(before.pipeline.storyBible, after.pipeline.storyBible)) add("storyBible");
-  if (changed(before.pipeline.tts, after.pipeline.tts)) add("tts", "audioMastering", "subtitles", "scenePlanning", "artwork", "video");
-  if (changed(before.audio, after.audio)) add("audioMastering", "subtitles", "scenePlanning", "artwork", "video");
+  if (changed(before.pipeline.tts, after.pipeline.tts)) add("tts", "audioMastering", "alignment", "subtitles", "scenePlanning", "artwork", "video");
+  if (changed(before.audio, after.audio)) add("audioMastering", "alignment", "subtitles", "scenePlanning", "artwork", "video");
   if (changed(before.subtitles, after.subtitles)) add("subtitles", "video");
   if (changed(before.video, after.video)) add("video");
   if (changed(before.pipeline.scenePlanner, after.pipeline.scenePlanner) || changed(before.scenes, after.scenes)) add("scenePlanning", "artwork", "video");

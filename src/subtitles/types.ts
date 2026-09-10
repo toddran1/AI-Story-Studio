@@ -8,5 +8,7 @@ export const subtitleSettingsSchema = z.object({
 }).refine((value) => value.maximumDurationSeconds >= value.minimumDurationSeconds, { message: "maximum subtitle duration must be at least the minimum" })
   .default({ maxCharactersPerLine: 42, maxLines: 2, minimumDurationSeconds: 1.2, maximumDurationSeconds: 6 });
 export type SubtitleSettings = z.infer<typeof subtitleSettingsSchema>;
-export type SubtitleCue = { index: number; startSeconds: number; endSeconds: number; text: string };
-export type SubtitleDocument = { version: string; durationSeconds: number; cues: SubtitleCue[] };
+export const subtitleCueSchema = z.object({ index: z.number().int().positive(), startSeconds: z.number().nonnegative(), endSeconds: z.number().positive(), text: z.string().trim().min(1).max(500) }).refine((cue) => cue.endSeconds > cue.startSeconds, { message: "Subtitle cue end must be after start" });
+export type SubtitleCue = z.infer<typeof subtitleCueSchema>;
+export const subtitleDocumentSchema = z.object({ version: z.string().min(1), durationSeconds: z.number().positive(), timingMode: z.enum(["aligned", "estimated"]).default("estimated"), manual: z.boolean().default(false), cues: z.array(subtitleCueSchema).min(1) });
+export type SubtitleDocument = z.infer<typeof subtitleDocumentSchema>;
