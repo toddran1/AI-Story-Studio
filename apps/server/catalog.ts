@@ -17,6 +17,7 @@ import { videoExportManifestSchema } from "../../src/video/video-export.js";
 import { SceneManifest, artworkSettingsSchema, sceneManifestSchema, sceneSettingsSchema } from "../../src/scenes/types.js";
 import { loadLatestProduction } from "../../src/production/manifest.js";
 import { applyManualBibleOverlay } from "../../src/studio/workflow.js";
+import { getStorageUsage, readActivity } from "../../src/studio/projects.js";
 
 const slugSchema = z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/);
 export const chapterFilterSchema = z.enum(["all", "unprocessed", "warn", "fail", "complete"]);
@@ -36,12 +37,16 @@ export async function listStories(root: string) {
     const manifest = manifestRaw ? sourceManifestSchema.safeParse(manifestRaw) : undefined;
     const chapters = await loadChapterSummaries(root, slug);
     const processed = chapters.filter((item) => item.audioMastering === "complete");
+    const activity = await readActivity(root, slug, 1); const storage = await getStorageUsage(root, slug); const cover = (await Promise.all(["cover.jpg", "cover.jpeg", "cover.png"].map(async (name) => await exists(join(paths.story, name)) ? name : undefined))).find(Boolean); let exportNames: string[] = [];
+    try { exportNames = await readdir(join(paths.story, "exports")); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
     return {
       slug, title: story.title, author: story.author, sourceType: story.source.type, sourceUrl: story.source.url,
       sourceLanguage: story.sourceLanguage, outputLanguage: story.outputLanguage,
       importedChapters: manifest?.success ? manifest.data.chapters.length : chapters.length,
       processedChapters: processed.length, latestProcessedChapter: processed.at(-1)?.chapter,
-      qa: countQa(chapters), progress: chapters.length ? Math.round(processed.length / chapters.length * 100) : 0,
+      qa: countQa(chapters), progress: chapters.length ? Math.round(processed.length / chapters.length * 100) : 0, description: story.description, tags: story.tags,
+      coverUrl: cover ? `/api/stories/${slug}/cover` : undefined, updatedAt: activity[0]?.at ?? (await stat(paths.storyConfig)).mtime.toISOString(), recentActivity: activity[0], projectBytes: storage.total,
+      hasAudiobook: exportNames.some((name) => /\.(mp3|m4b)$/.test(name)), hasVideo: exportNames.some((name) => name.endsWith(".mp4")),
     };
   });
   return cards.filter((card): card is NonNullable<typeof card> => Boolean(card)).sort((a, b) => a.title.localeCompare(b.title));
@@ -129,7 +134,7 @@ export async function getOutputsLibrary(root: string, slug: string) {
 async function outputItem(path: string, value: Record<string, unknown>) { try { const info = await stat(path); return { ...value, bytes: info.size, createdAt: value.createdAt ?? info.mtime.toISOString() }; } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return { ...value, bytes: 0, missing: true }; throw error; } }
 
 export const settingsUpdateSchema = z.object({
-  title: z.string().trim().min(1), sourceLanguage: z.string().trim().min(2), outputLanguage: z.string().trim().min(2),
+  title: z.string().trim().min(1), author: z.string().trim().optional(), description: z.string().max(10_000).default(""), tags: z.array(z.string()).max(30).default([]), notes: z.string().max(20_000).default(""), sourceLanguage: z.string().trim().min(2), outputLanguage: z.string().trim().min(2),
   recentChapterSummaries: z.number().int().min(0).max(100),
   translation: z.object({ provider: z.enum(["openai", "gemini"]), model: z.string().trim().min(1) }),
   narration: z.object({ provider: z.enum(["openai", "gemini"]), model: z.string().trim().min(1) }),
@@ -147,7 +152,7 @@ export async function updateStorySettings(root: string, slug: string, input: unk
   slugSchema.parse(slug); const update = settingsUpdateSchema.parse(input); const paths = storyPaths(root, slug, 1);
   return withStoryLock(root, slug, "web settings update", async () => {
     const current = await loadStory(paths.storyConfig);
-    const story = storySchema.parse({ ...current, title: update.title, sourceLanguage: update.sourceLanguage, outputLanguage: update.outputLanguage,
+    const story = storySchema.parse({ ...current, title: update.title, author: update.author || undefined, description: update.description, tags: update.tags, notes: update.notes, sourceLanguage: update.sourceLanguage, outputLanguage: update.outputLanguage,
       context: { ...current.context, recentChapterSummaries: update.recentChapterSummaries },
       audio: { ...current.audio, ...update.audio }, subtitles: { ...current.subtitles, ...update.subtitles }, video: { ...current.video, ...update.video }, scenes: { ...current.scenes, ...update.scenes }, artwork: { ...current.artwork, ...update.artwork }, pipeline: { ...current.pipeline, translation: update.translation, narration: update.narration, qa: update.qa, scenePlanner: update.scenePlanner ?? current.pipeline.scenePlanner,
         tts: { ...current.pipeline.tts, referenceId: update.tts.referenceId || undefined, speed: update.tts.speed } } });

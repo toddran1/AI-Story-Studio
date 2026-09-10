@@ -6,7 +6,7 @@ import { ConfigurationError } from "../pipeline/errors.js";
 export function defaultStory(slug: string, env: Environment): Story {
   const title = slug.split("-").map((part) => part[0]?.toUpperCase() + part.slice(1)).join(" ");
   return storySchema.parse({
-    id: slug, slug, title, sourceLanguage: "zh-CN", outputLanguage: "en-US",
+    id: slug, slug, title, description: "", tags: [], notes: "", defaultProductionProfile: "audiobook", sourceLanguage: "zh-CN", outputLanguage: "en-US",
     source: { type: "text" }, context: { recentChapterSummaries: 5 },
     audio: { loudnessTarget: -17, truePeak: -1.5, segmentGapSeconds: 0.35, chapterGapSeconds: 1.5, format: "mp3", bitrate: "128k", sampleRate: 44100 },
     subtitles: { maxCharactersPerLine: 42, maxLines: 2, minimumDurationSeconds: 1.2, maximumDurationSeconds: 6 },

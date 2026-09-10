@@ -10,7 +10,7 @@ export function put<T>(path: string, body: unknown) { return api<T>(path, { meth
 export function del<T>(path: string) { return api<T>(path, { method: "DELETE", body: JSON.stringify({}) }); }
 
 export type StoryConfig = {
-  slug: string; title: string; author?: string; sourceLanguage: string; outputLanguage: string; source: { type: string; url?: string };
+  slug: string; title: string; author?: string; description: string; tags: string[]; notes: string; defaultProductionProfile: "audio" | "audiobook" | "story-video" | "everything"; sourceLanguage: string; outputLanguage: string; source: { type: string; url?: string };
   context: { recentChapterSummaries: number };
   audio: AudioSettings;
   subtitles: SubtitleSettings; video: VideoSettings; scenes: SceneSettings; artwork: ArtworkSettings;
@@ -29,7 +29,7 @@ export type ScenesDashboard = { settings: SceneSettings; artwork: ArtworkSetting
 export type AudioDashboard = { settings: AudioSettings; chapters: Array<{ chapter: number; title?: string; status: string; durationSeconds?: number; audioAvailable: boolean }>; counts: { total: number; mastered: number }; totalDurationSeconds: number; exports: Array<{ fingerprint: string; from: number; to: number; format: "mp3" | "m4b"; createdAt: string; durationSeconds: number; downloadUrl: string }> };
 export type VideoDashboard = { settings: VideoSettings; subtitleSettings: SubtitleSettings; background: { coverAvailable: boolean; coverName?: string; effectiveMode: string }; counts: { total: number; mastered: number; subtitles: number; videos: number }; chapters: Array<{ chapter: number; title?: string; durationSeconds?: number; subtitleStatus: string; videoStatus: string; videoAvailable: boolean }>; exports: Array<{ fingerprint: string; from: number; to: number; createdAt: string; durationSeconds: number; downloadUrl: string }> };
 export type Model = { provider: "openai" | "gemini"; model: string };
-export type StoryCard = { slug: string; title: string; author?: string; sourceType: string; sourceUrl?: string; sourceLanguage: string; outputLanguage: string; importedChapters: number; processedChapters: number; latestProcessedChapter?: number; qa: Counts; progress: number };
+export type StoryCard = { slug: string; title: string; author?: string; description: string; tags: string[]; sourceType: string; sourceUrl?: string; sourceLanguage: string; outputLanguage: string; importedChapters: number; processedChapters: number; latestProcessedChapter?: number; qa: Counts; progress: number; coverUrl?: string; updatedAt: string; recentActivity?: { type: string; message: string; at: string }; projectBytes: number; hasAudiobook: boolean; hasVideo: boolean };
 export type Counts = { pass: number; warn: number; fail: number };
 export type ChapterRow = { chapter: number; originalTitle?: string; translation: string; narration: string; qa?: "pass" | "warn" | "fail"; qaScore?: number; tts: string; audioMastering: string; durationSeconds?: number; audioAvailable: boolean };
 export type QaResult = { status: "pass" | "warn" | "fail"; score: number; issues: Array<{ category: string; severity: "warn" | "fail"; message: string; evidence: string }>; checks: Record<string, "pass" | "warn" | "fail"> };

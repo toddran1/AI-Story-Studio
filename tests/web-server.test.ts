@@ -72,6 +72,12 @@ describe("web service layer", () => {
     expect(result.chapters).toBe(1); expect((await getStoryOverview(root, "uploaded-story")).counts.chapters).toBe(1);
   });
 
+  it("inspects an uploaded chapter folder in numeric chapter order", async () => {
+    const root = await mkdtemp(join(tmpdir(), "story-web-folder-")); const operations = new StudioOperations(root, env);
+    const inspection = await operations.inspectSource({ files: [{ name: "chapter-010.txt", text: "Ten" }, { name: "chapter-002.txt", text: "Two" }] });
+    expect(inspection.chapters.map((item) => item.chapter)).toEqual([2, 10]); await operations.close();
+  });
+
   it("starts a batch job and exposes terminal status", async () => {
     const root = await mkdtemp(join(tmpdir(), "story-web-job-")); const jobs = new JobManager();
     const operations = new StudioOperations(root, env, jobs, { pipeline: { run: async ({ chapter }) => ({ chapter, quality: { status: "pass", score: 1, issueCategories: [] } }) } });

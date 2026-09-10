@@ -412,6 +412,16 @@ Optional character references belong under `stories/<story>/assets/characters/<c
 
 The studio’s **Scenes / Artwork** workspace uses a film-strip timeline to edit timing, summaries, characters, locations, importance, and visual prompts; estimate and generate missing work; regenerate one scene; and mark results approved, rejected, or needing regeneration. Manual edits become the saved source of truth. Video rendering uses the scene timeline only when every image is present, fingerprint-valid, and approved; otherwise it safely retains the existing cover or generated-background fallback.
 
+## Milestone 12 — Library and Project Management
+
+The local studio now opens as a multi-story working archive. Projects can be searched, sorted, filtered, and viewed as a shelf or list with cover art, chapter/production progress, QA state, output badges, storage size, and recent local activity.
+
+Use **New story** to create an original project or inspect and import a TXT, TXT chapter folder, EPUB, DOCX, or supported HTTPS web novel. Project creation and dependency/provider status checks never call a paid API. Missing credentials are reported from configuration presence only; secrets stay in `.env` and are never returned to the browser.
+
+Each story’s **Manage project** screen supports metadata and cover changes, settings-only or full duplication, bounded ZIP backup/restore, categorized storage reporting, safe cleanup of regenerable media, and explicit title-confirmed deletion. Deletion moves the project to local recoverable trash rather than recursively deleting an unresolved path. Restore rejects absolute paths, traversal, lock/temp entries, oversized files, excessive expansion, and invalid project manifests. Cover changes invalidate chapter video only; text, QA, TTS, and mastered audio remain reusable.
+
+Application defaults live in `.ai-story-studio/settings.json` and apply only when a new story is created. Existing story configurations are not rewritten when these defaults change.
+
 ## Verification
 
 ```sh

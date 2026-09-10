@@ -12,6 +12,10 @@ const rawStorySchema = z.object({
   title: z.string().min(1),
   originalTitle: z.string().optional(),
   author: z.string().optional(),
+  description: z.string().default(""),
+  tags: z.array(z.string().min(1)).default([]),
+  notes: z.string().default(""),
+  defaultProductionProfile: z.enum(["audio", "audiobook", "story-video", "everything"]).default("audiobook"),
   sourceLanguage: z.string().min(2),
   outputLanguage: z.string().min(2),
   source: z.object({

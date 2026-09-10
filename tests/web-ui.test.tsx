@@ -10,6 +10,6 @@ describe("web UI", () => {
   it("renders the studio shell and accessible navigation", () => {
     Object.defineProperty(globalThis, "location", { value: { pathname: "/" }, configurable: true });
     const html = renderToStaticMarkup(<App />);
-    expect(html).toContain("Studio navigation"); expect(html).toContain("Your story shelf"); expect(html).toContain("Import a story");
+    expect(html).toContain("Studio navigation"); expect(html).toContain("Your story shelf"); expect(html).toContain("Create your first story"); expect(html).toContain("Nothing calls a paid provider");
   });
 });

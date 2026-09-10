@@ -1,5 +1,6 @@
 import { createReadStream } from "node:fs";
 import { stat } from "node:fs/promises";
+import { join } from "node:path";
 import { IncomingMessage, ServerResponse } from "node:http";
 import { z } from "zod";
 import { getAudioDashboard, getChapter, getChapterPage, getOutputsLibrary, getQaDashboard, getScenesDashboard, getStoryBibleView, getStoryDashboard, getStoryOverview, getVideoDashboard, listStories, updateStorySettings, chapterFilterSchema } from "./catalog.js";
@@ -12,6 +13,8 @@ import { BatchValidationError, ConfigurationError, ProviderError, StorageError }
 import { WebHttpError } from "../../src/source/web/http-client.js";
 import { logger } from "../../src/utils/logger.js";
 import { loadLatestProduction } from "../../src/production/manifest.js";
+import { backupPath } from "../../src/studio/projects.js";
+import { exists } from "../../src/storage/story-files.js";
 
 const MAX_BODY_BYTES = 50_000_000;
 const MAX_JSON_BYTES = 1_000_000;
@@ -21,6 +24,7 @@ const sourceInspectJsonSchema = z.object({
   to: z.number().int().positive().optional(), chapter: z.number().int().positive().optional(),
   splitChapters: z.boolean().optional(), allowGaps: z.boolean().optional(),
 }).strict();
+const directoryInspectSchema = z.object({ files: z.array(z.object({ name: z.string().min(1).max(255), text: z.string() }).strict()).min(1).max(2_000), allowGaps: z.boolean().optional() }).strict();
 
 export function createApiHandler(operations: StudioOperations) {
   return async function handle(request: IncomingMessage, response: ServerResponse): Promise<boolean> {
@@ -29,6 +33,12 @@ export function createApiHandler(operations: StudioOperations) {
       validateLocalRequest(request);
       if (request.method === "GET" && url.pathname === "/api/health") return send(response, 200, { status: "ready", binding: "localhost", credentials: { openai: "server-only", gemini: "server-only", fish: "server-only" } });
       if (request.method === "GET" && url.pathname === "/api/stories") return send(response, 200, { stories: await listStories(operations.root) });
+      if (request.method === "POST" && url.pathname === "/api/stories") return send(response, 201, { story: await operations.createStory(await jsonBody(request)) });
+      if (request.method === "GET" && url.pathname === "/api/settings") return send(response, 200, { settings: await operations.getGlobalSettings(), system: await operations.getSystemStatus() });
+      if (request.method === "PUT" && url.pathname === "/api/settings") return send(response, 200, { settings: await operations.updateGlobalSettings(await jsonBody(request)) });
+      if (request.method === "POST" && url.pathname === "/api/backups/restore") return send(response, 201, await operations.restoreBackup(await body(request, 100 * 1024 * 1024)));
+      const backupDownload = /^\/api\/backups\/([a-f0-9-]{36})\.zip$/.exec(url.pathname);
+      if (backupDownload && request.method === "GET") return sendFile(request, response, backupPath(operations.root, backupDownload[1]!), "application/zip");
       if (request.method === "GET" && url.pathname === "/api/jobs") return send(response, 200, { jobs: operations.jobs.list() });
 
       const jobMatch = /^\/api\/jobs\/([a-f0-9-]+)$/.exec(url.pathname);
@@ -51,6 +61,22 @@ export function createApiHandler(operations: StudioOperations) {
 
       const storyMatch = /^\/api\/stories\/([a-z0-9-]+)$/.exec(url.pathname);
       if (storyMatch && request.method === "GET") return send(response, 200, await getStoryOverview(operations.root, storyMatch[1]!));
+      if (storyMatch && request.method === "DELETE") return send(response, 200, await operations.deleteProject(storyMatch[1]!, await jsonBody(request)));
+      const metadataMatch = /^\/api\/stories\/([a-z0-9-]+)\/metadata$/.exec(url.pathname);
+      if (metadataMatch && request.method === "PUT") return send(response, 200, { story: await operations.updateMetadata(metadataMatch[1]!, await jsonBody(request)) });
+      const coverMatch = /^\/api\/stories\/([a-z0-9-]+)\/cover$/.exec(url.pathname);
+      if (coverMatch && request.method === "GET") { const root = storyPaths(operations.root, coverMatch[1]!, 1).story; for (const [name, type] of [["cover.jpg", "image/jpeg"], ["cover.jpeg", "image/jpeg"], ["cover.png", "image/png"]] as const) if (await exists(join(root, name))) return sendFile(request, response, join(root, name), type); return send(response, 404, { error: "Story cover was not found" }); }
+      if (coverMatch && request.method === "PUT") { const filename = request.headers["x-file-name"]; if (typeof filename !== "string") throw new HttpError("Cover upload requires X-File-Name", 400); return send(response, 200, await operations.updateCover(coverMatch[1]!, decodeURIComponent(filename), await body(request, 15 * 1024 * 1024))); }
+      const duplicateMatch = /^\/api\/stories\/([a-z0-9-]+)\/duplicate$/.exec(url.pathname);
+      if (duplicateMatch && request.method === "POST") return send(response, 201, await operations.duplicateProject(duplicateMatch[1]!, await jsonBody(request)));
+      const storyBackupMatch = /^\/api\/stories\/([a-z0-9-]+)\/backup$/.exec(url.pathname);
+      if (storyBackupMatch && request.method === "POST") return send(response, 201, await operations.createBackup(storyBackupMatch[1]!, await jsonBody(request)));
+      const storageMatch = /^\/api\/stories\/([a-z0-9-]+)\/storage$/.exec(url.pathname);
+      if (storageMatch && request.method === "GET") return send(response, 200, { usage: await operations.storageUsage(storageMatch[1]!) });
+      const cleanupMatch = /^\/api\/stories\/([a-z0-9-]+)\/storage\/cleanup$/.exec(url.pathname);
+      if (cleanupMatch && request.method === "POST") return send(response, 200, await operations.cleanup(cleanupMatch[1]!, await jsonBody(request)));
+      const activityMatch = /^\/api\/stories\/([a-z0-9-]+)\/activity$/.exec(url.pathname);
+      if (activityMatch && request.method === "GET") return send(response, 200, { activity: await operations.recentActivity(activityMatch[1]!, optionalInteger(url.searchParams.get("limit"))) });
       const dashboardMatch = /^\/api\/stories\/([a-z0-9-]+)\/dashboard$/.exec(url.pathname);
       if (dashboardMatch && request.method === "GET") return send(response, 200, await getStoryDashboard(operations.root, dashboardMatch[1]!));
       const outputsMatch = /^\/api\/stories\/([a-z0-9-]+)\/outputs$/.exec(url.pathname);
@@ -112,7 +138,7 @@ export function createApiHandler(operations: StudioOperations) {
       const inspectMatch = /^\/api\/stories\/([a-z0-9-]+)\/source\/inspect$/.exec(url.pathname);
       if (inspectMatch && request.method === "POST") {
         const contentType = request.headers["content-type"] ?? "";
-        if (contentType.includes("application/json")) return send(response, 200, await operations.inspectSource(sourceInspectJsonSchema.parse(await jsonBody(request))));
+        if (contentType.includes("application/json")) { const raw = await jsonBody(request, 50_000_000); const parsedDirectory = directoryInspectSchema.safeParse(raw); return send(response, 200, await operations.inspectSource(parsedDirectory.success ? parsedDirectory.data : sourceInspectJsonSchema.parse(raw))); }
         const file = await body(request); const filename = request.headers["x-file-name"];
         return send(response, 200, await operations.inspectSource({ file, filename: typeof filename === "string" ? decodeURIComponent(filename) : undefined,
           type: optionalString(url.searchParams.get("type")) as never, chapter: optionalInteger(url.searchParams.get("chapter")), splitChapters: url.searchParams.get("split") === "true", allowGaps: url.searchParams.get("allowGaps") === "true" }));
@@ -187,7 +213,7 @@ async function sendFile(request: IncomingMessage, response: ServerResponse, path
   const stream = createReadStream(path, { start, end }); stream.on("error", (error) => response.destroy(error)); stream.pipe(response); return true;
 }
 async function body(request: IncomingMessage, limit = MAX_BODY_BYTES): Promise<Buffer> { const parts: Buffer[] = []; let size = 0; for await (const chunk of request) { const part = Buffer.from(chunk); size += part.length; if (size > limit) throw new HttpError(`Request body exceeds ${Math.floor(limit / 1_000_000)} MB`, 413); parts.push(part); } return Buffer.concat(parts); }
-async function jsonBody(request: IncomingMessage): Promise<unknown> { const raw = await body(request, MAX_JSON_BYTES); if (!raw.length) return {}; try { return JSON.parse(raw.toString("utf8")); } catch { throw new HttpError("Request body must be valid JSON", 400); } }
+async function jsonBody(request: IncomingMessage, limit = MAX_JSON_BYTES): Promise<unknown> { const raw = await body(request, limit); if (!raw.length) return {}; try { return JSON.parse(raw.toString("utf8")); } catch { throw new HttpError("Request body must be valid JSON", 400); } }
 function integerParam(value: string | null, fallback: number) { if (value === null) return fallback; const number = Number(value); if (!Number.isInteger(number) || number < 1) throw new Error("Pagination values must be positive integers"); return number; }
 function optionalInteger(value: string | null) { if (value === null) return undefined; return integerParam(value, 1); }
 function optionalString(value: string | null) { return value?.trim() || undefined; }
@@ -205,6 +231,8 @@ function statusFor(error: unknown): number {
   if (error instanceof HttpError) return error.status;
   if (error instanceof z.ZodError) return 400;
   if (error instanceof JobConflictError || /locked by PID|already has active job/.test(String(error))) return 409;
+  if (/already exists/.test(String(error))) return 409;
+  if (/Confirmation|Unsafe backup|invalid ZIP|Backup must|Cover must|Select between|Select a |Chapter folder|Only HTTPS|exceeds the .* limit|Duplicate chapter/.test(String(error))) return 400;
   if (/not found|does not exist/.test(String(error))) return 404;
   if (error instanceof ConfigurationError || error instanceof BatchValidationError) return 422;
   if (error instanceof WebHttpError) return isTimeout(error) ? 504 : 502;

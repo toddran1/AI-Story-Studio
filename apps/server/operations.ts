@@ -45,6 +45,7 @@ import { refreshProductionRange } from "../../src/production/refresh.js";
 import { TTSProvider } from "../../src/tts/provider.js";
 import { addManualBibleEntry, bibleCategorySchema, chapterTextEditSchema, deleteBibleEntry, saveChapterTextEdit, saveVoicePreview, updateManualBibleEntry, voicePreviewSchema } from "../../src/studio/workflow.js";
 import { getStoryBible } from "./catalog.js";
+import { buildStoryBackup, cleanupKindSchema, cleanupStory, createBlankStory, deleteStory, duplicateStory, getStorageUsage, loadGlobalSettings, readActivity, recordActivity, restoreStoryBackup, saveCover, saveGlobalSettings, systemStatus, updateStoryMetadata } from "../../src/studio/projects.js";
 
 const slugSchema = z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/);
 const batchInputSchema = z.object({ from: z.number().int().positive().optional(), to: z.number().int().positive().optional(), force: z.enum(["translation", "narration", "qa", "story-bible", "tts", "audio", "all"]).optional() }).strict();
@@ -78,11 +79,16 @@ export class StudioOperations {
     this.inspectionTimer = setInterval(() => this.expireInspections(), 60_000); this.inspectionTimer.unref();
   }
 
-  async inspectSource(input: { url?: string; file?: Uint8Array; filename?: string; type?: SourceType; from?: number; to?: number; chapter?: number; splitChapters?: boolean; allowGaps?: boolean }) {
+  async inspectSource(input: { url?: string; file?: Uint8Array; filename?: string; files?: Array<{ name: string; text: string }>; type?: SourceType; from?: number; to?: number; chapter?: number; splitChapters?: boolean; allowGaps?: boolean }) {
     this.expireInspections(); let source: string; let temporaryDirectory: string | undefined;
     const type = input.type === undefined ? undefined : sourceTypeSchema.parse(input.type);
     if (input.url) { const url = new URL(input.url); if (url.protocol !== "https:") throw new Error("Only HTTPS source URLs are allowed"); source = url.toString(); }
-    else {
+    else if (input.files) {
+      if (!input.files.length || input.files.length > 2_000) throw new Error("Select between 1 and 2,000 TXT chapter files");
+      temporaryDirectory = join(tmpdir(), `ai-story-studio-${randomUUID()}`); await mkdir(temporaryDirectory); let total = 0; const names = new Set<string>();
+      for (const file of input.files) { const safeName = basename(file.name); if (safeName !== file.name || !safeName.toLowerCase().endsWith(".txt")) throw new Error("Chapter folders may contain only top-level TXT files"); if (names.has(safeName.toLowerCase())) throw new Error(`Duplicate chapter filename: ${safeName}`); names.add(safeName.toLowerCase()); total += Buffer.byteLength(file.text); if (total > 50 * 1024 * 1024) throw new Error("Chapter folder exceeds the 50 MB inspection limit"); await writeFile(join(temporaryDirectory, safeName), file.text, "utf8"); }
+      source = temporaryDirectory;
+    } else {
       if (!input.file?.length || !input.filename) throw new Error("Select a TXT, EPUB, or DOCX file");
       const safeName = basename(input.filename); if (!/\.(txt|epub|docx)$/i.test(safeName)) throw new Error("Only TXT, EPUB, and DOCX files are supported");
       temporaryDirectory = join(tmpdir(), `ai-story-studio-${randomUUID()}`); await mkdir(temporaryDirectory); source = join(temporaryDirectory, safeName); await writeFile(source, input.file);
@@ -114,8 +120,22 @@ export class StudioOperations {
       });
     try { await this.discardInspection(inspectionId); }
     catch (error) { logger.warn({ event: "web.inspection.cleanup_failed", inspectionId, error: error instanceof Error ? error.message : String(error) }); }
-    return result;
+    await recordActivity(this.root, slug, "source.imported", `Imported ${result.added.length} new and updated ${result.modified.length} chapters`); return result;
   }
+
+  getGlobalSettings() { return loadGlobalSettings(this.root, this.env); }
+  updateGlobalSettings(raw: unknown) { return saveGlobalSettings(this.root, raw); }
+  getSystemStatus() { return systemStatus(this.env); }
+  createStory(raw: unknown) { return createBlankStory(this.root, this.env, raw); }
+  updateMetadata(slug: string, raw: unknown) { return updateStoryMetadata(this.root, slug, raw); }
+  updateCover(slug: string, filename: string, bytes: Uint8Array) { return saveCover(this.root, slug, filename, bytes); }
+  duplicateProject(slug: string, raw: unknown) { const input = z.object({ slug: slugSchema, mode: z.enum(["settings", "full"]) }).strict().parse(raw); return duplicateStory(this.root, slug, input.slug, input.mode); }
+  deleteProject(slug: string, raw: unknown) { const input = z.object({ confirmation: z.string() }).strict().parse(raw); return deleteStory(this.root, slug, input.confirmation); }
+  createBackup(slug: string, raw: unknown) { const input = z.object({ includeMedia: z.boolean().default(false) }).strict().parse(raw); return buildStoryBackup(this.root, slug, input.includeMedia); }
+  restoreBackup(bytes: Uint8Array) { return restoreStoryBackup(this.root, bytes); }
+  storageUsage(slug: string) { return getStorageUsage(this.root, slug); }
+  recentActivity(slug: string, limit?: number) { return readActivity(this.root, slug, limit); }
+  cleanup(slug: string, raw: unknown) { const input = z.object({ kind: cleanupKindSchema }).strict().parse(raw); return cleanupStory(this.root, slug, input.kind); }
 
   startBatch(slug: string, raw: unknown) {
     slugSchema.parse(slug); const input = batchInputSchema.parse(raw);
@@ -130,14 +150,14 @@ export class StudioOperations {
 
   async productionPlan(slug: string, raw: unknown) { slugSchema.parse(slug); const input = productionInputSchema.parse(raw); const story = await loadStory(storyPaths(this.root, slug, 1).storyConfig); return (await planProduction({ root: this.root, story, ...input, dryRun: true }, { loadChapters: async () => (await loadImportedChapters(this.root, slug)).chapters })).plan; }
 
-  async editChapterText(slug: string, chapter: number, raw: unknown) { slugSchema.parse(slug); const input = chapterTextEditSchema.parse(raw); return withStoryLock(this.root, slug, "manual chapter text edit", () => saveChapterTextEdit(this.root, slug, chapter, input)); }
-  async addBibleEntry(slug: string, raw: unknown) { slugSchema.parse(slug); const input = z.object({ category: bibleCategorySchema, value: z.record(z.string(), z.unknown()), replacementKey: z.string().optional() }).strict().parse(raw); return withStoryLock(this.root, slug, "manual Story Bible add", async () => { const base = await getStoryBible(this.root, slug); return { id: await addManualBibleEntry(this.root, slug, base, input.category, input.value, input.replacementKey) }; }); }
-  async updateBibleEntry(slug: string, id: string, raw: unknown) { slugSchema.parse(slug); const input = z.object({ value: z.record(z.string(), z.unknown()) }).strict().parse(raw); return withStoryLock(this.root, slug, "manual Story Bible edit", async () => { const base = await getStoryBible(this.root, slug); await updateManualBibleEntry(this.root, slug, base, id, input.value); return { status: "updated" }; }); }
-  async deleteBibleEntry(slug: string, id: string) { slugSchema.parse(slug); return withStoryLock(this.root, slug, "manual Story Bible delete", async () => { const base = await getStoryBible(this.root, slug); await deleteBibleEntry(this.root, slug, base, id); return { status: "deleted" }; }); }
+  async editChapterText(slug: string, chapter: number, raw: unknown) { slugSchema.parse(slug); const input = chapterTextEditSchema.parse(raw); return withStoryLock(this.root, slug, "manual chapter text edit", async () => { const result = await saveChapterTextEdit(this.root, slug, chapter, input); await recordActivity(this.root, slug, "chapter.edited", `Edited Chapter ${chapter} ${input.field}`); return result; }); }
+  async addBibleEntry(slug: string, raw: unknown) { slugSchema.parse(slug); const input = z.object({ category: bibleCategorySchema, value: z.record(z.string(), z.unknown()), replacementKey: z.string().optional() }).strict().parse(raw); return withStoryLock(this.root, slug, "manual Story Bible add", async () => { const base = await getStoryBible(this.root, slug); const id = await addManualBibleEntry(this.root, slug, base, input.category, input.value, input.replacementKey); await recordActivity(this.root, slug, "bible.edited", `Added or corrected ${input.category} entry`); return { id }; }); }
+  async updateBibleEntry(slug: string, id: string, raw: unknown) { slugSchema.parse(slug); const input = z.object({ value: z.record(z.string(), z.unknown()) }).strict().parse(raw); return withStoryLock(this.root, slug, "manual Story Bible edit", async () => { const base = await getStoryBible(this.root, slug); await updateManualBibleEntry(this.root, slug, base, id, input.value); await recordActivity(this.root, slug, "bible.edited", "Updated a Story Bible entry"); return { status: "updated" }; }); }
+  async deleteBibleEntry(slug: string, id: string) { slugSchema.parse(slug); return withStoryLock(this.root, slug, "manual Story Bible delete", async () => { const base = await getStoryBible(this.root, slug); await deleteBibleEntry(this.root, slug, base, id); await recordActivity(this.root, slug, "bible.edited", "Deleted a manual Story Bible entry"); return { status: "deleted" }; }); }
 
-  startVoicePreview(slug: string, raw: unknown) { slugSchema.parse(slug); const input = voicePreviewSchema.parse(raw); return this.jobs.create("voicePreview", slug, async () => { const story = await loadStory(storyPaths(this.root, slug, 1).storyConfig); const config = story.pipeline.tts; const request = { ...input, model: input.model ?? config.model, referenceId: input.referenceId ?? config.referenceId, speed: input.speed ?? config.speed }; const result = await this.tts.synthesize({ text: request.text, model: request.model, referenceId: request.referenceId, speed: request.speed, format: config.format, sampleRate: config.sampleRate, bitrate: config.bitrate, normalize: config.normalize, maxCharsPerRequest: config.maxCharsPerRequest }); return saveVoicePreview(this.root, slug, result.audio, request); }); }
+  startVoicePreview(slug: string, raw: unknown) { slugSchema.parse(slug); const input = voicePreviewSchema.parse(raw); return this.jobs.create("voicePreview", slug, async () => { const story = await loadStory(storyPaths(this.root, slug, 1).storyConfig); const config = story.pipeline.tts; const request = { ...input, model: input.model ?? config.model, referenceId: input.referenceId ?? config.referenceId, speed: input.speed ?? config.speed }; const result = await this.tts.synthesize({ text: request.text, model: request.model, referenceId: request.referenceId, speed: request.speed, format: config.format, sampleRate: config.sampleRate, bitrate: config.bitrate, normalize: config.normalize, maxCharsPerRequest: config.maxCharsPerRequest }); const saved = await saveVoicePreview(this.root, slug, result.audio, request); await recordActivity(this.root, slug, "voice.preview", "Generated a voice preview"); return saved; }); }
 
-  startProduction(slug: string, raw: unknown) { slugSchema.parse(slug); const input = productionInputSchema.parse(raw); return this.jobs.create("production", slug, async (control) => withStoryLock(this.root, slug, "end-to-end production", async () => { const story = await loadStory(storyPaths(this.root, slug, 1).storyConfig); const shutdown = new ShutdownController(); control.setPause(() => shutdown.request()); return (await runProduction({ root: this.root, story, ...input, pause: shutdown, onProgress: (event) => control.update(event) }, { pipeline: this.pipeline, loadChapters: async () => (await loadImportedChapters(this.root, slug)).chapters, refresh: (from, to) => refreshProductionRange({ root: this.root, story, from, to, registry: this.registry }), scenePlanner: this.scenePlanner ?? this.runtime.router.forStage(story.pipeline.scenePlanner), image: this.image, video: this.video, videoExport: this.videoExport, audiobook: this.audiobook })).manifest; })); }
+  startProduction(slug: string, raw: unknown) { slugSchema.parse(slug); const input = productionInputSchema.parse(raw); return this.jobs.create("production", slug, async (control) => withStoryLock(this.root, slug, "end-to-end production", async () => { const story = await loadStory(storyPaths(this.root, slug, 1).storyConfig); const shutdown = new ShutdownController(); control.setPause(() => shutdown.request()); await recordActivity(this.root, slug, "production.started", `Started production for Chapters ${input.from}–${input.to}`); const manifest = (await runProduction({ root: this.root, story, ...input, pause: shutdown, onProgress: (event) => control.update(event) }, { pipeline: this.pipeline, loadChapters: async () => (await loadImportedChapters(this.root, slug)).chapters, refresh: (from, to) => refreshProductionRange({ root: this.root, story, from, to, registry: this.registry }), scenePlanner: this.scenePlanner ?? this.runtime.router.forStage(story.pipeline.scenePlanner), image: this.image, video: this.video, videoExport: this.videoExport, audiobook: this.audiobook })).manifest; await recordActivity(this.root, slug, `production.${manifest.status}`, `${manifest.status === "completed" ? "Completed" : "Stopped"} production for Chapters ${input.from}–${input.to}`); return manifest; })); }
 
   startPreview(slug: string, raw: unknown) {
     slugSchema.parse(slug); const input = previewInputSchema.parse(raw);
