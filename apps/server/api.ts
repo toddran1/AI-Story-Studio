@@ -225,7 +225,7 @@ export function createApiHandler(operations: StudioOperations) {
       const displayError = error instanceof z.ZodError ? new Error(z.prettifyError(error), { cause: error }) : error;
       const diagnostic = createErrorDiagnostic(displayError);
       if (status >= 500) logger.error({ event: "web.api.failed", diagnosticId: diagnostic.id, category: diagnostic.category, method: request.method, path: url.pathname, status, error: error instanceof Error ? error.message : String(error) });
-      return send(response, status, { error: diagnostic.summary, diagnostic: publicJob(diagnostic, operations.root) });
+      return send(response, status, { error: diagnostic.summary, diagnostic: publicJob(diagnostic, operations.root), validation: validationIssues(error) });
     }
   };
 }
@@ -289,6 +289,26 @@ function statusFor(error: unknown): number {
   if (error instanceof ProviderError) return isTimeout(error) ? 504 : 502;
   if (error instanceof StorageError) return 500;
   return 500;
+}
+
+/** A deliberately small, value-free validation contract for every editable API route. */
+export function validationIssues(error: unknown): Array<{ path: string; message: string; code: string }> | undefined {
+  const validation = findZodError(error);
+  if (!validation) return undefined;
+  return validation.issues.slice(0, 25).map((issue) => ({
+    path: issue.path.map(String).join(".") || "form",
+    message: issue.message.replace(/[\r\n]+/g, " ").slice(0, 300),
+    code: issue.code,
+  }));
+}
+
+function findZodError(error: unknown): z.ZodError | undefined {
+  let current = error;
+  for (let depth = 0; current && depth < 8; depth++) {
+    if (current instanceof z.ZodError) return current;
+    current = typeof current === "object" ? (current as { cause?: unknown }).cause : undefined;
+  }
+  return undefined;
 }
 function isTimeout(error: unknown) { for (let value: unknown = error, depth = 0; value && depth < 8; depth++, value = typeof value === "object" ? (value as { cause?: unknown }).cause : undefined) if (value instanceof Error && /timeout|timed out/i.test(`${value.name} ${value.message}`)) return true; return false; }
 

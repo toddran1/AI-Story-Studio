@@ -24,7 +24,8 @@ import { AudiobookProcessor } from "../src/audio/audiobook.js";
 import { VideoProcessor } from "../src/video/renderer.js";
 import { VideoExportProcessor } from "../src/video/video-export.js";
 import { ImageProvider } from "../src/artwork/provider.js";
-import { integerParam, publicJob, validateLocalRequest } from "../apps/server/api.js";
+import { integerParam, publicJob, validateLocalRequest, validationIssues } from "../apps/server/api.js";
+import { z } from "zod";
 
 const webAudio: AudioMasteringProcessor = { version: "web-audio-v1", master: async (_inputs, output) => { await atomicWrite(output, Buffer.from("mastered")); return { durationSeconds: 9, codec: "mp3", container: "mp3" }; } };
 const webBook: AudiobookProcessor = { version: "web-book-v1", assemble: async (_chapters, output, format) => { await atomicWrite(output, Buffer.from("book")); return { durationSeconds: 9, codec: format === "m4b" ? "aac" : "mp3", container: format === "m4b" ? "mp4" : "mp3" }; } };
@@ -44,6 +45,11 @@ async function storyFixture() {
 
 describe("web service layer", () => {
   it("classifies malformed pagination as an HTTP 400 client error", () => { expect(() => integerParam("abc", 1)).toThrow(expect.objectContaining({ status: 400 })); expect(() => integerParam("0", 1)).toThrow(expect.objectContaining({ status: 400 })); expect(integerParam(null, 7)).toBe(7); });
+  it("exposes safe field paths for invalid editable input", () => {
+    const failure = z.object({ tts: z.object({ model: z.string().min(1) }) }).safeParse({ tts: { model: "" } });
+    expect(failure.success).toBe(false);
+    if (!failure.success) expect(validationIssues(failure.error)).toEqual([expect.objectContaining({ path: "tts.model", code: "too_small" })]);
+  });
   it("rejects cross-site and non-JSON mutation requests at the localhost API boundary", () => {
     expect(() => validateLocalRequest({ method: "POST", headers: { host: "localhost:3000", origin: "https://attacker.example", "content-type": "application/json" } })).toThrow("Cross-origin");
     expect(() => validateLocalRequest({ method: "POST", headers: { host: "attacker.example", "content-type": "application/json" } })).toThrow("localhost");
@@ -185,6 +191,9 @@ describe("web service layer", () => {
       translation: story.pipeline.translation, narration: story.pipeline.narration, qa: story.pipeline.qa, tts: { model: "s2.1-pro-free", referenceId: "voice", speed: 1.1 } };
     expect((await updateStorySettings(root, story.slug, valid)).title).toBe("Revised");
     expect((await updateStorySettings(root, story.slug, valid)).pipeline.tts.model).toBe("s2.1-pro-free");
+    const persisted = await readFile(storyPaths(root, story.slug, 1).storyConfig, "utf8");
+    await expect(updateStorySettings(root, story.slug, { ...valid, tts: { ...valid.tts, model: "" } })).rejects.toThrow();
+    expect(await readFile(storyPaths(root, story.slug, 1).storyConfig, "utf8")).toBe(persisted);
     await expect(updateStorySettings(root, story.slug, { ...valid, OPENAI_API_KEY: "must-not-pass" })).rejects.toThrow();
   });
 

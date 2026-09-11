@@ -1,13 +1,26 @@
 export type ErrorDiagnostic = { id:string;timestamp:string;summary:string;category:"transient"|"rate_limit"|"configuration"|"content_qa"|"permanent";retryable:boolean;recommendedAction:string;chapter?:number;stage?:string;provider?:string;code?:string;technicalDetails?:string;issues?:Array<{category:string;severity:string;message:string;evidence?:string}> };
-export class ApiError extends Error { constructor(message: string, public readonly diagnostic?: ErrorDiagnostic) { super(diagnostic ? formatDiagnostic(diagnostic) : message); this.name = "ApiError"; } }
+export type ApiValidationIssue = { path: string; message: string; code?: string };
+export class ApiError extends Error { constructor(message: string, public readonly diagnostic?: ErrorDiagnostic, public readonly validation?: ApiValidationIssue[]) { super(formatApiError(message, diagnostic, validation)); this.name = "ApiError"; } }
 export function formatDiagnostic(diagnostic: ErrorDiagnostic) { return `${diagnostic.summary}\nNext: ${diagnostic.recommendedAction}\nReference: ${diagnostic.id}`; }
+export function formatApiError(message: string, diagnostic?: ErrorDiagnostic, validation?: ApiValidationIssue[]) {
+  const fields = validation?.length ? `Please correct:\n${validation.map((issue) => `• ${issue.path}: ${issue.message}`).join("\n")}` : undefined;
+  return [message, fields, diagnostic ? formatDiagnostic(diagnostic) : undefined].filter(Boolean).join("\n");
+}
 
 export async function api<T>(path: string, options?: RequestInit): Promise<T> {
   const binary = options?.body instanceof ArrayBuffer || (typeof Blob !== "undefined" && options?.body instanceof Blob);
-  const response = await fetch(`/api${path}`, { ...options, headers: { ...(binary ? {} : { "content-type": "application/json" }), ...options?.headers } });
+  let response: Response;
+  try { response = await fetch(`/api${path}`, { ...options, headers: { ...(binary ? {} : { "content-type": "application/json" }), ...options?.headers } }); }
+  catch (cause) { throw new ApiError("Cannot reach the local Story Studio service. Confirm `npm run web` is running, then try again.", undefined, undefined); }
   const value = await response.json().catch(() => ({}));
-  if (!response.ok) throw new ApiError(value.error ?? `Request failed (${response.status})`, value.diagnostic);
+  if (!response.ok) throw new ApiError(typeof value.error === "string" ? value.error : `Request failed (${response.status})`, value.diagnostic, parseValidationIssues(value.validation));
   return value as T;
+}
+
+function parseValidationIssues(value: unknown): ApiValidationIssue[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const issues = value.filter((item): item is ApiValidationIssue => Boolean(item) && typeof item === "object" && typeof (item as ApiValidationIssue).path === "string" && typeof (item as ApiValidationIssue).message === "string").slice(0, 25);
+  return issues.length ? issues : undefined;
 }
 
 export function post<T>(path: string, body: unknown) { return api<T>(path, { method: "POST", body: JSON.stringify(body) }); }
