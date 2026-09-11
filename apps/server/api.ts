@@ -248,7 +248,7 @@ async function sendFile(request: IncomingMessage, response: ServerResponse, path
 }
 async function body(request: IncomingMessage, limit = MAX_BODY_BYTES): Promise<Buffer> { const parts: Buffer[] = []; let size = 0; for await (const chunk of request) { const part = Buffer.from(chunk); size += part.length; if (size > limit) throw new HttpError(`Request body exceeds ${Math.floor(limit / 1_000_000)} MB`, 413); parts.push(part); } return Buffer.concat(parts); }
 async function jsonBody(request: IncomingMessage, limit = MAX_JSON_BYTES): Promise<unknown> { const raw = await body(request, limit); if (!raw.length) return {}; try { return JSON.parse(raw.toString("utf8")); } catch { throw new HttpError("Request body must be valid JSON", 400); } }
-function integerParam(value: string | null, fallback: number) { if (value === null) return fallback; const number = Number(value); if (!Number.isInteger(number) || number < 1) throw new Error("Pagination values must be positive integers"); return number; }
+export function integerParam(value: string | null, fallback: number) { if (value === null) return fallback; const number = Number(value); if (!Number.isInteger(number) || number < 1) throw new HttpError("Pagination values must be positive integers", 400); return number; }
 function optionalInteger(value: string | null) { if (value === null) return undefined; return integerParam(value, 1); }
 function optionalString(value: string | null) { return value?.trim() || undefined; }
 function boundedPageSize(value:string|null){const size=integerParam(value,50);if(size>200)throw new HttpError("Page size cannot exceed 200",400);return size;}
@@ -270,7 +270,7 @@ function statusFor(error: unknown): number {
   if (error instanceof QueueConflictError) return 409;
   if (error instanceof QueueNotFoundError) return 404;
   if (/already exists/.test(String(error))) return 409;
-  if (/Confirmation|Unsafe backup|invalid ZIP|Backup must|Cover must|Select between|Select a |Chapter folder|Only HTTPS|exceeds the .* limit|Duplicate chapter/.test(String(error))) return 400;
+  if (/Confirmation|Unsafe backup|invalid ZIP|Backup must|Cover must|Select between|Select a |Chapter folder|Only HTTPS|exceeds the .* limit|Duplicate chapter|Entity merge|Merge must|requires a manual Story Bible correction|does not contain a canonical status|Story context maxCharacters/.test(String(error))) return 400;
   if (/not found|does not exist/.test(String(error))) return 404;
   if (error instanceof ConfigurationError || error instanceof BatchValidationError) return 422;
   if (error instanceof WebHttpError) return isTimeout(error) ? 504 : 502;

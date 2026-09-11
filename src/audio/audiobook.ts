@@ -1,4 +1,4 @@
-import { mkdir, readFile, readdir, rename, rm } from "node:fs/promises";
+import { mkdir, readdir, rename, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
@@ -9,6 +9,7 @@ import { atomicWrite, atomicWriteJson } from "../storage/atomic-write.js";
 import { exportPaths, storyPaths } from "../storage/paths.js";
 import { exists, readJsonIfExists } from "../storage/story-files.js";
 import { fingerprint } from "../utils/hash.js";
+import { fileFingerprint } from "../utils/file-fingerprint.js";
 import { AudioSettings } from "./config.js";
 import { AUDIO_PROCESSOR_VERSION, AudioProbe, FfmpegTools } from "./ffmpeg.js";
 
@@ -28,11 +29,15 @@ export class FfmpegAudiobookProcessor implements AudiobookProcessor {
   readonly version = AUDIO_PROCESSOR_VERSION;
   constructor(private readonly tools = new FfmpegTools()) {}
   async assemble(chapters: AudiobookChapter[], output: string, format: AudiobookFormat, settings: AudioSettings, metadata: AudiobookMetadata, cover?: string) {
-    await this.tools.validateAvailability(); const metadataPath = `${output}.ffmetadata`; await atomicWrite(metadataPath, buildFfmetadata(metadata));
+    await this.tools.validateAvailability();
+    const metadataPath = `${output}.ffmetadata`; const concatPath = `${output}.ffconcat`; const gapPath = settings.chapterGapSeconds > 0 && chapters.length > 1 ? `${output}.gap.mp3` : undefined;
+    await atomicWrite(metadataPath, buildFfmetadata(metadata));
     try {
-      const args = buildAudiobookArgs(chapters, output, format, settings, metadataPath, cover); await this.tools.ffmpeg(args); const probe = await this.tools.probe(output);
+      if (gapPath) await this.tools.ffmpeg(["-f", "lavfi", "-i", `anullsrc=r=${settings.sampleRate}:cl=stereo`, "-t", String(settings.chapterGapSeconds), "-c:a", "libmp3lame", "-b:a", settings.bitrate, "-ar", String(settings.sampleRate), gapPath]);
+      await atomicWrite(concatPath, buildConcatManifest(chapters.map((chapter) => chapter.path), gapPath));
+      const args = buildAudiobookArgs(concatPath, output, format, settings, metadataPath, cover); await this.tools.ffmpeg(args); const probe = await this.tools.probe(output);
       validateAudiobook(probe, format, expectedDuration(chapters, settings.chapterGapSeconds)); return probe;
-    } finally { await rm(metadataPath, { force: true }); }
+    } finally { await Promise.all([metadataPath, concatPath, gapPath].filter((path): path is string => Boolean(path)).map((path) => rm(path, { force: true }))); }
   }
 }
 
@@ -87,19 +92,22 @@ export function buildFfmetadata(metadata: AudiobookMetadata) {
   return `${lines.join("\n")}\n`;
 }
 
-export function buildAudiobookArgs(chapters: AudiobookChapter[], output: string, format: AudiobookFormat, settings: AudioSettings, metadataPath: string, cover?: string) {
-  if (!chapters.length) throw new AudioError("Audiobook requires at least one mastered chapter"); const args: string[] = [];
-  for (const chapter of chapters) args.push("-i", chapter.path); const metadataIndex = chapters.length; args.push("-f", "ffmetadata", "-i", metadataPath);
-  const coverIndex = cover ? metadataIndex + 1 : undefined; if (cover) args.push("-i", cover);
-  const filters: string[] = []; const labels: string[] = [];
-  chapters.forEach((_, index) => { filters.push(`[${index}:a]aresample=${settings.sampleRate},aformat=sample_fmts=fltp:channel_layouts=stereo[c${index}]`); labels.push(`[c${index}]`);
-    if (index < chapters.length - 1 && settings.chapterGapSeconds > 0) { filters.push(`anullsrc=r=${settings.sampleRate}:cl=stereo:d=${settings.chapterGapSeconds}[gap${index}]`); labels.push(`[gap${index}]`); } });
-  filters.push(`${labels.join("")}concat=n=${labels.length}:v=0:a=1[book]`); args.push("-filter_complex", filters.join(";"), "-map", "[book]", "-map_metadata", String(metadataIndex), "-map_chapters", String(metadataIndex));
+export function buildAudiobookArgs(concatPath: string, output: string, format: AudiobookFormat, settings: AudioSettings, metadataPath: string, cover?: string) {
+  const args = ["-f", "concat", "-safe", "0", "-i", concatPath, "-f", "ffmetadata", "-i", metadataPath];
+  const coverIndex = cover ? 2 : undefined; if (cover) args.push("-i", cover);
+  args.push("-map", "0:a", "-map_metadata", "1", "-map_chapters", "1");
   if (format === "m4b") {
     if (coverIndex !== undefined) args.push("-map", `${coverIndex}:v`, "-c:v", "copy", "-disposition:v", "attached_pic");
     args.push("-c:a", "aac", "-b:a", settings.bitrate, "-ar", String(settings.sampleRate), "-movflags", "+faststart", "-f", "mp4", output);
   } else args.push("-c:a", "libmp3lame", "-b:a", settings.bitrate, "-ar", String(settings.sampleRate), output);
   return args;
+}
+
+export function buildConcatManifest(paths: string[], gapPath?: string) {
+  if (!paths.length) throw new AudioError("Audiobook requires at least one mastered chapter");
+  const files: string[] = [];
+  paths.forEach((path, index) => { files.push(path); if (gapPath && index < paths.length - 1) files.push(gapPath); });
+  return `ffconcat version 1.0\n${files.map((path) => `file '${escapeConcatPath(path)}'`).join("\n")}\n`;
 }
 
 function validateAudiobook(probe: AudioProbe, format: AudiobookFormat, expected: number) {
@@ -110,4 +118,4 @@ function validateAudiobook(probe: AudioProbe, format: AudiobookFormat, expected:
 function expectedDuration(chapters: AudiobookChapter[], gap: number) { return chapters.reduce((sum, chapter) => sum + chapter.durationSeconds, 0) + gap * Math.max(0, chapters.length - 1); }
 function escapeMetadata(value: string) { return value.replace(/([\\;#=])/g, "\\$1").replace(/\n/g, "\\n"); }
 async function findCover(root: string, slug: string) { for (const name of ["cover.jpg", "cover.jpeg", "cover.png"]) { const path = join(storyPaths(root, slug, 1).story, name); if (await exists(path)) return path; } return undefined; }
-async function fileFingerprint(path: string) { try { const data = await readFile(path); return data.length ? fingerprint(data.toString("base64")) : undefined; } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; } }
+function escapeConcatPath(path: string) { return path.replaceAll("'", "'\\''"); }

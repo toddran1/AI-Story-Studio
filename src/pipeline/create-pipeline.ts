@@ -18,7 +18,7 @@ export function createPipelineRuntime(env: Environment) {
       ["openai", new OpenAIProvider(env.OPENAI_API_KEY, env.PROVIDER_TIMEOUT_MS)],
       ["gemini", new GeminiProvider(env.GEMINI_API_KEY, env.PROVIDER_TIMEOUT_MS)],
     ]));
-  const tts = new FishAudioProvider(env.FISH_AUDIO_API_KEY, fetch, env.PROVIDER_TIMEOUT_MS);
+  const tts = new FishAudioProvider(env.FISH_AUDIO_API_KEY, fetch, env.PROVIDER_TIMEOUT_MS, env.FISH_AUDIO_REFERENCE_ID);
   const audio = new FfmpegMasteringProcessor();
   const images = new ImageProviderRouter(new Map([["openai", new OpenAIImageProvider(env.OPENAI_API_KEY, env.PROVIDER_TIMEOUT_MS)]]));
   return { router, images, tts, audio, pipeline: new ChapterPipeline(router, tts, audio) };

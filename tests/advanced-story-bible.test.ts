@@ -34,6 +34,19 @@ describe("advanced Story Bible continuity", () => {
     await undoCanonicalMerge(root, "demo-story", bible, merged.merge.id); const restored = await applyCanonicalOverlay(root, "demo-story", bible); expect(restored.bible.canonicalEntities.map((item) => item.id)).toEqual(expect.arrayContaining([su!.id, doctor!.id]));
   });
 
+  it("resolves chained merge references and rejects merge cycles", async () => {
+    const root = await mkdtemp(join(tmpdir(), "canonical-chain-")); const base = mergeStoryBible(emptyStoryBible(), update(1, { characters: [named("Alpha", 1), named("Beta", 1), named("Gamma", 1)], relationships: [{ subject: "Alpha", object: "Beta", relationship: "ally", firstSeenChapter: 1, lastSeenChapter: 1 }] }), 1); const [alpha, beta, gamma] = base.canonicalEntities;
+    await mergeCanonicalEntities(root, "demo-story", base, beta!.id, [alpha!.id], "First merge"); const chained = await mergeCanonicalEntities(root, "demo-story", base, gamma!.id, [beta!.id], "Second merge");
+    expect(chained.bible.canonicalEntities.map((item) => item.id)).toEqual([gamma!.id]); expect(chained.bible.canonicalRelationships[0]).toMatchObject({ sourceEntityId: gamma!.id, targetEntityId: gamma!.id });
+    const cycleRoot = await mkdtemp(join(tmpdir(), "canonical-cycle-")); await mergeCanonicalEntities(cycleRoot, "demo-story", base, beta!.id, [alpha!.id], "A to B"); await expect(mergeCanonicalEntities(cycleRoot, "demo-story", base, alpha!.id, [beta!.id], "B to A")).rejects.toThrow(/cycle/);
+  });
+
+  it("learns aliases and provenance while canonical records are locked", () => {
+    let bible = mergeStoryBible(emptyStoryBible(), update(1, { characters: [named("Su Ming", 1)], relationships: [{ subject: "Su Ming", object: "Lin Yue", relationship: "friend", firstSeenChapter: 1, lastSeenChapter: 1, locked: true }] }), 1); const su = bible.canonicalEntities.find((item) => item.canonicalName === "Su Ming")!; su.canonicalNameLocked = true;
+    bible = mergeStoryBible(bible, update(2, { characters: [named("Doctor Su", 2, { aliases: ["Su Ming"] })], relationships: [{ subject: "Su Ming", object: "Lin Yue", relationship: "friend", firstSeenChapter: 2, lastSeenChapter: 2 }] }), 2);
+    expect(bible.canonicalEntities.find((item) => item.id === su.id)?.aliases).toContain("Doctor Su"); expect(bible.canonicalRelationships[0]?.provenance.map((item) => item.chapter)).toEqual([1, 2]);
+  });
+
   it("suggests deterministic duplicates but never merges them automatically", () => { const bible = mergeStoryBible(emptyStoryBible(), update(1, { characters: [named("Su Ming", 1), named("Doctor Su", 1)] }), 1); const suggestions = findDuplicateSuggestions(bible.canonicalEntities); expect(suggestions[0]).toMatchObject({ confidence: .82, entities: [{ name: "Su Ming" }, { name: "Doctor Su" }] }); expect(bible.canonicalEntities).toHaveLength(2); });
 
   it("detects status, location, relationship, identity, and ownership conflicts", () => {
@@ -53,10 +66,14 @@ describe("advanced Story Bible continuity", () => {
 
   it("paginates and searches large canonical indexes by alias", async () => { const root = await mkdtemp(join(tmpdir(), "bible-page-")); const characters = Array.from({ length: 125 }, (_, index) => named(`Character ${String(index + 1).padStart(3, "0")}`, 1, { aliases: index === 77 ? ["The Archivist"] : [] })); const bible = mergeStoryBible(emptyStoryBible(), update(1, { characters }), 1); await atomicWriteJson(storyPaths(root, "demo-story", 1).bible, bible); const page = await getCanonicalEntitiesPage(root, "demo-story", { page: 2, pageSize: 50, type: "character", sort: "name" }); expect(page).toMatchObject({ page: 2, pages: 3, total: 125 }); expect(page.items).toHaveLength(50); const search = await getCanonicalEntitiesPage(root, "demo-story", { page: 1, pageSize: 10, query: "archivist" }); expect(search.items).toHaveLength(1); expect(search.items[0]?.aliases).toContain("The Archivist"); });
 
+  it("serves the atomic Story Bible snapshot without replaying malformed chapter history", async () => { const root = await mkdtemp(join(tmpdir(), "bible-snapshot-")); const bible = mergeStoryBible(emptyStoryBible(), update(1, { characters: [named("Snapshot Hero", 1)] }), 1); const paths = storyPaths(root, "demo-story", 1); await atomicWriteJson(paths.bible, bible); await atomicWriteJson(paths.bibleUpdate, { malformed: true }); const page = await getCanonicalEntitiesPage(root, "demo-story", { page: 1, pageSize: 10 }); expect(page.items[0]?.canonicalName).toBe("Snapshot Hero"); });
+
   it("retrieves bounded relevant context from a synthetic 1,600-chapter history", () => {
     let bible = emptyStoryBible();
     for (let chapter = 1; chapter <= 1600; chapter++) bible = mergeStoryBible(bible, update(chapter, { characters: [named(chapter % 2 ? "Su Ming" : "Doctor Su", chapter, { aliases: [chapter % 2 ? "Doctor Su" : "Su Ming"] })], relationships: chapter === 147 ? [{ subject: "Su Ming", object: "Azure Sect", relationship: "member of", firstSeenChapter: chapter, lastSeenChapter: chapter }] : chapter === 612 ? [{ subject: "Su Ming", object: "Azure Sect", relationship: "member of", firstSeenChapter: chapter, lastSeenChapter: chapter, endChapter: chapter, state: "historical" }] : [] }), chapter);
     const context = retrieveRelevantContext(bible, "Doctor Su remembers Azure Sect.", 1601, { maxEntities: 8, maxTimelineEvents: 12, maxCharacters: 7000 }); const su = context.canonicalEntities.find((item) => item.canonicalName === "Su Ming");
     expect(su?.lastKnownAppearance).toBe(1600); expect(context.canonicalEntities.length).toBeLessThanOrEqual(8); expect(context.entityTimeline.length).toBeLessThanOrEqual(12); expect(JSON.stringify(context).length).toBeLessThanOrEqual(7000);
   }, 15_000);
+
+  it("enforces a small context character budget even with oversized entity fields", () => { let bible = mergeStoryBible(emptyStoryBible(), update(1, { characters: [named("Verbose Hero", 1, { aliases: Array.from({ length: 50 }, (_, index) => `Hero Alias ${index}`), description: "x".repeat(9000) })] }), 1); const context = retrieveRelevantContext(bible, "Verbose Hero", 2, { maxCharacters: 1000 }); expect(JSON.stringify(context).length).toBeLessThanOrEqual(1000); });
 });

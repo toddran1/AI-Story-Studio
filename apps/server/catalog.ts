@@ -127,9 +127,12 @@ export async function getQaDashboard(root: string, slug: string) {
 }
 
 export async function getStoryBible(root: string, slug: string, options: { includeCanonicalOverlay?: boolean } = {}): Promise<StoryBible> {
-  slugSchema.parse(slug); const index = await loadChapterIndex(root, slug);
-  if (index.manifest) return rebuildStoryBibleBeforeChapter(root, slug, (index.numbers.at(-1) ?? 0) + 1, options);
-  const raw = await readJsonIfExists<StoryBible>(storyPaths(root, slug, 1).bible); const bible = raw ? storyBibleSchema.parse(raw) : emptyStoryBible(); return options.includeCanonicalOverlay === false ? bible : (await applyCanonicalOverlay(root, slug, bible)).bible;
+  slugSchema.parse(slug); const paths = storyPaths(root, slug, 1);
+  // Production maintains this canonical snapshot atomically and chronologically.
+  // Browser reads should never replay thousands of chapter updates merely to paginate it.
+  const raw = await readJsonIfExists<StoryBible>(paths.bible);
+  const bible = raw ? storyBibleSchema.parse(raw) : await rebuildStoryBibleBeforeChapter(root, slug, Number.MAX_SAFE_INTEGER, { includeCanonicalOverlay: false });
+  return options.includeCanonicalOverlay === false ? bible : (await applyCanonicalOverlay(root, slug, bible)).bible;
 }
 
 export async function getStoryBibleView(root: string, slug: string) { const bible = await getStoryBible(root, slug); return applyManualBibleOverlay(root, slug, bible); }

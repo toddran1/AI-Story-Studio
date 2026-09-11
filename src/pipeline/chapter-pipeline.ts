@@ -195,10 +195,14 @@ export class ChapterPipeline {
     await runStage("continuity", continuityFp, paths.continuityAnalysis, { provider: "local", model: "deterministic-continuity-v1" }, async () => analyzeAndPersistContinuity(options.root, options.story.slug, bible, options.chapter));
 
     const ttsConfig = options.story.pipeline.tts;
-    const ttsFp = fingerprint({ narration: fingerprint(narration), config: ttsConfig });
+    // A blank per-story voice intentionally inherits the environment default. Include
+    // the resolved value in the fingerprint so a changed default cannot reuse audio
+    // generated with a different voice.
+    const referenceId = this.tts.resolveReferenceId?.(ttsConfig.referenceId) ?? ttsConfig.referenceId;
+    const ttsFp = fingerprint({ narration: fingerprint(narration), config: { ...ttsConfig, referenceId } });
     if (!(await fileFingerprint(paths.audioRaw)) && chapter.stages.tts.status === "complete" && await fileFingerprint(paths.audio)) await atomicWrite(paths.audioRaw, await readFile(paths.audio));
     await runStage("tts", ttsFp, paths.audioRaw, { provider: ttsConfig.provider, model: ttsConfig.model }, async () => {
-      const result = await this.tts.synthesize({ text: narration, model: ttsConfig.model, referenceId: ttsConfig.referenceId,
+      const result = await this.tts.synthesize({ text: narration, model: ttsConfig.model, referenceId,
         speed: ttsConfig.speed, format: ttsConfig.format, sampleRate: ttsConfig.sampleRate, bitrate: ttsConfig.bitrate,
         normalize: ttsConfig.normalize, maxCharsPerRequest: ttsConfig.maxCharsPerRequest });
       await atomicWrite(paths.audioRaw, result.audio);

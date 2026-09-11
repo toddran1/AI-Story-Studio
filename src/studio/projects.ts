@@ -19,6 +19,7 @@ import { alignmentConfig, createAlignmentEngine } from "../alignment/config.js";
 const MAX_BACKUP_ARCHIVE_BYTES = 4 * 1024 * 1024 * 1024;
 const MAX_BACKUP_ENTRY_BYTES = 4 * 1024 * 1024 * 1024;
 const MAX_BACKUP_EXPANDED_BYTES = 20 * 1024 * 1024 * 1024;
+const MAX_PROJECT_FILES = 250_000;
 const activityQueues = new Map<string, Promise<void>>();
 
 export const safeSlugSchema = z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/).max(80);
@@ -119,9 +120,9 @@ function modelSchema() { return z.object({ provider: z.enum(["openai", "gemini"]
 function globalSettingsPath(root: string) { return join(root, ".ai-story-studio", "settings.json"); }
 function activityPath(root: string, slug: string) { return join(storyPaths(root, slug, 1).story, "activity.json"); }
 async function uniqueSlug(root: string, requested: string) { const base = safeSlugSchema.parse(slugify(requested)); if (!(await exists(storyPaths(root, base, 1).story))) return base; for (let i = 2; i < 10_000; i++) { const value = `${base}-${i}`; if (!(await exists(storyPaths(root, value, 1).story))) return value; } throw new Error("Unable to allocate a unique story slug"); }
-async function walk(directory: string): Promise<string[]> { const out: string[] = []; for (const entry of await readdir(directory, { withFileTypes: true }).catch((error) => { if ((error as NodeJS.ErrnoException).code === "ENOENT") return []; throw error; })) { if (entry.name === ".lock" || entry.name.includes(".tmp")) continue; const path = join(directory, entry.name); if (entry.isDirectory()) out.push(...await walk(path)); else if (entry.isFile()) out.push(path); if (out.length > 10_000) throw new Error("Project contains more than 10,000 files"); } return out; }
+async function walk(directory: string, state = { count: 0 }): Promise<string[]> { const out: string[] = []; for (const entry of await readdir(directory, { withFileTypes: true }).catch((error) => { if ((error as NodeJS.ErrnoException).code === "ENOENT") return []; throw error; })) { if (entry.name === ".lock" || entry.name.includes(".tmp")) continue; const path = join(directory, entry.name); if (entry.isDirectory()) out.push(...await walk(path, state)); else if (entry.isFile()) { state.count++; if (state.count > MAX_PROJECT_FILES) throw new Error(`Project contains more than ${MAX_PROJECT_FILES.toLocaleString("en-US")} files`); out.push(path); } } return out; }
 function shouldExcludeBackup(path: string, includeMedia: boolean) { if (path === "activity.json" || path.startsWith("backups/") || path.startsWith(".lock")) return true; if (includeMedia || /^cover\.(jpg|jpeg|png)$/.test(path)) return false; return /(^|\/)(audio-segments|scenes|voice-previews|previews|exports)(\/|$)/.test(path) || /\.(mp3|m4b|mp4|png|jpe?g)$/i.test(path); }
-function validateArchiveNames(names: string[]) { if (names.length > 10_000) throw new Error("Backup contains too many files"); for (const name of names) { const normalized = name.replaceAll("\\", "/"); const parts = normalized.split("/"); if (!name || name.includes("\0") || normalized.startsWith("/") || /^[A-Za-z]:/.test(normalized) || parts.includes("..") || parts.includes(".lock") || parts.some((part) => part.includes(".tmp")) || resolve("/safe", normalized) === "/safe") throw new Error(`Unsafe backup path: ${name}`); } }
+function validateArchiveNames(names: string[]) { if (names.length > MAX_PROJECT_FILES) throw new Error("Backup contains too many files"); for (const name of names) { const normalized = name.replaceAll("\\", "/"); const parts = normalized.split("/"); if (!name || name.includes("\0") || normalized.startsWith("/") || /^[A-Za-z]:/.test(normalized) || parts.includes("..") || parts.includes(".lock") || parts.some((part) => part.includes(".tmp")) || resolve("/safe", normalized) === "/safe") throw new Error(`Unsafe backup path: ${name}`); } }
 function validateImageSignature(extension: string, bytes: Uint8Array) {
   const valid = extension === ".png" ? validPng(bytes) : validJpeg(bytes);
   if (!valid) throw new Error("Cover is not a complete, structurally valid image matching its file extension");
@@ -192,7 +193,7 @@ async function extractBackupArchive(archivePath: string, destination: string) {
   const fail = (error: unknown) => { failure ??= error instanceof Error ? error : new Error(String(error)); };
   const unzipper = new Unzip((file) => {
     try {
-      validateArchiveNames([file.name]); count++; if (count > 10_000) throw new Error("Backup contains too many files");
+      validateArchiveNames([file.name]); count++; if (count > MAX_PROJECT_FILES) throw new Error("Backup contains too many files");
       if ((file.originalSize ?? 0) > MAX_BACKUP_ENTRY_BYTES) throw new Error(`Backup entry exceeds the 4 GB limit: ${file.name}`);
       if (file.name.endsWith("/")) { file.ondata = (error) => { if (error) fail(error); }; file.start(); return; }
       const target = join(destination, file.name); const task = mkdir(dirname(target), { recursive: true }).then(() => new Promise<void>((resolvePromise, rejectPromise) => {

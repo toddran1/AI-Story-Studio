@@ -24,7 +24,7 @@ import { AudiobookProcessor } from "../src/audio/audiobook.js";
 import { VideoProcessor } from "../src/video/renderer.js";
 import { VideoExportProcessor } from "../src/video/video-export.js";
 import { ImageProvider } from "../src/artwork/provider.js";
-import { publicJob, validateLocalRequest } from "../apps/server/api.js";
+import { integerParam, publicJob, validateLocalRequest } from "../apps/server/api.js";
 
 const webAudio: AudioMasteringProcessor = { version: "web-audio-v1", master: async (_inputs, output) => { await atomicWrite(output, Buffer.from("mastered")); return { durationSeconds: 9, codec: "mp3", container: "mp3" }; } };
 const webBook: AudiobookProcessor = { version: "web-book-v1", assemble: async (_chapters, output, format) => { await atomicWrite(output, Buffer.from("book")); return { durationSeconds: 9, codec: format === "m4b" ? "aac" : "mp3", container: format === "m4b" ? "mp4" : "mp3" }; } };
@@ -43,6 +43,7 @@ async function storyFixture() {
 }
 
 describe("web service layer", () => {
+  it("classifies malformed pagination as an HTTP 400 client error", () => { expect(() => integerParam("abc", 1)).toThrow(expect.objectContaining({ status: 400 })); expect(() => integerParam("0", 1)).toThrow(expect.objectContaining({ status: 400 })); expect(integerParam(null, 7)).toBe(7); });
   it("rejects cross-site and non-JSON mutation requests at the localhost API boundary", () => {
     expect(() => validateLocalRequest({ method: "POST", headers: { host: "localhost:3000", origin: "https://attacker.example", "content-type": "application/json" } })).toThrow("Cross-origin");
     expect(() => validateLocalRequest({ method: "POST", headers: { host: "attacker.example", "content-type": "application/json" } })).toThrow("localhost");

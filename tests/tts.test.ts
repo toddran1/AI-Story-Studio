@@ -19,6 +19,14 @@ describe("Fish TTS", () => {
     expect(result.audio.length).toBe(result.segments.reduce((sum, value) => sum + value.length, 0));
   });
 
+  it("uses the configured environment voice when a story has no voice override", async () => {
+    const fetcher = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => new Response(new Uint8Array([1, 2, 3]), { status: 200, headers: { "content-type": "audio/mpeg" } }));
+    const provider = new FishAudioProvider("test-key", fetcher as typeof fetch, 120_000, "environment-voice");
+    await provider.synthesize({ text: "Hello", model: "s2-pro", speed: 1.2, format: "mp3", sampleRate: 44100, bitrate: 128, normalize: true, maxCharsPerRequest: 500 });
+    const request = fetcher.mock.calls[0]?.[1] as RequestInit;
+    expect(JSON.parse(String(request.body)).reference_id).toBe("environment-voice");
+  });
+
   it("rejects empty and non-audio success responses", async () => {
     const request: TTSRequest = { text: "Hello", model: "s2-pro", speed: 1, format: "mp3", sampleRate: 44100, bitrate: 128, normalize: true, maxCharsPerRequest: 500 };
     const empty = new FishAudioProvider("test-key", vi.fn(async () => new Response(new Uint8Array(), { status: 200, headers: { "content-type": "audio/mpeg" } })) as typeof fetch);

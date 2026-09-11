@@ -21,12 +21,13 @@ export type QueueJob = {
   pauseRequested: boolean; cancelRequested: boolean; currentChapter?: number; currentStage?: string;
   totalItems: number; completedItems: number; warningItems: number; reviewItems: number; failedItems: number;
   errorSummary?: string; createdAt: string; startedAt?: string; updatedAt: string; completedAt?: string;
+  finalizationOwner?: string; finalizationToken?: string; finalizationExpiresAt?: string;
 };
 export type QueueWorkItem = {
   id: string; jobId: string; story: string; chapter: number; ordinal: number; status: WorkItemStatus; currentStage?: string;
   attemptCount: number; maxAttempts: number; lastError?: string; errorCategory?: FailureCategory; nextRetryAt?: string;
   lastAttemptAt?: string; startedAt?: string; completedAt?: string; reused: boolean; qaStatus?: "pass" | "warn" | "fail";
-  requiredProviders: string[]; leaseOwner?: string; leaseExpiresAt?: string;
+  requiredProviders: string[]; leaseOwner?: string; leaseToken?: string; leaseExpiresAt?: string;
 };
 export type QueueEvent = { id: string; jobId: string; workItemId?: string; type: string; message: string; data: Record<string, unknown>; createdAt: string };
 export type QueuePage<T> = { items: T[]; page: number; pageSize: number; total: number; pages: number };

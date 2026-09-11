@@ -2,7 +2,7 @@ import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { assembleAudiobook, audiobookMetadata, AudiobookChapter, AudiobookMetadata, AudiobookProcessor, buildAudiobookArgs, buildFfmetadata, selectExportChapters } from "../src/audio/audiobook.js";
+import { assembleAudiobook, audiobookMetadata, AudiobookChapter, AudiobookMetadata, AudiobookProcessor, buildAudiobookArgs, buildConcatManifest, buildFfmetadata, selectExportChapters } from "../src/audio/audiobook.js";
 import { audioMasteringFingerprint, masterStoredChapter } from "../src/audio/chapter-audio.js";
 import { AudioSettings } from "../src/audio/config.js";
 import { AudioProbe, CommandRunner, FfmpegTools, runCommand } from "../src/audio/ffmpeg.js";
@@ -77,8 +77,10 @@ describe("audiobook assembly", () => {
   it("generates M4B chapter metadata and maps it into the container", () => {
     const story = testStory(); story.author = "R. Writer"; const chapters: AudiobookChapter[] = [{ chapter: 1, title: "A=Start", path: "one.mp3", durationSeconds: 10, fingerprint: "a" }, { chapter: 2, title: "Return", path: "two.mp3", durationSeconds: 20, fingerprint: "b" }];
     const metadata = audiobookMetadata(story, chapters); expect(metadata.chapters).toEqual([{ chapter: 1, title: "A=Start", startMs: 0, endMs: 10000 }, { chapter: 2, title: "Return", startMs: 11500, endMs: 31500 }]);
-    expect(buildFfmetadata(metadata)).toContain("title=A\\=Start"); const args = buildAudiobookArgs(chapters, "book.m4b", "m4b", story.audio, "chapters.ffmeta"); expect(args).toContain("-map_chapters"); expect(args).toContain("aac"); expect(args.at(-1)).toBe("book.m4b");
+    expect(buildFfmetadata(metadata)).toContain("title=A\\=Start"); const concat = buildConcatManifest(chapters.map((item) => item.path), "gap.mp3"); expect(concat).toContain("file 'one.mp3'\nfile 'gap.mp3'"); const args = buildAudiobookArgs("chapters.ffconcat", "book.m4b", "m4b", story.audio, "chapters.ffmeta"); expect(args).toContain("-map_chapters"); expect(args).toContain("aac"); expect(args.at(-1)).toBe("book.m4b"); expect(args.filter((value) => value === "-i")).toHaveLength(2);
   });
+
+  it("keeps FFmpeg argument size constant for 1,600 chapters", () => { const paths = Array.from({ length: 1600 }, (_, index) => `/audio/${index + 1}.mp3`); expect(buildConcatManifest(paths).split("\n")).toHaveLength(1602); const args = buildAudiobookArgs("book.ffconcat", "book.m4b", "m4b", testStory().audio, "book.ffmetadata"); expect(args.length).toBeLessThan(30); });
 
   it("caches unchanged exports and invalidates them when a chapter master changes", async () => {
     const { root, story } = await masteredFixture([1, 2]); const processor = new RecordingBook();
