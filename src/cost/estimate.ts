@@ -1,0 +1,9 @@
+import { ProductionPlan } from "../production/types.js";
+
+export type CostEstimate = { classification:"historical"|"unknown"|"exact"; estimatedUsd?:number; lowUsd?:number; highUsd?:number; confidence:"high"|"medium"|"low"; assumptions:string[]; unknownStages:string[]; breakdown:Array<{stage:string;required:number;estimatedUsd?:number;basis:string}> };
+export function estimatePlanCost(plan:ProductionPlan,analytics:{dimensions:Array<{stage:string;requests:number;costUsd:number|string}>}):CostEstimate{
+  const breakdown:CostEstimate["breakdown"]=[],unknownStages:string[]=[];let total=0,known=0;
+  for(const [stage,count] of Object.entries(plan.counts)){if(!count.required)continue;const history=analytics.dimensions.filter(item=>item.stage===stage&&Number(item.costUsd)>0);const requests=history.reduce((sum,item)=>sum+Number(item.requests),0),cost=history.reduce((sum,item)=>sum+Number(item.costUsd),0);if(!requests){unknownStages.push(stage);breakdown.push({stage,required:count.required,basis:"No priced history"});continue;}const estimate=cost/requests*count.required;total+=estimate;known++;breakdown.push({stage,required:count.required,estimatedUsd:estimate,basis:`Historical average across ${requests} request${requests===1?"":"s"}`});}
+  if(!known)return{classification:"unknown",confidence:"low",assumptions:["No priced usage history is available for the required stages."],unknownStages,breakdown};
+  total=Math.round(total*1e9)/1e9;const confidence=unknownStages.length?"low":analytics.dimensions.reduce((sum,item)=>sum+Number(item.requests),0)>=20?"high":"medium";return{classification:"historical",estimatedUsd:total,lowUsd:total*.75,highUsd:total*1.35,confidence,assumptions:["Uses this story's recorded average cost per provider request.","Range is directional; output length, retries, and provider billing can vary.","Cached stages in the production plan are excluded."],unknownStages,breakdown};
+}

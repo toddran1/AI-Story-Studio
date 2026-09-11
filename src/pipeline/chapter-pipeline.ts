@@ -26,12 +26,14 @@ import { AudioMasteringProcessor, FfmpegMasteringProcessor } from "../audio/mast
 import { masterStoredChapter } from "../audio/chapter-audio.js";
 import { retrieveRelevantContext } from "../story-bible/retrieval.js";
 import { analyzeAndPersistContinuity } from "../story-bible/continuity.js";
+import { withUsageScope } from "../cost/context.js";
 
 export type ForceStage = "translation" | "narration" | "qa" | "story-bible" | "continuity" | "tts" | "audio" | "all";
 export type PipelineStageEvent = { stage: StageName; status: "started" | "completed" | "reused"; state: StageState };
 export type PipelineOptions = {
   root: string; story: Story; chapter: number; inputPath: string; force?: ForceStage;
   source?: Chapter["source"];
+  productionRunId?: string; queueJobId?: string;
   onStageEvent?: (event: PipelineStageEvent) => void;
 };
 
@@ -85,7 +87,7 @@ export class ChapterPipeline {
       options.onStageEvent?.({ stage, status: "started", state: chapter.stages[stage] });
       logger.info({ event: "pipeline.stage.started", story: options.story.slug, chapter: options.chapter, stage, provider: details.provider, model: details.model });
       try {
-        const value = await action();
+        const value = await withUsageScope({ story: options.story.slug, chapter: options.chapter, productionRunId: options.productionRunId, queueJobId: options.queueJobId, stage }, action);
         const producedFingerprint = await fileFingerprint(outputPath);
         if (!producedFingerprint) throw new Error(`Stage '${stage}' did not produce a non-empty output at ${outputPath}`);
         chapter.stages[stage] = { ...chapter.stages[stage], status: "complete", outputFingerprint: producedFingerprint, completedAt: new Date().toISOString(), durationMs: Date.now() - started, error: undefined };

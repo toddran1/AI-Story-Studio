@@ -27,6 +27,7 @@
     "story:queue": "node --import tsx apps/cli/queue.ts",
     "story:worker": "node --import tsx apps/cli/worker.ts",
     "story:continuity": "node --import tsx apps/cli/continuity.ts",
+    "story:cost": "node --import tsx apps/cli/cost.ts",
     "db:migrate": "node --import tsx apps/cli/migrate.ts",
     "web": "node --import tsx apps/server/index.ts --dev",
     "web:build": "vite build",

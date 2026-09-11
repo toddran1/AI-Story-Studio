@@ -32,6 +32,8 @@ Milestone 9 adds structured scene planning, reviewable still-art generation, cha
 
 Milestone 10 adds one dependency-aware production orchestrator with resumable manifests, bounded QA repair, cost-safe planning, optional artwork, and final audiobook/video assembly.
 
+Provider usage, historical estimates, budget guards, and analytics exports are documented in [Provider cost tracking](docs/provider-costs.md).
+
 Milestone 13 adds a Postgres-backed production queue with chronological chapter claims, worker leases, durable retries and provider cooldowns, restart reconciliation against filesystem artifacts, persistent controls, and paginated queue/review workspaces.
 
 Milestone 14 adds local narration-to-audio forced alignment, durable word timestamps, alignment-aware subtitle segmentation, quality metrics, protected manual timing edits, and deterministic estimated timing when the aligner is unavailable or produces unusable results.

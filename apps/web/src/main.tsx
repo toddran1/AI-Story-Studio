@@ -7,6 +7,7 @@ import "@fontsource/newsreader/400.css";
 import "@fontsource/newsreader/500.css";
 import "@fontsource/ibm-plex-mono/400.css";
 import "./styles.css";
+import "./costs.css";
 import "./enhancements.css";
 import "./audio.css";
 import "./video.css";

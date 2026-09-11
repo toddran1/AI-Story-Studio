@@ -11,7 +11,7 @@ export type FailureCategory = z.infer<typeof failureCategorySchema>;
 export const queueSubmissionSchema = z.object({
   from: z.number().int().positive(), to: z.number().int().positive(), profile: z.string().optional(),
   outputs: z.array(productionOutputSchema).min(1).optional(), artwork: z.boolean().optional(), repairQa: z.boolean().optional(),
-  refresh: z.boolean().default(false), alignment: z.boolean().optional(), force: productionForceSchema.optional(), audiobookFormat: z.enum(["mp3", "m4b"]).optional(),
+  refresh: z.boolean().default(false), alignment: z.boolean().optional(), force: productionForceSchema.optional(), audiobookFormat: z.enum(["mp3", "m4b"]).optional(), maxProviderBudgetUsd: z.number().positive().max(1_000_000).optional(),
   dryRun: z.literal(false).optional(),
 }).strict().refine((value) => value.to >= value.from, { message: "Range end must be at or after range start" });
 export type QueueSubmission = z.infer<typeof queueSubmissionSchema>;

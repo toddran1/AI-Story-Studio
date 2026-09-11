@@ -9,14 +9,16 @@ import { assertQueueSchema, createDatabasePool } from "../../src/queue/database.
 import { PostgresQueueRepository } from "../../src/queue/repository.js";
 import { ProductionQueueService } from "../../src/queue/production-service.js";
 import { ProductionWorker } from "../../src/queue/worker.js";
+import { PostgresUsageRepository } from "../../src/cost/repository.js";
 
 const env = loadEnvironment(); const root = resolveStudioRoot(env); const host = "127.0.0.1"; const port = env.WEB_PORT;
 const pool = env.DATABASE_URL ? createDatabasePool(env.DATABASE_URL) : undefined;
 if (pool) await assertQueueSchema(pool);
 const repository = pool ? new PostgresQueueRepository(pool, env.QUEUE_EVENT_RETENTION_DAYS) : undefined;
-const queue = repository ? new ProductionQueueService(root, env, repository) : undefined;
+const usage = pool ? new PostgresUsageRepository(pool, root) : undefined;
+const queue = repository ? new ProductionQueueService(root, env, repository, usage) : undefined;
 const worker = queue ? new ProductionWorker(repository!, queue, { workerId: `web-${process.pid}-${randomUUID()}`, pollMs: env.QUEUE_POLL_MS, leaseMs: env.QUEUE_LEASE_MS, providerSpacingMs: env.PROVIDER_MIN_SPACING_MS }) : undefined;
-const operations = new StudioOperations(root, env, undefined, { queue }); const api = createApiHandler(operations);
+const operations = new StudioOperations(root, env, undefined, { queue, usage }); const api = createApiHandler(operations);
 if (worker) await worker.start(); else logger.warn({ event: "queue.disabled", message: "DATABASE_URL is not configured; production web jobs use the legacy in-memory runner" });
 const development = process.argv.includes("--dev");
 const vite = development ? await import("vite").then(({ createServer }) => createServer({ server: { host, middlewareMode: true, ws: { host, port: 24678 } }, appType: "spa" })) : undefined;
