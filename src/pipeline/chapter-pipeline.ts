@@ -6,6 +6,7 @@ import { StoryBibleUpdate, storyBibleUpdateSchema } from "../domain/story-bible.
 import { QaResult, qaResultSchema } from "../domain/qa.js";
 import { LLMRouter } from "../llm/router.js";
 import { TTSProvider } from "../tts/provider.js";
+import { TTSProviderRouter } from "../tts/router.js";
 import { atomicWrite, atomicWriteJson } from "../storage/atomic-write.js";
 import { readJsonIfExists, readTextIfExists } from "../storage/story-files.js";
 import { storyPaths } from "../storage/paths.js";
@@ -15,6 +16,7 @@ import { TRANSLATION_PROMPT_VERSION } from "../translation/prompts.js";
 import { translate } from "../translation/translator.js";
 import { NARRATION_PROMPT_VERSION } from "../narration/prompts.js";
 import { polishNarration } from "../narration/narration-editor.js";
+import { narrationDeliveryProfile, stripDeliveryCues } from "../narration/tts-direction.js";
 import { STORY_BIBLE_PROMPT_VERSION } from "../story-bible/prompts.js";
 import { extractStoryBible } from "../story-bible/extractor.js";
 import { QA_PROMPT_VERSION } from "../qa/prompts.js";
@@ -41,7 +43,8 @@ export type PipelineOptions = {
 const pending = (): StageState => ({ status: "pending" });
 
 export class ChapterPipeline {
-  constructor(private readonly llms: LLMRouter, private readonly tts: TTSProvider, private readonly audio: AudioMasteringProcessor = new FfmpegMasteringProcessor()) {}
+  private readonly tts: TTSProviderRouter;
+  constructor(private readonly llms: LLMRouter, tts: TTSProviderRouter | TTSProvider, private readonly audio: AudioMasteringProcessor = new FfmpegMasteringProcessor()) { this.tts = tts instanceof TTSProviderRouter ? tts : new TTSProviderRouter(tts); }
 
   async run(options: PipelineOptions): Promise<Chapter> {
     const paths = storyPaths(options.root, options.story.slug, options.chapter);
@@ -135,15 +138,20 @@ export class ChapterPipeline {
     const english = translationResult ?? await requireText(paths.english, "translation");
 
     const narrationConfig = options.story.pipeline.narration;
-    const narrationFp = fingerprint({ english: fingerprint(english), context: priorContext, config: narrationConfig, prompt: NARRATION_PROMPT_VERSION });
+    const ttsConfig = options.story.pipeline.tts;
+    const deliveryProfile = narrationDeliveryProfile(ttsConfig.provider, ttsConfig.model);
+    const narrationFp = fingerprint({ english: fingerprint(english), context: priorContext, config: narrationConfig, deliveryProfile, prompt: NARRATION_PROMPT_VERSION });
     const narrationResult = await runStage("narration", narrationFp, paths.narration, {
       provider: narrationConfig.provider, model: narrationConfig.model, promptVersion: NARRATION_PROMPT_VERSION,
     }, async () => {
-      const result = await polishNarration(this.llms.forStage(narrationConfig), narrationConfig, english, options.story.outputLanguage, priorContext);
-      await atomicWrite(paths.narration, result.text);
-      chapter.counts.narrationWords = wordCount(result.text);
+      const result = await polishNarration(this.llms.forStage(narrationConfig), narrationConfig, english, options.story.outputLanguage, priorContext, ttsConfig.provider, ttsConfig.model);
+      const cleanNarration = stripDeliveryCues(result.text, ttsConfig.provider, ttsConfig.model);
+      if (!cleanNarration) throw new PipelineError("Narration delivery cues cannot replace the chapter's spoken narration");
+      await atomicWrite(paths.narration, cleanNarration);
+      await atomicWrite(paths.narrationTts, result.text);
+      chapter.counts.narrationWords = wordCount(cleanNarration);
       chapter.stages.narration.usage = result.usage;
-      return result.text;
+      return cleanNarration;
     });
     const narration = narrationResult ?? await requireText(paths.narration, "narration");
 
@@ -200,15 +208,18 @@ export class ChapterPipeline {
     const continuityFp = fingerprint({ bible: bible.version, entities: bible.canonicalEntities, relationships: bible.canonicalRelationships, timeline: bible.entityTimeline });
     await runStage("continuity", continuityFp, paths.continuityAnalysis, { provider: "local", model: "deterministic-continuity-v1" }, async () => analyzeAndPersistContinuity(options.root, options.story.slug, bible, options.chapter));
 
-    const ttsConfig = options.story.pipeline.tts;
+    // Reader-facing narration remains clean for QA, subtitles, Story Bible, and
+    // scene planning. Only Fish receives the model-specific delivery script.
+    const ttsScript = (await readTextIfExists(paths.narrationTts))?.trim() || narration;
     // A blank per-story voice intentionally inherits the environment default. Include
     // the resolved value in the fingerprint so a changed default cannot reuse audio
     // generated with a different voice.
-    const referenceId = this.tts.resolveReferenceId?.(ttsConfig.referenceId) ?? ttsConfig.referenceId;
-    const ttsFp = fingerprint({ narration: fingerprint(narration), config: { ...ttsConfig, referenceId } });
+    const ttsProvider = this.tts.forName(ttsConfig.provider);
+    const referenceId = ttsProvider.resolveReferenceId?.(ttsConfig.referenceId) ?? ttsConfig.referenceId;
+    const ttsFp = fingerprint({ narration: fingerprint(ttsScript), config: { ...ttsConfig, referenceId }, deliveryProfile });
     if (!(await fileFingerprint(paths.audioRaw)) && chapter.stages.tts.status === "complete" && await fileFingerprint(paths.audio)) await atomicWrite(paths.audioRaw, await readFile(paths.audio));
     await runStage("tts", ttsFp, paths.audioRaw, { provider: ttsConfig.provider, model: ttsConfig.model }, async () => {
-      const result = await this.tts.synthesize({ text: narration, model: ttsConfig.model, referenceId,
+      const result = await ttsProvider.synthesize({ text: ttsScript, model: ttsConfig.model, referenceId,
         speed: ttsConfig.speed, format: ttsConfig.format, sampleRate: ttsConfig.sampleRate, bitrate: ttsConfig.bitrate,
         normalize: ttsConfig.normalize, maxCharsPerRequest: ttsConfig.maxCharsPerRequest });
       await atomicWrite(paths.audioRaw, result.audio);
@@ -217,7 +228,7 @@ export class ChapterPipeline {
       await Promise.all(result.segments.map((segment, index) => atomicWrite(join(paths.segments, `${String(index + 1).padStart(4, "0")}.mp3`), segment)));
       chapter.stages.tts.usage = {
         requestId: result.requestIds?.join(","), requests: result.segments.length,
-        characters: [...narration].length, bytes: result.audio.byteLength,
+        characters: [...ttsScript].length, bytes: result.audio.byteLength,
       };
     });
 

@@ -4,6 +4,7 @@ import { LLMRequest, StructuredLLMRequest } from "../src/llm/types.js";
 import { storyBibleUpdateSchema } from "../src/domain/story-bible.js";
 import { qaResultSchema } from "../src/domain/qa.js";
 import { TTSProvider } from "../src/tts/provider.js";
+import { TTSRequest } from "../src/tts/types.js";
 import { defaultProductionProfiles } from "../src/production/types.js";
 
 export class MockLLM implements LLMProvider {
@@ -30,9 +31,9 @@ export class MockLLM implements LLMProvider {
 }
 
 export class MockTTS implements TTSProvider {
-  readonly name = "fish" as const; calls = 0;
+  readonly name = "fish" as const; calls = 0; requests: TTSRequest[] = [];
   async validateConfiguration() {}
-  async synthesize() { this.calls++; const audio = new Uint8Array([0x49, 0x44, 0x33]); return { audio, segments: [audio] }; }
+  async synthesize(request: TTSRequest) { this.calls++; this.requests.push(request); const audio = new Uint8Array([0x49, 0x44, 0x33]); return { audio, segments: [audio] }; }
 }
 
 export const testStory = (overrides: Partial<Story["pipeline"]> = {}): Story => ({

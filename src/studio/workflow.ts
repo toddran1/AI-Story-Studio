@@ -8,6 +8,7 @@ import { storyPaths, voicePreviewPaths } from "../storage/paths.js";
 import { readJsonIfExists } from "../storage/story-files.js";
 import { fingerprint } from "../utils/hash.js";
 import { applyCanonicalOverlay, findDuplicateSuggestions } from "../story-bible/canonical.js";
+import { ttsProviderNameSchema } from "../domain/provider.js";
 
 export const bibleCategorySchema = z.enum(["characters", "locations", "factions", "abilities", "classes", "ranks", "items", "creatures", "systemTerms", "relationships", "translationTerms"]);
 export type BibleCategory = z.infer<typeof bibleCategorySchema>;
@@ -55,14 +56,14 @@ export const chapterTextEditSchema = z.object({ field: z.enum(["translation", "n
 export async function saveChapterTextEdit(root: string, slug: string, chapterNumber: number, input: z.infer<typeof chapterTextEditSchema>) {
   const { field, text } = chapterTextEditSchema.parse(input); const paths = storyPaths(root, slug, chapterNumber); const raw = await readJsonIfExists<Chapter>(paths.chapterMeta); if (!raw) throw new Error(`Chapter ${chapterNumber} has not been processed`); const chapter = chapterSchema.parse(raw);
   const stage: StageName = field; const output = field === "translation" ? paths.english : paths.narration; const now = new Date().toISOString(); const outputFingerprint = fingerprint(Buffer.from(text).toString("base64"));
-  await atomicWrite(output, text); chapter.stages[stage] = { status: "complete", provider: "manual", model: "studio-editor", fingerprint: `manual:${outputFingerprint}`, outputFingerprint, completedAt: now };
+  await atomicWrite(output, text); if (field === "narration") await atomicWrite(paths.narrationTts, text); chapter.stages[stage] = { status: "complete", provider: "manual", model: "studio-editor", fingerprint: `manual:${outputFingerprint}`, outputFingerprint, completedAt: now };
   const order: StageName[] = ["translation", "narration", "qa", "storyBible", "continuity", "tts", "audioMastering", "alignment", "subtitles", "scenePlanning", "artwork", "video"];
   const invalidated = order.slice(order.indexOf(stage) + 1); for (const name of invalidated) chapter.stages[name] = { status: "pending" };
   if (field === "translation") chapter.counts.englishWords = wordCount(text); else chapter.counts.narrationWords = wordCount(text); chapter.quality = undefined; chapter.audio = undefined; chapter.alignment = undefined; chapter.subtitle = undefined; chapter.video = undefined; chapter.scenes = undefined; chapter.updatedAt = now; await atomicWriteJson(paths.chapterMeta, chapter);
   return { chapter, invalidated };
 }
 
-export const voicePreviewSchema = z.object({ text: z.string().trim().min(1).max(1200), model: z.string().trim().min(1).optional(), referenceId: z.string().trim().optional(), speed: z.number().min(.5).max(2).optional() }).strict();
+export const voicePreviewSchema = z.object({ text: z.string().trim().min(1).max(1200), provider: ttsProviderNameSchema.optional(), model: z.string().trim().min(1).optional(), referenceId: z.string().trim().optional(), speed: z.number().min(.5).max(2).optional() }).strict();
 export async function saveVoicePreview(root: string, slug: string, audio: Uint8Array, request: z.infer<typeof voicePreviewSchema>) {
   if (!audio.length) throw new Error("Voice provider returned empty audio"); const id = randomUUID(); const paths = voicePreviewPaths(root, slug, id); await mkdir(paths.directory, { recursive: true }); await atomicWrite(paths.audio, audio); await atomicWriteJson(paths.manifest, { version: 1, id, story: slug, createdAt: new Date().toISOString(), request: { ...request, text: undefined, textFingerprint: fingerprint(request.text) }, bytes: audio.byteLength }); return { id, audioUrl: `/api/stories/${slug}/voice-previews/${id}.mp3`, bytes: audio.byteLength };
 }

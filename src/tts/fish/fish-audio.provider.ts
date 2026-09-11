@@ -29,7 +29,8 @@ export class FishAudioProvider implements TTSProvider {
           signal: AbortSignal.timeout(this.timeoutMs),
           headers: { Authorization: `Bearer ${this.apiKey}`, "Content-Type": "application/json", model: request.model },
           body: JSON.stringify({ text, reference_id: referenceId, format: request.format, sample_rate: request.sampleRate,
-            mp3_bitrate: request.bitrate, normalize: request.normalize, prosody: { speed: request.speed, volume: 0, normalize_loudness: true } }),
+            mp3_bitrate: request.bitrate, normalize: request.normalize, prosody: { speed: request.speed, volume: 0, normalize_loudness: true },
+            ...fishS2Defaults(request.model) }),
         });
       } catch (error) { throw new ProviderError("Fish Audio network request failed", { cause: error }); }
       if (!response.ok) {
@@ -49,4 +50,11 @@ export class FishAudioProvider implements TTSProvider {
     for (const segment of segments) { audio.set(segment, offset); offset += segment.length; }
     return { audio, segments, requestIds };
   }
+}
+
+/** Documented S2/S2.1 production defaults. Other/unknown models retain the portable request shape. */
+function fishS2Defaults(model: string) {
+  if (!new Set(["s2-pro", "s2.1-pro", "s2.1-pro-free"]).has(model.trim().toLowerCase())) return {};
+  return { temperature: 0.7, top_p: 0.7, chunk_length: 300, latency: "normal", max_new_tokens: 1024,
+    repetition_penalty: 1.2, min_chunk_length: 50, condition_on_previous_chunks: true, early_stop_threshold: 1 };
 }

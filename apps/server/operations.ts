@@ -42,6 +42,7 @@ import { planProduction, runProduction } from "../../src/production/orchestrator
 import { productionForceSchema, productionOutputSchema } from "../../src/production/types.js";
 import { refreshProductionRange } from "../../src/production/refresh.js";
 import { TTSProvider } from "../../src/tts/provider.js";
+import { TTSProviderRouter } from "../../src/tts/router.js";
 import { addManualBibleEntry, bibleCategorySchema, chapterTextEditSchema, deleteBibleEntry, saveChapterTextEdit, saveVoicePreview, updateManualBibleEntry, voicePreviewSchema } from "../../src/studio/workflow.js";
 import { getStoryBible, invalidateCatalogCache } from "./catalog.js";
 import { buildStoryBackup, cleanupKindSchema, cleanupStory, createBlankStory, deleteStory, duplicateStory, getStorageUsage, loadGlobalSettings, readActivity, recordActivity, restoreStoryBackupFile, saveCover, saveGlobalSettings, systemStatus, updateStoryMetadata } from "../../src/studio/projects.js";
@@ -70,7 +71,7 @@ const artworkJobSchema = z.object({ from: z.number().int().positive(), to: z.num
 const productionInputSchema = z.object({ from: z.number().int().positive(), to: z.number().int().positive(), profile: z.string().optional(), outputs: z.array(productionOutputSchema).min(1).optional(), artwork: z.boolean().optional(), repairQa: z.boolean().optional(), alignment: z.boolean().optional(), refresh: z.boolean().default(false), dryRun: z.boolean().default(false), force: productionForceSchema.optional(), audiobookFormat: z.enum(["mp3", "m4b"]).optional(), maxProviderBudgetUsd: z.number().positive().max(1_000_000).optional() }).strict().refine((value) => value.to >= value.from, { message: "Range end must be at or after range start" });
 
 type InspectionRecord = { inspection: SourceInspection; temporaryDirectory?: string; createdAt: number; bytes: number };
-export type OperationsDependencies = { pipeline?: ChapterProcessor; preview?: PreviewRunner; registry?: SourceProviderRegistry; audio?: AudioMasteringProcessor; audiobook?: AudiobookProcessor; video?: VideoProcessor; videoExport?: VideoExportProcessor; scenePlanner?: LLMProvider; image?: ImageProvider; tts?: TTSProvider; alignment?: AlignmentEngine; queue?: ProductionQueueService; usage?: PostgresUsageRepository };
+export type OperationsDependencies = { pipeline?: ChapterProcessor; preview?: PreviewRunner; registry?: SourceProviderRegistry; audio?: AudioMasteringProcessor; audiobook?: AudiobookProcessor; video?: VideoProcessor; videoExport?: VideoExportProcessor; scenePlanner?: LLMProvider; image?: ImageProvider; tts?: TTSProvider | TTSProviderRouter; alignment?: AlignmentEngine; queue?: ProductionQueueService; usage?: PostgresUsageRepository };
 
 export class StudioOperations {
   private static readonly maxInspections = 10;
@@ -79,7 +80,7 @@ export class StudioOperations {
   private readonly pipeline: ChapterProcessor; private readonly preview: PreviewRunner; private readonly registry: SourceProviderRegistry;
   private readonly audio: AudioMasteringProcessor; private readonly audiobook: AudiobookProcessor;
   private readonly video: VideoProcessor; private readonly videoExport: VideoExportProcessor;
-  private readonly scenePlanner?: LLMProvider; private readonly image: ImageProvider; private readonly tts: TTSProvider; private readonly runtime: ReturnType<typeof createPipelineRuntime>;
+  private readonly scenePlanner?: LLMProvider; private readonly image: ImageProvider; private readonly tts: TTSProviderRouter; private readonly runtime: ReturnType<typeof createPipelineRuntime>;
   private readonly alignConfig; private readonly aligner?: AlignmentEngine;
   private readonly inspectionTimer: NodeJS.Timeout; private inspectionBytes = 0;
   readonly queue?: ProductionQueueService; readonly usage?: PostgresUsageRepository;
@@ -88,7 +89,7 @@ export class StudioOperations {
     this.registry = dependencies.registry ?? new SourceProviderRegistry(undefined, createWebHttpClient(root, env));
     this.audio = dependencies.audio ?? runtime.audio ?? new FfmpegMasteringProcessor(); this.audiobook = dependencies.audiobook ?? new FfmpegAudiobookProcessor();
     this.video = dependencies.video ?? new FfmpegVideoProcessor(); this.videoExport = dependencies.videoExport ?? new FfmpegVideoExportProcessor();
-    this.scenePlanner = dependencies.scenePlanner; this.image = dependencies.image ?? runtime.images.forName("openai"); this.tts = dependencies.tts ?? runtime.tts;
+    this.scenePlanner = dependencies.scenePlanner; this.image = dependencies.image ?? runtime.images.forName("openai"); this.tts = dependencies.tts instanceof TTSProviderRouter ? dependencies.tts : dependencies.tts ? new TTSProviderRouter(dependencies.tts) : runtime.tts;
     this.queue = dependencies.queue; this.alignConfig = alignmentConfig(env, root); this.aligner = dependencies.alignment ?? createAlignmentEngine(this.alignConfig);
     this.inspectionTimer = setInterval(() => this.expireInspections(), 60_000); this.inspectionTimer.unref();
   }
@@ -198,7 +199,7 @@ export class StudioOperations {
     });
   }
 
-  startVoicePreview(slug: string, raw: unknown) { slugSchema.parse(slug); const input = voicePreviewSchema.parse(raw); return this.jobs.create("voicePreview", slug, async () => { const story = await loadStory(storyPaths(this.root, slug, 1).storyConfig); const config = story.pipeline.tts; const request = { ...input, model: input.model ?? config.model, referenceId: input.referenceId ?? config.referenceId, speed: input.speed ?? config.speed }; const result = await withUsageScope({story:slug,stage:"voicePreview"},()=>this.tts.synthesize({ text: request.text, model: request.model, referenceId: request.referenceId, speed: request.speed, format: config.format, sampleRate: config.sampleRate, bitrate: config.bitrate, normalize: config.normalize, maxCharsPerRequest: config.maxCharsPerRequest })); const saved = await saveVoicePreview(this.root, slug, result.audio, request); await recordActivity(this.root, slug, "voice.preview", "Generated a voice preview"); return saved; }); }
+  startVoicePreview(slug: string, raw: unknown) { slugSchema.parse(slug); const input = voicePreviewSchema.parse(raw); return this.jobs.create("voicePreview", slug, async () => { const story = await loadStory(storyPaths(this.root, slug, 1).storyConfig); const config = story.pipeline.tts; const request = { ...input, provider: input.provider ?? config.provider, model: input.model ?? config.model, referenceId: input.referenceId ?? config.referenceId, speed: input.speed ?? config.speed }; const result = await withUsageScope({story:slug,stage:"voicePreview"},()=>this.tts.forName(request.provider).synthesize({ text: request.text, model: request.model, referenceId: request.referenceId, speed: request.speed, format: config.format, sampleRate: config.sampleRate, bitrate: config.bitrate, normalize: config.normalize, maxCharsPerRequest: config.maxCharsPerRequest })); const saved = await saveVoicePreview(this.root, slug, result.audio, request); await recordActivity(this.root, slug, "voice.preview", "Generated a voice preview"); return saved; }); }
 
   startProduction(slug: string, raw: unknown) { slugSchema.parse(slug); const input = productionInputSchema.parse(raw); return this.jobs.create("production", slug, async (control) => withStoryLock(this.root, slug, "end-to-end production", async () => { const story = await loadStory(storyPaths(this.root, slug, 1).storyConfig); const shutdown = new ShutdownController(); control.setPause(() => shutdown.request()); await recordActivity(this.root, slug, "production.started", `Started production for Chapters ${input.from}–${input.to}`); const manifest = (await runProduction({ root: this.root, story, ...input, pause: shutdown, recordedCost: this.usage ? () => this.usage!.recordedCost({ story: slug }) : undefined, onProgress: (event) => control.update(event) }, { pipeline: this.pipeline, loadChapters: async () => (await loadImportedChapters(this.root, slug)).chapters, refresh: (from, to) => refreshProductionRange({ root: this.root, story, from, to, registry: this.registry }), scenePlanner: this.scenePlanner ?? this.runtime.router.forStage(story.pipeline.scenePlanner), image: this.image, video: this.video, videoExport: this.videoExport, audiobook: this.audiobook, alignmentConfig: this.alignConfig, alignmentEngine: this.aligner })).manifest; await recordActivity(this.root, slug, `production.${manifest.status}`, `${manifest.status === "completed" ? "Completed" : "Stopped"} production for Chapters ${input.from}–${input.to}`); return manifest; })); }
   async submitProduction(slug:string,raw:unknown){if(this.queue)return this.queue.submit(slug,raw);return this.startProduction(slug,raw);}

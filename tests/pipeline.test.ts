@@ -38,6 +38,16 @@ describe("chapter pipeline", () => {
     expect(ctx.tts.calls).toBe(1);
   });
 
+  it("keeps S2 delivery cues in the TTS script but out of the reader-facing narration", async () => {
+    const root = await mkdtemp(join(tmpdir(), "story-studio-s2-cues-")); const input = join(root, "chapter.txt"); await writeFile(input, "正文", "utf8");
+    const gemini = new MockLLM("gemini", ["Translation"]); const openai = new MockLLM("openai", ["[sad] The [System] spoke. [pause] Then she left."]); const tts = new MockTTS();
+    const pipeline = new ChapterPipeline(new LLMRouter(new Map([["gemini", gemini], ["openai", openai]])), tts, new CopyingAudioProcessor()); const paths = storyPaths(root, "demo-story", 1);
+    await pipeline.run({ root, story: testStory({ tts: { ...testStory().pipeline.tts, model: "s2.1-pro-free" } }), chapter: 1, inputPath: input });
+    expect(await readFile(paths.narration, "utf8")).toBe("The [System] spoke. Then she left.");
+    expect(await readFile(paths.narrationTts, "utf8")).toContain("[sad]");
+    expect(tts.requests[0]?.text).toContain("[pause]");
+  });
+
   it("resumes at TTS after earlier stages completed", async () => {
     const ctx = await setup();
     await ctx.pipeline.run({ root: ctx.root, story: testStory(), chapter: 1, inputPath: ctx.input });

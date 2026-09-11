@@ -1,7 +1,7 @@
 import { z } from "zod";
 
 export const llmProviderNameSchema = z.enum(["openai", "gemini"]);
-export const ttsProviderNameSchema = z.literal("fish");
+export const ttsProviderNameSchema = z.enum(["fish"]);
 
 export type LLMProviderName = z.infer<typeof llmProviderNameSchema>;
 export type TTSProviderName = z.infer<typeof ttsProviderNameSchema>;
@@ -11,7 +11,7 @@ export const stageModelConfigSchema = z.object({
   model: z.string().min(1),
 });
 
-export const ttsStageConfigSchema = z.object({
+export const fishTtsStageConfigSchema = z.object({
   provider: ttsProviderNameSchema,
   model: z.string().min(1),
   referenceId: z.string().min(1).optional(),
@@ -22,6 +22,10 @@ export const ttsStageConfigSchema = z.object({
   normalize: z.boolean().default(true),
   maxCharsPerRequest: z.number().int().min(500).max(20_000).default(4000),
 });
+
+// Provider-specific discriminated variants belong here. Adding a provider does
+// not require teaching the pipeline about that provider's private settings.
+export const ttsStageConfigSchema = z.discriminatedUnion("provider", [fishTtsStageConfigSchema]);
 
 export type StageModelConfig = z.infer<typeof stageModelConfigSchema>;
 export type TTSStageConfig = z.infer<typeof ttsStageConfigSchema>;

@@ -10,6 +10,7 @@ import { OpenAIImageProvider } from "../artwork/openai-image.provider.js";
 import { ImageProviderRouter } from "../artwork/router.js";
 import { UsageSink } from "../cost/types.js";
 import { TrackedImageProvider, TrackedLLMProvider, TrackedTTSProvider } from "../cost/context.js";
+import { TTSProviderRouter } from "../tts/router.js";
 
 export function createPipeline(env: Environment): ChapterPipeline {
   return createPipelineRuntime(env).pipeline;
@@ -22,7 +23,8 @@ export function createPipelineRuntime(env: Environment, usage?: UsageSink) {
       ["gemini", trackLlm(new GeminiProvider(env.GEMINI_API_KEY, env.PROVIDER_TIMEOUT_MS))],
     ]));
   const rawTts = new FishAudioProvider(env.FISH_AUDIO_API_KEY, fetch, env.PROVIDER_TIMEOUT_MS, env.FISH_AUDIO_REFERENCE_ID);
-  const tts = usage ? new TrackedTTSProvider(rawTts, usage) : rawTts;
+  const trackedTts = usage ? new TrackedTTSProvider(rawTts, usage) : rawTts;
+  const tts = new TTSProviderRouter(new Map([[trackedTts.name, trackedTts]]));
   const audio = new FfmpegMasteringProcessor();
   const rawImage = new OpenAIImageProvider(env.OPENAI_API_KEY, env.PROVIDER_TIMEOUT_MS);
   const images = new ImageProviderRouter(new Map([["openai", usage ? new TrackedImageProvider(rawImage, usage) : rawImage]]));

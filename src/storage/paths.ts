@@ -9,7 +9,7 @@ export function storyPaths(root: string, slug: string, chapter: number) {
     storyConfig: join(story, "story.json"), pipelineConfig: join(story, "pipeline.json"),
     bible: join(story, "story-bible.json"), bibleManual: join(story, "story-bible-manual.json"), bibleCanonicalManual: join(story, "story-bible-canonical-manual.json"), continuityReview: join(story, "continuity-review.json"), chapterMeta: join(chapterDir, "chapter.json"),
     original: join(chapterDir, "original.txt"), english: join(chapterDir, "english.txt"),
-    narration: join(chapterDir, "narration.txt"), qa: join(chapterDir, "qa.json"), bibleUpdate: join(chapterDir, "story-bible-update.json"), continuityAnalysis: join(chapterDir, "continuity.json"), storyContext: join(chapterDir, "story-context.json"),
+    narration: join(chapterDir, "narration.txt"), narrationTts: join(chapterDir, "narration-tts.txt"), qa: join(chapterDir, "qa.json"), bibleUpdate: join(chapterDir, "story-bible-update.json"), continuityAnalysis: join(chapterDir, "continuity.json"), storyContext: join(chapterDir, "story-context.json"),
     audioRaw: join(chapterDir, "audio-raw.mp3"), audio: join(chapterDir, "audio.mp3"), segments: join(chapterDir, "audio-segments"),
     alignment: join(chapterDir, "alignment.json"), subtitlesDocument: join(chapterDir, "subtitles.json"), subtitlesManual: join(chapterDir, "subtitles.manual.json"),
     subtitlesSrt: join(chapterDir, "subtitles.srt"), subtitlesVtt: join(chapterDir, "subtitles.vtt"), video: join(chapterDir, "video.mp4"),

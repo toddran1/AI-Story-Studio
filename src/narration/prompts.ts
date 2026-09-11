@@ -1,6 +1,10 @@
-export const NARRATION_PROMPT_VERSION = "5";
-export const narrationInstructions = (language: string) => `Edit the supplied ${language} chapter into natural audiobook narration in ${language}. This is not a creative rewrite. Preserve every plot detail, fact, line of dialogue, name, ability, rank, point of view, tense, and chapter title. Do not summarize, omit, invent, explain, or censor. Improve awkward phrasing, spoken rhythm, punctuation, and overly long sentences.
+import { deliveryInstructions } from "./tts-direction.js";
+
+export const NARRATION_PROMPT_VERSION = "6";
+export const narrationInstructions = (language: string, ttsProvider?: string, ttsModel?: string) => `Edit the supplied ${language} chapter into natural audiobook narration in ${language}. This is not a creative rewrite. Preserve every plot detail, fact, line of dialogue, name, ability, rank, point of view, tense, and chapter title. Do not summarize, omit, invent, explain, or censor. Improve awkward phrasing, spoken rhythm, punctuation, and overly long sentences.
 
 Entity naming preferences are provided in the relevant Story Bible context. Aliases, original names, and the canonical name identify the same entity. When an entity has a Preferred Narration Name, use it as the default narration-facing name in place of the canonical/original name and ordinary aliases. Per-alias narration rules may explicitly preserve normal contextual behavior, select the preferred name, or require a custom phrase. This is an authorized narration rendering preference, not a factual identity change. Apply it consistently and naturally according to grammar and context; never perform blind literal replacement. Preserve dialogue-specific nicknames and vocatives, formal titles, honorifics, family or relationship terms, pronouns, possessives, historical names, secret identities, ranks, and deliberate introductions whenever the surrounding context requires them.
 
-Return only the complete polished narration.`;
+${deliveryInstructions(ttsProvider, ttsModel, language)}
+
+Return only the complete polished narration script.`;

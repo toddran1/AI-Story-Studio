@@ -10,13 +10,16 @@ import { previewPaths } from "../storage/paths.js";
 import { rebuildStoryBibleBeforeChapter } from "../story-bible/rebuild.js";
 import { retrieveRelevantContext } from "../story-bible/retrieval.js";
 import { TTSProvider } from "../tts/provider.js";
+import { TTSProviderRouter } from "../tts/router.js";
+import { stripDeliveryCues } from "../narration/tts-direction.js";
 import { translate } from "../translation/translator.js";
 import { fingerprint } from "../utils/hash.js";
 import { PreviewManifest, PreviewPreset, previewManifestSchema } from "./types.js";
 import { loadNarrationNamingEntities } from "../story-bible/narration-names.js";
 
 export class PreviewRunner {
-  constructor(private readonly llms: LLMRouter, private readonly tts: TTSProvider) {}
+  private readonly tts: TTSProviderRouter;
+  constructor(private readonly llms: LLMRouter, tts: TTSProviderRouter | TTSProvider) { this.tts = tts instanceof TTSProviderRouter ? tts : new TTSProviderRouter(tts); }
 
   async run(options: { root: string; story: Story; chapter: number; inputPath: string; presets: { a: PreviewPreset; b: PreviewPreset }; audioPreview: boolean; id?: string }): Promise<PreviewManifest> {
     const source = await readFile(options.inputPath, "utf8");
@@ -32,7 +35,8 @@ export class PreviewRunner {
       const translation = sameLanguage(options.story.sourceLanguage, options.story.outputLanguage)
         ? source
         : (await translate(this.llms.forStage(preset.translation), preset.translation, source, translationContext, options.story.sourceLanguage, options.story.outputLanguage)).text;
-      const narration = (await polishNarration(this.llms.forStage(preset.narration), preset.narration, translation, options.story.outputLanguage, context)).text;
+      const narrationScript = (await polishNarration(this.llms.forStage(preset.narration), preset.narration, translation, options.story.outputLanguage, context, preset.tts.provider, preset.tts.model)).text;
+      const narration = stripDeliveryCues(narrationScript, preset.tts.provider, preset.tts.model);
       const qa = (await validateChapterQuality(this.llms.forStage(preset.qa), preset.qa, {
         chapter: options.chapter, sourceLanguage: options.story.sourceLanguage, outputLanguage: options.story.outputLanguage,
         source, translation, narration, context,
@@ -42,8 +46,8 @@ export class PreviewRunner {
       await atomicWriteJson(choice === "a" ? paths.qaA : paths.qaB, qa);
       let audioGenerated = false;
       if (options.audioPreview && qa.status !== "fail") {
-        const sample = audioSample(narration);
-        const result = await this.tts.synthesize({ text: sample, model: preset.tts.model, referenceId: preset.tts.referenceId,
+        const sample = audioSample(narrationScript);
+        const result = await this.tts.forName(preset.tts.provider).synthesize({ text: sample, model: preset.tts.model, referenceId: preset.tts.referenceId,
           speed: preset.tts.speed, format: preset.tts.format, sampleRate: preset.tts.sampleRate, bitrate: preset.tts.bitrate,
           normalize: preset.tts.normalize, maxCharsPerRequest: preset.tts.maxCharsPerRequest });
         await atomicWrite(choice === "a" ? paths.audioA : paths.audioB, result.audio);
