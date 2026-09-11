@@ -7,6 +7,7 @@ import { withRetry } from "./retry.js";
 import { Chapter } from "../domain/chapter.js";
 import { QaCategory, QaStatus } from "../domain/qa.js";
 import { QualityGateError } from "../pipeline/errors.js";
+import { createErrorDiagnostic, ErrorDiagnostic } from "../errors/diagnostic.js";
 
 export interface ChapterProcessor { run(options: PipelineOptions): Promise<unknown>; }
 export type ProgressEvent =
@@ -14,7 +15,7 @@ export type ProgressEvent =
   | { type: "stage"; chapter: number; event: PipelineStageEvent }
   | { type: "chapter.completed"; index: number; total: number; chapter: number }
   | { type: "chapter.retrying"; chapter: number; attempt: number }
-  | { type: "chapter.failed"; index: number; total: number; chapter: number; error: string; attempts: number };
+  | { type: "chapter.failed"; index: number; total: number; chapter: number; error: string; attempts: number; diagnostic: ErrorDiagnostic };
 
 export type BatchRunOptions = {
   root: string; story: Story; chapters: DiscoveredChapter[]; state: BatchState; retry: RetryConfig;
@@ -30,7 +31,7 @@ export class BatchRunner {
     for (let index = 0; index < options.chapters.length; index++) {
       const discovered = options.chapters[index]!; const entry = options.state.chapters[String(discovered.chapter)]!;
       if (options.shutdown.isRequested) { options.state.status = "paused"; options.state.stopReason = "Shutdown requested"; break; }
-      entry.status = "running"; entry.startedAt ??= new Date().toISOString(); entry.error = undefined;
+      entry.status = "running"; entry.startedAt ??= new Date().toISOString(); entry.error = undefined; entry.diagnostic = undefined;
       options.onProgress?.({ type: "chapter.started", index: index + 1, total: options.chapters.length, chapter: discovered.chapter });
       await persistBatchState(options.root, options.state);
       try {
@@ -42,6 +43,7 @@ export class BatchRunner {
           // rely on ChapterPipeline fingerprints to avoid repeating paid work.
           force: currentAttempt === 1 ? options.state.options.force as PipelineOptions["force"] : undefined,
           onStageEvent: (event) => {
+            entry.currentStage = event.stage;
             options.onProgress?.({ type: "stage", chapter: discovered.chapter, event });
             if (event.status === "completed") addUsage(options.state, event);
           },
@@ -61,7 +63,8 @@ export class BatchRunner {
       } catch (error) {
         if (error instanceof QualityGateError) addQuality(options.state, error.result.status, error.result.issues.map((issue) => issue.category));
         entry.status = "failed"; entry.error = error instanceof Error ? error.message : String(error);
-        options.onProgress?.({ type: "chapter.failed", index: index + 1, total: options.chapters.length, chapter: discovered.chapter, error: entry.error, attempts: entry.attempts });
+        entry.diagnostic = createErrorDiagnostic(error, { chapter: discovered.chapter, stage: entry.currentStage });
+        options.onProgress?.({ type: "chapter.failed", index: index + 1, total: options.chapters.length, chapter: discovered.chapter, error: entry.error, attempts: entry.attempts, diagnostic: entry.diagnostic });
         if (options.shutdown.isRequested) {
           options.state.status = "paused"; options.state.stopReason = `Shutdown requested during Chapter ${discovered.chapter}`;
           await persistBatchState(options.root, options.state); break;

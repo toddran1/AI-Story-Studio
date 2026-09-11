@@ -4,6 +4,11 @@ export const entityTypeSchema = z.enum(["character", "location", "organization",
 export type EntityType = z.infer<typeof entityTypeSchema>;
 export const factOriginSchema = z.enum(["automatic", "manual"]);
 export const provenanceSchema = z.object({ chapter: z.number().int().positive(), kind: z.enum(["extraction", "event", "relationship", "manual"]), confidence: z.number().min(0).max(1).optional(), origin: factOriginSchema.default("automatic") });
+export const aliasNarrationRuleSchema = z.object({
+  alias: z.string().trim().min(1).max(300),
+  behavior: z.enum(["no_override", "use_preferred", "custom"]),
+  replacement: z.string().trim().min(1).max(300).optional(),
+}).superRefine((value, context) => { if (value.behavior === "custom" && !value.replacement) context.addIssue({ code: "custom", message: "A custom narration replacement is required", path: ["replacement"] }); });
 
 const namedEntity = z.object({
   canonicalEnglishName: z.string().min(1).max(300), originalName: z.string().max(300).default(""), description: z.string().max(10_000).default(""),
@@ -30,6 +35,7 @@ export const storyBibleUpdateSchema = z.object({
 
 export const canonicalEntitySchema = z.object({
   id: z.string().regex(/^ent_[a-f0-9]{24}$/), type: entityTypeSchema, canonicalName: z.string().min(1).max(300), aliases: z.array(z.string().min(1).max(300)).max(100).default([]), originalName: z.string().max(300).default(""), description: z.string().max(10_000).default(""),
+  preferredNarrationName: z.string().trim().min(1).max(300).optional(), aliasNarrationRules: z.array(aliasNarrationRuleSchema).max(100).default([]),
   firstAppearance: z.number().int().positive(), lastKnownAppearance: z.number().int().positive(), status: z.string().max(500).default("unknown"), notes: z.string().max(10_000).default(""), canonicalNameLocked: z.boolean().default(false),
   origin: factOriginSchema.default("automatic"), provenance: z.array(provenanceSchema).default([]), mergedFromIds: z.array(z.string()).default([]),
 });

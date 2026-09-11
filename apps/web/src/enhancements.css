@@ -20,8 +20,13 @@
 .refresh-banner b { display: block; font: 11px var(--mono); margin: 6px 0; }
 .refresh-banner p { font-size: 9px; color: #8e8c96; margin: 0; }
 .active-profile { display: block; color: #666570; font: 8px/1.6 var(--mono); margin-top: 10px; max-width: 720px; }
-.job-actions { display: flex; justify-content: flex-end; margin-top: 8px; }
-.job-actions button { border: 0; background: transparent; color: #aaa8b2; font-size: 9px; cursor: pointer; }
+.job-actions { display: flex; justify-content: flex-end; align-items:center; gap:13px; margin-top: 11px; }
+.job-actions button,.job-actions a { border: 0; background: transparent; color: #aaa8b2; font-size: 9px; cursor: pointer; text-decoration:none; }
+.incident h3{font:500 18px/1.25 var(--serif);margin:2px 0 10px;color:var(--ink)}
+.incident-meta{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px}.incident-meta span{border:1px solid rgba(219,93,104,.25);background:rgba(219,93,104,.07);border-radius:4px;padding:4px 6px;color:#d99aa1;font:8px var(--mono);text-transform:uppercase;letter-spacing:.05em}
+.incident ul{margin:0 0 12px;padding:0;list-style:none;display:grid;gap:6px}.incident li{border-left:2px solid var(--fail);padding-left:9px;color:#aaa8b2;font-size:10px;line-height:1.45}.incident li b{display:block;color:#e1a3a9;font:8px var(--mono);text-transform:uppercase;margin-bottom:2px}
+.incident-next{background:#121216;border:1px solid var(--line);border-radius:7px;padding:10px 11px}.incident-next small{color:#777680;font:8px var(--mono);text-transform:uppercase;letter-spacing:.08em}.incident-next p{color:#d0ced7;margin-top:5px;font:10px/1.5 var(--sans)}
+.incident details{border-top:1px solid var(--line);margin-top:11px;padding-top:9px}.incident summary{color:#9997a2;font:9px var(--mono);cursor:pointer}.incident details p{margin:8px 0;white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.55}.incident details small{color:#64636d;font:8px var(--mono)}.incident-action-error{margin-top:8px!important;color:var(--fail)!important}
 
 @media (max-width: 720px) {
   .refresh-banner { align-items: flex-start; gap: 14px; }

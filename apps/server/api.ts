@@ -18,6 +18,7 @@ import { exists } from "../../src/storage/story-files.js";
 import { durableJobStatusSchema } from "../../src/queue/types.js";
 import { QueueConflictError, QueueNotFoundError } from "../../src/queue/repository.js";
 import { productionForceSchema } from "../../src/production/types.js";
+import { createErrorDiagnostic } from "../../src/errors/diagnostic.js";
 
 const MAX_BODY_BYTES = 50_000_000;
 const MAX_JSON_BYTES = 1_000_000;
@@ -221,8 +222,10 @@ export function createApiHandler(operations: StudioOperations) {
       return send(response, 404, { error: "API route not found" });
     } catch (error) {
       const status = statusFor(error);
-      if (status >= 500) logger.error({ event: "web.api.failed", method: request.method, path: url.pathname, status, error: error instanceof Error ? error.message : String(error) });
-      return send(response, status, { error: error instanceof z.ZodError ? z.prettifyError(error) : error instanceof Error ? error.message : String(error) });
+      const displayError = error instanceof z.ZodError ? new Error(z.prettifyError(error), { cause: error }) : error;
+      const diagnostic = createErrorDiagnostic(displayError);
+      if (status >= 500) logger.error({ event: "web.api.failed", diagnosticId: diagnostic.id, category: diagnostic.category, method: request.method, path: url.pathname, status, error: error instanceof Error ? error.message : String(error) });
+      return send(response, status, { error: diagnostic.summary, diagnostic: publicJob(diagnostic, operations.root) });
     }
   };
 }

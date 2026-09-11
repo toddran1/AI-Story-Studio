@@ -111,7 +111,7 @@ function printProgress(event: ProgressEvent) {
   else if (event.type === "stage") process.stdout.write(`  ${event.event.status === "completed" ? "✓" : event.event.status === "reused" ? "↺" : "→"} ${event.event.stage}${event.event.status === "reused" ? " (reused)" : ""}\n`);
   else if (event.type === "chapter.completed") process.stdout.write(`  Complete (${event.index}/${event.total})\n`);
   else if (event.type === "chapter.retrying") process.stdout.write(`  Retrying Chapter ${event.chapter} (attempt ${event.attempt})\n`);
-  else process.stdout.write(`  Failed after ${event.attempts} attempt(s): ${event.error}\n`);
+  else process.stdout.write(`  Failed after ${event.attempts} attempt(s): ${event.diagnostic.summary}\n  Category: ${event.diagnostic.category}\n  Next: ${event.diagnostic.recommendedAction}\n  Reference: ${event.diagnostic.id}${event.diagnostic.technicalDetails ? `\n  Details: ${event.diagnostic.technicalDetails}` : ""}\n`);
 }
 function formatPlan(story: string, directory: string, plan: Awaited<ReturnType<typeof createBatchPlan>>) {
   return [`Batch dry run`, `Story: ${story}`, `Input: ${directory}`, `Discovered: ${plan.discovered}`,

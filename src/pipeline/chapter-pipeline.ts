@@ -27,6 +27,7 @@ import { masterStoredChapter } from "../audio/chapter-audio.js";
 import { retrieveRelevantContext } from "../story-bible/retrieval.js";
 import { analyzeAndPersistContinuity } from "../story-bible/continuity.js";
 import { withUsageScope } from "../cost/context.js";
+import { loadNarrationNamingEntities } from "../story-bible/narration-names.js";
 
 export type ForceStage = "translation" | "narration" | "qa" | "story-bible" | "continuity" | "tts" | "audio" | "all";
 export type PipelineStageEvent = { stage: StageName; status: "started" | "completed" | "reused"; state: StageState };
@@ -60,7 +61,9 @@ export class ChapterPipeline {
     const source = await readFile(options.inputPath, "utf8");
     if (!source.trim()) throw new PipelineError(`Input file is empty: ${options.inputPath}`);
     let bible = await rebuildStoryBibleBeforeChapter(options.root, options.story.slug, options.chapter);
-    const priorContext = retrieveRelevantContext(bible, source, options.chapter, { recentSummaryCount: options.story.context.recentChapterSummaries });
+    const translationContext = retrieveRelevantContext(bible, source, options.chapter, { recentSummaryCount: options.story.context.recentChapterSummaries });
+    const narrationNamingEntities = await loadNarrationNamingEntities(options.root, options.story.slug);
+    const priorContext = retrieveRelevantContext(bible, source, options.chapter, { recentSummaryCount: options.story.context.recentChapterSummaries, narrationNamingEntities });
     await atomicWriteJson(paths.storyContext, priorContext);
 
     const persist = async () => { chapter.updatedAt = new Date().toISOString(); await atomicWriteJson(paths.chapterMeta, chapter); };
@@ -111,7 +114,7 @@ export class ChapterPipeline {
 
     const translationConfig = options.story.pipeline.translation;
     const passthroughTranslation = sameLanguage(options.story.sourceLanguage, options.story.outputLanguage);
-    const translationFp = fingerprint({ source: ingestionFp, config: passthroughTranslation ? "passthrough" : translationConfig, prompt: passthroughTranslation ? "passthrough-v1" : TRANSLATION_PROMPT_VERSION, context: priorContext });
+    const translationFp = fingerprint({ source: ingestionFp, config: passthroughTranslation ? "passthrough" : translationConfig, prompt: passthroughTranslation ? "passthrough-v1" : TRANSLATION_PROMPT_VERSION, context: translationContext });
     const translationResult = await runStage("translation", translationFp, paths.english, {
       provider: passthroughTranslation ? "passthrough" : translationConfig.provider,
       model: passthroughTranslation ? undefined : translationConfig.model,
@@ -123,7 +126,7 @@ export class ChapterPipeline {
         return source;
       }
       const provider = this.llms.forStage(translationConfig);
-      const result = await translate(provider, translationConfig, source, priorContext, options.story.sourceLanguage, options.story.outputLanguage);
+      const result = await translate(provider, translationConfig, source, translationContext, options.story.sourceLanguage, options.story.outputLanguage);
       await atomicWrite(paths.english, result.text);
       chapter.counts.englishWords = wordCount(result.text);
       chapter.stages.translation.usage = result.usage;
@@ -169,7 +172,8 @@ export class ChapterPipeline {
       chapter.stages.continuity = pending();
       chapter.stages.tts = pending();
       await persist();
-      await atomicWriteJson(paths.bible, bible);
+      // QA failure must not replace the last known-good canonical snapshot with
+      // the pre-chapter context. The rejected chapter can be retried later.
       throw new QualityGateError(`Chapter ${options.chapter} failed QA`, quality);
     }
 

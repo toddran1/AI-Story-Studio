@@ -133,6 +133,7 @@ describe("web service layer", () => {
     const jobs = new JobManager(); const started = jobs.create("batch", "failed-story", async () => ({ status: "failed", stopReason: "Chapter 7 failed" }));
     const finished = await waitForJob(jobs, started.id);
     expect(finished).toMatchObject({ status: "failed", error: "Chapter 7 failed", result: { status: "failed" } });
+    expect(finished.diagnostic).toMatchObject({ chapter: 7, summary: "Chapter 7 failed", retryable: false });
   });
 
   it("reports the selected remote range separately from the available directory", async () => {

@@ -1,8 +1,10 @@
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
+import { createErrorDiagnostic, ErrorDiagnostic, errorDiagnosticSchema } from "../../src/errors/diagnostic.js";
+import { logger } from "../../src/utils/logger.js";
 
 export type JobStatus = "queued" | "running" | "completed" | "failed" | "paused";
-export type Job = { id: string; type: "batch" | "preview" | "voicePreview" | "audio" | "audiobook" | "alignment" | "subtitles" | "video" | "videoExport" | "scenes" | "artwork" | "production"; story: string; status: JobStatus; createdAt: string; updatedAt: string; progress?: unknown; result?: unknown; error?: string };
+export type Job = { id: string; type: "batch" | "preview" | "voicePreview" | "audio" | "audiobook" | "alignment" | "subtitles" | "video" | "videoExport" | "scenes" | "artwork" | "production"; story: string; status: JobStatus; createdAt: string; updatedAt: string; progress?: unknown; result?: unknown; error?: string; diagnostic?: ErrorDiagnostic };
 type JobControl = { update(progress: unknown): void; setPause(handler: () => void): void };
 
 export class JobConflictError extends Error {}
@@ -46,9 +48,11 @@ export class JobManager {
       if (resultStatus === "paused") this.set(job, { status: "paused", result });
       else if (resultStatus === "failed" || resultStatus === "completed_with_errors") {
         const reason = typeof (result as { stopReason?: unknown }).stopReason === "string" ? (result as { stopReason: string }).stopReason : `Batch ${resultStatus}`;
-        this.set(job, { status: "failed", result, error: reason });
+        const diagnostic = diagnosticFromResult(result) ?? createErrorDiagnostic(new Error(reason), { summary: reason });
+        logFailure(job, diagnostic);
+        this.set(job, { status: "failed", result, error: diagnostic.summary, diagnostic });
       } else this.set(job, { status: "completed", result });
-    } catch (error) { this.set(job, { status: "failed", error: error instanceof Error ? error.message : String(error) }); }
+    } catch (error) { const diagnostic = createErrorDiagnostic(error); logFailure(job, diagnostic); this.set(job, { status: "failed", error: diagnostic.summary, diagnostic }); }
     finally {
       this.pauseHandlers.delete(job.id); if (this.activeStories.get(job.story) === job.id) this.activeStories.delete(job.story);
       this.events.delete(job.id); this.prune();
@@ -65,3 +69,23 @@ export class JobManager {
 }
 
 const isTerminal = (status: JobStatus) => status === "completed" || status === "failed" || status === "paused";
+function logFailure(job: Job, diagnostic: ErrorDiagnostic) { logger.error({ event: "web.job.failed", jobId: job.id, type: job.type, story: job.story, diagnostic }); }
+
+function diagnosticFromResult(result: unknown): ErrorDiagnostic | undefined {
+  if (!result || typeof result !== "object") return undefined;
+  const chapters = (result as { chapters?: unknown }).chapters;
+  for (const value of chapters && typeof chapters === "object" ? Object.values(chapters) : []) {
+    if (value && typeof value === "object" && "diagnostic" in value) {
+      const parsed = errorDiagnosticSchema.safeParse((value as { diagnostic?: unknown }).diagnostic); if (parsed.success) return parsed.data;
+    }
+  }
+  const failure = Array.isArray((result as { failures?: unknown }).failures) ? (result as { failures: unknown[] }).failures[0] : undefined;
+  if (failure && typeof failure === "object") {
+    const value = failure as { message?: unknown; chapter?: unknown; stage?: unknown };
+    if (typeof value.message === "string") return createErrorDiagnostic(new Error(value.message), {
+      chapter: typeof value.chapter === "number" ? value.chapter : undefined,
+      stage: typeof value.stage === "string" ? value.stage : undefined,
+    });
+  }
+  return undefined;
+}

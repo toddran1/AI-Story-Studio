@@ -13,6 +13,7 @@ import { TTSProvider } from "../tts/provider.js";
 import { translate } from "../translation/translator.js";
 import { fingerprint } from "../utils/hash.js";
 import { PreviewManifest, PreviewPreset, previewManifestSchema } from "./types.js";
+import { loadNarrationNamingEntities } from "../story-bible/narration-names.js";
 
 export class PreviewRunner {
   constructor(private readonly llms: LLMRouter, private readonly tts: TTSProvider) {}
@@ -21,7 +22,8 @@ export class PreviewRunner {
     const source = await readFile(options.inputPath, "utf8");
     if (!source.trim()) throw new Error(`Input file is empty: ${options.inputPath}`);
     const bible = await rebuildStoryBibleBeforeChapter(options.root, options.story.slug, options.chapter);
-    const context = retrieveRelevantContext(bible, source, options.chapter, { recentSummaryCount: options.story.context.recentChapterSummaries });
+    const translationContext = retrieveRelevantContext(bible, source, options.chapter, { recentSummaryCount: options.story.context.recentChapterSummaries });
+    const context = retrieveRelevantContext(bible, source, options.chapter, { recentSummaryCount: options.story.context.recentChapterSummaries, narrationNamingEntities: await loadNarrationNamingEntities(options.root, options.story.slug) });
     const id = options.id ?? `${new Date().toISOString().replace(/[-:.]/g, "").replace("Z", "Z")}-${randomUUID().slice(0, 8)}`;
     const paths = previewPaths(options.root, options.story.slug, id);
 
@@ -29,7 +31,7 @@ export class PreviewRunner {
       const preset = options.presets[choice];
       const translation = sameLanguage(options.story.sourceLanguage, options.story.outputLanguage)
         ? source
-        : (await translate(this.llms.forStage(preset.translation), preset.translation, source, context, options.story.sourceLanguage, options.story.outputLanguage)).text;
+        : (await translate(this.llms.forStage(preset.translation), preset.translation, source, translationContext, options.story.sourceLanguage, options.story.outputLanguage)).text;
       const narration = (await polishNarration(this.llms.forStage(preset.narration), preset.narration, translation, options.story.outputLanguage, context)).text;
       const qa = (await validateChapterQuality(this.llms.forStage(preset.qa), preset.qa, {
         chapter: options.chapter, sourceLanguage: options.story.sourceLanguage, outputLanguage: options.story.outputLanguage,

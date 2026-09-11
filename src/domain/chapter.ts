@@ -26,6 +26,8 @@ export const stageStateSchema = z.object({
   durationMs: z.number().optional(),
   usage: usageSchema,
   error: z.object({ message: z.string(), cause: z.string().optional() }).optional(),
+  staleReason: z.string().max(500).optional(),
+  manualReviewRequired: z.boolean().optional(),
 });
 
 const rawChapterSchema = z.object({

@@ -8,6 +8,8 @@ import { storyPaths } from "../src/storage/paths.js";
 import { MockLLM, MockTTS, testStory } from "./helpers.js";
 import { CopyingAudioProcessor } from "../src/audio/chapter-audio.js";
 import { saveChapterTextEdit } from "../src/studio/workflow.js";
+import { emptyStoryBible } from "../src/domain/story-bible.js";
+import { atomicWriteJson } from "../src/storage/atomic-write.js";
 
 class CountingAudioProcessor extends CopyingAudioProcessor { calls = 0; override async master(inputs: string[], output: string) { this.calls++; return super.master(inputs, output); } }
 
@@ -158,8 +160,10 @@ describe("chapter pipeline", () => {
     const gemini = new MockLLM("gemini", ["The value is one hundred."]); const openai = new MockLLM("openai", ["The value was one hundred."], qa); const tts = new MockTTS();
     const pipeline = new ChapterPipeline(new LLMRouter(new Map([["gemini", gemini], ["openai", openai]])), tts, new CopyingAudioProcessor());
     const paths = storyPaths(root, "demo-story", 1);
+    const lastKnownGood = { ...emptyStoryBible(), version: 7 }; await atomicWriteJson(paths.bible, lastKnownGood);
     await expect(pipeline.run({ root, story: testStory(), chapter: 1, inputPath: input })).rejects.toThrow("Chapter 1 failed QA");
     expect(JSON.parse(await readFile(paths.qa, "utf8")).status).toBe("fail");
+    expect(JSON.parse(await readFile(paths.bible, "utf8")).version).toBe(7);
     expect(gemini.calls.filter((call) => call.structured)).toHaveLength(0);
     expect(tts.calls).toBe(0);
   });

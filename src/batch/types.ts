@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { errorDiagnosticSchema } from "../errors/diagnostic.js";
 
 export const discoveredChapterSchema = z.object({
   chapter: z.number().int().positive(),
@@ -26,6 +27,8 @@ export const batchChapterStateSchema = z.object({
   startedAt: z.string().optional(),
   completedAt: z.string().optional(),
   error: z.string().optional(),
+  currentStage: z.string().optional(),
+  diagnostic: errorDiagnosticSchema.optional(),
 });
 
 const usageTotalsSchema = z.object({

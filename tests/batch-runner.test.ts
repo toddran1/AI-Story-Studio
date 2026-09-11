@@ -71,6 +71,7 @@ describe("batch runner", () => {
     const ctx = await setup({ run: async () => { throw new QualityGateError("Chapter 1 failed QA", qa); } }, discovered.slice(0, 1));
     const result = await ctx.runner.run({ ...ctx, story: testStory(), chapters: discovered.slice(0, 1), retry, sleep: async () => undefined });
     expect(result.qa.fail).toBe(1); expect(result.qa.issueCategories.numbers).toBe(1);
+    expect(result.chapters["1"]?.diagnostic).toMatchObject({ chapter: 1, category: "content_qa", stage: "qa", summary: "Chapter 1 failed quality review" });
   });
   it("does not start another retry after shutdown is requested", async () => {
     const shutdown = new ShutdownController(); let calls = 0;

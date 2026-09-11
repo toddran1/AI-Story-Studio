@@ -1,8 +1,12 @@
+export type ErrorDiagnostic = { id:string;timestamp:string;summary:string;category:"transient"|"rate_limit"|"configuration"|"content_qa"|"permanent";retryable:boolean;recommendedAction:string;chapter?:number;stage?:string;provider?:string;code?:string;technicalDetails?:string;issues?:Array<{category:string;severity:string;message:string;evidence?:string}> };
+export class ApiError extends Error { constructor(message: string, public readonly diagnostic?: ErrorDiagnostic) { super(diagnostic ? formatDiagnostic(diagnostic) : message); this.name = "ApiError"; } }
+export function formatDiagnostic(diagnostic: ErrorDiagnostic) { return `${diagnostic.summary}\nNext: ${diagnostic.recommendedAction}\nReference: ${diagnostic.id}`; }
+
 export async function api<T>(path: string, options?: RequestInit): Promise<T> {
   const binary = options?.body instanceof ArrayBuffer || (typeof Blob !== "undefined" && options?.body instanceof Blob);
   const response = await fetch(`/api${path}`, { ...options, headers: { ...(binary ? {} : { "content-type": "application/json" }), ...options?.headers } });
   const value = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(value.error ?? `Request failed (${response.status})`);
+  if (!response.ok) throw new ApiError(value.error ?? `Request failed (${response.status})`, value.diagnostic);
   return value as T;
 }
 
@@ -34,7 +38,7 @@ export type StoryCard = { slug: string; title: string; author?: string; descript
 export type Counts = { pass: number; warn: number; fail: number };
 export type ChapterRow = { chapter: number; originalTitle?: string; translation: string; narration: string; qa?: "pass" | "warn" | "fail"; qaScore?: number; tts: string; audioMastering: string; alignment: string; subtitles: string; durationSeconds?: number; audioAvailable: boolean };
 export type QaResult = { status: "pass" | "warn" | "fail"; score: number; issues: Array<{ category: string; severity: "warn" | "fail"; message: string; evidence: string }>; checks: Record<string, "pass" | "warn" | "fail"> };
-export type Job = { id: string; type: string; story: string; status: "queued" | "running" | "completed" | "failed" | "paused"; progress?: any; result?: any; error?: string };
+export type Job = { id: string; type: string; story: string; status: "queued" | "running" | "completed" | "failed" | "paused"; progress?: any; result?: any; error?: string; diagnostic?: ErrorDiagnostic };
 export type ProductionPlan = { story: string; from: number; to: number; chapters: number[]; requiredChapters: number[]; chapterRequirements: Record<string,string[]>; outputs: string[]; artwork: boolean; stages: string[]; counts: Record<string, { required: number; reusable: number }>; estimates: { llmOperations: number; ttsOperations: number; imageOperations: number; imagesPendingPlanning: number }; finalOutputs: string[]; costEstimate?: {classification:string;estimatedUsd?:number;lowUsd?:number;highUsd?:number;confidence:string;assumptions:string[];unknownStages:string[];breakdown:Array<{stage:string;required:number;estimatedUsd?:number;basis:string}>} };
 export type CostAnalytics = {summary:{totalCostUsd:number;requests:number;successful:number;failed:number;retries:number;inputTokens:number;cachedInputTokens:number;outputTokens:number;inputUtf8Bytes:number;images:number;unpricedRequests:number};dimensions:Array<{stage:string;provider:string;model:string;requests:number;costUsd:number;inputTokens:number;outputTokens:number;inputUtf8Bytes:number;images:number;failures:number}>;chapters:Array<{chapter?:number;requests:number;costUsd:number;unpriced:number}>};
 export type QueueJob = { id:string;story:string;from:number;to:number;profile?:string;status:string;pauseRequested:boolean;cancelRequested:boolean;currentChapter?:number;currentStage?:string;totalItems:number;completedItems:number;warningItems:number;reviewItems:number;failedItems:number;errorSummary?:string;createdAt:string;startedAt?:string;updatedAt:string;completedAt?:string };
