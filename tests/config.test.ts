@@ -5,7 +5,7 @@ import { storySchema } from "../src/domain/story.js";
 describe("configuration", () => {
   it("loads valid values and defaults", () => {
     const env = loadEnvironment({ OPENAI_API_KEY: "test", GEMINI_API_KEY: "test", FISH_AUDIO_API_KEY: "test" });
-    expect(env.FISH_AUDIO_MODEL).toBe("s2-pro");
+    expect(env.FISH_AUDIO_MODEL).toBe("s2.1-pro-free");
     expect(env.FISH_AUDIO_MP3_BITRATE).toBe(128);
   });
 

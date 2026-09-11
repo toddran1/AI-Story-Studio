@@ -8,6 +8,7 @@ import { queueSubmissionSchema } from "../src/queue/types.js";
 describe("durable queue policy", () => {
   it("classifies retryable, configuration, QA, and permanent failures", () => {
     expect(classifyQueueFailure(Object.assign(new Error("OpenAI rate limit"), { status: 429, headers: { "retry-after": "12" } }))).toMatchObject({ category: "rate_limit", retryable: true, retryAfterMs: 12_000, provider: "openai" });
+    expect(classifyQueueFailure(Object.assign(new Error("Gemini quota exceeded. Please retry in 50.736203116s."), { status: 429 }))).toMatchObject({ category: "rate_limit", retryable: true, retryAfterMs: 50_737, provider: "gemini" });
     expect(classifyQueueFailure(Object.assign(new Error("service unavailable"), { status: 503 }))).toMatchObject({ category: "transient", retryable: true });
     expect(classifyQueueFailure(new ConfigurationError("FFmpeg unavailable"))).toMatchObject({ category: "configuration", retryable: false });
     expect(classifyQueueFailure(new Error("Whisper.cpp alignment model was not found"))).toMatchObject({ category: "configuration", retryable: false });

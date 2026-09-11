@@ -20,4 +20,16 @@ describe("retry", () => {
     await expect(withRetry(operation, retry, { sleep: async () => undefined })).rejects.toThrow(/unavailable/);
     expect(operation).toHaveBeenCalledTimes(3);
   });
+  it("honors Gemini retry durations embedded in error messages beyond the normal backoff cap", async () => {
+    const operation = vi.fn().mockRejectedValueOnce(Object.assign(new Error("429 Please retry in 50.736203116s."), { status: 429 })).mockResolvedValue("ok");
+    const sleep = vi.fn(async () => undefined);
+    await expect(withRetry(operation, retry, { sleep })).resolves.toBe("ok");
+    expect(sleep).toHaveBeenCalledWith(50_737);
+  });
+  it("parses millisecond Gemini retry durations", async () => {
+    const operation = vi.fn().mockRejectedValueOnce(Object.assign(new Error("429 Please retry in 223.595465ms."), { status: 429 })).mockResolvedValue("ok");
+    const sleep = vi.fn(async () => undefined);
+    await expect(withRetry(operation, retry, { sleep })).resolves.toBe("ok");
+    expect(sleep).toHaveBeenCalledWith(224);
+  });
 });

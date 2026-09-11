@@ -12,7 +12,7 @@ const envSchema = z.object({
   GEMINI_API_KEY: optionalSecret,
   GEMINI_DEFAULT_MODEL: z.string().default("gemini-3.8-flash"),
   FISH_AUDIO_API_KEY: optionalSecret,
-  FISH_AUDIO_MODEL: z.string().default("s2-pro"),
+  FISH_AUDIO_MODEL: z.string().default("s2.1-pro-free"),
   FISH_AUDIO_REFERENCE_ID: optionalSecret,
   FISH_AUDIO_SPEED: z.coerce.number().min(0.5).max(2).default(1),
   FISH_AUDIO_SAMPLE_RATE: z.coerce.number().pipe(z.union([z.literal(32000), z.literal(44100)])).default(44100),

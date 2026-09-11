@@ -19,8 +19,10 @@ export async function withRetry<T>(operation: () => Promise<T>, config: RetryCon
       if (attempt >= config.maxAttempts || hooks.shouldStop?.() || !isTransientError(error)) throw error;
       const retryAfterMs = findRetryAfterMs(error);
       const exponential = Math.min(config.maxDelayMs, config.initialDelayMs * 2 ** (attempt - 1));
-      const delay = retryAfterMs ?? Math.round(exponential * (0.75 + random() * 0.5));
-      await sleep(Math.min(config.maxDelayMs, Math.max(0, delay)));
+      const delay = retryAfterMs === undefined
+        ? Math.min(config.maxDelayMs, Math.round(exponential * (0.75 + random() * 0.5)))
+        : Math.min(15 * 60_000, retryAfterMs);
+      await sleep(Math.max(0, delay));
     }
   }
   throw lastError;
@@ -56,9 +58,19 @@ function findRetryAfterMs(error: unknown): number | undefined {
     const raw = typeof (headers as { get?: unknown } | undefined)?.get === "function"
       ? (headers as { get: (name: string) => string | null }).get("retry-after")
       : (headers as Record<string, string> | undefined)?.["retry-after"];
-    if (!raw) continue;
-    const seconds = Number(raw); if (Number.isFinite(seconds)) return seconds * 1000;
-    const date = Date.parse(raw); if (Number.isFinite(date)) return Math.max(0, date - Date.now());
+    if (raw) {
+      const seconds = Number(raw); if (Number.isFinite(seconds)) return seconds * 1000;
+      const date = Date.parse(raw); if (Number.isFinite(date)) return Math.max(0, date - Date.now());
+    }
+    const fromMessage = retryAfterFromMessage(String(item.message ?? ""));
+    if (fromMessage !== undefined) return fromMessage;
   }
   return undefined;
+}
+
+function retryAfterFromMessage(message: string): number | undefined {
+  const match = message.match(/(?:please\s+)?retry\s+in\s+([0-9]+(?:\.[0-9]+)?)\s*(ms|milliseconds?|s|seconds?)/i);
+  if (!match) return undefined;
+  const amount = Number(match[1]);
+  return Math.max(0, Math.ceil(amount * (/^m/i.test(match[2]!) ? 1 : 1000)));
 }

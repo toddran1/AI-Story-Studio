@@ -182,8 +182,9 @@ describe("web service layer", () => {
 
   it("validates settings and rejects credential-shaped fields", async () => {
     const { root, story } = await storyFixture(); const valid = { title: "Revised", sourceLanguage: story.sourceLanguage, outputLanguage: story.outputLanguage, recentChapterSummaries: 4,
-      translation: story.pipeline.translation, narration: story.pipeline.narration, qa: story.pipeline.qa, tts: { referenceId: "voice", speed: 1.1 } };
+      translation: story.pipeline.translation, narration: story.pipeline.narration, qa: story.pipeline.qa, tts: { model: "s2.1-pro-free", referenceId: "voice", speed: 1.1 } };
     expect((await updateStorySettings(root, story.slug, valid)).title).toBe("Revised");
+    expect((await updateStorySettings(root, story.slug, valid)).pipeline.tts.model).toBe("s2.1-pro-free");
     await expect(updateStorySettings(root, story.slug, { ...valid, OPENAI_API_KEY: "must-not-pass" })).rejects.toThrow();
   });
 
