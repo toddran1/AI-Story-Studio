@@ -7,14 +7,15 @@ import { NeedsReviewPage, QueueStudioPage } from "./QueueStudio.js";
 type Route = { page: string; story?: string; chapter?: number };
 
 export function App() {
-  const [route, setRoute] = useState<Route>(() => parseRoute(location.pathname)); const [stories, setStories] = useState<StoryCard[]>([]); const [storiesError, setStoriesError] = useState(""); const [job, setJob] = useState<Job>();
+  const [route, setRoute] = useState<Route>(() => parseRoute(location.pathname)); const [stories, setStories] = useState<StoryCard[]>([]); const [storiesError, setStoriesError] = useState(""); const [job, setJob] = useState<Job>(); const [jobRefreshVersion, setJobRefreshVersion] = useState(0); const latestJob = useRef<Job>();
   useEffect(() => { const handler = () => setRoute(parseRoute(location.pathname)); addEventListener("popstate", handler); return () => removeEventListener("popstate", handler); }, []);
-  useEffect(() => { setStoriesError(""); api<{ stories: StoryCard[]; warnings?: string[] }>("/stories").then((value) => { setStories(value.stories); setStoriesError(value.warnings?.join(" ") ?? ""); }).catch((error) => { setStories([]); setStoriesError(message(error)); }); }, [route.page]);
+  useEffect(() => { setStoriesError(""); api<{ stories: StoryCard[]; warnings?: string[] }>("/stories").then((value) => { setStories(value.stories); setStoriesError(value.warnings?.join(" ") ?? ""); }).catch((error) => { setStories([]); setStoriesError(message(error)); }); }, [route.page, jobRefreshVersion]);
+  const updateJob = (next: Job) => { if (shouldRefreshAfterJob(latestJob.current, next)) setJobRefreshVersion((value) => value + 1); latestJob.current = next; setJob(next); };
   const navigate = (path: string) => { history.pushState({}, "", path); setRoute(parseRoute(path)); window.scrollTo({ top: 0, behavior: "smooth" }); };
   const active = route.story ? stories.find((story) => story.slug === route.story) : undefined;
   return <div className="studio-shell">
     <Sidebar stories={stories} active={route.story} navigate={navigate} />
-    <main className="canvas">
+    <main className="canvas" key={`${route.page}:${route.story ?? ""}:${route.chapter ?? ""}:${jobRefreshVersion}`}>
       <Topbar title={active?.title ?? pageTitle(route.page)} subtitle={active ? `${active.sourceLanguage} → ${active.outputLanguage}` : "Local production workspace"} />
       {route.page === "stories" && <LibraryPage stories={stories} error={storiesError} navigate={navigate} />}
       {route.page === "new" && <NewStoryPage navigate={navigate} />}
@@ -22,22 +23,22 @@ export function App() {
       {route.page === "queue" && <QueueStudioPage navigate={navigate} />}
       {route.page === "review" && <NeedsReviewPage navigate={navigate} />}
       {route.page === "manage" && route.story && <ManageStoryPage slug={route.story} navigate={navigate} />}
-      {route.page === "story" && route.story && <StoryPage slug={route.story} navigate={navigate} onJob={setJob} />}
-      {route.page === "chapter" && route.story && route.chapter && <ChapterPage slug={route.story} chapter={route.chapter} navigate={navigate} onJob={setJob} />}
+      {route.page === "story" && route.story && <StoryPage slug={route.story} navigate={navigate} onJob={updateJob} />}
+      {route.page === "chapter" && route.story && route.chapter && <ChapterPage slug={route.story} chapter={route.chapter} navigate={navigate} onJob={updateJob} />}
       {route.page === "qa" && route.story && <QaPage slug={route.story} navigate={navigate} />}
-      {route.page === "preview" && route.story && <PreviewPage slug={route.story} onJob={setJob} />}
+      {route.page === "preview" && route.story && <PreviewPage slug={route.story} onJob={updateJob} />}
       {route.page === "bible" && route.story && <BiblePage slug={route.story} navigate={navigate} />}
       {route.page === "continuity" && route.story && <ContinuityPage slug={route.story} navigate={navigate} />}
-      {route.page === "audio" && route.story && <AudioPage slug={route.story} onJob={setJob} />}
-      {route.page === "video" && route.story && <VideoPage slug={route.story} onJob={setJob} />}
-      {route.page === "scenes" && route.story && <ScenesPage slug={route.story} onJob={setJob} />}
-      {route.page === "production" && route.story && <ProductionPage slug={route.story} activeJob={job?.type === "production" ? job : undefined} onJob={setJob} navigate={navigate} />}
+      {route.page === "audio" && route.story && <AudioPage slug={route.story} onJob={updateJob} />}
+      {route.page === "video" && route.story && <VideoPage slug={route.story} onJob={updateJob} />}
+      {route.page === "scenes" && route.story && <ScenesPage slug={route.story} onJob={updateJob} />}
+      {route.page === "production" && route.story && <ProductionPage slug={route.story} activeJob={job?.type === "production" ? job : undefined} onJob={updateJob} navigate={navigate} />}
       {route.page === "outputs" && route.story && <OutputsPage slug={route.story} />}
-      {route.page === "voice" && route.story && <VoicePage slug={route.story} onJob={setJob} />}
+      {route.page === "voice" && route.story && <VoicePage slug={route.story} onJob={updateJob} />}
       {route.page === "settings" && route.story && <SettingsPage slug={route.story} />}
       {route.page === "import" && <ImportPage stories={stories} navigate={navigate} />}
     </main>
-    {job && <JobConsole job={job} onUpdate={setJob} onClose={() => setJob(undefined)} />}
+    {job && <JobConsole job={job} onUpdate={updateJob} onClose={() => { latestJob.current = undefined; setJob(undefined); }} />}
   </div>;
 }
 
@@ -311,6 +312,7 @@ function formatBytes(bytes: number) { if (bytes < 1024) return `${bytes} B`; if 
 function formatTime(seconds: number) { const minutes = Math.floor(Math.max(0, seconds) / 60); const rest = Math.floor(Math.max(0, seconds) % 60); return `${minutes}:${String(rest).padStart(2, "0")}`; }
 
 function isTerminalJob(job: Job) { return ["completed", "failed", "paused"].includes(job.status); }
+export function shouldRefreshAfterJob(previous: Job | undefined, next: Job) { return isTerminalJob(next) && (previous?.id !== next.id || !isTerminalJob(previous)); }
 function watchJob(id: string, onUpdate: (job: Job) => void | Promise<void>, onError: (error: unknown) => void) {
   let stopped = false; let timer: number | undefined; const source = new EventSource(`/api/jobs/${id}/events`);
   const deliver = (job: Job) => { void Promise.resolve(onUpdate(job)).catch(onError); if (isTerminalJob(job)) stop(); };
