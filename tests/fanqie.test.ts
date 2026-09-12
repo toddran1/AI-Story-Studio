@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { parseFanqieBook } from "../src/source/fanqie/book-parser.js";
-import { decodeFanqieText, parseFanqieChapter } from "../src/source/fanqie/chapter-parser.js";
+import { decodeFanqieText, FanqieLockedChapterError, parseFanqieChapter } from "../src/source/fanqie/chapter-parser.js";
 import { FanqieSource } from "../src/source/fanqie/fanqie-source.js";
 import { parseFanqieUrl } from "../src/source/fanqie/fanqie-url.js";
 import { importSource, loadImportedChapters } from "../src/source/importer.js";
@@ -36,6 +36,23 @@ describe("Fanqie source", () => {
     expect(decodeFanqieText(String.fromCodePoint(58_611))).toBe("的");
     const parsed = parseFanqieChapter(chapterHtml("第1章 起点", `第一段${String.fromCodePoint(58_611)}文字`, "第二段。"));
     expect(parsed.text).toBe("第一段的文字\n\n第二段。");
+  });
+
+  it("rejects a Fanqie login preview instead of treating it as a complete chapter", () => {
+    const html = lockedChapterHtml("第1501章 你可听闻大世界", "这是仅供预览的开头。", 2104);
+    expect(() => parseFanqieChapter(html)).toThrow(FanqieLockedChapterError);
+  });
+
+  it("reports locked chapters as unavailable and never returns their preview text", async () => {
+    const fetcher = vi.fn(async (input: string | URL | Request) => {
+      const url = String(input); if (url === bookUrl) return new Response(bookHtml(2));
+      if (url === chapterUrl(1)) return new Response(chapterHtml("第1章 起点", "Full first chapter. ".repeat(20)));
+      if (url === chapterUrl(2)) return new Response(lockedChapterHtml("第2章 回声", "Only a preview.", 1800));
+      return new Response("missing", { status: 404 });
+    });
+    const result = await fanqieSource(fetcher).inspect(bookUrl, { from: 1, to: 2 });
+    expect(result.chapters.map((item) => item.ref.chapter)).toEqual([1]);
+    expect(result.warnings).toEqual(expect.arrayContaining([expect.objectContaining({ code: "unavailable_chapter", sourceId: "9002" })]));
   });
 
   it("inspects only the directory unless probes or ranges request bodies", async () => {
@@ -102,6 +119,18 @@ describe("web HTTP client", () => {
     const redirect = new WebHttpClient({ fetcher: vi.fn(async () => new Response(null, { status: 302, headers: { location: "https://evil.example/book" } })) as typeof fetch, requestDelayMs: 0, allowedHosts: ["example.com"] });
     await expect(redirect.getText("https://example.com/book")).rejects.toThrow(/host is not allowed/);
   });
+
+  it("maintains ordinary host-scoped session cookies without caching challenge pages", async () => {
+    const cache = { get: vi.fn(async () => undefined), set: vi.fn(async () => undefined) }; let calls = 0;
+    const fetcher = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+      calls += 1; const cookie = new Headers(init?.headers).get("cookie");
+      if (calls === 1) { expect(cookie).toBeNull(); return new Response("session ready", { headers: { "set-cookie": "reader_session=ok; Path=/; Secure; HttpOnly" } }); }
+      expect(cookie).toBe("reader_session=ok"); return new Response("<title>正在验证浏览器</title><script>challenge=1</script>");
+    });
+    const client = new WebHttpClient({ fetcher: fetcher as typeof fetch, cache, maintainCookies: true, requestDelayMs: 0, maxRetries: 0, allowedHosts: ["example.com"] });
+    await client.getText("https://example.com/book", { refresh: true }); await client.getText("https://example.com/chapter", { refresh: true });
+    expect(cache.set).toHaveBeenCalledTimes(1);
+  });
 });
 
 function fanqieSource(fetcher: ReturnType<typeof vi.fn>) {
@@ -112,7 +141,7 @@ function fixtureFetcher(count: number, bodies = new Map<number, string>(), title
     const url = String(input);
     if (url === bookUrl) return new Response(bookHtml(count, titles), { status: 200 });
     const id = Number(/\/reader\/(\d+)/.exec(url)?.[1]) - 9000;
-    if (id >= 1 && id <= count) return new Response(chapterHtml(titles.get(id) ?? defaultTitle(id), bodies.get(id) ?? `Body ${id}`), { status: 200 });
+    if (id >= 1 && id <= count) return new Response(chapterHtml(titles.get(id) ?? defaultTitle(id), `${bodies.get(id) ?? `Body ${id}`}. `.repeat(30)), { status: 200 });
     return new Response("missing", { status: 404 });
   });
 }
@@ -122,3 +151,4 @@ function bookHtml(count: number, titles = new Map<number, string>()) {
   return `<html><body><div class="page-header-info"><h1>虚构星河</h1><div class="info-label">连载中 科幻</div><div class="author-name-text">测试作者</div><div class="page-abstract-content">一部虚构作品。</div><div class="page-cover"><img src="//images.example/cover.jpg"></div></div><h3>目录${count}章</h3><div class="chapter">${chapters}</div></body></html>`;
 }
 function chapterHtml(title: string, ...paragraphs: string[]) { return `<html><body><h1 class="muye-reader-title">${title}</h1><div class="muye-reader-content">${paragraphs.map((value) => `<p>${value}</p>`).join("")}</div></body></html>`; }
+function lockedChapterHtml(title: string, preview: string, advertisedCharacters: number) { return `<html><body><h1 class="muye-reader-title">${title}</h1><div class="muye-reader-content"><p>${preview}</p></div><p>会员登录后，可在网页畅读全文</p><p>扫码下载APP免费读</p><script>window.__INITIAL_STATE__={"reader":{"chapterData":{"isChapterLock":true,"chapterWordNumber":"${advertisedCharacters}","content":"${preview}"}}}</script></body></html>`; }

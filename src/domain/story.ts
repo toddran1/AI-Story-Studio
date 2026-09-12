@@ -5,6 +5,7 @@ import { subtitleSettingsSchema } from "../subtitles/types.js";
 import { videoSettingsSchema } from "../video/config.js";
 import { artworkSettingsSchema, sceneSettingsSchema } from "../scenes/types.js";
 import { productionProfilesSchema } from "../production/types.js";
+import { storyNovelSourceSchema } from "../source/novel-provider.js";
 
 const rawStorySchema = z.object({
   id: z.string().min(1),
@@ -32,6 +33,7 @@ const rawStorySchema = z.object({
     externalId: z.string().optional(),
     path: z.string().optional(),
   }),
+  sources: z.array(storyNovelSourceSchema).default([]),
   context: z.object({
     recentChapterSummaries: z.number().int().min(0).max(100).default(5),
   }).default({ recentChapterSummaries: 5 }),

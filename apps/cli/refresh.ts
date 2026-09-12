@@ -24,12 +24,12 @@ async function refresh(slug: string, importNew: boolean, root: string, env: Retu
   const manifest = sourceManifestSchema.parse(raw); if (!("url" in manifest.origin) || !manifest.remote) throw new Error(`Story '${slug}' does not use a refreshable remote source`);
   const registry = new SourceProviderRegistry(undefined, createWebHttpClient(root, env));
   const { provider } = await registry.resolve(manifest.origin.url, manifest.type);
-  const directoryInspection = await provider.inspect(manifest.origin.url, { refresh: true }); const comparison = compareRemoteDirectory(manifest, directoryInspection);
+  const directoryInspection = await registry.inspect(provider, manifest.origin.url, { refresh: true }); const comparison = compareRemoteDirectory(manifest, directoryInspection);
   process.stdout.write(`${formatRefresh(slug, comparison)}\n`);
   if (!importNew || !comparison.added.length) return;
   if (comparison.removed.length || comparison.reordered.length) throw new Error("Refusing automatic import because the remote directory removed or reordered existing chapters");
   const chapters = comparison.added.map((ref) => ref.chapter);
-  const inspection = await provider.inspect(manifest.origin.url, { chapters });
+  const inspection = await registry.inspect(provider, manifest.origin.url, { chapters });
   const story = await loadStory(paths.storyConfig);
   const result = await importSource(root, slug, inspection, async () => {
     await atomicWriteJson(paths.pipelineConfig, story.pipeline); await atomicWriteJson(paths.storyConfig, story);

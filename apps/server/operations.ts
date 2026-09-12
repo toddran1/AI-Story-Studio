@@ -10,16 +10,17 @@ import { Environment } from "../../src/config/env.js";
 import { defaultStory, loadStory } from "../../src/config/load-config.js";
 import { storySchema } from "../../src/domain/story.js";
 import { createPipelineRuntime } from "../../src/pipeline/create-pipeline.js";
+import { ConfigurationError } from "../../src/pipeline/errors.js";
 import { applyPreviewProfile } from "../../src/preview/profile.js";
 import { PreviewRunner } from "../../src/preview/preview-runner.js";
 import { previewPresetSchema } from "../../src/preview/types.js";
-import { importSource, loadImportedChapters } from "../../src/source/importer.js";
+import { importedChapterFingerprint, importSource, loadImportedChapters } from "../../src/source/importer.js";
 import { validateImportable } from "../../src/source/inspection.js";
 import { compareRemoteDirectory } from "../../src/source/refresh.js";
 import { SourceProviderRegistry } from "../../src/source/registry.js";
 import { applySourceMetadata } from "../../src/source/story-metadata.js";
 import { translateStoryMetadata } from "../../src/translation/story-metadata.js";
-import { SourceInspection, SourceManifest, SourceType, sourceManifestSchema, sourceTypeSchema } from "../../src/source/types.js";
+import { SourceInspection, SourceManifest, SourceType, StorySourceProvider, sourceManifestSchema, sourceTypeSchema } from "../../src/source/types.js";
 import { createWebHttpClient } from "../../src/source/web/create-client.js";
 import { atomicWriteJson } from "../../src/storage/atomic-write.js";
 import { previewPaths, storyPaths } from "../../src/storage/paths.js";
@@ -61,6 +62,7 @@ import { withUsageScope } from "../../src/cost/context.js";
 import { invalidateNarrationNamingChange } from "../../src/story-bible/narration-names.js";
 import { findChapterGaps } from "../../src/batch/gaps.js";
 import { fingerprint } from "../../src/utils/hash.js";
+import { NovelProviderId, novelProviderIdSchema, storyNovelSourceSchema } from "../../src/source/novel-provider.js";
 
 const slugSchema = z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/);
 const batchInputSchema = z.object({ from: z.number().int().positive().optional(), to: z.number().int().positive().optional(), force: z.enum(["translation", "narration", "qa", "story-bible", "continuity", "tts", "audio", "all"]).optional() }).strict();
@@ -98,7 +100,31 @@ export class StudioOperations {
     this.inspectionTimer = setInterval(() => this.expireInspections(), 60_000); this.inspectionTimer.unref();
   }
 
-  async inspectSource(input: { url?: string; file?: Uint8Array; filename?: string; files?: Array<{ name: string; text: string }>; type?: SourceType; from?: number; to?: number; chapter?: number; splitChapters?: boolean; allowGaps?: boolean }, context?: { story: string; additive: boolean }) {
+  novelProviders() { return this.registry.listNovelProviders(); }
+  diagnoseNovelProvider(id: string) { return this.registry.diagnoseNovelProvider(novelProviderIdSchema.parse(id)); }
+  setNovelProviderEnabled(id: string, raw: unknown) { const provider = novelProviderIdSchema.parse(id); const input = z.object({ enabled: z.boolean() }).strict().parse(raw); input.enabled ? this.registry.enableNovelProvider(provider) : this.registry.disableNovelProvider(provider); return this.registry.listNovelProviders().find((item) => item.id === provider)!; }
+  async searchNovelSources(raw: unknown) {
+    const input = z.object({ query: z.string().trim().min(1).max(200), providers: z.array(novelProviderIdSchema).max(20).optional(), limit: z.number().int().min(1).max(100).default(50) }).strict().parse(raw);
+    return this.registry.searchNovels(input.query, input.providers, input.limit);
+  }
+
+  async updateNovelSourcePriorities(slug: string, raw: unknown) {
+    slugSchema.parse(slug);
+    const input = z.object({ sources: z.array(z.object({ provider: novelProviderIdSchema, bookId: z.string().min(1), priority: z.number().int().min(0).max(10_000), enabled: z.boolean() }).strict()).max(100) }).strict().parse(raw);
+    const keys = new Set(input.sources.map((source) => `${source.provider}\0${source.bookId}`));
+    if (keys.size !== input.sources.length) throw new ConfigurationError("Each configured novel source may appear only once");
+    return withStoryLock(this.root, slug, "novel source priority update", async () => {
+      const paths = storyPaths(this.root, slug, 1); const current = await loadStory(paths.storyConfig);
+      const currentKeys = new Set(current.sources.map((source) => `${source.provider}\0${source.bookId}`));
+      for (const key of keys) if (!currentKeys.has(key)) throw new ConfigurationError("Source priority updates may only reference sources already attached to this story");
+      const changes = new Map(input.sources.map((source) => [`${source.provider}\0${source.bookId}`, source]));
+      const sources = current.sources.map((source) => storyNovelSourceSchema.parse({ ...source, ...(changes.get(`${source.provider}\0${source.bookId}`) ?? {}) }));
+      const story = storySchema.parse({ ...current, sources }); await atomicWriteJson(paths.storyConfig, story);
+      await recordActivity(this.root, slug, "source.priority", "Updated novel source priority and availability"); invalidateCatalogCache(this.root, slug); return story;
+    });
+  }
+
+  async inspectSource(input: { url?: string; file?: Uint8Array; filename?: string; files?: Array<{ name: string; text: string }>; type?: SourceType; from?: number; to?: number; chapter?: number; splitChapters?: boolean; allowGaps?: boolean; acquisition?: "html" | "bulk-download" }, context?: { story: string; additive: boolean }) {
     this.expireInspections(); let source: string; let temporaryDirectory: string | undefined;
     const type = input.type === undefined ? undefined : sourceTypeSchema.parse(input.type);
     try {
@@ -115,7 +141,9 @@ export class StudioOperations {
       }
       const { provider, semanticType } = await this.registry.resolve(source, type); const remote = semanticType === "fanqie" || semanticType === "web";
       if (remote && ((input.from === undefined) !== (input.to === undefined))) throw new Error("Remote chapter ranges require both from and to");
-      const inspection = await provider.inspect(source, { semanticType, from: input.from, to: input.to, chapter: input.chapter, splitChapters: input.splitChapters, allowGaps: input.allowGaps });
+      if (input.acquisition === "bulk-download" && (!remote || !supportsBulk(provider))) throw new Error("The selected source does not support full-manuscript downloads");
+      let inspection = await this.registry.inspect(provider, source, { semanticType, from: input.from, to: input.to, chapter: input.chapter, splitChapters: input.splitChapters, allowGaps: input.allowGaps, acquisition: input.acquisition });
+      if (remote && context?.story && inspection.warnings.some((warning) => warning.code === "unavailable_chapter")) inspection = await this.applyConfiguredFallbacks(context.story, inspection, input.from, input.to);
       const previousRaw = context ? await readJsonIfExists<SourceManifest>(storyPaths(this.root, context.story, 1).sourceManifest) : undefined;
       const previous = previousRaw ? sourceManifestSchema.safeParse(previousRaw) : undefined;
       if (context?.additive && previousRaw && !previous?.success) throw new Error(`Cannot safely update '${context.story}' because its source manifest is invalid`);
@@ -145,6 +173,55 @@ export class StudioOperations {
     try { await this.discardInspection(inspectionId); }
     catch (error) { logger.warn({ event: "web.inspection.cleanup_failed", inspectionId, error: error instanceof Error ? error.message : String(error) }); }
     await recordActivity(this.root, slug, "source.imported", `Imported ${result.added.length} new and updated ${result.modified.length} chapters`); invalidateCatalogCache(this.root, slug); return result;
+  }
+
+  private async applyConfiguredFallbacks(slug: string, primary: SourceInspection, from?: number, to?: number): Promise<SourceInspection> {
+    const story = await loadStory(storyPaths(this.root, slug, 1).storyConfig);
+    const inferred = story.source.url ? this.registry.novelProviderIdForUrl(story.source.url) : undefined;
+    const configured: Array<{ provider: NovelProviderId; bookId: string; url: string }> = story.sources.length
+      ? [...story.sources].filter((item) => item.enabled).sort((left, right) => left.priority - right.priority)
+      : inferred && story.source.url ? [{ provider: inferred, bookId: story.source.externalId ?? "unknown", url: story.source.url }] : [];
+    const candidates = configured.filter((item) => item.url !== primary.origin?.url);
+    if (!candidates.length) return primary;
+    const requested = new Set<number>(); const start = from ?? primary.directory?.[0]?.chapter; const end = to ?? primary.directory?.at(-1)?.chapter;
+    if (start !== undefined && end !== undefined) for (let chapter = start; chapter <= end; chapter++) requested.add(chapter);
+    for (const item of primary.chapters) requested.delete(item.ref.chapter);
+    const attempts: Array<{ provider: string; chapter: number; status: string; reason: string; extractedCharacters?: number; expectedCharacters?: number }> = [];
+    for (const warning of primary.warnings.filter((item) => item.code === "unavailable_chapter")) {
+      const chapter = primary.directory?.find((item) => item.sourceId === warning.sourceId)?.chapter ?? numberFromMessage(warning.message);
+      if (chapter) attempts.push({ provider: String(primary.metadata?.provider ?? primary.sourceType), chapter, status: validationStatusFromMessage(warning.message), reason: warning.message });
+    }
+    const previousRaw = await readJsonIfExists<SourceManifest>(storyPaths(this.root, slug, 1).sourceManifest); const previous = previousRaw ? sourceManifestSchema.safeParse(previousRaw) : undefined;
+    if (previous?.success) for (const item of previous.data.chapters) requested.delete(item.chapter);
+    const chapters = [...primary.chapters]; const directory = new Map((primary.directory ?? []).map((item) => [item.chapter, item]));
+    for (const candidate of candidates) {
+      if (!requested.size) break;
+      try {
+        const { provider } = await this.registry.resolve(candidate.url); const catalog = await this.registry.inspect(provider, candidate.url);
+        const available = (catalog.directory ?? []).filter((item) => requested.has(item.chapter)).map((item) => item.chapter);
+        if (!available.length) { for (const chapter of requested) attempts.push({ provider: candidate.provider, chapter, status: "INVALID", reason: "Chapter is absent from this provider's catalog" }); continue; }
+        const fallback = await this.registry.inspect(provider, candidate.url, { chapters: available });
+        for (const warning of fallback.warnings.filter((item) => item.code === "unavailable_chapter")) {
+          const chapter = fallback.directory?.find((item) => item.sourceId === warning.sourceId)?.chapter;
+          if (chapter) attempts.push({ provider: candidate.provider, chapter, status: validationStatusFromMessage(warning.message), reason: warning.message });
+        }
+        for (const item of fallback.chapters) {
+          if (!requested.has(item.ref.chapter)) continue;
+          chapters.push(item); directory.set(item.ref.chapter, item.ref); requested.delete(item.ref.chapter);
+          const validation = item.ref.metadata.validation as { status?: string; evidence?: { extractedCharacters?: number; expectedCharacters?: number } } | undefined;
+          attempts.push({ provider: candidate.provider, chapter: item.ref.chapter, status: validation?.status ?? "COMPLETE", reason: "Accepted as the first complete configured fallback", extractedCharacters: validation?.evidence?.extractedCharacters, expectedCharacters: validation?.evidence?.expectedCharacters });
+        }
+      } catch (error) {
+        for (const chapter of requested) attempts.push({ provider: candidate.provider, chapter, status: /challenge|captcha|interstitial|browser-verification/i.test(String(error)) ? "CHALLENGE_REQUIRED" : /blocked|access denied/i.test(String(error)) ? "BLOCKED" : "INVALID", reason: error instanceof Error ? error.message : String(error) });
+      }
+    }
+    const unresolved = primary.warnings.filter((warning) => warning.code !== "unavailable_chapter");
+    for (const chapter of requested) unresolved.push({ code: "unavailable_chapter", message: `Chapter ${chapter} is unavailable from every configured source`, sourceId: String(chapter) });
+    chapters.sort((a, b) => a.ref.chapter - b.ref.chapter);
+    return { ...primary, sourceType: chapters.some((item) => item.ref.sourceType === "web") ? "web" : primary.sourceType, chapters,
+      directory: [...directory.values()].sort((a, b) => a.chapter - b.chapter), warnings: unresolved,
+      fingerprint: fingerprint({ primary: primary.fingerprint, fallbackChapters: chapters.map((item) => ({ chapter: item.ref.chapter, provider: item.ref.metadata.provider, sourceId: item.ref.sourceId })) }),
+      metadata: { ...primary.metadata, fallbackAttempts: attempts } };
   }
 
   getGlobalSettings() { return loadGlobalSettings(this.root, this.env); }
@@ -303,11 +380,17 @@ export class StudioOperations {
     slugSchema.parse(slug); return withStoryLock(this.root, slug, "web remote refresh", async () => {
       const paths = storyPaths(this.root, slug, 1); const raw = await readJsonIfExists<SourceManifest>(paths.sourceManifest); if (!raw) throw new Error(`Story '${slug}' has no source manifest`);
       const manifest = sourceManifestSchema.parse(raw); if (!("url" in manifest.origin) || !manifest.remote) throw new Error(`Story '${slug}' does not use a remote source`);
-      const { provider } = await this.registry.resolve(manifest.origin.url, manifest.type); const directory = await provider.inspect(manifest.origin.url, { refresh: true }); const comparison = compareRemoteDirectory(manifest, directory);
+      const { provider } = await this.registry.resolve(manifest.origin.url, manifest.type); const directory = await this.registry.inspect(provider, manifest.origin.url, { refresh: true });
+      const activeProvider = this.registry.novelProviderIdForUrl(manifest.origin.url);
+      const providerDirectory = activeProvider
+        ? manifest.remote.directory.filter((item) => (item.metadata.provider ?? this.registry.novelProviderIdForUrl(String(item.metadata.sourceUrl ?? "")) ?? activeProvider) === activeProvider)
+        : manifest.remote.directory;
+      const providerManifest = { ...manifest, remote: { ...manifest.remote, chapterCountAtInspection: providerDirectory.length, directory: providerDirectory } };
+      const comparison = compareRemoteDirectory(providerManifest, directory);
       let imported: number[] = [];
       if (importNew && comparison.added.length) {
         if (comparison.removed.length || comparison.reordered.length) throw new Error("Cannot import automatically because existing chapters were removed or reordered");
-        const inspection = await provider.inspect(manifest.origin.url, { chapters: comparison.added.map((item) => item.chapter) }); const result = await importSource(this.root, slug, inspection); imported = result.added;
+        const inspection = await this.registry.inspect(provider, manifest.origin.url, { chapters: comparison.added.map((item) => item.chapter) }); const result = await importSource(this.root, slug, inspection); imported = result.added;
       }
       return { ...comparison, previousImportedCount: manifest.chapters.length, imported };
     });
@@ -322,11 +405,13 @@ export class StudioOperations {
   }
 }
 
+function supportsBulk(provider: StorySourceProvider) { const capabilities = (provider as unknown as { capabilities?: { acquisition?: string[] } }).capabilities; return capabilities?.acquisition?.includes("bulk-download") === true; }
+
 function sourceUpdatePreview(previous: SourceManifest, inspection: SourceInspection) {
   const before = new Map(previous.chapters.map((item) => [item.chapter, item.fingerprint]));
   const incoming = inspection.chapters.map((item) => {
     const text = item.text.endsWith("\n") ? item.text : `${item.text}\n`;
-    return { chapter: item.ref.chapter, fingerprint: fingerprint({ ref: item.ref, text }) };
+    return { chapter: item.ref.chapter, fingerprint: importedChapterFingerprint(item.ref, text) };
   });
   const added = incoming.filter((item) => !before.has(item.chapter)).map((item) => item.chapter);
   const replaced = incoming.filter((item) => before.has(item.chapter) && before.get(item.chapter) !== item.fingerprint).map((item) => item.chapter);
@@ -343,3 +428,5 @@ function sourceUpdatePreview(previous: SourceManifest, inspection: SourceInspect
 }
 
 async function readFileSafe(path: string) { try { return await readFile(path, "utf8"); } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; } }
+function validationStatusFromMessage(message: string) { for (const status of ["TRUNCATED", "LOCKED", "CHALLENGE_REQUIRED", "BLOCKED", "INVALID"] as const) if (message.includes(status)) return status; return "INVALID"; }
+function numberFromMessage(message: string) { const match = /Chapter\s+(\d+)/i.exec(message); return match ? Number(match[1]) : undefined; }

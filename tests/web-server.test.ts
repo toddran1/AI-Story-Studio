@@ -13,8 +13,9 @@ import { qaResultSchema } from "../src/domain/qa.js";
 import { LLMRouter } from "../src/llm/router.js";
 import { PreviewRunner } from "../src/preview/preview-runner.js";
 import { SourceProviderRegistry } from "../src/source/registry.js";
-import { loadImportedChapters } from "../src/source/importer.js";
+import { importSource, loadImportedChapters } from "../src/source/importer.js";
 import { StorySourceProvider, sourceManifestSchema } from "../src/source/types.js";
+import { NovelSourceProvider } from "../src/source/novel-provider.js";
 import { atomicWrite, atomicWriteJson } from "../src/storage/atomic-write.js";
 import { storyPaths } from "../src/storage/paths.js";
 import { exists } from "../src/storage/story-files.js";
@@ -221,6 +222,55 @@ describe("web service layer", () => {
     const provider: StorySourceProvider = { type: "fanqie", inspect: async (sourcePath) => ({ sourcePath, sourceType: "fanqie", fingerprint: fingerprint("remote"), chapters: [], directory: [first, second], warnings: [], unnumberedSections: [], origin: { url: sourcePath }, remote: { lastInspectedAt: new Date().toISOString(), chapterCountAtInspection: 2 } }) };
     const operations = new StudioOperations(root, env, new JobManager(), { registry: new SourceProviderRegistry([provider]) }); const result = await operations.refreshRemote(story.slug, false);
     expect(result.currentCount).toBe(2); expect(result.added.map((item) => item.chapter)).toEqual([2]);
+  });
+
+  it("uses a configured complete fallback without replacing an existing valid chapter", async () => {
+    const { root, story, paths } = await storyFixture(); const now = new Date().toISOString();
+    const fanqieUrl = "https://fanqienovel.com/page/123"; const fallbackUrl = "https://ixdzs8.com/read/456/";
+    story.source = { type: "fanqie", url: fanqieUrl, externalId: "123", path: "source" };
+    story.sources = [
+      { provider: "fanqie", bookId: "123", url: fanqieUrl, addedAt: now, priority: 900, enabled: true },
+      { provider: "ixdzs8", bookId: "456", url: fallbackUrl, addedAt: now, priority: 100, enabled: true },
+    ];
+    await atomicWriteJson(paths.storyConfig, story);
+    const primaryRef = { chapter: 1500, sourceId: "locked-1500", sourceType: "fanqie" as const, metadata: { provider: "fanqie" } };
+    const fallbackValidation = { status: "COMPLETE" as const, evidence: { extractedCharacters: 600, contentContainerFound: true, indicators: [] as string[], reasons: ["Complete chapter content"] } };
+    const fallbackRef = { chapter: 1500, sourceId: "p1500", sourceType: "web" as const, metadata: { provider: "ixdzs8", sourceBookId: "456", sourceChapterId: "p1500", sourceUrl: `${fallbackUrl}p1500.html`, retrievedAt: now, validation: fallbackValidation, characterCount: 600 } };
+    let fallbackInspections = 0;
+    const primary = {
+      type: "fanqie" as const, id: "fanqie" as const, displayName: "Fanqie", capabilities: { search: false, download: true, authentication: "optional" as const }, supportsUrl: (url: string) => url === fanqieUrl,
+      search: async () => [], getBook: async () => ({ provider: "fanqie" as const, bookId: "123", url: fanqieUrl, title: "Test" }), getChapterList: async () => [], getChapter: async () => { throw new Error("locked"); }, validateChapter: () => ({ status: "LOCKED" as const, evidence: { extractedCharacters: 200, expectedCharacters: 1800, contentContainerFound: true, indicators: ["lock"], reasons: ["Locked preview"] } }),
+      inspect: async () => ({ sourcePath: fanqieUrl, sourceType: "fanqie" as const, fingerprint: "a".repeat(64), chapters: [], directory: [primaryRef], warnings: [{ code: "unavailable_chapter" as const, sourceId: primaryRef.sourceId, message: "Chapter 1500 LOCKED: extracted 200 / ~1800 characters" }], unnumberedSections: [], origin: { url: fanqieUrl, bookId: "123" }, remote: { lastInspectedAt: now, chapterCountAtInspection: 1 }, metadata: { provider: "fanqie", bookId: "123" } }),
+    } satisfies StorySourceProvider & NovelSourceProvider;
+    const fallback = {
+      type: "web" as const, id: "ixdzs8" as const, displayName: "ixdzs8", capabilities: { search: true, download: true, authentication: "none" as const }, supportsUrl: (url: string) => url === fallbackUrl,
+      search: async () => [], getBook: async () => ({ provider: "ixdzs8" as const, bookId: "456", url: fallbackUrl, title: "Test" }), getChapterList: async () => [], getChapter: async () => { throw new Error("not used"); }, validateChapter: () => fallbackValidation,
+      inspect: async (_source: string, options) => { fallbackInspections += 1; return { sourcePath: fallbackUrl, sourceType: "web" as const, fingerprint: "b".repeat(64), chapters: options?.chapters?.length ? [{ ref: fallbackRef, text: "完整正文。".repeat(100) }] : [], directory: [fallbackRef], warnings: [], unnumberedSections: [], origin: { url: fallbackUrl, bookId: "456" }, remote: { lastInspectedAt: now, chapterCountAtInspection: 1 }, metadata: { provider: "ixdzs8", bookId: "456" }, adapterVersion: "test" }; },
+    } satisfies StorySourceProvider & NovelSourceProvider;
+    const operations = new StudioOperations(root, env, new JobManager(), { registry: new SourceProviderRegistry([primary, fallback]) });
+    const result = await operations.inspectSource({ url: fanqieUrl, from: 1500, to: 1500 }, { story: story.slug, additive: true });
+    expect(result.chapters[0]?.metadata).toMatchObject({ provider: "ixdzs8", validation: { status: "COMPLETE" } });
+    expect(result.metadata?.fallbackAttempts).toEqual(expect.arrayContaining([expect.objectContaining({ provider: "fanqie", status: "LOCKED" }), expect.objectContaining({ provider: "ixdzs8", status: "COMPLETE" })]));
+    await importSource(root, story.slug, { sourcePath: fallbackUrl, sourceType: "web", fingerprint: "b".repeat(64), chapters: [{ ref: fallbackRef, text: "Existing valid text" }], directory: [fallbackRef], warnings: [], unnumberedSections: [], origin: { url: fallbackUrl, bookId: "456" }, remote: { lastInspectedAt: now, chapterCountAtInspection: 1 }, metadata: { provider: "ixdzs8", bookId: "456" }, adapterVersion: "test" });
+    const callsBefore = fallbackInspections; const preserved = await operations.inspectSource({ url: fanqieUrl, from: 1500, to: 1500 }, { story: story.slug, additive: true });
+    expect(fallbackInspections).toBe(callsBefore); expect(preserved.chapters).toHaveLength(0);
+    await operations.close();
+  });
+
+  it("validates and persists story-specific provider priority without losing source provenance", async () => {
+    const { root, story, paths } = await storyFixture(); const now = new Date().toISOString();
+    story.sources = [
+      { provider: "fanqie", bookId: "123", url: "https://fanqienovel.com/page/123", addedAt: now, priority: 900, enabled: true },
+      { provider: "ixdzs8", bookId: "456", url: "https://ixdzs8.com/read/456/", addedAt: now, priority: 100, enabled: true },
+    ];
+    await atomicWriteJson(paths.storyConfig, story); const operations = new StudioOperations(root, env);
+    const updated = await operations.updateNovelSourcePriorities(story.slug, { sources: [
+      { provider: "fanqie", bookId: "123", priority: 950, enabled: false },
+      { provider: "ixdzs8", bookId: "456", priority: 10, enabled: true },
+    ] });
+    expect(updated.sources).toEqual([expect.objectContaining({ provider: "fanqie", url: story.sources[0]!.url, priority: 950, enabled: false }), expect.objectContaining({ provider: "ixdzs8", priority: 10, enabled: true })]);
+    await expect(operations.updateNovelSourcePriorities(story.slug, { sources: [{ provider: "unknown-source", bookId: "999", priority: 1, enabled: true }] })).rejects.toThrow(/already attached/);
+    await operations.close();
   });
 });
 

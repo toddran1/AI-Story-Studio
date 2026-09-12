@@ -1,4 +1,5 @@
 import { z } from "zod";
+import type { AcquisitionTransport } from "./novel-provider.js";
 
 export const sourceTypeSchema = z.enum(["text", "epub", "docx", "web", "fanqie", "manual", "original"]);
 export type SourceType = z.infer<typeof sourceTypeSchema>;
@@ -54,6 +55,7 @@ export type SourceInspectOptions = {
   probe?: number;
   chapters?: number[];
   refresh?: boolean;
+  acquisition?: Exclude<AcquisitionTransport, "json-api">;
 };
 
 export interface StorySourceProvider {
@@ -93,7 +95,7 @@ export const sourceManifestSchema = z.object({
     const item = manifest.chapters[index]!; const fileNumber = Number(/^chapters\/(\d+)\.txt$/.exec(item.file)?.[1]);
     if (item.ref.chapter !== item.chapter) context.addIssue({ code: "custom", path: ["chapters", index, "ref", "chapter"], message: "Reference chapter must match manifest chapter" });
     if (fileNumber !== item.chapter) context.addIssue({ code: "custom", path: ["chapters", index, "file"], message: "Materialized filename must match manifest chapter" });
-    if (item.ref.sourceType !== manifest.type) context.addIssue({ code: "custom", path: ["chapters", index, "ref", "sourceType"], message: "Reference source type must match manifest type" });
+    if (item.ref.sourceType !== manifest.type && !isRemoteSourceType(item.ref.sourceType, manifest.type)) context.addIssue({ code: "custom", path: ["chapters", index, "ref", "sourceType"], message: "Reference source type must match manifest type" });
     if (seen.has(item.chapter)) context.addIssue({ code: "custom", path: ["chapters", index, "chapter"], message: "Manifest chapter numbers must be unique" });
     seen.add(item.chapter);
   }
@@ -104,10 +106,12 @@ export const sourceManifestSchema = z.object({
     const directoryNumbers = new Set<number>();
     for (let index = 0; index < manifest.remote.directory.length; index++) {
       const ref = manifest.remote.directory[index]!;
-      if (ref.sourceType !== manifest.type) context.addIssue({ code: "custom", path: ["remote", "directory", index, "sourceType"], message: "Remote directory source type must match manifest type" });
+      if (ref.sourceType !== manifest.type && !isRemoteSourceType(ref.sourceType, manifest.type)) context.addIssue({ code: "custom", path: ["remote", "directory", index, "sourceType"], message: "Remote directory source type must match manifest type" });
       if (directoryNumbers.has(ref.chapter)) context.addIssue({ code: "custom", path: ["remote", "directory", index, "chapter"], message: "Remote directory chapter numbers must be unique" });
       directoryNumbers.add(ref.chapter);
     }
   }
 });
 export type SourceManifest = z.infer<typeof sourceManifestSchema>;
+
+function isRemoteSourceType(left: SourceType, right: SourceType) { return (left === "fanqie" || left === "web") && (right === "fanqie" || right === "web"); }

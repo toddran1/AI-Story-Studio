@@ -27,7 +27,8 @@ async function main() {
   if (remote && command !== "inspect" && (args.from === undefined || args.to === undefined)) usage("Remote imports require both --from and --to");
   if (!remote && (args.from !== undefined || args.to !== undefined || args.probe !== undefined)) usage("--from, --to, and --probe apply only to remote sources");
   if (command !== "inspect" && args.probe !== undefined) usage("--probe is inspection-only");
-  const inspection = await provider.inspect(sourcePath, { splitChapters: args.splitChapters, chapter: args.chapter, allowGaps: args.allowGaps, semanticType, from: args.from, to: args.to, probe: args.probe });
+  if (args.acquisition === "bulk-download" && (!remote || !supportsBulk(provider))) usage("The selected source does not support --acquisition bulk-download");
+  const inspection = await registry.inspect(provider, sourcePath, { splitChapters: args.splitChapters, chapter: args.chapter, allowGaps: args.allowGaps, semanticType, from: args.from, to: args.to, probe: args.probe, acquisition: args.acquisition });
   if (command === "inspect") { process.stdout.write(`${formatInspection(inspection)}\n`); return; }
   validateImportable(inspection.chapters, inspection.warnings, args.allowGaps);
   const storySlug = args.story!;
@@ -44,7 +45,7 @@ async function main() {
   });
 }
 
-type Args = { source?: string; story?: string; type?: SourceType; chapter?: number; from?: number; to?: number; probe?: number; splitChapters: boolean; allowGaps: boolean };
+type Args = { source?: string; story?: string; type?: SourceType; chapter?: number; from?: number; to?: number; probe?: number; splitChapters: boolean; allowGaps: boolean; acquisition?: "html" | "bulk-download" };
 function parseArgs(values: string[]): Args {
   const args: Args = { splitChapters: false, allowGaps: false };
   for (let index = 0; index < values.length; index++) {
@@ -56,6 +57,7 @@ function parseArgs(values: string[]): Args {
     else if (key === "--chapter") { const number = Number(value); if (!Number.isInteger(number) || number < 1) usage("--chapter must be a positive integer"); args.chapter = number; }
     else if (key === "--from" || key === "--to" || key === "--probe") { const number = Number(value); if (!Number.isInteger(number) || number < 1) usage(`${key} must be a positive integer`); args[key.slice(2) as "from" | "to" | "probe"] = number; }
     else if (key === "--type") { const parsed = sourceTypeSchema.safeParse(value); if (!parsed.success) usage(`Unsupported source type: ${value}`); args.type = parsed.data; }
+    else if (key === "--acquisition") { if (value !== "html" && value !== "bulk-download") usage("--acquisition must be html or bulk-download"); args.acquisition = value; }
     else usage(`Unknown argument: ${key}`);
   }
   return args;
@@ -78,6 +80,7 @@ function formatImport(story: string, result: Awaited<ReturnType<typeof importSou
   return [`Source ${result.status}`, `Story: ${story}`, `Chapters: ${result.manifest.chapters.length}`, `Added: ${list(result.added)}`, `Modified: ${list(result.modified)}`, `Removed: ${list(result.removed)}`, `Manifest: stories/${story}/source/source.json`, "No LLM or TTS calls were made."].join("\n");
 }
 function isUrl(value: string) { try { new URL(value); return true; } catch { return false; } }
-function usage(message: string): never { throw new Error(`${message}\nUsage: npm run story:inspect -- --source <path-or-url> [--type text|epub|docx|fanqie|manual|original] [--probe N]\n   or: npm run story:import -- --story <slug> --source <path-or-url> [--from N --to N] [local source options]\n   or: npm run story:update -- --story <slug> --source <path-or-url> [--chapter N | --split-chapters] [--from N --to N] [--allow-gaps]`); }
+function supportsBulk(provider: { inspect: unknown }) { const capabilities = (provider as unknown as { capabilities?: { acquisition?: string[] } }).capabilities; return capabilities?.acquisition?.includes("bulk-download") === true; }
+function usage(message: string): never { throw new Error(`${message}\nUsage: npm run story:inspect -- --source <path-or-url> [--type text|epub|docx|fanqie|manual|original] [--probe N] [--acquisition html|bulk-download]\n   or: npm run story:import -- --story <slug> --source <path-or-url> [--from N --to N] [--acquisition html|bulk-download] [local source options]\n   or: npm run story:update -- --story <slug> --source <path-or-url> [--chapter N | --split-chapters] [--from N --to N] [--allow-gaps] [--acquisition html|bulk-download]`); }
 
 main().catch((error: unknown) => { process.stderr.write(`${JSON.stringify({ event: "source.failed", error: error instanceof Error ? error.message : String(error) }, null, 2)}\n`); process.exitCode = 1; });

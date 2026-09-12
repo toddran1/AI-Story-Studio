@@ -21,5 +21,9 @@ export type WebHttpClientOptions = {
   allowedHosts?: string[];
   cache?: HttpCache;
   cacheTtlMs?: number;
+  maintainCookies?: boolean;
+  defaultHeaders?: Record<string, string>;
   sleep?: (ms: number) => Promise<void>;
 };
+
+export type WebBinaryResponse = { bytes: Uint8Array; contentType?: string; url: string };

@@ -23,7 +23,7 @@ describe("web UI", () => {
     const story = { slug: "long-story", title: "Long Story", sourceType: "text", importedChapters: 3 } as any;
     const html = renderToStaticMarkup(<ChapterImportPage storySlug="long-story" stories={[story]} navigate={() => undefined} />);
     expect(html).toContain("Add pages to <em>Long Story</em>");
-    expect(html).toContain("Chapter folder"); expect(html).toContain("Manuscript file"); expect(html).toContain("Web range");
+    expect(html).toContain("Chapter folder"); expect(html).toContain("Manuscript file"); expect(html).toContain("Novel search"); expect(html).toContain("Web range");
     expect(html).toContain("Adding Chapters 29–40 does not remove Chapters 1–3");
   });
   it("prefers a story's persisted source URL and supports older manifest-only projects", () => {

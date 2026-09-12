@@ -2,6 +2,9 @@ export type ParsedHeading = { chapter: number; originalTitle: string; title?: st
 
 export function parseChapterHeading(value: string): ParsedHeading | undefined {
   const originalTitle = value.trim();
+  // A heading is a single short label. This prevents prose beginning with phrases such as
+  // "第一章……" from splitting full-book TXT downloads into duplicate chapters.
+  if (!originalTitle || [...originalTitle].length > 160) return undefined;
   let match = /^chapter\s+0*(\d+)(?:\s*[:.\-–—]\s*|\s+)?(.*)$/i.exec(originalTitle);
   if (match) return parsed(Number(match[1]), originalTitle, match[2]);
   match = /^第\s*0*(\d+)\s*章(?:\s*[:：.\-–—]?\s*)(.*)$/.exec(originalTitle);
@@ -36,4 +39,3 @@ export function detectTextLanguage(text: string): string | undefined {
   if (latin >= 20) return "en-US";
   return undefined;
 }
-

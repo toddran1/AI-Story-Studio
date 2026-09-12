@@ -5,7 +5,7 @@ import { atomicWrite, atomicWriteJson } from "../storage/atomic-write.js";
 import { storyPaths } from "../storage/paths.js";
 import { exists, readJsonIfExists } from "../storage/story-files.js";
 import { fingerprint } from "../utils/hash.js";
-import { chapterReferenceSchema, SourceInspection, SourceManifest, sourceManifestSchema } from "./types.js";
+import { ChapterReference, chapterReferenceSchema, SourceInspection, SourceManifest, sourceManifestSchema } from "./types.js";
 import { chapterWarnings } from "./inspection.js";
 import { Chapter, chapterSchema, StageName } from "../domain/chapter.js";
 
@@ -52,8 +52,11 @@ export async function importSource(root: string, story: string, inspection: Sour
       for (const item of parsedPrevious.data.chapters) {
         if (incomingNumbers.has(item.chapter)) continue;
         const text = await readFile(resolve(paths.source, item.file)); await atomicWrite(join(stage, item.file), text);
-        const ref = currentDirectory.get(item.chapter) ?? item.ref;
-        manifestChapters.push({ ...item, ref, fingerprint: fingerprint({ ref, text: text.toString("utf8") }) });
+        const directoryRef = currentDirectory.get(item.chapter);
+        const ref = directoryRef && sameReferenceSource(item.ref, directoryRef)
+          ? { ...directoryRef, metadata: { ...item.ref.metadata, ...directoryRef.metadata } }
+          : item.ref;
+        manifestChapters.push({ ...item, ref, fingerprint: importedChapterFingerprint(ref, text.toString("utf8")) });
       }
     }
     for (const chapter of chapters) {
@@ -61,7 +64,7 @@ export async function importSource(root: string, story: string, inspection: Sour
       const file = join("chapters", `${String(chapter.ref.chapter).padStart(4, "0")}.txt`);
       const materializedText = chapter.text.endsWith("\n") ? chapter.text : `${chapter.text}\n`;
       const ref = chapterReferenceSchema.parse(JSON.parse(JSON.stringify(chapter.ref)));
-      const chapterFingerprint = fingerprint({ ref, text: materializedText });
+      const chapterFingerprint = importedChapterFingerprint(ref, materializedText);
       await atomicWrite(join(stage, file), materializedText);
       manifestChapters.push({ chapter: ref.chapter, file, fingerprint: chapterFingerprint, ref });
     }
@@ -72,7 +75,7 @@ export async function importSource(root: string, story: string, inspection: Sour
       fingerprint: additive ? fingerprint({ type: inspection.sourceType, chapters: manifestChapters.map((item) => ({ chapter: item.chapter, fingerprint: item.fingerprint })) }) : inspection.fingerprint,
       importedAt: new Date().toISOString(), title: inspection.title, author: inspection.author, language: inspection.language,
       metadata: inspection.metadata,
-      remote: inspection.remote ? { ...inspection.remote, directory: inspection.directory ?? [] } : undefined,
+      remote: inspection.remote ? { ...inspection.remote, directory: mergedRemoteDirectory(additive && parsedPrevious?.success ? parsedPrevious.data.remote?.directory : undefined, inspection.directory ?? []) } : undefined,
       warnings: inspection.warnings, unnumberedSections: inspection.unnumberedSections, chapters: manifestChapters,
     });
     await atomicWriteJson(join(stage, "source.json"), manifest);
@@ -129,19 +132,43 @@ async function snapshotChangedProduction(root: string, story: string, changes: {
 }
 
 function assertCompatibleAdditiveSource(previous: SourceManifest, inspection: SourceInspection) {
-  if (previous.type !== inspection.sourceType) throw new Error(`Existing source type '${previous.type}' does not match '${inspection.sourceType}'`);
+  const bothRemote = (previous.type === "fanqie" || previous.type === "web") && (inspection.sourceType === "fanqie" || inspection.sourceType === "web");
+  if (previous.type !== inspection.sourceType && !bothRemote) throw new Error(`Existing source type '${previous.type}' does not match '${inspection.sourceType}'`);
   if (!("url" in previous.origin) && !inspection.origin) return;
   if (!("url" in previous.origin) || !inspection.origin) throw new Error("Cannot combine a remote source with a local source import");
-  const incomingOrigin = inspection.origin;
-  if (previous.origin.bookId && incomingOrigin.bookId && previous.origin.bookId !== incomingOrigin.bookId) throw new Error("Refusing to combine chapters from different remote books");
-  if (!previous.origin.bookId && previous.origin.url !== incomingOrigin.url) throw new Error("Refusing to combine chapters from different remote URLs");
-  if (previous.remote && inspection.directory) {
+  const incomingOrigin = inspection.origin; const previousProvider = providerFromManifest(previous); const incomingProvider = providerFromInspection(inspection);
+  const sameProvider = previousProvider !== undefined && previousProvider === incomingProvider;
+  if (sameProvider && previous.origin.bookId && incomingOrigin.bookId && previous.origin.bookId !== incomingOrigin.bookId) throw new Error(`Refusing to combine different ${incomingProvider} books`);
+  if (sameProvider && !previous.origin.bookId && previous.origin.url !== incomingOrigin.url) throw new Error(`Refusing to combine different ${incomingProvider} URLs`);
+  if (sameProvider && previous.remote && inspection.directory) {
     const current = new Map(inspection.directory.map((ref) => [ref.chapter, ref]));
     for (const item of previous.chapters) {
       const ref = current.get(item.chapter);
       if (!ref || ref.sourceId !== item.ref.sourceId) throw new Error(`Refusing additive import because remote Chapter ${item.chapter} was removed or reordered`);
     }
   }
+}
+
+function providerFromManifest(manifest: SourceManifest) {
+  const direct = manifest.metadata?.provider; if (typeof direct === "string") return direct;
+  if (manifest.type === "fanqie") return "fanqie";
+  return undefined;
+}
+function providerFromInspection(inspection: SourceInspection) {
+  const direct = inspection.metadata?.provider; if (typeof direct === "string") return direct;
+  if (inspection.sourceType === "fanqie") return "fanqie";
+  return undefined;
+}
+function mergedRemoteDirectory(previous: ChapterReference[] | undefined, incoming: ChapterReference[]) {
+  const merged = new Map<number, ChapterReference>(); for (const item of previous ?? []) merged.set(item.chapter, item); for (const item of incoming) merged.set(item.chapter, item);
+  return [...merged.values()].sort((a, b) => a.chapter - b.chapter);
+}
+function sameReferenceSource(left: ChapterReference, right: ChapterReference) {
+  const leftProvider = typeof left.metadata.provider === "string" ? left.metadata.provider : left.sourceType;
+  const rightProvider = typeof right.metadata.provider === "string" ? right.metadata.provider : right.sourceType;
+  const leftBook = left.metadata.sourceBookId ?? left.metadata.bookId;
+  const rightBook = right.metadata.sourceBookId ?? right.metadata.bookId;
+  return leftProvider === rightProvider && (leftBook === undefined || rightBook === undefined || leftBook === rightBook);
 }
 
 async function recoverInterruptedImport(storyRoot: string, sourceRoot: string) {
@@ -174,9 +201,14 @@ async function manifestFilesExist(sourceRoot: string, manifest: SourceManifest) 
   for (const chapter of manifest.chapters) {
     const path = resolve(sourceRoot, chapter.file); if (!(await exists(path))) return false;
     const text = await readFile(path, "utf8");
-    if (fingerprint({ ref: chapter.ref, text }) !== chapter.fingerprint) return false;
+    if (importedChapterFingerprint(chapter.ref, text) !== chapter.fingerprint) return false;
   }
   return true;
+}
+
+export function importedChapterFingerprint(ref: ChapterReference, text: string) {
+  const metadata = { ...ref.metadata }; delete metadata.retrievedAt;
+  return fingerprint({ ref: { ...ref, metadata }, text });
 }
 function compareChapters(previous: SourceManifest | undefined, next: SourceManifest) {
   const before = new Map(previous?.chapters.map((item) => [item.chapter, item.fingerprint]) ?? []); const after = new Map(next.chapters.map((item) => [item.chapter, item.fingerprint]));

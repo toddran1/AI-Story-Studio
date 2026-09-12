@@ -27,6 +27,7 @@ const sourceInspectJsonSchema = z.object({
   url: z.url(), type: z.enum(["web", "fanqie"]).optional(), from: z.number().int().positive().optional(),
   to: z.number().int().positive().optional(), chapter: z.number().int().positive().optional(),
   splitChapters: z.boolean().optional(), allowGaps: z.boolean().optional(),
+  acquisition: z.enum(["html", "bulk-download"]).optional(),
 }).strict();
 const directoryInspectSchema = z.object({ files: z.array(z.object({ name: z.string().min(1).max(255), text: z.string() }).strict()).min(1).max(2_000), allowGaps: z.boolean().optional() }).strict();
 
@@ -37,6 +38,12 @@ export function createApiHandler(operations: StudioOperations) {
       validateLocalRequest(request);
       if (request.method === "GET" && url.pathname === "/api/health") return send(response, 200, { status: "ready", binding: "localhost", credentials: { openai: "server-only", gemini: "server-only", fish: "server-only" } });
       if (request.method === "GET" && url.pathname === "/api/stories") { const warnings: string[] = []; const stories = await listStories(operations.root, warnings); return send(response, 200, { stories, warnings }); }
+      if (request.method === "GET" && url.pathname === "/api/novel/providers") return send(response, 200, { providers: operations.novelProviders() });
+      if (request.method === "POST" && url.pathname === "/api/novel/search") return send(response, 200, await operations.searchNovelSources(await jsonBody(request)));
+      const providerHealthMatch = /^\/api\/novel\/providers\/([a-z0-9-]+)\/health$/.exec(url.pathname);
+      if (providerHealthMatch && request.method === "POST") return send(response, 200, await operations.diagnoseNovelProvider(providerHealthMatch[1]!));
+      const providerStatusMatch = /^\/api\/novel\/providers\/([a-z0-9-]+)\/status$/.exec(url.pathname);
+      if (providerStatusMatch && request.method === "PUT") return send(response, 200, operations.setNovelProviderEnabled(providerStatusMatch[1]!, await jsonBody(request)));
       if (request.method === "GET" && url.pathname === "/api/costs") return send(response, 200, await operations.appCostAnalytics(costFilters(url)));
       if (request.method === "POST" && url.pathname === "/api/stories") return send(response, 201, { story: await operations.createStory(await jsonBody(request)) });
       if (request.method === "POST" && url.pathname === "/api/stories/from-inspection") { const input = z.object({ inspectionId: z.string().uuid(), story: z.unknown() }).strict().parse(await jsonBody(request)); return send(response, 201, { story: await operations.createStoryWithInspection(input.story, input.inspectionId) }); }
@@ -174,6 +181,8 @@ export function createApiHandler(operations: StudioOperations) {
       if (bibleEntryMatch && request.method === "DELETE") return send(response, 200, await operations.deleteBibleEntry(bibleEntryMatch[1]!, bibleEntryMatch[2]!));
       const settingsMatch = /^\/api\/stories\/([a-z0-9-]+)\/settings$/.exec(url.pathname);
       if (settingsMatch && request.method === "PUT") return send(response, 200, { story: await updateStorySettings(operations.root, settingsMatch[1]!, await jsonBody(request)) });
+      const novelSourcesMatch = /^\/api\/stories\/([a-z0-9-]+)\/sources$/.exec(url.pathname);
+      if (novelSourcesMatch && request.method === "PUT") return send(response, 200, { story: await operations.updateNovelSourcePriorities(novelSourcesMatch[1]!, await jsonBody(request)) });
       const metadataTranslationJobMatch = /^\/api\/stories\/([a-z0-9-]+)\/jobs\/metadata-translation$/.exec(url.pathname);
       if (metadataTranslationJobMatch && request.method === "POST") return send(response, 202, operations.startMetadataTranslation(metadataTranslationJobMatch[1]!));
 
