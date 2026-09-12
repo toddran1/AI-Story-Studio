@@ -29,7 +29,7 @@ export async function importSource(root: string, story: string, inspection: Sour
   const previousFilesValid = parsedPrevious?.success ? await manifestFilesExist(paths.source, parsedPrevious.data) : false;
   const additive = inspection.additive === true;
   if (additive && previous && !parsedPrevious?.success) throw new Error(`Cannot safely add to the invalid existing source manifest for '${story}'`);
-  if (additive && parsedPrevious?.success) assertSameRemoteSource(parsedPrevious.data, inspection);
+  if (additive && parsedPrevious?.success) assertCompatibleAdditiveSource(parsedPrevious.data, inspection);
   if (parsedPrevious?.success && parsedPrevious.data.fingerprint === inspection.fingerprint && !additive && previousFilesValid) {
     await finalize?.();
     return { status: "unchanged", manifest: parsedPrevious.data, added: [], modified: [], removed: [] };
@@ -68,7 +68,8 @@ export async function importSource(root: string, story: string, inspection: Sour
     manifestChapters.sort((a, b) => a.chapter - b.chapter);
     const manifest = sourceManifestSchema.parse({
       version: 1, adapterVersion: inspection.adapterVersion ?? SOURCE_ADAPTER_VERSION, type: inspection.sourceType,
-      origin: inspection.origin ?? { path: inspection.sourcePath, name: basename(inspection.sourcePath) }, fingerprint: inspection.fingerprint,
+      origin: inspection.origin ?? { path: inspection.sourcePath, name: basename(inspection.sourcePath) },
+      fingerprint: additive ? fingerprint({ type: inspection.sourceType, chapters: manifestChapters.map((item) => ({ chapter: item.chapter, fingerprint: item.fingerprint })) }) : inspection.fingerprint,
       importedAt: new Date().toISOString(), title: inspection.title, author: inspection.author, language: inspection.language,
       metadata: inspection.metadata,
       remote: inspection.remote ? { ...inspection.remote, directory: inspection.directory ?? [] } : undefined,
@@ -127,11 +128,13 @@ async function snapshotChangedProduction(root: string, story: string, changes: {
   return snapshots;
 }
 
-function assertSameRemoteSource(previous: SourceManifest, inspection: SourceInspection) {
+function assertCompatibleAdditiveSource(previous: SourceManifest, inspection: SourceInspection) {
   if (previous.type !== inspection.sourceType) throw new Error(`Existing source type '${previous.type}' does not match '${inspection.sourceType}'`);
-  if (!("url" in previous.origin) || !inspection.origin) throw new Error("Remote additive import requires compatible URL origins");
-  if (previous.origin.bookId && inspection.origin.bookId && previous.origin.bookId !== inspection.origin.bookId) throw new Error("Refusing to combine chapters from different remote books");
-  if (!previous.origin.bookId && previous.origin.url !== inspection.origin.url) throw new Error("Refusing to combine chapters from different remote URLs");
+  if (!("url" in previous.origin) && !inspection.origin) return;
+  if (!("url" in previous.origin) || !inspection.origin) throw new Error("Cannot combine a remote source with a local source import");
+  const incomingOrigin = inspection.origin;
+  if (previous.origin.bookId && incomingOrigin.bookId && previous.origin.bookId !== incomingOrigin.bookId) throw new Error("Refusing to combine chapters from different remote books");
+  if (!previous.origin.bookId && previous.origin.url !== incomingOrigin.url) throw new Error("Refusing to combine chapters from different remote URLs");
   if (previous.remote && inspection.directory) {
     const current = new Map(inspection.directory.map((ref) => [ref.chapter, ref]));
     for (const item of previous.chapters) {

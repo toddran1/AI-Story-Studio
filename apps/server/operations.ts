@@ -8,6 +8,7 @@ import { retryConfigSchema } from "../../src/batch/types.js";
 import { selectChapterRange } from "../../src/batch/range.js";
 import { Environment } from "../../src/config/env.js";
 import { defaultStory, loadStory } from "../../src/config/load-config.js";
+import { storySchema } from "../../src/domain/story.js";
 import { createPipelineRuntime } from "../../src/pipeline/create-pipeline.js";
 import { applyPreviewProfile } from "../../src/preview/profile.js";
 import { PreviewRunner } from "../../src/preview/preview-runner.js";
@@ -17,6 +18,7 @@ import { validateImportable } from "../../src/source/inspection.js";
 import { compareRemoteDirectory } from "../../src/source/refresh.js";
 import { SourceProviderRegistry } from "../../src/source/registry.js";
 import { applySourceMetadata } from "../../src/source/story-metadata.js";
+import { translateStoryMetadata } from "../../src/translation/story-metadata.js";
 import { SourceInspection, SourceManifest, SourceType, sourceManifestSchema, sourceTypeSchema } from "../../src/source/types.js";
 import { createWebHttpClient } from "../../src/source/web/create-client.js";
 import { atomicWriteJson } from "../../src/storage/atomic-write.js";
@@ -45,7 +47,7 @@ import { TTSProvider } from "../../src/tts/provider.js";
 import { TTSProviderRouter } from "../../src/tts/router.js";
 import { addManualBibleEntry, bibleCategorySchema, chapterTextEditSchema, deleteBibleEntry, saveChapterTextEdit, saveVoicePreview, updateManualBibleEntry, voicePreviewSchema } from "../../src/studio/workflow.js";
 import { getStoryBible, invalidateCatalogCache } from "./catalog.js";
-import { buildStoryBackup, cleanupKindSchema, cleanupStory, createBlankStory, deleteStory, duplicateStory, getStorageUsage, loadGlobalSettings, readActivity, recordActivity, restoreStoryBackupFile, saveCover, saveGlobalSettings, systemStatus, updateStoryMetadata } from "../../src/studio/projects.js";
+import { buildStoryBackup, cleanupKindSchema, cleanupStory, createBlankStory, deleteStory, duplicateStory, getStorageUsage, invalidateStoryForConfigChange, loadGlobalSettings, readActivity, recordActivity, restoreStoryBackupFile, saveCover, saveGlobalSettings, systemStatus, updateStoryMetadata } from "../../src/studio/projects.js";
 import { ProductionQueueService } from "../../src/queue/production-service.js";
 import { alignmentConfig, createAlignmentEngine } from "../../src/alignment/config.js";
 import { AlignmentEngine } from "../../src/alignment/types.js";
@@ -57,6 +59,8 @@ import { PostgresUsageRepository } from "../../src/cost/repository.js";
 import { estimatePlanCost } from "../../src/cost/estimate.js";
 import { withUsageScope } from "../../src/cost/context.js";
 import { invalidateNarrationNamingChange } from "../../src/story-bible/narration-names.js";
+import { findChapterGaps } from "../../src/batch/gaps.js";
+import { fingerprint } from "../../src/utils/hash.js";
 
 const slugSchema = z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/);
 const batchInputSchema = z.object({ from: z.number().int().positive().optional(), to: z.number().int().positive().optional(), force: z.enum(["translation", "narration", "qa", "story-bible", "continuity", "tts", "audio", "all"]).optional() }).strict();
@@ -94,7 +98,7 @@ export class StudioOperations {
     this.inspectionTimer = setInterval(() => this.expireInspections(), 60_000); this.inspectionTimer.unref();
   }
 
-  async inspectSource(input: { url?: string; file?: Uint8Array; filename?: string; files?: Array<{ name: string; text: string }>; type?: SourceType; from?: number; to?: number; chapter?: number; splitChapters?: boolean; allowGaps?: boolean }) {
+  async inspectSource(input: { url?: string; file?: Uint8Array; filename?: string; files?: Array<{ name: string; text: string }>; type?: SourceType; from?: number; to?: number; chapter?: number; splitChapters?: boolean; allowGaps?: boolean }, context?: { story: string; additive: boolean }) {
     this.expireInspections(); let source: string; let temporaryDirectory: string | undefined;
     const type = input.type === undefined ? undefined : sourceTypeSchema.parse(input.type);
     try {
@@ -112,15 +116,20 @@ export class StudioOperations {
       const { provider, semanticType } = await this.registry.resolve(source, type); const remote = semanticType === "fanqie" || semanticType === "web";
       if (remote && ((input.from === undefined) !== (input.to === undefined))) throw new Error("Remote chapter ranges require both from and to");
       const inspection = await provider.inspect(source, { semanticType, from: input.from, to: input.to, chapter: input.chapter, splitChapters: input.splitChapters, allowGaps: input.allowGaps });
-      const bytes = inspection.chapters.reduce((sum, item) => sum + Buffer.byteLength(item.text), 0);
+      const previousRaw = context ? await readJsonIfExists<SourceManifest>(storyPaths(this.root, context.story, 1).sourceManifest) : undefined;
+      const previous = previousRaw ? sourceManifestSchema.safeParse(previousRaw) : undefined;
+      if (context?.additive && previousRaw && !previous?.success) throw new Error(`Cannot safely update '${context.story}' because its source manifest is invalid`);
+      const storedInspection = { ...inspection, additive: Boolean(context?.additive && previous?.success) };
+      const bytes = storedInspection.chapters.reduce((sum, item) => sum + Buffer.byteLength(item.text), 0);
       if (this.inspections.size >= StudioOperations.maxInspections || this.inspectionBytes + bytes > StudioOperations.maxInspectionBytes) {
         throw new Error("Too many pending source inspections; import an existing inspection or wait for it to expire");
       }
-      const id = randomUUID(); this.inspections.set(id, { inspection, temporaryDirectory, createdAt: Date.now(), bytes }); this.inspectionBytes += bytes;
-      const selected = inspection.chapters.map((item) => item.ref); const available = inspection.directory?.length ?? selected.length;
-      return { id, type: inspection.sourceType, title: inspection.title, author: inspection.author, language: inspection.language,
+      const id = randomUUID(); this.inspections.set(id, { inspection: storedInspection, temporaryDirectory, createdAt: Date.now(), bytes }); this.inspectionBytes += bytes;
+      const selected = storedInspection.chapters.map((item) => item.ref); const available = storedInspection.directory?.length ?? selected.length;
+      const update = previous?.success ? sourceUpdatePreview(previous.data, storedInspection) : undefined;
+      return { id, type: storedInspection.sourceType, title: storedInspection.title, author: storedInspection.author, language: storedInspection.language,
         chapterCount: selected.length, availableChapterCount: available, chapters: selected.slice(0, 200), truncated: selected.length > 200,
-        warnings: inspection.warnings, metadata: inspection.metadata };
+        warnings: storedInspection.warnings, metadata: storedInspection.metadata, update };
     } catch (error) { if (temporaryDirectory) await rm(temporaryDirectory, { recursive: true, force: true }); throw error; }
   }
 
@@ -148,6 +157,22 @@ export class StudioOperations {
     catch (error) { await rm(storyPaths(this.root, created.slug, 1).story, { recursive: true, force: true }); invalidateCatalogCache(this.root, created.slug); throw error; }
   }
   async updateMetadata(slug: string, raw: unknown) { const story = await updateStoryMetadata(this.root, slug, raw); invalidateCatalogCache(this.root, slug); return story; }
+
+  startMetadataTranslation(slug: string) {
+    slugSchema.parse(slug);
+    return this.jobs.create("metadataTranslation", slug, async () => withStoryLock(this.root, slug, "story metadata translation", async () => {
+      const paths = storyPaths(this.root, slug, 1); const current = await loadStory(paths.storyConfig);
+      const source = current.metadataTranslationSource;
+      if ((source?.language ?? current.sourceLanguage) === current.outputLanguage) return { story: current, reused: true };
+      const provider = this.runtime.router.forStage(current.pipeline.translation);
+      const result = await withUsageScope({ story: slug, stage: "metadataTranslation" }, () => translateStoryMetadata(provider, current.pipeline.translation, current));
+      const story = storySchema.parse({ ...current, title: result.translated.title, author: result.translated.author ?? result.source.author, description: result.translated.description, tags: result.translated.tags,
+        originalTitle: current.originalTitle ?? result.source.title, metadataTranslationSource: result.source, metadataTranslatedAt: new Date().toISOString() });
+      await invalidateStoryForConfigChange(this.root, slug, current, story); await atomicWriteJson(paths.storyConfig, story);
+      await recordActivity(this.root, slug, "story.metadata_translated", `Translated story metadata to ${story.outputLanguage}`); invalidateCatalogCache(this.root, slug);
+      return { story, reused: false };
+    }));
+  }
   async updateCover(slug: string, filename: string, bytes: Uint8Array) { const result = await saveCover(this.root, slug, filename, bytes); invalidateCatalogCache(this.root, slug); return result; }
   async duplicateProject(slug: string, raw: unknown) { const input = z.object({ slug: slugSchema, mode: z.enum(["settings", "full"]) }).strict().parse(raw); const result = await duplicateStory(this.root, slug, input.slug, input.mode); invalidateCatalogCache(this.root, result.slug); return result; }
   async deleteProject(slug: string, raw: unknown) { const input = z.object({ confirmation: z.string() }).strict().parse(raw); const result = await deleteStory(this.root, slug, input.confirmation); invalidateCatalogCache(this.root, slug); return result; }
@@ -295,6 +320,26 @@ export class StudioOperations {
     this.inspections.delete(id); this.inspectionBytes = Math.max(0, this.inspectionBytes - record.bytes);
     if (record.temporaryDirectory) await rm(record.temporaryDirectory, { recursive: true, force: true });
   }
+}
+
+function sourceUpdatePreview(previous: SourceManifest, inspection: SourceInspection) {
+  const before = new Map(previous.chapters.map((item) => [item.chapter, item.fingerprint]));
+  const incoming = inspection.chapters.map((item) => {
+    const text = item.text.endsWith("\n") ? item.text : `${item.text}\n`;
+    return { chapter: item.ref.chapter, fingerprint: fingerprint({ ref: item.ref, text }) };
+  });
+  const added = incoming.filter((item) => !before.has(item.chapter)).map((item) => item.chapter);
+  const replaced = incoming.filter((item) => before.has(item.chapter) && before.get(item.chapter) !== item.fingerprint).map((item) => item.chapter);
+  const unchanged = incoming.filter((item) => before.get(item.chapter) === item.fingerprint).map((item) => item.chapter);
+  const incomingNumbers = new Set(incoming.map((item) => item.chapter));
+  const preserved = previous.chapters.map((item) => item.chapter).filter((chapter) => !incomingNumbers.has(chapter));
+  const after = [...new Set([...before.keys(), ...incomingNumbers])].sort((a, b) => a - b);
+  const gaps = findChapterGaps(after, 200);
+  return {
+    existingCount: previous.chapters.length, afterCount: after.length, added, replaced, unchanged,
+    preservedCount: preserved.length, missingCount: gaps.total, missingChapters: gaps.missing, missingSummary: gaps.summary,
+    minimumChapter: after[0], maximumChapter: after.at(-1),
+  };
 }
 
 async function readFileSafe(path: string) { try { return await readFile(path, "utf8"); } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; } }

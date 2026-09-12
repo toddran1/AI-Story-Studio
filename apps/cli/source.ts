@@ -14,9 +14,9 @@ import { createWebHttpClient } from "../../src/source/web/create-client.js";
 import { applySourceMetadata } from "../../src/source/story-metadata.js";
 
 async function main() {
-  const command = process.argv[2]; if (command !== "inspect" && command !== "import") usage("Expected inspect or import");
+  const command = process.argv[2]; if (command !== "inspect" && command !== "import" && command !== "update") usage("Expected inspect, import, or update");
   const args = parseArgs(process.argv.slice(3)); if (!args.source) usage("--source is required");
-  if (command === "import" && !args.story) usage("--story is required for import");
+  if ((command === "import" || command === "update") && !args.story) usage(`--story is required for ${command}`);
   if (args.story && !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(args.story)) usage("--story must be a lowercase kebab-case slug");
   const env = loadEnvironment(); const root = resolveStudioRoot(env);
   const sourcePath = isUrl(args.source) ? args.source : resolve(args.source); const registry = new SourceProviderRegistry(undefined, createWebHttpClient(root, env));
@@ -24,15 +24,17 @@ async function main() {
   if (args.chapter && args.splitChapters) usage("--chapter and --split-chapters cannot be used together");
   if ((args.chapter || args.splitChapters) && !["text", "manual", "original"].includes(semanticType)) usage("--chapter and --split-chapters apply only to TXT/manual/original sources");
   const remote = semanticType === "fanqie" || semanticType === "web";
-  if (remote && command === "import" && (args.from === undefined || args.to === undefined)) usage("Remote imports require both --from and --to");
+  if (remote && command !== "inspect" && (args.from === undefined || args.to === undefined)) usage("Remote imports require both --from and --to");
   if (!remote && (args.from !== undefined || args.to !== undefined || args.probe !== undefined)) usage("--from, --to, and --probe apply only to remote sources");
-  if (command === "import" && args.probe !== undefined) usage("--probe is inspection-only");
+  if (command !== "inspect" && args.probe !== undefined) usage("--probe is inspection-only");
   const inspection = await provider.inspect(sourcePath, { splitChapters: args.splitChapters, chapter: args.chapter, allowGaps: args.allowGaps, semanticType, from: args.from, to: args.to, probe: args.probe });
   if (command === "inspect") { process.stdout.write(`${formatInspection(inspection)}\n`); return; }
   validateImportable(inspection.chapters, inspection.warnings, args.allowGaps);
   const storySlug = args.story!;
   await withStoryLock(root, storySlug, "source import", async () => {
     const paths = storyPaths(root, storySlug, inspection.chapters[0]?.ref.chapter ?? 1); const existed = await exists(paths.storyConfig);
+    if (command === "update" && !existed) throw new Error(`Story '${storySlug}' does not exist. Use story:import to create its initial source.`);
+    if (command === "update") inspection.additive = true;
     let story = existed ? await loadStory(paths.storyConfig) : defaultStory(storySlug, loadEnvironment());
     story = applySourceMetadata(story, inspection, !existed);
     const result = await importSource(root, storySlug, inspection, async () => {
@@ -76,6 +78,6 @@ function formatImport(story: string, result: Awaited<ReturnType<typeof importSou
   return [`Source ${result.status}`, `Story: ${story}`, `Chapters: ${result.manifest.chapters.length}`, `Added: ${list(result.added)}`, `Modified: ${list(result.modified)}`, `Removed: ${list(result.removed)}`, `Manifest: stories/${story}/source/source.json`, "No LLM or TTS calls were made."].join("\n");
 }
 function isUrl(value: string) { try { new URL(value); return true; } catch { return false; } }
-function usage(message: string): never { throw new Error(`${message}\nUsage: npm run story:inspect -- --source <path-or-url> [--type text|epub|docx|fanqie|manual|original] [--probe N]\n   or: npm run story:import -- --story <slug> --source <path-or-url> [--from N --to N] [local source options]`); }
+function usage(message: string): never { throw new Error(`${message}\nUsage: npm run story:inspect -- --source <path-or-url> [--type text|epub|docx|fanqie|manual|original] [--probe N]\n   or: npm run story:import -- --story <slug> --source <path-or-url> [--from N --to N] [local source options]\n   or: npm run story:update -- --story <slug> --source <path-or-url> [--chapter N | --split-chapters] [--from N --to N] [--allow-gaps]`); }
 
 main().catch((error: unknown) => { process.stderr.write(`${JSON.stringify({ event: "source.failed", error: error instanceof Error ? error.message : String(error) }, null, 2)}\n`); process.exitCode = 1; });

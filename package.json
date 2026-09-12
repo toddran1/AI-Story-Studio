@@ -11,6 +11,7 @@
     "story:batch": "node --import tsx apps/cli/batch.ts",
     "story:inspect": "node --import tsx apps/cli/source.ts inspect",
     "story:import": "node --import tsx apps/cli/source.ts import",
+    "story:update": "node --import tsx apps/cli/source.ts update",
     "story:refresh": "node --import tsx apps/cli/refresh.ts",
     "story:repair": "node --import tsx apps/cli/repair.ts",
     "story:preview": "node --import tsx apps/cli/preview.ts",

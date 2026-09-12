@@ -174,14 +174,17 @@ export function createApiHandler(operations: StudioOperations) {
       if (bibleEntryMatch && request.method === "DELETE") return send(response, 200, await operations.deleteBibleEntry(bibleEntryMatch[1]!, bibleEntryMatch[2]!));
       const settingsMatch = /^\/api\/stories\/([a-z0-9-]+)\/settings$/.exec(url.pathname);
       if (settingsMatch && request.method === "PUT") return send(response, 200, { story: await updateStorySettings(operations.root, settingsMatch[1]!, await jsonBody(request)) });
+      const metadataTranslationJobMatch = /^\/api\/stories\/([a-z0-9-]+)\/jobs\/metadata-translation$/.exec(url.pathname);
+      if (metadataTranslationJobMatch && request.method === "POST") return send(response, 202, operations.startMetadataTranslation(metadataTranslationJobMatch[1]!));
 
       const inspectMatch = /^\/api\/stories\/([a-z0-9-]+)\/source\/inspect$/.exec(url.pathname);
       if (inspectMatch && request.method === "POST") {
+        const updateContext = inspectMatch[1] === "new" ? undefined : { story: inspectMatch[1]!, additive: true };
         const contentType = request.headers["content-type"] ?? "";
-        if (contentType.includes("application/json")) { const raw = await jsonBody(request, 50_000_000); const parsedDirectory = directoryInspectSchema.safeParse(raw); return send(response, 200, await operations.inspectSource(parsedDirectory.success ? parsedDirectory.data : sourceInspectJsonSchema.parse(raw))); }
+        if (contentType.includes("application/json")) { const raw = await jsonBody(request, 50_000_000); const parsedDirectory = directoryInspectSchema.safeParse(raw); return send(response, 200, await operations.inspectSource(parsedDirectory.success ? parsedDirectory.data : sourceInspectJsonSchema.parse(raw), updateContext)); }
         const file = await body(request); const filename = request.headers["x-file-name"];
         return send(response, 200, await operations.inspectSource({ file, filename: typeof filename === "string" ? decodeURIComponent(filename) : undefined,
-          type: optionalString(url.searchParams.get("type")) as never, chapter: optionalInteger(url.searchParams.get("chapter")), splitChapters: url.searchParams.get("split") === "true", allowGaps: url.searchParams.get("allowGaps") === "true" }));
+          type: optionalString(url.searchParams.get("type")) as never, chapter: optionalInteger(url.searchParams.get("chapter")), splitChapters: url.searchParams.get("split") === "true", allowGaps: url.searchParams.get("allowGaps") === "true" }, updateContext));
       }
       const importMatch = /^\/api\/stories\/([a-z0-9-]+)\/source\/import$/.exec(url.pathname);
       if (importMatch && request.method === "POST") { const input = z.object({ inspectionId: z.string().uuid(), allowGaps: z.boolean().default(false) }).parse(await jsonBody(request)); return send(response, 200, await operations.importInspection(importMatch[1]!, input.inspectionId, input.allowGaps)); }

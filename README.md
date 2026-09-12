@@ -276,6 +276,21 @@ npm run story:import -- --story my-story --source ./drafts/my-story.txt --type o
 
 A single TXT file is one chapter by default; select its number with `--chapter 361`. Add `--split-chapters` only when one TXT contains headings such as `Chapter 1`, `第1章`, or `第一章`. TXT directories retain the Milestone 2 filename validation rules. Use `--allow-gaps` when missing numbers are intentional.
 
+Add chapters to an existing story without removing chapter numbers that are absent from the new source:
+
+```sh
+# Add one later chapter.
+npm run story:update -- --story my-story --source ./chapter-29.txt --chapter 29
+
+# Add a numbered folder such as Chapters 29–40. Chapters 1–3 remain in place.
+npm run story:update -- --story my-story --source ./later-chapters --allow-gaps
+
+# Chapters 4–28 can be added later and are inserted in numeric order.
+npm run story:update -- --story my-story --source ./missing-chapters --allow-gaps
+```
+
+`story:update` is additive: new numbers are inserted, overlapping numbers are replaced only when their source changed, and all other chapters are preserved. `story:import` remains the authoritative full-source import and may remove chapters omitted from that source.
+
 Import writes normalized chapters to `stories/<slug>/source/chapters/` and a validated `source.json` manifest containing source/chapter fingerprints, titles, metadata, warnings, and the import origin. Writes are staged and finalized atomically, interrupted staging directories are cleaned up on the next import, and a previous source is restored if configuration finalization fails. Re-importing unchanged content reuses the existing materialization; changed imports report added, modified, and removed chapter numbers. EPUB and DOCX ZIP containers are rejected when compressed, expanded, entry-size, or entry-count safety limits are exceeded.
 
 Process an imported source without repeating its path:

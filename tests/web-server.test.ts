@@ -3,7 +3,7 @@ import { mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { getAudioDashboard, getChapter, getChapterPage, getQaDashboard, getScenesDashboard, getStoryOverview, getVideoDashboard, listStories, updateStorySettings } from "../apps/server/catalog.js";
+import { getAudioDashboard, getChapter, getChapterPage, getQaDashboard, getScenesDashboard, getStoryDashboard, getStoryOverview, getVideoDashboard, listStories, updateStorySettings } from "../apps/server/catalog.js";
 import { Job, JobManager } from "../apps/server/job-manager.js";
 import { StudioOperations } from "../apps/server/operations.js";
 import { loadEnvironment } from "../src/config/env.js";
@@ -13,6 +13,7 @@ import { qaResultSchema } from "../src/domain/qa.js";
 import { LLMRouter } from "../src/llm/router.js";
 import { PreviewRunner } from "../src/preview/preview-runner.js";
 import { SourceProviderRegistry } from "../src/source/registry.js";
+import { loadImportedChapters } from "../src/source/importer.js";
 import { StorySourceProvider, sourceManifestSchema } from "../src/source/types.js";
 import { atomicWrite, atomicWriteJson } from "../src/storage/atomic-write.js";
 import { storyPaths } from "../src/storage/paths.js";
@@ -97,6 +98,17 @@ describe("web service layer", () => {
     expect(inspection.chapters.map((item) => item.chapter)).toEqual([2, 10]); await operations.close();
   });
 
+  it("previews and applies additive chapter updates without removing earlier chapters", async () => {
+    const root = await mkdtemp(join(tmpdir(), "story-web-update-")); const operations = new StudioOperations(root, env);
+    const initial = await operations.inspectSource({ files: [{ name: "chapter-001.txt", text: "One" }, { name: "chapter-002.txt", text: "Two" }], allowGaps: true });
+    await operations.importInspection("update-story", initial.id, true);
+    const later = await operations.inspectSource({ files: [{ name: "chapter-029.txt", text: "Twenty nine" }, { name: "chapter-030.txt", text: "Thirty" }], allowGaps: true }, { story: "update-story", additive: true });
+    expect(later.update).toMatchObject({ existingCount: 2, afterCount: 4, added: [29, 30], replaced: [], preservedCount: 2, missingCount: 26 });
+    await operations.importInspection("update-story", later.id, true);
+    expect((await loadImportedChapters(root, "update-story")).chapters.map((item) => item.chapter)).toEqual([1, 2, 29, 30]);
+    await operations.close();
+  });
+
   it("cleans inspection temp data when validation fails during file setup", async () => {
     const root = await mkdtemp(join(tmpdir(), "story-web-cleanup-")); const operations = new StudioOperations(root, env); const before = new Set((await readdir(tmpdir())).filter((name) => name.startsWith("ai-story-studio-")));
     await expect(operations.inspectSource({ files: [{ name: "chapter.txt", text: "one" }, { name: "CHAPTER.TXT", text: "two" }] })).rejects.toThrow("Duplicate chapter filename");
@@ -151,6 +163,11 @@ describe("web service layer", () => {
     const operations = new StudioOperations(root, env, new JobManager(), { registry: new SourceProviderRegistry([provider]) });
     const result = await operations.inspectSource({ url: "https://fanqienovel.com/page/123", from: 5, to: 6 });
     expect(result).toMatchObject({ chapterCount: 2, availableChapterCount: 10, chapters: [{ chapter: 5 }, { chapter: 6 }] });
+    await operations.importInspection("remote-story", result.id, true);
+    expect(await getStoryDashboard(root, "remote-story")).toMatchObject({
+      story: { source: { type: "fanqie", url: "https://fanqienovel.com/page/123" } },
+      source: { origin: { url: "https://fanqienovel.com/page/123" } },
+    });
     await operations.close();
   });
 

@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { strToU8, zipSync } from "fflate";
@@ -89,6 +89,26 @@ describe("source ingestion", () => {
     await expect(importSource(root, "novel", await provider.inspect(source, { splitChapters: true }), async () => { throw new Error("config failed"); })).rejects.toThrow("config failed");
     expect(await readFile(join(root, "stories/novel/source/chapters/0001.txt"), "utf8")).toContain("Original");
     expect(await readFile(chapterPath, "utf8")).toBe(previousMetadata);
+  });
+
+  it("adds non-contiguous local chapters and later fills gaps in numeric order", async () => {
+    const root = await mkdtemp(join(tmpdir(), "source-additive-local-")); const provider = new TxtSource();
+    const firstDirectory = join(root, "first"); await mkdir(firstDirectory);
+    await Promise.all([1, 2, 3].map((chapter) => writeFile(join(firstDirectory, `chapter-${chapter}.txt`), `Chapter ${chapter}\nOriginal ${chapter}`)));
+    await importSource(root, "long-story", await provider.inspect(firstDirectory, { allowGaps: true }));
+
+    const laterDirectory = join(root, "later"); await mkdir(laterDirectory);
+    await Promise.all(Array.from({ length: 12 }, (_, index) => index + 29).map((chapter) => writeFile(join(laterDirectory, `chapter-${chapter}.txt`), `Chapter ${chapter}\nLater ${chapter}`)));
+    const later = await provider.inspect(laterDirectory, { allowGaps: true }); later.additive = true;
+    const addedLater = await importSource(root, "long-story", later);
+    expect(addedLater.added).toEqual(Array.from({ length: 12 }, (_, index) => index + 29));
+    expect((await loadImportedChapters(root, "long-story")).chapters.map((item) => item.chapter)).toEqual([1, 2, 3, ...Array.from({ length: 12 }, (_, index) => index + 29)]);
+
+    const gapDirectory = join(root, "gap"); await mkdir(gapDirectory);
+    await Promise.all(Array.from({ length: 25 }, (_, index) => index + 4).map((chapter) => writeFile(join(gapDirectory, `chapter-${chapter}.txt`), `Chapter ${chapter}\nFilled ${chapter}`)));
+    const gap = await provider.inspect(gapDirectory, { allowGaps: true }); gap.additive = true;
+    await importSource(root, "long-story", gap);
+    expect((await loadImportedChapters(root, "long-story")).chapters.map((item) => item.chapter)).toEqual(Array.from({ length: 40 }, (_, index) => index + 1));
   });
 
   it("rejects a compressed archive whose expanded entry is too large", async () => {

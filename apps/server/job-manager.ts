@@ -4,7 +4,7 @@ import { createErrorDiagnostic, ErrorDiagnostic, errorDiagnosticSchema } from ".
 import { logger } from "../../src/utils/logger.js";
 
 export type JobStatus = "queued" | "running" | "completed" | "failed" | "paused";
-export type Job = { id: string; type: "batch" | "preview" | "voicePreview" | "audio" | "audiobook" | "alignment" | "subtitles" | "video" | "videoExport" | "scenes" | "artwork" | "production"; story: string; status: JobStatus; createdAt: string; updatedAt: string; progress?: unknown; result?: unknown; error?: string; diagnostic?: ErrorDiagnostic };
+export type Job = { id: string; type: "batch" | "preview" | "voicePreview" | "metadataTranslation" | "audio" | "audiobook" | "alignment" | "subtitles" | "video" | "videoExport" | "scenes" | "artwork" | "production"; story: string; status: JobStatus; createdAt: string; updatedAt: string; progress?: unknown; result?: unknown; error?: string; diagnostic?: ErrorDiagnostic };
 type JobControl = { update(progress: unknown): void; setPause(handler: () => void): void };
 
 export class JobConflictError extends Error {}
