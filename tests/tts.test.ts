@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { FishAudioProvider } from "../src/tts/fish/fish-audio.provider.js";
+import { FishAudioProvider, normalizeFishSpeechText } from "../src/tts/fish/fish-audio.provider.js";
 import { splitForTTS } from "../src/tts/split-text.js";
 import { TTSRequest } from "../src/tts/types.js";
 
@@ -41,7 +41,32 @@ describe("Fish TTS", () => {
     await provider.synthesize({ text: "**Important:** *whisper this.* [sad] 2 * 2", model: "s2.1-pro", speed: 1, format: "mp3", sampleRate: 44100, bitrate: 128, normalize: true, maxCharsPerRequest: 500 });
     const body = JSON.parse(String((fetcher.mock.calls[0]?.[1] as RequestInit).body));
     expect(body.text).toBe("Important: whisper this. [sad] 2 * 2");
-    expect(provider.inputNormalizationVersion).toBe("fish-markdown-cleanup-v1");
+    expect(provider.inputNormalizationVersion).toBe("fish-speech-normalization-v2");
+  });
+
+  it("normalizes fiction abbreviations, titles, values, and units for speech", () => {
+    const script = normalizeFishSpeechText("**Dr. Lin** reached Lv. 12 with 80% HP at 8:00 PM. The NPC gained 5 EXP in 30°C heat.");
+    expect(script).toBe("Doctor Lin reached Level 12 with 80 percent H.P. at 8 o'clock P.M. The N.P.C. gained 5 E.X.P. in 30 degrees Celsius heat.");
+  });
+
+  it("removes speech-hostile markup, links, and emoji while preserving Fish cues and ambiguous names", () => {
+    const script = normalizeFishSpeechText("## Scene\n[sad] Prof. Vale met St. John. [Source](https://example.com) ✨ 2 * 2.");
+    expect(script).toBe("Scene\n[sad] Professor Vale met St. John. Source 2 * 2.");
+  });
+
+  it("sends normalized hidden text to Fish without changing the caller's narration", async () => {
+    const narration = "Capt. Rao has 50% HP.";
+    const fetcher = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => new Response(new Uint8Array([1]), { headers: { "content-type": "audio/mpeg" } }));
+    const provider = new FishAudioProvider("test-key", fetcher as typeof fetch);
+    await provider.synthesize({ text: narration, model: "s2.1-pro", speed: 1, format: "mp3", sampleRate: 44100, bitrate: 128, normalize: true, maxCharsPerRequest: 500 });
+    expect(JSON.parse(String((fetcher.mock.calls[0]?.[1] as RequestInit).body)).text).toBe("Captain Rao has 50 percent H.P.");
+    expect(narration).toBe("Capt. Rao has 50% HP.");
+  });
+
+  it("rejects input that contains no speakable text after normalization", async () => {
+    const provider = new FishAudioProvider("test-key", vi.fn() as typeof fetch);
+    const request: TTSRequest = { text: "![cover](https://example.com/cover.png)", model: "s2-pro", speed: 1, format: "mp3", sampleRate: 44100, bitrate: 128, normalize: true, maxCharsPerRequest: 500 };
+    await expect(provider.synthesize(request)).rejects.toThrow(/empty after speech normalization/);
   });
 
   it("rejects empty and non-audio success responses", async () => {

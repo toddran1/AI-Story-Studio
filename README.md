@@ -252,7 +252,7 @@ stories/demo-story/
     └── video.mp4
 ```
 
-Long narration is split at paragraph and sentence boundaries. Every original TTS response remains in `audio-segments/`, `audio-raw.mp3` preserves the provider output, and the FFmpeg-mastered `audio.mp3` is the playback-ready chapter file.
+Long narration is split at paragraph and sentence boundaries. Before a Fish request, a hidden provider-only speech normalizer removes speech-hostile Markdown, links, and emoji; expands unambiguous titles, common initialisms, game terms, percentages, times, temperatures, and units; and preserves Fish S2 delivery cues. Ambiguous abbreviations and the reader-facing narration are left unchanged. The normalizer version participates in the TTS fingerprint, so pronunciation-rule changes make old audio stale without rerunning translation or narration. Every original TTS response remains in `audio-segments/`, `audio-raw.mp3` preserves the provider output, and the FFmpeg-mastered `audio.mp3` is the playback-ready chapter file.
 
 ## Milestone 3 — Source Ingestion
 
