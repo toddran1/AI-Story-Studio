@@ -7,6 +7,7 @@ import { ProviderCircuitBreaker } from "../src/source/provider-catalog.js";
 import { SourceProviderRegistry } from "../src/source/registry.js";
 import { SourceInspection, StorySourceProvider } from "../src/source/types.js";
 import { WebHttpClient } from "../src/source/web/http-client.js";
+import { inspectNovelProvider } from "../src/source/novel-inspection.js";
 
 const fixtureRoot = join(import.meta.dirname, "fixtures", "novel-providers");
 const cases = [
@@ -43,6 +44,24 @@ describe("novel provider adapter contracts", () => {
     expect(registry.listNovelProviders().find((provider) => provider.id === "failing-source")?.health.status).toBe("cooldown");
     const second = await registry.searchNovels("story", undefined, 20);
     expect(second.results).toHaveLength(1); expect(second.warnings[0]?.message).toMatch(/cooling down/);
+  });
+
+  it("counts an all-failed chapter inspection as a circuit-breaker failure", async () => {
+    const breaker = new ProviderCircuitBreaker(1, 60_000); const provider = fakeProvider("semantic-failure", false);
+    provider.inspect = async () => ({ sourcePath: "https://semantic-failure.example/book/1", sourceType: "web", fingerprint: "failed", chapters: [], warnings: [{ code: "unavailable_chapter", sourceId: "1", message: "Chapter 1 is truncated" }], unnumberedSections: [] });
+    const registry = new SourceProviderRegistry([provider], undefined, breaker);
+    await registry.inspect(provider, "https://semantic-failure.example/book/1", { from: 1, to: 1 });
+    expect(registry.listNovelProviders()[0]?.health.status).toBe("cooldown");
+  });
+
+  it("selects sparse catalogs by actual chapter numbers rather than directory length", async () => {
+    const provider = fakeProvider("sparse-source", false); const refs = [1499, 1500, 1501].map((chapter) => ({ provider: provider.id, bookId: "1", chapterId: String(chapter), chapter, url: `https://sparse-source.example/read/${chapter}` }));
+    provider.getBook = async () => ({ provider: provider.id, bookId: "1", url: "https://sparse-source.example/book/1", title: "Sparse" });
+    provider.getChapterList = async () => refs;
+    provider.getChapter = async (ref) => ({ ...ref, text: `Chapter ${ref.chapter} complete content `.repeat(20), rawHtml: "<article>complete</article>", contentContainerFound: true, retrievedAt: new Date().toISOString() });
+    provider.validateChapter = (chapter) => ({ status: "COMPLETE", evidence: { extractedCharacters: chapter.text.length, contentContainerFound: true, indicators: [], reasons: ["Complete fixture"] } });
+    await expect(inspectNovelProvider(provider, "https://sparse-source.example/book/1", { from: 1499, to: 1501 }, "test-v1")).resolves.toMatchObject({ chapters: [{ ref: { chapter: 1499 } }, { ref: { chapter: 1500 } }, { ref: { chapter: 1501 } }] });
+    await expect(inspectNovelProvider(provider, "https://sparse-source.example/book/1", { from: 1, to: 3 }, "test-v1")).rejects.toThrow(/available chapter numbers 1499-1501/);
   });
 });
 

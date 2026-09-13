@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 import { builtinSelectorSources } from "../src/source/html/builtin-selector-sources.js";
 import { ShuhaigeSource } from "../src/source/shuhaige/shuhaige-source.js";
 import { WebHttpClient } from "../src/source/web/http-client.js";
+import { SelectorNovelSource } from "../src/source/html/selector-source.js";
 
 const fixtureRoot = join(import.meta.dirname, "fixtures", "novel-providers");
 const fixture = (provider: string, name: string) => readFile(join(fixtureRoot, provider, name), "utf8");
@@ -31,6 +32,11 @@ describe("provider acquisition transports and defensive adapters", () => {
     expect(inspection.chapters[0]!.ref.metadata).toMatchObject({ acquisitionTransport: "bulk-download", acquisitionUrl: "https://files.shuhaige.net/all/test-book.zip", validation: { status: "COMPLETE" } });
   });
 
+  it("reports Shuhaige download-page failures instead of claiming TXT was not advertised", async () => {
+    const source = new ShuhaigeSource(client(vi.fn(async () => new Response("unavailable", { status: 503 })), ["m.shuhaige.net"]));
+    await expect(source.getBulkDownloads({ provider: "shuhaige", bookId: "1", title: "Book", url: "https://www.shuhaige.net/1/", metadata: { downloadPages: ["https://m.shuhaige.net/txt_1.html"] } })).rejects.toThrow(/could not inspect its TXT download pages/);
+  });
+
   it("uses Biquge345 POST search with an ordinary reusable session cookie", async () => {
     const search = await fixture("biquge345", "search.html"); const book = await fixture("biquge345", "book.html");
     let bookCookie = "";
@@ -44,6 +50,11 @@ describe("provider acquisition transports and defensive adapters", () => {
     expect(await source.search("亡灵")).toEqual([expect.objectContaining({ provider: "biquge345", bookId: "337742", title: "亡灵天灾" })]);
     await source.getBook("https://www.xbiquge345.com/book/337742/");
     expect(bookCookie).toContain("PHPSESSID=test-session");
+  });
+
+  it("rejects a challenge response from provider search instead of reporting no matches", async () => {
+    const source = adapter("biquge345", client(vi.fn(async () => new Response("<title>Checking your browser</title><script>challenge=1</script>")), ["www.xbiquge345.com"]));
+    await expect(source.search("亡灵")).rejects.toThrow(/challenge/);
   });
 
   it("rejects Biquge345 placeholders, VIP failures, and challenge pages", async () => {
@@ -68,6 +79,17 @@ describe("provider acquisition transports and defensive adapters", () => {
     await expect(source.getChapterList(book)).rejects.toThrow(/did not contain a chapter directory/);
   });
 
+  it("rejects distinct pagination URLs that repeat a catalog or chapter page", async () => {
+    const catalog = `<meta property="og:novel:book_name" content="Test"><div class="book_list2"><a href="/123/1001.html">第1章</a></div><a href="index_2.html">2</a>`;
+    const catalogSource = adapter("biquge5", client(vi.fn(async () => new Response(catalog)), ["www.biquge5.com"]));
+    const book = await catalogSource.getBook("https://www.biquge5.com/123/");
+    await expect(catalogSource.getChapterList(book)).rejects.toThrow(/repeated page 2/);
+
+    const chapter = `<h1>第1章</h1><article>${longText("正文")}</article><a href="/123/1001_2.html">下一页</a>`;
+    const chapterSource = adapter("biquge5", client(vi.fn(async () => new Response(chapter)), ["www.biquge5.com"]));
+    await expect(chapterSource.getChapter({ provider: "biquge5", bookId: "123", chapterId: "1001", chapter: 1, url: "https://www.biquge5.com/123/1001.html" })).rejects.toThrow(/repeated content/);
+  });
+
   it("builds Tianya's opt-in author discovery index once and reuses the cache", async () => {
     const pages = new Map([
       ["https://www.tianyabooks.com/author.html", await fixture("tianyabooks", "author-index.html")],
@@ -77,9 +99,29 @@ describe("provider acquisition transports and defensive adapters", () => {
     const fetcher = vi.fn(async (input: string | URL | Request) => new Response(pages.get(String(input)) ?? "missing", { status: pages.has(String(input)) ? 200 : 404 }));
     const source = adapter("tianyabooks", client(fetcher, ["www.tianyabooks.com"]));
     expect(source.descriptor?.enabledByDefault).toBe(false);
-    expect(await source.search("测试小说")).toEqual([expect.objectContaining({ provider: "tianyabooks", bookId: "net/test-book", title: "测试小说", author: "测试作者" })]);
-    expect(await source.search("测试作者")).toHaveLength(1);
+    const [byTitle, byAuthor] = await Promise.all([source.search("测试小说"), source.search("测试作者")]);
+    expect(byTitle).toEqual([expect.objectContaining({ provider: "tianyabooks", bookId: "net/test-book", title: "测试小说", author: "测试作者" })]);
+    expect(byAuthor).toHaveLength(1);
     expect(fetcher).toHaveBeenCalledTimes(3);
+  });
+
+  it("does not cache a partial Tianya discovery crawl", async () => {
+    const landing = await fixture("tianyabooks", "author-index.html"); const writer = await fixture("tianyabooks", "writer.html"); const author = await fixture("tianyabooks", "author.html"); let failAuthor = true;
+    const fetcher = vi.fn(async (input: string | URL | Request) => { const url = String(input); if (url.endsWith("/author.html")) return new Response(landing); if (url.endsWith("/writer01.html")) return new Response(writer); if (url.endsWith("/author/test-author.html") && failAuthor) return new Response("busy", { status: 503 }); if (url.endsWith("/author/test-author.html")) return new Response(author); return new Response("missing", { status: 404 }); });
+    const source = adapter("tianyabooks", client(fetcher, ["www.tianyabooks.com"]));
+    await expect(source.search("测试小说")).rejects.toThrow(/was incomplete/); failAuthor = false;
+    await expect(source.search("测试小说")).resolves.toHaveLength(1);
+    expect(fetcher.mock.calls.filter(([input]) => String(input).endsWith("/author/test-author.html"))).toHaveLength(2);
+  });
+
+  it("coalesces discovery and aborts the underlying request at its overall deadline", async () => {
+    let aborted = false; const fetcher = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener("abort", () => { aborted = true; reject(init.signal?.reason ?? new DOMException("Aborted", "AbortError")); }, { once: true });
+    }));
+    const descriptor = { id: "deadline-source", displayName: "Deadline Source", domains: ["deadline.example"], languages: ["zh-CN"], priority: 1, reliability: "standard" as const, enabledByDefault: true, capabilities: { search: true, download: true, authentication: "none" as const }, rateLimit: { minimumDelayMs: 0, maximumConcurrency: 1 } };
+    const source = new SelectorNovelSource({ descriptor, baseUrl: "https://deadline.example", parseUrl: () => ({ bookId: "1" }), bookUrl: () => "https://deadline.example/book/1", chapterUrl: () => "https://deadline.example/chapter/1", selectors: { title: "h1", directory: "a", chapterTitle: "h1", content: "article" }, parseChapterHref: () => "1", discoveryIndex: { landingPath: "/authors", writerPath: /^\/writer/u, authorPath: /^\/author/u, fallbackWriterPaths: ["/writer1"], deadlineMs: 10 } }, client(fetcher, ["deadline.example"]));
+    const first = source.search("book"); const second = source.search("author");
+    await expect(Promise.all([first, second])).rejects.toThrow(/deadline/); expect(fetcher).toHaveBeenCalledTimes(1); expect(aborted).toBe(true);
   });
 });
 

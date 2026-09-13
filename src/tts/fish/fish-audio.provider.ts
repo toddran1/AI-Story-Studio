@@ -5,6 +5,9 @@ import { splitForTTS } from "../split-text.js";
 
 export class FishAudioProvider implements TTSProvider {
   readonly name = "fish" as const;
+  // Included in the TTS fingerprint so audio made before Markdown cleanup is not
+  // silently reused after the normalizer changes.
+  readonly inputNormalizationVersion = "fish-markdown-cleanup-v1";
   constructor(
     private readonly apiKey?: string,
     private readonly fetcher: typeof fetch = fetch,
@@ -21,7 +24,7 @@ export class FishAudioProvider implements TTSProvider {
     await this.validateConfiguration();
     const referenceId = this.resolveReferenceId(request.referenceId);
     const segments: Uint8Array[] = []; const requestIds: string[] = [];
-    for (const text of splitForTTS(request.text, request.maxCharsPerRequest)) {
+    for (const text of splitForTTS(stripFishMarkdownEmphasis(request.text), request.maxCharsPerRequest)) {
       let response: Response;
       try {
         response = await this.fetcher("https://api.fish.audio/v1/tts", {
@@ -50,6 +53,24 @@ export class FishAudioProvider implements TTSProvider {
     for (const segment of segments) { audio.set(segment, offset); offset += segment.length; }
     return { audio, segments, requestIds };
   }
+}
+
+/**
+ * Fish treats Markdown emphasis asterisks as spoken characters. Narration is
+ * prose, so remove paired emphasis delimiters while leaving ordinary math and
+ * literal asterisks (for example, `2 * 2`) untouched. Fish's square-bracket
+ * delivery cues deliberately remain intact.
+ */
+export function stripFishMarkdownEmphasis(text: string): string {
+  let normalized = text;
+  let previous: string | undefined;
+  // Repeat for nested markup such as ***very important*** without allowing a
+  // malformed marker on one line to consume prose on a later line.
+  do {
+    previous = normalized;
+    normalized = normalized.replace(/(^|[^\p{L}\p{N}_])\*{1,3}(?=\S)([^*\n]*?\S)\*{1,3}(?=$|[^\p{L}\p{N}_])/gmu, "$1$2");
+  } while (normalized !== previous);
+  return normalized;
 }
 
 /** Documented S2/S2.1 production defaults. Other/unknown models retain the portable request shape. */

@@ -24,13 +24,27 @@ export class WebHttpClient {
     this.sleep = options.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
   }
 
-  async getText(input: string, options: { refresh?: boolean } = {}): Promise<string> {
+  async getText(input: string, options: { refresh?: boolean; signal?: AbortSignal } = {}): Promise<string> {
     const initial = this.validateUrl(input); let cached: HttpCacheEntry | undefined;
     try { cached = await this.cache?.get(initial.href); } catch { /* Cache reads are optional; continue with the network. */ }
     if (!options.refresh && cached && !cached.etag && !cached.lastModified && Date.now() - Date.parse(cached.fetchedAt) < this.cacheTtlMs) return cached.body;
     let lastError: unknown;
     for (let attempt = 0; attempt <= this.retries; attempt++) {
-      try { return await this.request(initial, cached); }
+      try { return await this.request(initial, cached, 0, options.signal); }
+      catch (error) {
+        lastError = error;
+        if (options.signal?.aborted || attempt >= this.retries || !isTransient(error)) throw error;
+        await this.sleep(Math.min(5000, 500 * 2 ** attempt));
+      }
+    }
+    throw lastError;
+  }
+
+
+  async getBinary(input: string, options: { maxBytes?: number } = {}): Promise<WebBinaryResponse> {
+    let lastError: unknown;
+    for (let attempt = 0; attempt <= this.retries; attempt++) {
+      try { return await this.getBinaryAttempt(input, options); }
       catch (error) {
         lastError = error;
         if (attempt >= this.retries || !isTransient(error)) throw error;
@@ -40,8 +54,7 @@ export class WebHttpClient {
     throw lastError;
   }
 
-
-  async getBinary(input: string, options: { maxBytes?: number } = {}): Promise<WebBinaryResponse> {
+  private async getBinaryAttempt(input: string, options: { maxBytes?: number } = {}): Promise<WebBinaryResponse> {
     const limit = options.maxBytes ?? this.maxBytes;
     for (let challengeAttempts = 0; ; challengeAttempts++) {
       let url = this.validateUrl(input); let result: WebBinaryResponse | undefined;
@@ -51,12 +64,12 @@ export class WebHttpClient {
         catch (error) { throw new WebHttpError(`Web download failed for ${url.href}`, undefined, { cause: error }); }
         this.captureCookies(url, response);
         if (response.status >= 300 && response.status < 400) {
-          const location = response.headers.get("location"); if (!location) throw new WebHttpError(`Redirect from ${url.href} has no Location header`, response.status);
-          if (redirects === this.maxRedirects) throw new WebHttpError(`Too many redirects while downloading ${input}`, response.status);
-          url = this.validateUrl(new URL(location, url).href); continue;
+          const location = response.headers.get("location"); if (!location) { await discard(response); throw new WebHttpError(`Redirect from ${url.href} has no Location header`, response.status); }
+          if (redirects === this.maxRedirects) { await discard(response); throw new WebHttpError(`Too many redirects while downloading ${input}`, response.status); }
+          await discard(response); url = this.validateUrl(new URL(location, url).href); continue;
         }
         if (!response.ok) { await discard(response); throw new WebHttpError(`Web download failed (${response.status}) for ${url.href}`, response.status); }
-        const contentLength = Number(response.headers.get("content-length")); if (Number.isFinite(contentLength) && contentLength > limit) throw new WebHttpError(`Web download exceeds ${limit} bytes: ${url.href}`, response.status);
+        const contentLength = Number(response.headers.get("content-length")); if (Number.isFinite(contentLength) && contentLength > limit) { await discard(response); throw new WebHttpError(`Web download exceeds ${limit} bytes: ${url.href}`, response.status); }
         result = { bytes: await readLimitedBytes(response, limit), contentType: response.headers.get("content-type") ?? undefined, url: url.href };
         break;
       }
@@ -70,6 +83,19 @@ export class WebHttpClient {
   }
 
   async postForm(input: string, fields: Record<string, string>, options: { headers?: Record<string, string> } = {}): Promise<string> {
+    let lastError: unknown;
+    for (let attempt = 0; attempt <= this.retries; attempt++) {
+      try { return await this.postFormAttempt(input, fields, options); }
+      catch (error) {
+        lastError = error;
+        if (attempt >= this.retries || !isTransient(error)) throw error;
+        await this.sleep(Math.min(5000, 500 * 2 ** attempt));
+      }
+    }
+    throw lastError;
+  }
+
+  private async postFormAttempt(input: string, fields: Record<string, string>, options: { headers?: Record<string, string> } = {}): Promise<string> {
     const url = this.validateUrl(input);
     for (let challengeAttempts = 0; ; challengeAttempts++) {
       await this.rateLimit();
@@ -83,14 +109,14 @@ export class WebHttpClient {
       this.captureCookies(url, response);
       if (!response.ok) { await discard(response); throw new WebHttpError(`Web request failed (${response.status}) for ${url.href}`, response.status); }
       const contentLength = Number(response.headers.get("content-length"));
-      if (Number.isFinite(contentLength) && contentLength > this.maxBytes) throw new WebHttpError(`Web response exceeds ${this.maxBytes} bytes: ${url.href}`, response.status);
+      if (Number.isFinite(contentLength) && contentLength > this.maxBytes) { await discard(response); throw new WebHttpError(`Web response exceeds ${this.maxBytes} bytes: ${url.href}`, response.status); }
       const text = await readLimitedText(response, this.maxBytes);
       if (await this.challengeSolved(url, text, challengeAttempts)) continue;
       return text;
     }
   }
 
-  private async request(initial: URL, cached?: HttpCacheEntry, challengeAttempts = 0): Promise<string> {
+  private async request(initial: URL, cached?: HttpCacheEntry, challengeAttempts = 0, externalSignal?: AbortSignal): Promise<string> {
     let url = initial;
     for (let redirects = 0; redirects <= this.maxRedirects; redirects++) {
       await this.rateLimit();
@@ -99,20 +125,20 @@ export class WebHttpClient {
         const headers: Record<string, string> = { Accept: "text/html,application/xhtml+xml", "User-Agent": "AI-Story-Studio/0.1", ...this.defaultHeaders, ...await this.cookieHeaders(url) };
         if (url.href === initial.href && cached?.etag) headers["If-None-Match"] = cached.etag;
         if (url.href === initial.href && cached?.lastModified) headers["If-Modified-Since"] = cached.lastModified;
-        response = await this.fetcher(url, { method: "GET", redirect: "manual", headers, signal: AbortSignal.timeout(this.timeoutMs) });
+        response = await this.fetcher(url, { method: "GET", redirect: "manual", headers, signal: requestSignal(this.timeoutMs, externalSignal) });
       } catch (error) { throw new WebHttpError(`Web request failed for ${url.href}`, undefined, { cause: error }); }
       this.captureCookies(url, response);
       if (response.status === 304 && cached) return cached.body;
       if (response.status >= 300 && response.status < 400) {
-        const location = response.headers.get("location"); if (!location) throw new WebHttpError(`Redirect from ${url.href} has no Location header`, response.status);
-        if (redirects === this.maxRedirects) throw new WebHttpError(`Too many redirects while fetching ${initial.href}`, response.status);
-        url = this.validateUrl(new URL(location, url).href); continue;
+        const location = response.headers.get("location"); if (!location) { await discard(response); throw new WebHttpError(`Redirect from ${url.href} has no Location header`, response.status); }
+        if (redirects === this.maxRedirects) { await discard(response); throw new WebHttpError(`Too many redirects while fetching ${initial.href}`, response.status); }
+        await discard(response); url = this.validateUrl(new URL(location, url).href); continue;
       }
       if (!response.ok) { await discard(response); throw new WebHttpError(`Web request failed (${response.status}) for ${url.href}`, response.status); }
       const contentLength = Number(response.headers.get("content-length"));
-      if (Number.isFinite(contentLength) && contentLength > this.maxBytes) throw new WebHttpError(`Web response exceeds ${this.maxBytes} bytes: ${url.href}`, response.status);
+      if (Number.isFinite(contentLength) && contentLength > this.maxBytes) { await discard(response); throw new WebHttpError(`Web response exceeds ${this.maxBytes} bytes: ${url.href}`, response.status); }
       const body = await readLimitedText(response, this.maxBytes);
-      if (await this.challengeSolved(url, body, challengeAttempts)) return this.request(initial, cached, challengeAttempts + 1);
+      if (await this.challengeSolved(url, body, challengeAttempts)) return this.request(initial, cached, challengeAttempts + 1, externalSignal);
       try {
         if (cacheable(body)) await this.cache?.set(initial.href, { url: initial.href, body, etag: response.headers.get("etag") ?? undefined,
           lastModified: response.headers.get("last-modified") ?? undefined, fetchedAt: new Date().toISOString() });
@@ -205,3 +231,4 @@ function jsChallengeToken(body: string) {
 }
 function cacheable(body: string) { return !/captcha|checking your browser|正在验证浏览器|正在進行安全驗證|安全验证|challenge\s*=/iu.test(body); }
 function hostAllowed(host: string, allowed: Set<string>) { if (allowed.has(host)) return true; for (const value of allowed) if (value.startsWith("*.") && host.endsWith(value.slice(1)) && host.length > value.length - 1) return true; return false; }
+function requestSignal(timeoutMs: number, external?: AbortSignal) { return external ? AbortSignal.any([AbortSignal.timeout(timeoutMs), external]) : AbortSignal.timeout(timeoutMs); }

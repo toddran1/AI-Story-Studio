@@ -40,18 +40,19 @@ async function main() {
     story = applySourceMetadata(story, inspection, !existed);
     const result = await importSource(root, storySlug, inspection, async () => {
       await atomicWriteJson(paths.pipelineConfig, story.pipeline); await atomicWriteJson(paths.storyConfig, story);
-    });
+    }, { overwriteExisting: args.overwriteExisting });
     process.stdout.write(`${formatImport(storySlug, result)}\n`);
   });
 }
 
-type Args = { source?: string; story?: string; type?: SourceType; chapter?: number; from?: number; to?: number; probe?: number; splitChapters: boolean; allowGaps: boolean; acquisition?: "html" | "bulk-download" };
+type Args = { source?: string; story?: string; type?: SourceType; chapter?: number; from?: number; to?: number; probe?: number; splitChapters: boolean; allowGaps: boolean; overwriteExisting: boolean; acquisition?: "html" | "bulk-download" };
 function parseArgs(values: string[]): Args {
-  const args: Args = { splitChapters: false, allowGaps: false };
+  const args: Args = { splitChapters: false, allowGaps: false, overwriteExisting: false };
   for (let index = 0; index < values.length; index++) {
     const key = values[index]!;
     if (key === "--split-chapters") { args.splitChapters = true; continue; }
     if (key === "--allow-gaps") { args.allowGaps = true; continue; }
+    if (key === "--overwrite-existing") { args.overwriteExisting = true; continue; }
     const value = values[++index]; if (!value || value.startsWith("--")) usage(`Missing value for ${key}`);
     if (key === "--source") args.source = value; else if (key === "--story") args.story = value;
     else if (key === "--chapter") { const number = Number(value); if (!Number.isInteger(number) || number < 1) usage("--chapter must be a positive integer"); args.chapter = number; }
@@ -81,6 +82,6 @@ function formatImport(story: string, result: Awaited<ReturnType<typeof importSou
 }
 function isUrl(value: string) { try { new URL(value); return true; } catch { return false; } }
 function supportsBulk(provider: { inspect: unknown }) { const capabilities = (provider as unknown as { capabilities?: { acquisition?: string[] } }).capabilities; return capabilities?.acquisition?.includes("bulk-download") === true; }
-function usage(message: string): never { throw new Error(`${message}\nUsage: npm run story:inspect -- --source <path-or-url> [--type text|epub|docx|fanqie|manual|original] [--probe N] [--acquisition html|bulk-download]\n   or: npm run story:import -- --story <slug> --source <path-or-url> [--from N --to N] [--acquisition html|bulk-download] [local source options]\n   or: npm run story:update -- --story <slug> --source <path-or-url> [--chapter N | --split-chapters] [--from N --to N] [--allow-gaps] [--acquisition html|bulk-download]`); }
+function usage(message: string): never { throw new Error(`${message}\nUsage: npm run story:inspect -- --source <path-or-url> [--type text|epub|docx|fanqie|manual|original] [--probe N] [--acquisition html|bulk-download]\n   or: npm run story:import -- --story <slug> --source <path-or-url> [--from N --to N] [--overwrite-existing] [--acquisition html|bulk-download] [local source options]\n   or: npm run story:update -- --story <slug> --source <path-or-url> [--chapter N | --split-chapters] [--from N --to N] [--allow-gaps] [--overwrite-existing] [--acquisition html|bulk-download]`); }
 
 main().catch((error: unknown) => { process.stderr.write(`${JSON.stringify({ event: "source.failed", error: error instanceof Error ? error.message : String(error) }, null, 2)}\n`); process.exitCode = 1; });

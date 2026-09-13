@@ -4,7 +4,7 @@ import { createErrorDiagnostic, ErrorDiagnostic, errorDiagnosticSchema } from ".
 import { logger } from "../../src/utils/logger.js";
 
 export type JobStatus = "queued" | "running" | "completed" | "failed" | "paused";
-export type Job = { id: string; type: "batch" | "preview" | "voicePreview" | "metadataTranslation" | "audio" | "audiobook" | "alignment" | "subtitles" | "video" | "videoExport" | "scenes" | "artwork" | "production"; story: string; status: JobStatus; createdAt: string; updatedAt: string; progress?: unknown; result?: unknown; error?: string; diagnostic?: ErrorDiagnostic };
+export type Job = { id: string; type: "batch" | "preview" | "voicePreview" | "metadataTranslation" | "qaRepair" | "qaRecheck" | "audio" | "audiobook" | "alignment" | "subtitles" | "video" | "videoExport" | "scenes" | "artwork" | "production"; story: string; status: JobStatus; createdAt: string; updatedAt: string; progress?: unknown; result?: unknown; error?: string; diagnostic?: ErrorDiagnostic };
 type JobControl = { update(progress: unknown): void; setPause(handler: () => void): void };
 
 export class JobConflictError extends Error {}
@@ -46,11 +46,13 @@ export class JobManager {
       });
       const resultStatus = typeof result === "object" && result !== null && "status" in result ? (result as { status?: unknown; stopReason?: unknown }).status : undefined;
       if (resultStatus === "paused") this.set(job, { status: "paused", result });
-      else if (resultStatus === "failed" || resultStatus === "completed_with_errors") {
+      else if (resultStatus === "failed" || (resultStatus === "completed_with_errors" && job.type !== "batch")) {
         const reason = typeof (result as { stopReason?: unknown }).stopReason === "string" ? (result as { stopReason: string }).stopReason : `Batch ${resultStatus}`;
         const diagnostic = diagnosticFromResult(result) ?? createErrorDiagnostic(new Error(reason), { summary: reason });
         logFailure(job, diagnostic);
         this.set(job, { status: "failed", result, error: diagnostic.summary, diagnostic });
+      // A batch that was explicitly allowed to continue has completed its
+      // range; individual errors remain in its manifest and Needs Review.
       } else this.set(job, { status: "completed", result });
     } catch (error) { const diagnostic = createErrorDiagnostic(error); logFailure(job, diagnostic); this.set(job, { status: "failed", error: diagnostic.summary, diagnostic }); }
     finally {

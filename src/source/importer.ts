@@ -8,6 +8,7 @@ import { fingerprint } from "../utils/hash.js";
 import { ChapterReference, chapterReferenceSchema, SourceInspection, SourceManifest, sourceManifestSchema } from "./types.js";
 import { chapterWarnings } from "./inspection.js";
 import { Chapter, chapterSchema, StageName } from "../domain/chapter.js";
+import { SourceConflictError, SourceValidationError } from "./errors.js";
 
 export const SOURCE_ADAPTER_VERSION = "milestone-3-v1";
 export type ImportResult = {
@@ -18,8 +19,8 @@ export type ImportResult = {
   removed: number[];
 };
 
-export async function importSource(root: string, story: string, inspection: SourceInspection, finalize?: () => Promise<void>): Promise<ImportResult> {
-  if (!inspection.chapters.length) throw new Error("Source import contains no materialized chapters");
+export async function importSource(root: string, story: string, inspection: SourceInspection, finalize?: () => Promise<void>, options: { overwriteExisting?: boolean } = {}): Promise<ImportResult> {
+  if (!inspection.chapters.length) throw new SourceValidationError("Source import contains no materialized chapters");
   const paths = storyPaths(root, story, inspection.chapters[0]?.ref.chapter ?? 1);
   await recoverInterruptedImport(paths.story, paths.source);
   let previous: SourceManifest | undefined;
@@ -28,7 +29,7 @@ export async function importSource(root: string, story: string, inspection: Sour
   const parsedPrevious = previous ? sourceManifestSchema.safeParse(previous) : undefined;
   const previousFilesValid = parsedPrevious?.success ? await manifestFilesExist(paths.source, parsedPrevious.data) : false;
   const additive = inspection.additive === true;
-  if (additive && previous && !parsedPrevious?.success) throw new Error(`Cannot safely add to the invalid existing source manifest for '${story}'`);
+  if (additive && previous && !parsedPrevious?.success) throw new SourceConflictError(`Cannot safely add to the invalid existing source manifest for '${story}'`);
   if (additive && parsedPrevious?.success) assertCompatibleAdditiveSource(parsedPrevious.data, inspection);
   if (parsedPrevious?.success && parsedPrevious.data.fingerprint === inspection.fingerprint && !additive && previousFilesValid) {
     await finalize?.();
@@ -36,9 +37,9 @@ export async function importSource(root: string, story: string, inspection: Sour
   }
 
   const duplicateWarnings = chapterWarnings(inspection.chapters, true).filter((warning) => warning.code === "duplicate_chapter_number");
-  if (duplicateWarnings.length) throw new Error(duplicateWarnings.map((warning) => warning.message).join("; "));
+  if (duplicateWarnings.length) throw new SourceValidationError(duplicateWarnings.map((warning) => warning.message).join("; "));
   const unavailable = inspection.warnings.filter((warning) => warning.code === "unavailable_chapter");
-  if (unavailable.length) throw new Error(unavailable.map((warning) => warning.message).join("; "));
+  if (unavailable.length) throw new SourceValidationError(unavailable.map((warning) => warning.message).join("; "));
   const stage = `${paths.source}.stage-${randomUUID()}`; const backup = `${paths.source}.backup-${randomUUID()}`;
   const chapters = [...inspection.chapters].sort((a, b) => a.ref.chapter - b.ref.chapter);
   const manifestChapters: SourceManifest["chapters"] = [];
@@ -48,7 +49,7 @@ export async function importSource(root: string, story: string, inspection: Sour
     const incomingNumbers = new Set(chapters.map((chapter) => chapter.ref.chapter));
     const currentDirectory = new Map(inspection.directory?.map((ref) => [ref.chapter, ref]) ?? []);
     if (additive && parsedPrevious?.success) {
-      if (!previousFilesValid) throw new Error(`Cannot safely add to '${story}' because its existing materialized source is missing or modified`);
+      if (!previousFilesValid) throw new SourceConflictError(`Cannot safely add to '${story}' because its existing materialized source is missing or modified`);
       for (const item of parsedPrevious.data.chapters) {
         if (incomingNumbers.has(item.chapter)) continue;
         const text = await readFile(resolve(paths.source, item.file)); await atomicWrite(join(stage, item.file), text);
@@ -56,17 +57,18 @@ export async function importSource(root: string, story: string, inspection: Sour
         const ref = directoryRef && sameReferenceSource(item.ref, directoryRef)
           ? { ...directoryRef, metadata: { ...item.ref.metadata, ...directoryRef.metadata } }
           : item.ref;
-        manifestChapters.push({ ...item, ref, fingerprint: importedChapterFingerprint(ref, text.toString("utf8")) });
+        const value = text.toString("utf8");
+        manifestChapters.push({ ...item, ref, fingerprint: importedChapterFingerprint(ref, value), contentFingerprint: importedChapterContentFingerprint(value) });
       }
     }
     for (const chapter of chapters) {
-      if (!chapter.text.trim()) throw new Error(`Chapter ${chapter.ref.chapter} is empty`);
+      if (!chapter.text.trim()) throw new SourceValidationError(`Chapter ${chapter.ref.chapter} is empty`);
       const file = join("chapters", `${String(chapter.ref.chapter).padStart(4, "0")}.txt`);
       const materializedText = chapter.text.endsWith("\n") ? chapter.text : `${chapter.text}\n`;
       const ref = chapterReferenceSchema.parse(JSON.parse(JSON.stringify(chapter.ref)));
       const chapterFingerprint = importedChapterFingerprint(ref, materializedText);
       await atomicWrite(join(stage, file), materializedText);
-      manifestChapters.push({ chapter: ref.chapter, file, fingerprint: chapterFingerprint, ref });
+      manifestChapters.push({ chapter: ref.chapter, file, fingerprint: chapterFingerprint, contentFingerprint: importedChapterContentFingerprint(materializedText), ref });
     }
     manifestChapters.sort((a, b) => a.chapter - b.chapter);
     const manifest = sourceManifestSchema.parse({
@@ -79,7 +81,12 @@ export async function importSource(root: string, story: string, inspection: Sour
       warnings: inspection.warnings, unnumberedSections: inspection.unnumberedSections, chapters: manifestChapters,
     });
     await atomicWriteJson(join(stage, "source.json"), manifest);
-    const changes = compareChapters(parsedPrevious?.success ? parsedPrevious.data : undefined, manifest);
+    const changes = await compareChapters(paths.source, parsedPrevious?.success ? parsedPrevious.data : undefined, manifest);
+    // Interactive callers opt in before replacing a chapter that may have
+    // expensive downstream work. Programmatic migrations retain compatibility.
+    if (changes.modified.length && options.overwriteExisting === false) {
+      throw new SourceConflictError(`Incoming source would replace existing Chapter${changes.modified.length === 1 ? "" : "s"} ${changes.modified.join(", ")}. Review the update and explicitly confirm replacement before importing.`);
+    }
     productionSnapshot = await snapshotChangedProduction(root, story, changes);
     await invalidateChangedProduction(root, story, changes);
     const hadPrevious = await exists(paths.source);
@@ -93,7 +100,7 @@ export async function importSource(root: string, story: string, inspection: Sour
       throw error;
     }
     if (hadPrevious) { try { await rm(backup, { recursive: true, force: true }); } catch { /* The installed source is valid; a stale backup is recoverable. */ } }
-    const unchanged = parsedPrevious?.success && previousFilesValid && parsedPrevious.data.fingerprint === manifest.fingerprint
+    const unchanged = parsedPrevious?.success && previousFilesValid
       && !changes.added.length && !changes.modified.length && !changes.removed.length;
     return { status: unchanged ? "unchanged" : parsedPrevious?.success ? "updated" : "imported", manifest, ...changes };
   } catch (error) {
@@ -133,19 +140,19 @@ async function snapshotChangedProduction(root: string, story: string, changes: {
 
 function assertCompatibleAdditiveSource(previous: SourceManifest, inspection: SourceInspection) {
   const bothRemote = (previous.type === "fanqie" || previous.type === "web") && (inspection.sourceType === "fanqie" || inspection.sourceType === "web");
-  if (previous.type !== inspection.sourceType && !bothRemote) throw new Error(`Existing source type '${previous.type}' does not match '${inspection.sourceType}'`);
+  if (previous.type !== inspection.sourceType && !bothRemote) throw new SourceConflictError(`Existing source type '${previous.type}' does not match '${inspection.sourceType}'`);
   if (!("url" in previous.origin) && !inspection.origin) return;
-  if (!("url" in previous.origin) || !inspection.origin) throw new Error("Cannot combine a remote source with a local source import");
+  if (!("url" in previous.origin) || !inspection.origin) throw new SourceConflictError("Cannot combine a remote source with a local source import");
   const incomingOrigin = inspection.origin; const previousProvider = providerFromManifest(previous); const incomingProvider = providerFromInspection(inspection);
   const sameProvider = previousProvider !== undefined && previousProvider === incomingProvider;
-  if (sameProvider && previous.origin.bookId && incomingOrigin.bookId && previous.origin.bookId !== incomingOrigin.bookId) throw new Error(`Refusing to combine different ${incomingProvider} books`);
-  if (sameProvider && !previous.origin.bookId && previous.origin.url !== incomingOrigin.url) throw new Error(`Refusing to combine different ${incomingProvider} URLs`);
+  if (sameProvider && previous.origin.bookId && incomingOrigin.bookId && previous.origin.bookId !== incomingOrigin.bookId) throw new SourceConflictError(`Refusing to combine different ${incomingProvider} books`);
+  if (sameProvider && !previous.origin.bookId && previous.origin.url !== incomingOrigin.url) throw new SourceConflictError(`Refusing to combine different ${incomingProvider} URLs`);
   if (sameProvider && previous.remote && inspection.directory) {
     const current = new Map(inspection.directory.map((ref) => [ref.chapter, ref]));
     for (const item of previous.chapters) {
       if (referenceProvider(item.ref) !== incomingProvider) continue;
       const ref = current.get(item.chapter);
-      if (!ref || ref.sourceId !== item.ref.sourceId) throw new Error(`Refusing additive import because remote Chapter ${item.chapter} was removed or reordered`);
+      if (!ref || ref.sourceId !== item.ref.sourceId) throw new SourceConflictError(`Refusing additive import because remote Chapter ${item.chapter} was removed or reordered`);
     }
   }
 }
@@ -198,7 +205,7 @@ export async function loadImportedChapters(root: string, story: string) {
   if (!(await manifestFilesExist(paths.source, manifest))) throw new Error(`Imported source manifest for '${story}' references missing chapter files`);
   return { manifest, directory: paths.sourceChapters, chapters: manifest.chapters.map((item) => ({
     chapter: item.chapter, filename: basename(item.file), path: resolve(paths.source, item.file),
-    source: { type: item.ref.sourceType, sourceId: item.ref.sourceId, originalTitle: item.ref.originalTitle, fingerprint: item.fingerprint, metadata: item.ref.metadata },
+    source: { type: item.ref.sourceType, sourceId: item.ref.sourceId, originalTitle: item.ref.originalTitle, fingerprint: item.contentFingerprint ?? item.fingerprint, metadata: item.ref.metadata },
   })) };
 }
 
@@ -215,8 +222,14 @@ export function importedChapterFingerprint(ref: ChapterReference, text: string) 
   const metadata = { ...ref.metadata }; delete metadata.retrievedAt;
   return fingerprint({ ref: { ...ref, metadata }, text });
 }
-function compareChapters(previous: SourceManifest | undefined, next: SourceManifest) {
-  const before = new Map(previous?.chapters.map((item) => [item.chapter, item.fingerprint]) ?? []); const after = new Map(next.chapters.map((item) => [item.chapter, item.fingerprint]));
+export function importedChapterContentFingerprint(text: string) { return fingerprint(text); }
+async function compareChapters(sourceRoot: string, previous: SourceManifest | undefined, next: SourceManifest) {
+  const before = new Map<number, string>();
+  for (const item of previous?.chapters ?? []) {
+    const content = item.contentFingerprint ?? importedChapterContentFingerprint(await readFile(resolve(sourceRoot, item.file), "utf8"));
+    before.set(item.chapter, content);
+  }
+  const after = new Map(next.chapters.map((item) => [item.chapter, item.contentFingerprint ?? item.fingerprint]));
   return {
     added: [...after.keys()].filter((chapter) => !before.has(chapter)),
     modified: [...after].filter(([chapter, value]) => before.has(chapter) && before.get(chapter) !== value).map(([chapter]) => chapter),

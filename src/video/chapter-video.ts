@@ -1,4 +1,4 @@
-import { readFile, rename, rm } from "node:fs/promises";
+import { rename, rm } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { Chapter, StageState, chapterSchema } from "../domain/chapter.js";
@@ -8,6 +8,7 @@ import { atomicWriteJson } from "../storage/atomic-write.js";
 import { sceneImagePath, storyPaths } from "../storage/paths.js";
 import { exists, readJsonIfExists } from "../storage/story-files.js";
 import { fingerprint } from "../utils/hash.js";
+import { fileFingerprint } from "../utils/file-fingerprint.js";
 import { ChapterVideoInput, VideoProcessor } from "./renderer.js";
 import { SceneManifest, sceneManifestSchema } from "../scenes/types.js";
 
@@ -25,5 +26,4 @@ export async function renderStoredChapterVideo(options: { root: string; story: S
 export function videoFingerprint(audio: string | undefined, subtitles: string | undefined, background: string | undefined, settings: Story["video"], title?: string) { return fingerprint({ audio, subtitles, background, settings, title, version: "chapter-video-v1" }); }
 async function findCover(root: string, slug: string) { for (const name of ["cover.jpg", "cover.jpeg", "cover.png"]) { const path = join(storyPaths(root, slug, 1).story, name); if (await exists(path)) return path; } return undefined; }
 async function approvedSceneArtwork(root: string, slug: string, chapter: number) { const raw = await readJsonIfExists<SceneManifest>(storyPaths(root, slug, chapter).scenesManifest); const parsed = raw ? sceneManifestSchema.safeParse(raw) : undefined; if (!parsed?.success || !parsed.data.scenes.length) return undefined; const result: Array<{ path: string; durationSeconds: number; fingerprint: string }> = []; for (const scene of parsed.data.scenes) { const path = sceneImagePath(root, slug, chapter, scene.id); if (scene.artwork.status !== "complete" || scene.artwork.review !== "approved" || !scene.artwork.imageFingerprint || !(await exists(path)) || await fileFingerprint(path) !== scene.artwork.imageFingerprint) return undefined; result.push({ path, durationSeconds: scene.endSeconds - scene.startSeconds, fingerprint: scene.artwork.imageFingerprint }); } return result; }
-async function fileFingerprint(path: string) { try { const data = await readFile(path); return data.length ? fingerprint(data.toString("base64")) : undefined; } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; } }
 async function persist(path: string, chapter: Chapter) { chapter.updatedAt = new Date().toISOString(); await atomicWriteJson(path, chapterSchema.parse(chapter)); }

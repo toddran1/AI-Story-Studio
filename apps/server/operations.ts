@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
-import { basename, join } from "node:path";
+import { basename, join, resolve } from "node:path";
 import { z } from "zod";
 import { BatchRunner, ChapterProcessor, ProgressEvent } from "../../src/batch/batch-runner.js";
 import { createBatchState } from "../../src/batch/batch-state.js";
@@ -14,7 +14,7 @@ import { ConfigurationError } from "../../src/pipeline/errors.js";
 import { applyPreviewProfile } from "../../src/preview/profile.js";
 import { PreviewRunner } from "../../src/preview/preview-runner.js";
 import { previewPresetSchema } from "../../src/preview/types.js";
-import { importedChapterFingerprint, importSource, loadImportedChapters } from "../../src/source/importer.js";
+import { importedChapterContentFingerprint, importSource, loadImportedChapters } from "../../src/source/importer.js";
 import { validateImportable } from "../../src/source/inspection.js";
 import { compareRemoteDirectory } from "../../src/source/refresh.js";
 import { SourceProviderRegistry } from "../../src/source/registry.js";
@@ -22,6 +22,7 @@ import { applySourceMetadata } from "../../src/source/story-metadata.js";
 import { translateStoryMetadata } from "../../src/translation/story-metadata.js";
 import { SourceInspection, SourceManifest, SourceType, StorySourceProvider, sourceManifestSchema, sourceTypeSchema } from "../../src/source/types.js";
 import { createWebHttpClient } from "../../src/source/web/create-client.js";
+import { SourceConflictError, SourceInputError, SourceOperationError, SourceValidationError } from "../../src/source/errors.js";
 import { atomicWriteJson } from "../../src/storage/atomic-write.js";
 import { previewPaths, storyPaths } from "../../src/storage/paths.js";
 import { exists, readJsonIfExists } from "../../src/storage/story-files.js";
@@ -61,12 +62,18 @@ import { estimatePlanCost } from "../../src/cost/estimate.js";
 import { withUsageScope } from "../../src/cost/context.js";
 import { invalidateNarrationNamingChange } from "../../src/story-bible/narration-names.js";
 import { findChapterGaps } from "../../src/batch/gaps.js";
-import { StageName } from "../../src/domain/chapter.js";
+import { Chapter, chapterSchema, StageName } from "../../src/domain/chapter.js";
 import { fingerprint } from "../../src/utils/hash.js";
 import { NovelProviderId, novelProviderIdSchema, storyNovelSourceSchema } from "../../src/source/novel-provider.js";
+import { qaResultSchema } from "../../src/domain/qa.js";
+import { issueRepairTargets, repairQaText, repairTargets } from "../../src/qa/repair.js";
+import { LLMRouter } from "../../src/llm/router.js";
+import { validateChapterQuality } from "../../src/qa/validator.js";
+import { emptyStoryBible, storyBibleSchema } from "../../src/domain/story-bible.js";
 
 const slugSchema = z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/);
-const batchInputSchema = z.object({ from: z.number().int().positive().optional(), to: z.number().int().positive().optional(), force: z.enum(["translation", "narration", "qa", "story-bible", "continuity", "tts", "audio", "all"]).optional() }).strict();
+const batchInputSchema = z.object({ from: z.number().int().positive().optional(), to: z.number().int().positive().optional(), force: z.enum(["translation", "narration", "qa", "story-bible", "continuity", "tts", "audio", "all"]).optional(), continueOnError: z.boolean().default(false) }).strict();
+const qaRepairInputSchema = z.object({ issueIndexes: z.array(z.number().int().nonnegative()).min(1).max(100) }).strict();
 const previewInputSchema = z.object({ chapter: z.number().int().positive(), audioPreview: z.boolean().default(false), presets: z.object({ a: previewPresetSchema, b: previewPresetSchema }) }).strict();
 const audioInputSchema = z.object({ from: z.number().int().positive().optional(), to: z.number().int().positive().optional(), force: z.boolean().default(false) }).strict();
 const audiobookInputSchema = z.object({ from: z.number().int().positive(), to: z.number().int().positive(), format: z.enum(["mp3", "m4b"]), force: z.boolean().default(false) }).strict();
@@ -78,7 +85,7 @@ const artworkJobSchema = z.object({ from: z.number().int().positive(), to: z.num
 const productionInputSchema = z.object({ from: z.number().int().positive(), to: z.number().int().positive(), profile: z.string().optional(), outputs: z.array(productionOutputSchema).min(1).optional(), artwork: z.boolean().optional(), repairQa: z.boolean().optional(), alignment: z.boolean().optional(), refresh: z.boolean().default(false), dryRun: z.boolean().default(false), force: productionForceSchema.optional(), audiobookFormat: z.enum(["mp3", "m4b"]).optional(), maxProviderBudgetUsd: z.number().positive().max(1_000_000).optional() }).strict().refine((value) => value.to >= value.from, { message: "Range end must be at or after range start" });
 
 type InspectionRecord = { inspection: SourceInspection; temporaryDirectory?: string; createdAt: number; bytes: number };
-export type OperationsDependencies = { pipeline?: ChapterProcessor; preview?: PreviewRunner; registry?: SourceProviderRegistry; audio?: AudioMasteringProcessor; audiobook?: AudiobookProcessor; video?: VideoProcessor; videoExport?: VideoExportProcessor; scenePlanner?: LLMProvider; image?: ImageProvider; tts?: TTSProvider | TTSProviderRouter; alignment?: AlignmentEngine; queue?: ProductionQueueService; usage?: PostgresUsageRepository };
+export type OperationsDependencies = { pipeline?: ChapterProcessor; preview?: PreviewRunner; registry?: SourceProviderRegistry; llm?: LLMRouter; audio?: AudioMasteringProcessor; audiobook?: AudiobookProcessor; video?: VideoProcessor; videoExport?: VideoExportProcessor; scenePlanner?: LLMProvider; image?: ImageProvider; tts?: TTSProvider | TTSProviderRouter; alignment?: AlignmentEngine; queue?: ProductionQueueService; usage?: PostgresUsageRepository };
 
 export class StudioOperations {
   private static readonly maxInspections = 10;
@@ -87,12 +94,13 @@ export class StudioOperations {
   private readonly pipeline: ChapterProcessor; private readonly preview: PreviewRunner; private readonly registry: SourceProviderRegistry;
   private readonly audio: AudioMasteringProcessor; private readonly audiobook: AudiobookProcessor;
   private readonly video: VideoProcessor; private readonly videoExport: VideoExportProcessor;
+  private readonly llm: LLMRouter;
   private readonly scenePlanner?: LLMProvider; private readonly image: ImageProvider; private readonly tts: TTSProviderRouter; private readonly runtime: ReturnType<typeof createPipelineRuntime>;
   private readonly alignConfig; private readonly aligner?: AlignmentEngine;
   private readonly inspectionTimer: NodeJS.Timeout; private inspectionBytes = 0;
   readonly queue?: ProductionQueueService; readonly usage?: PostgresUsageRepository;
   constructor(public readonly root: string, private readonly env: Environment, public readonly jobs = new JobManager(), dependencies: OperationsDependencies = {}) {
-    this.usage = dependencies.usage; const runtime = createPipelineRuntime(env, this.usage); this.runtime = runtime; this.pipeline = dependencies.pipeline ?? runtime.pipeline; this.preview = dependencies.preview ?? new PreviewRunner(runtime.router, runtime.tts);
+    this.usage = dependencies.usage; const runtime = createPipelineRuntime(env, this.usage); this.runtime = runtime; this.llm = dependencies.llm ?? runtime.router; this.pipeline = dependencies.pipeline ?? runtime.pipeline; this.preview = dependencies.preview ?? new PreviewRunner(this.llm, runtime.tts);
     this.registry = dependencies.registry ?? new SourceProviderRegistry(undefined, createWebHttpClient(root, env));
     this.audio = dependencies.audio ?? runtime.audio ?? new FfmpegMasteringProcessor(); this.audiobook = dependencies.audiobook ?? new FfmpegAudiobookProcessor();
     this.video = dependencies.video ?? new FfmpegVideoProcessor(); this.videoExport = dependencies.videoExport ?? new FfmpegVideoExportProcessor();
@@ -129,7 +137,7 @@ export class StudioOperations {
     this.expireInspections(); let source: string; let temporaryDirectory: string | undefined;
     const type = input.type === undefined ? undefined : sourceTypeSchema.parse(input.type);
     try {
-      if (input.url) { const url = new URL(input.url); if (url.protocol !== "https:") throw new Error("Only HTTPS source URLs are allowed"); source = url.toString(); }
+      if (input.url) { let url: URL; try { url = new URL(input.url); } catch (error) { throw new SourceInputError("Source URL is invalid", { cause: error }); } if (url.protocol !== "https:") throw new SourceInputError("Only HTTPS source URLs are allowed"); source = url.toString(); }
       else if (input.files) {
         if (!input.files.length || input.files.length > 2_000) throw new Error("Select between 1 and 2,000 TXT chapter files");
         temporaryDirectory = join(this.root, ".ai-story-studio", "tmp", `source-${randomUUID()}`); await mkdir(temporaryDirectory, { recursive: true }); let total = 0; const names = new Set<string>();
@@ -141,34 +149,35 @@ export class StudioOperations {
         temporaryDirectory = join(this.root, ".ai-story-studio", "tmp", `source-${randomUUID()}`); await mkdir(temporaryDirectory, { recursive: true }); source = join(temporaryDirectory, safeName); await writeFile(source, input.file);
       }
       const { provider, semanticType } = await this.registry.resolve(source, type); const remote = semanticType === "fanqie" || semanticType === "web";
-      if (remote && ((input.from === undefined) !== (input.to === undefined))) throw new Error("Remote chapter ranges require both from and to");
-      if (input.acquisition === "bulk-download" && (!remote || !supportsBulk(provider))) throw new Error("The selected source does not support full-manuscript downloads");
+      if (remote && ((input.from === undefined) !== (input.to === undefined))) throw new SourceInputError("Remote chapter ranges require both from and to");
+      if (input.acquisition === "bulk-download" && (!remote || !supportsBulk(provider))) throw new SourceValidationError("The selected source does not support full-manuscript downloads");
       let inspection = await this.registry.inspect(provider, source, { semanticType, from: input.from, to: input.to, chapter: input.chapter, splitChapters: input.splitChapters, allowGaps: input.allowGaps, acquisition: input.acquisition });
       if (remote && context?.story && inspection.warnings.some((warning) => warning.code === "unavailable_chapter")) inspection = await this.applyConfiguredFallbacks(context.story, inspection, input.from, input.to);
       const previousRaw = context ? await readJsonIfExists<SourceManifest>(storyPaths(this.root, context.story, 1).sourceManifest) : undefined;
       const previous = previousRaw ? sourceManifestSchema.safeParse(previousRaw) : undefined;
-      if (context?.additive && previousRaw && !previous?.success) throw new Error(`Cannot safely update '${context.story}' because its source manifest is invalid`);
+      if (context?.additive && previousRaw && !previous?.success) throw new SourceConflictError(`Cannot safely update '${context.story}' because its source manifest is invalid`);
       const storedInspection = { ...inspection, additive: Boolean(context?.additive && previous?.success) };
       const bytes = storedInspection.chapters.reduce((sum, item) => sum + Buffer.byteLength(item.text), 0);
       if (this.inspections.size >= StudioOperations.maxInspections || this.inspectionBytes + bytes > StudioOperations.maxInspectionBytes) {
-        throw new Error("Too many pending source inspections; import an existing inspection or wait for it to expire");
+        throw new SourceConflictError("Too many pending source inspections; import an existing inspection or wait for it to expire");
       }
       const id = randomUUID(); this.inspections.set(id, { inspection: storedInspection, temporaryDirectory, createdAt: Date.now(), bytes }); this.inspectionBytes += bytes;
       const selected = storedInspection.chapters.map((item) => item.ref); const available = storedInspection.directory?.length ?? selected.length;
-      const update = previous?.success ? sourceUpdatePreview(previous.data, storedInspection) : undefined;
+      const update = previous?.success ? await sourceUpdatePreview(storyPaths(this.root, context!.story, 1).source, previous.data, storedInspection) : undefined;
       return { id, type: storedInspection.sourceType, title: storedInspection.title, author: storedInspection.author, language: storedInspection.language,
         chapterCount: selected.length, availableChapterCount: available, chapters: selected.slice(0, 200), truncated: selected.length > 200,
         warnings: storedInspection.warnings, metadata: storedInspection.metadata, update };
     } catch (error) { if (temporaryDirectory) await rm(temporaryDirectory, { recursive: true, force: true }); throw error; }
   }
 
-  async importInspection(slug: string, inspectionId: string, allowGaps = false) {
+  async importInspection(slug: string, inspectionId: string, allowGaps = false, overwriteExisting = false) {
     slugSchema.parse(slug); const record = this.inspections.get(inspectionId); if (!record) throw new Error("Inspection expired or was not found");
-    validateImportable(record.inspection.chapters, record.inspection.warnings, allowGaps);
+    try { validateImportable(record.inspection.chapters, record.inspection.warnings, allowGaps); }
+    catch (error) { if (error instanceof SourceOperationError) throw error; throw new SourceValidationError(error instanceof Error ? error.message : String(error), { cause: error }); }
     const result = await withStoryLock(this.root, slug, "web source import", async () => {
         const paths = storyPaths(this.root, slug, record.inspection.chapters[0]?.ref.chapter ?? 1); const existed = await exists(paths.storyConfig);
         let story = existed ? await loadStory(paths.storyConfig) : defaultStory(slug, this.env); story = applySourceMetadata(story, record.inspection, !existed);
-        const result = await importSource(this.root, slug, record.inspection, async () => { await atomicWriteJson(paths.storyConfig, story); await atomicWriteJson(paths.pipelineConfig, story.pipeline); });
+        const result = await importSource(this.root, slug, record.inspection, async () => { await atomicWriteJson(paths.storyConfig, story); await atomicWriteJson(paths.pipelineConfig, story.pipeline); }, { overwriteExisting });
         return { status: result.status, story, added: result.added, modified: result.modified, removed: result.removed, chapters: result.manifest.chapters.length };
       });
     try { await this.discardInspection(inspectionId); }
@@ -241,7 +250,18 @@ export class StudioOperations {
     return this.jobs.create("metadataTranslation", slug, async () => withStoryLock(this.root, slug, "story metadata translation", async () => {
       const paths = storyPaths(this.root, slug, 1); const current = await loadStory(paths.storyConfig);
       const source = current.metadataTranslationSource;
-      if ((source?.language ?? current.sourceLanguage) === current.outputLanguage) return { story: current, reused: true };
+      if (sameLanguage(source?.language ?? current.sourceLanguage, current.outputLanguage)) {
+        if (!source) return { story: current, reused: true };
+        const story = storySchema.parse({ ...current, title: source.title, author: source.author, description: source.description, tags: source.tags,
+          originalTitle: current.originalTitle ?? source.title, metadataTranslatedAt: undefined });
+        const reused = story.title === current.title && story.author === current.author && story.description === current.description
+          && JSON.stringify(story.tags) === JSON.stringify(current.tags) && current.metadataTranslatedAt === undefined;
+        if (!reused) {
+          await invalidateStoryForConfigChange(this.root, slug, current, story); await atomicWriteJson(paths.storyConfig, story);
+          await recordActivity(this.root, slug, "story.metadata_restored", `Restored original story metadata for ${story.outputLanguage}`); invalidateCatalogCache(this.root, slug);
+        }
+        return { story, reused, restored: true };
+      }
       const provider = this.runtime.router.forStage(current.pipeline.translation);
       const result = await withUsageScope({ story: slug, stage: "metadataTranslation" }, () => translateStoryMetadata(provider, current.pipeline.translation, current));
       const story = storySchema.parse({ ...current, title: result.translated.title, author: result.translated.author ?? result.source.author, description: result.translated.description, tags: result.translated.tags,
@@ -264,7 +284,7 @@ export class StudioOperations {
     slugSchema.parse(slug); const input = batchInputSchema.parse(raw);
     return this.jobs.create("batch", slug, async (control) => withStoryLock(this.root, slug, "web batch", async () => {
       const story = await loadStory(storyPaths(this.root, slug, 1).storyConfig); const imported = await loadImportedChapters(this.root, slug);
-      const selected = selectChapterRange(imported.chapters, input.from, input.to); const state = createBatchState({ root: this.root, story: slug, inputDirectory: imported.directory, chapters: selected, allowGaps: true, continueOnError: false, delayMs: 0, force: input.force, stopAfter: batchStopAfter(input.force) });
+      const selected = selectChapterRange(imported.chapters, input.from, input.to); const state = createBatchState({ root: this.root, story: slug, inputDirectory: imported.directory, chapters: selected, allowGaps: true, continueOnError: input.continueOnError, delayMs: 0, force: input.force, stopAfter: batchStopAfter(input.force) });
       const shutdown = new ShutdownController(); control.setPause(() => shutdown.request());
       return new BatchRunner(this.pipeline).run({ root: this.root, story, chapters: selected, state, shutdown, retry: retryConfigSchema.parse({}),
         onProgress: (event: ProgressEvent) => control.update(event) });
@@ -277,6 +297,53 @@ export class StudioOperations {
   async appCostAnalytics(filters: Parameters<PostgresUsageRepository["summary"]>[0]) { if (!this.usage) throw new Error("Cost analytics requires DATABASE_URL"); return this.usage.summary(filters); }
 
   async editChapterText(slug: string, chapter: number, raw: unknown) { slugSchema.parse(slug); const input = chapterTextEditSchema.parse(raw); return withStoryLock(this.root, slug, "manual chapter text edit", async () => { const result = await saveChapterTextEdit(this.root, slug, chapter, input); await recordActivity(this.root, slug, "chapter.edited", `Edited Chapter ${chapter} ${input.field}`); return result; }); }
+  startQaRepair(slug: string, chapter: number, raw: unknown) {
+    slugSchema.parse(slug); const input = qaRepairInputSchema.parse(raw);
+    return this.jobs.create("qaRepair", slug, async (control) => withStoryLock(this.root, slug, "selected QA repair", async () => {
+      const story = await loadStory(storyPaths(this.root, slug, chapter).storyConfig); const paths = storyPaths(this.root, slug, chapter);
+      const [qaRaw, source, translation, narration, context] = await Promise.all([readJsonIfExists(paths.qa), readFile(paths.original, "utf8"), readFile(paths.english, "utf8"), readFile(paths.narration, "utf8"), readJsonIfExists(paths.storyContext)]);
+      const qa = qaResultSchema.parse(qaRaw); const uniqueIndexes = [...new Set(input.issueIndexes)];
+      const issues = uniqueIndexes.map((index) => qa.issues[index]).filter((issue): issue is NonNullable<typeof issue> => Boolean(issue));
+      if (issues.length !== uniqueIndexes.length) throw new Error("One or more selected QA findings no longer exist. Reload the chapter and select them again.");
+      const targets = repairTargets(issues); const repaired: string[] = []; let currentTranslation = translation; let currentNarration = narration;
+      for (const target of targets) {
+        control.update({ type: "qa.repair.started", chapter, target, selectedIssues: issues.length });
+        const config = story.pipeline[target]; const provider = this.llm.forStage(config);
+        const result = await withUsageScope({ story: slug, chapter, stage: `qaRepair.${target}` }, () => repairQaText(provider, config, { target, chapter, sourceLanguage: story.sourceLanguage, outputLanguage: story.outputLanguage, source, translation: currentTranslation, narration: currentNarration, issues: issues.filter((issue) => issueRepairTargets(issue).includes(target)), context }));
+        await saveChapterTextEdit(this.root, slug, chapter, { field: target, text: result.text });
+        if (target === "translation") currentTranslation = result.text; else currentNarration = result.text; repaired.push(target);
+        control.update({ type: "qa.repair.completed", chapter, target, completed: repaired.length, total: targets.length });
+      }
+      invalidateCatalogCache(this.root, slug); await recordActivity(this.root, slug, "chapter.qa_repaired", `AI repaired Chapter ${chapter} ${repaired.join(" and ")} for ${issues.length} selected QA finding(s)`);
+      return { chapter, repaired, issueIndexes: uniqueIndexes, requiresQaRecheck: true };
+    }));
+  }
+  startQaRecheck(slug: string, chapter: number) {
+    slugSchema.parse(slug); if (!Number.isSafeInteger(chapter) || chapter < 1) throw new ConfigurationError("Chapter must be a positive integer");
+    return this.jobs.create("qaRecheck", slug, async (control) => withStoryLock(this.root, slug, "QA-only recheck", async () => {
+      const paths = storyPaths(this.root, slug, chapter); const story = await loadStory(paths.storyConfig);
+      const [rawChapter, source, translation, narration, contextRaw] = await Promise.all([
+        readJsonIfExists<Chapter>(paths.chapterMeta), readFile(paths.original, "utf8"), readFile(paths.english, "utf8"), readFile(paths.narration, "utf8"), readJsonIfExists(paths.storyContext),
+      ]);
+      if (!rawChapter) throw new Error(`Chapter ${chapter} has no production metadata`);
+      if (!translation.trim() || !narration.trim()) throw new Error(`Chapter ${chapter} needs a retained translation and narration before it can be rechecked`);
+      const metadata = chapterSchema.parse(rawChapter);
+      // A prior context snapshot is an optimization for the normal pipeline, not
+      // a prerequisite for QA. Older imported chapters may not have one yet.
+      const context = contextRaw ? storyBibleSchema.parse(contextRaw) : emptyStoryBible();
+      control.update({ type: "qa.recheck.started", chapter, stage: "qa" });
+      const config = story.pipeline.qa; const result = await withUsageScope({ story: slug, chapter, stage: "qa" }, () => validateChapterQuality(this.llm.forStage(config), config, {
+        chapter, sourceLanguage: story.sourceLanguage, outputLanguage: story.outputLanguage, source, translation, narration, context,
+      }));
+      await atomicWriteJson(paths.qa, result.value);
+      metadata.quality = { status: result.value.status, score: result.value.score, issueCategories: [...new Set(result.value.issues.map((issue) => issue.category))] };
+      metadata.stages.qa = { status: "complete", fingerprint: fingerprint({ source, translation, narration, config }), outputFingerprint: fingerprint(JSON.stringify(result.value)), provider: config.provider, model: config.model, promptVersion: "qa-only-v1", completedAt: new Date().toISOString(), usage: result.usage };
+      metadata.updatedAt = new Date().toISOString(); await atomicWriteJson(paths.chapterMeta, metadata);
+      control.update({ type: "qa.recheck.completed", chapter, stage: "qa", status: result.value.status });
+      invalidateCatalogCache(this.root, slug); await recordActivity(this.root, slug, "chapter.qa_rechecked", `Rechecked Chapter ${chapter} using its retained translation and narration`);
+      return { chapter, qa: result.value.status, qaOnly: true };
+    }));
+  }
   async addBibleEntry(slug: string, raw: unknown) { slugSchema.parse(slug); const input = z.object({ category: bibleCategorySchema, value: z.record(z.string(), z.unknown()), replacementKey: z.string().optional() }).strict().parse(raw); return withStoryLock(this.root, slug, "manual Story Bible add", async () => { const base = await getStoryBible(this.root, slug); const id = await addManualBibleEntry(this.root, slug, base, input.category, input.value, input.replacementKey); await recordActivity(this.root, slug, "bible.edited", `Added or corrected ${input.category} entry`); return { id }; }); }
   async updateBibleEntry(slug: string, id: string, raw: unknown) { slugSchema.parse(slug); const input = z.object({ value: z.record(z.string(), z.unknown()) }).strict().parse(raw); return withStoryLock(this.root, slug, "manual Story Bible edit", async () => { const base = await getStoryBible(this.root, slug); await updateManualBibleEntry(this.root, slug, base, id, input.value); await recordActivity(this.root, slug, "bible.edited", "Updated a Story Bible entry"); return { status: "updated" }; }); }
   async deleteBibleEntry(slug: string, id: string) { slugSchema.parse(slug); return withStoryLock(this.root, slug, "manual Story Bible delete", async () => { const base = await getStoryBible(this.root, slug); await deleteBibleEntry(this.root, slug, base, id); await recordActivity(this.root, slug, "bible.edited", "Deleted a manual Story Bible entry"); return { status: "deleted" }; }); }
@@ -390,7 +457,7 @@ export class StudioOperations {
       const comparison = compareRemoteDirectory(providerManifest, directory);
       let imported: number[] = [];
       if (importNew && comparison.added.length) {
-        if (comparison.removed.length || comparison.reordered.length) throw new Error("Cannot import automatically because existing chapters were removed or reordered");
+        if (comparison.removed.length || comparison.reordered.length) throw new SourceConflictError("Cannot import automatically because existing chapters were removed or reordered");
         const inspection = await this.registry.inspect(provider, manifest.origin.url, { chapters: comparison.added.map((item) => item.chapter) }); const result = await importSource(this.root, slug, inspection); imported = result.added;
       }
       return { ...comparison, previousImportedCount: manifest.chapters.length, imported };
@@ -407,17 +474,22 @@ export class StudioOperations {
 }
 
 function supportsBulk(provider: StorySourceProvider) { const capabilities = (provider as unknown as { capabilities?: { acquisition?: string[] } }).capabilities; return capabilities?.acquisition?.includes("bulk-download") === true; }
+function sameLanguage(left: string, right: string) { return left.trim().toLowerCase().replaceAll("_", "-") === right.trim().toLowerCase().replaceAll("_", "-"); }
 
 function batchStopAfter(force?: z.infer<typeof batchInputSchema>["force"]): StageName | undefined {
   if (!force || force === "all") return undefined;
   return force === "story-bible" ? "storyBible" : force === "audio" ? "audioMastering" : force;
 }
 
-function sourceUpdatePreview(previous: SourceManifest, inspection: SourceInspection) {
-  const before = new Map(previous.chapters.map((item) => [item.chapter, item.fingerprint]));
+async function sourceUpdatePreview(sourceRoot: string, previous: SourceManifest, inspection: SourceInspection) {
+  const before = new Map<number, string>();
+  for (const item of previous.chapters) {
+    const text = await readFile(resolve(sourceRoot, item.file), "utf8");
+    before.set(item.chapter, item.contentFingerprint ?? importedChapterContentFingerprint(text));
+  }
   const incoming = inspection.chapters.map((item) => {
     const text = item.text.endsWith("\n") ? item.text : `${item.text}\n`;
-    return { chapter: item.ref.chapter, fingerprint: importedChapterFingerprint(item.ref, text) };
+    return { chapter: item.ref.chapter, fingerprint: importedChapterContentFingerprint(text) };
   });
   const added = incoming.filter((item) => !before.has(item.chapter)).map((item) => item.chapter);
   const replaced = incoming.filter((item) => before.has(item.chapter) && before.get(item.chapter) !== item.fingerprint).map((item) => item.chapter);

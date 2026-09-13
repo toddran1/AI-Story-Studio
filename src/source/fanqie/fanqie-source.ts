@@ -6,6 +6,7 @@ import { bookIdFromChapterPage, FanqieLockedChapterError, parseFanqieChapter } f
 import { fanqieBookUrl, parseFanqieUrl } from "./fanqie-url.js";
 import { validateWebChapter } from "../chapter-validation.js";
 import { chapterProvenance, FetchedNovelChapter, NovelBook, NovelChapterRef, NovelProviderDescriptor, NovelSearchResult, NovelSourceProvider } from "../novel-provider.js";
+import { SourceValidationError } from "../errors.js";
 
 const ADAPTER_VERSION = "fanqie-v1";
 
@@ -52,18 +53,18 @@ export class FanqieSource implements StorySourceProvider, NovelSourceProvider {
     const parsed = parseFanqieUrl(sourcePath); let bookId = parsed.id;
     if (parsed.kind === "chapter") bookId = bookIdFromChapterPage(await this.http.getText(parsed.url, { refresh: options.refresh }));
     const sourceUrl = fanqieBookUrl(bookId); const book = parseFanqieBook(await this.http.getText(sourceUrl, { refresh: options.refresh }), sourceUrl, bookId);
-    if (options.from && options.to && options.from > options.to) throw new Error("--from cannot be greater than --to");
+    if (options.from && options.to && options.from > options.to) throw new SourceValidationError("--from cannot be greater than --to");
     let requested = options.chapters ? new Set(options.chapters) : undefined; let selected;
     if (!requested && (options.from !== undefined || options.to !== undefined)) {
       const from = options.from ?? 1; const to = options.to ?? book.directory.length;
-      if (from > book.directory.length || to > book.directory.length) throw new Error(`Requested range ${from}-${to} exceeds the ${book.directory.length} exposed Fanqie chapters`);
+      if (from > book.directory.length || to > book.directory.length) throw new SourceValidationError(`Requested range ${from}-${to} exceeds the ${book.directory.length} exposed Fanqie chapters`);
       selected = book.directory.filter((ref) => ref.chapter >= from && ref.chapter <= to);
     }
     if (!requested && !selected && options.probe) selected = book.directory.slice(0, options.probe);
     selected ??= requested ? book.directory.filter((ref) => requested!.has(ref.chapter)) : [];
     if (requested && selected.length !== requested.size) {
       const found = new Set(selected.map((ref) => ref.chapter)); const missing = [...requested].filter((chapter) => !found.has(chapter));
-      throw new Error(`Requested chapters are not present in the Fanqie directory: ${missing.join(", ")}`);
+      throw new SourceValidationError(`Requested chapters are not present in the Fanqie directory: ${missing.join(", ")}`);
     }
     const chapters: RawChapter[] = [];
     const warnings: SourceWarning[] = book.chapterCount !== book.directory.length ? [{ code: "unavailable_chapter", message: `Fanqie reports ${book.chapterCount} chapters but exposes ${book.directory.length}` }] : [];

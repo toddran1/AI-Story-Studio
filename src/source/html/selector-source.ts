@@ -5,6 +5,7 @@ import { inspectNovelProvider } from "../novel-inspection.js";
 import { FetchedNovelChapter, NovelBook, NovelChapterRef, NovelProviderDescriptor, NovelSearchResult, NovelSourceProvider } from "../novel-provider.js";
 import { SourceInspectOptions, SourceInspection, StorySourceProvider } from "../types.js";
 import { WebHttpClient } from "../web/http-client.js";
+import { fingerprint } from "../../utils/hash.js";
 
 export type SelectorSourceConfig = {
   descriptor: NovelProviderDescriptor;
@@ -25,13 +26,14 @@ export type SelectorSourceConfig = {
     url(query: string): string; result: string; link: string; author?: string; latest?: string;
     method?: "GET" | "POST_FORM"; fields?: (query: string) => Record<string, string>; headers?: Record<string, string>;
   };
-  discoveryIndex?: { landingPath: string; writerPath: RegExp; authorPath: RegExp; fallbackWriterPaths: string[]; ttlMs?: number };
+  discoveryIndex?: { landingPath: string; writerPath: RegExp; authorPath: RegExp; fallbackWriterPaths: string[]; ttlMs?: number; deadlineMs?: number };
 };
 
 export class SelectorNovelSource implements StorySourceProvider, NovelSourceProvider {
   readonly type = "web" as const; readonly id; readonly displayName; readonly capabilities; readonly descriptor;
   private readonly http: WebHttpClient;
   private discoveryCache?: { expiresAt: number; results: NovelSearchResult[] };
+  private discoveryBuild?: Promise<NovelSearchResult[]>;
   constructor(private readonly config: SelectorSourceConfig, http?: WebHttpClient) {
     this.http = http ?? new WebHttpClient({ allowedHosts: config.descriptor.domains, maintainCookies: true });
     this.id = config.descriptor.id; this.displayName = config.descriptor.displayName; this.capabilities = config.descriptor.capabilities; this.descriptor = config.descriptor;
@@ -43,7 +45,7 @@ export class SelectorNovelSource implements StorySourceProvider, NovelSourceProv
     if (!query.trim()) return [];
     if (this.config.discoveryIndex) return this.searchDiscoveryIndex(query.trim(), limit);
     const search = this.config.search; if (!search) return [];
-    const html = search.method === "POST_FORM" ? await this.http.postForm(search.url(query.trim()), search.fields?.(query.trim()) ?? {}, { headers: search.headers }) : await this.http.getText(search.url(query.trim())); const $ = load(html); const results: NovelSearchResult[] = []; const seen = new Set<string>();
+    const html = search.method === "POST_FORM" ? await this.http.postForm(search.url(query.trim()), search.fields?.(query.trim()) ?? {}, { headers: search.headers }) : await this.http.getText(search.url(query.trim())); assertPage(html, `${this.displayName} search`); const $ = load(html); const results: NovelSearchResult[] = []; const seen = new Set<string>();
     $(search.result).each((_, element) => {
       const link = $(element).find(search.link).first(); const href = link.attr("href"); if (!href) return;
       const url = new URL(href, this.config.baseUrl); const parsed = this.config.parseUrl(url); const title = clean(link.text()); if (!parsed?.bookId || !title || seen.has(parsed.bookId)) return; seen.add(parsed.bookId);
@@ -61,24 +63,28 @@ export class SelectorNovelSource implements StorySourceProvider, NovelSourceProv
       language: this.descriptor.languages[0], metadata: { firstHtml: html } };
   }
   async getChapterList(book: NovelBook): Promise<NovelChapterRef[]> {
-    const firstHtml = typeof book.metadata?.firstHtml === "string" ? book.metadata.firstHtml : await this.http.getText(book.url); const firstDocument = load(firstHtml);
+    const firstHtml = typeof book.metadata?.firstHtml === "string" ? book.metadata.firstHtml : await this.http.getText(book.url); assertPage(firstHtml, `${this.displayName} catalog`); const firstDocument = load(firstHtml);
     const urls = this.config.catalogPageUrls?.(book.bookId, firstHtml, firstDocument) ?? [book.url]; if (!urls.length || urls.length > 500) throw new Error(`${this.displayName} catalog page count is outside the 1-500 safety limit`);
     const normalizedUrls = [...new Set(urls)]; if (normalizedUrls.length !== urls.length) throw new Error(`${this.displayName} catalog pagination contains duplicate page URLs`);
     const pages = [firstHtml];
-    for (const url of normalizedUrls) if (url !== book.url) { const html = await this.http.getText(url); const page = load(html); if (!page(this.config.selectors.directory).length) throw new Error(`${this.displayName} catalog page ${url} did not contain a chapter directory`); pages.push(html); }
-    const refs: NovelChapterRef[] = []; const seen = new Set<string>();
-    for (const html of pages) { const $ = load(html); $(this.config.selectors.directory).each((_, element) => {
+    for (const url of normalizedUrls) if (url !== book.url) { const html = await this.http.getText(url); assertPage(html, `${this.displayName} catalog page ${url}`); const page = load(html); if (!page(this.config.selectors.directory).length) throw new Error(`${this.displayName} catalog page ${url} did not contain a chapter directory`); pages.push(html); }
+    const refs: NovelChapterRef[] = []; const seen = new Set<string>(); const pageSignatures = new Set<string>();
+    for (const [pageIndex, html] of pages.entries()) { const $ = load(html); const pageIds: string[] = []; $(this.config.selectors.directory).each((_, element) => { const href = $(element).attr("href"); if (!href) return; const chapterId = this.config.parseChapterHref(new URL(href, book.url), book.bookId); if (chapterId) pageIds.push(chapterId); });
+      if (!pageIds.length) throw new Error(`${this.displayName} catalog page ${pageIndex + 1} did not contain recognizable chapter links`);
+      const signature = fingerprint(pageIds); if (pageSignatures.has(signature)) throw new Error(`${this.displayName} catalog pagination repeated page ${pageIndex + 1}`); pageSignatures.add(signature);
+      $(this.config.selectors.directory).each((_, element) => {
       const href = $(element).attr("href"); if (!href) return; const url = new URL(href, book.url); const chapterId = this.config.parseChapterHref(url, book.bookId); if (!chapterId || seen.has(chapterId)) return; seen.add(chapterId);
       const title = optional($(element).text()); refs.push({ provider: this.id, bookId: book.bookId, chapterId, chapter: explicitChapterNumber(title) ?? refs.length + 1, title, url: this.config.chapterUrl(book.bookId, chapterId) });
     }); }
     if (!refs.length) throw new Error(`${this.displayName} chapter directory was not found`); return refs;
   }
   async getChapter(ref: NovelChapterRef): Promise<FetchedNovelChapter> {
-    const pages: string[] = []; const paragraphs: string[] = []; let extractedTitle: string | undefined; let contentContainerFound = false; const visited = new Set<string>(); let next = ref.url;
+    const pages: string[] = []; const paragraphs: string[] = []; let extractedTitle: string | undefined; let contentContainerFound = false; const visited = new Set<string>(); const pageSignatures = new Set<string>(); let next = ref.url;
     for (let page = 1; page <= 50; page++) {
       if (visited.has(next)) throw new Error(`${this.displayName} chapter pagination loop detected`); visited.add(next);
-      const html = await this.http.getText(next); pages.push(html); const $ = load(html); extractedTitle ??= optional(first($, this.config.selectors.chapterTitle)); const containers = $(this.config.selectors.content); if (page > 1 && !containers.length) throw new Error(`${this.displayName} continuation page ${page} did not contain chapter content`); contentContainerFound ||= containers.length > 0;
-      containers.each((_, element) => { const node = $(element).clone(); node.find("script,style,noscript,nav,.ads,.ad").remove(); const paragraphNodes = node.find("p"); if (!paragraphNodes.length) node.find("br").replaceWith("\n"); const pieces = paragraphNodes.length ? paragraphNodes.toArray().map((item) => $(item).text()) : node.text().split(/\r?\n/); for (const raw of pieces) { const line = this.clean(raw, extractedTitle); if (line) paragraphs.push(line); } });
+      const html = await this.http.getText(next); pages.push(html); const $ = load(html); extractedTitle ??= optional(first($, this.config.selectors.chapterTitle)); const containers = $(this.config.selectors.content); if (page > 1 && !containers.length && !isChallengePage(html)) throw new Error(`${this.displayName} continuation page ${page} did not contain chapter content`); contentContainerFound ||= containers.length > 0; const pageParagraphs: string[] = [];
+      containers.each((_, element) => { const node = $(element).clone(); node.find("script,style,noscript,nav,.ads,.ad").remove(); const paragraphNodes = node.find("p"); if (!paragraphNodes.length) node.find("br").replaceWith("\n"); const pieces = paragraphNodes.length ? paragraphNodes.toArray().map((item) => $(item).text()) : node.text().split(/\r?\n/); for (const raw of pieces) { const line = this.clean(raw, extractedTitle); if (line) pageParagraphs.push(line); } });
+      if (pageParagraphs.length) { const signature = fingerprint(pageParagraphs); if (pageSignatures.has(signature)) throw new Error(`${this.displayName} chapter pagination repeated content on page ${page}`); pageSignatures.add(signature); paragraphs.push(...pageParagraphs); }
       const candidate = this.config.nextChapterPage?.(ref, page, html, $); if (!candidate) break; next = candidate;
       if (page === 50) throw new Error(`${this.displayName} chapter exceeds the 50-page safety limit`);
     }
@@ -88,16 +94,27 @@ export class SelectorNovelSource implements StorySourceProvider, NovelSourceProv
   private async searchDiscoveryIndex(query: string, limit: number) {
     const config = this.config.discoveryIndex!; const now = Date.now(); let results = this.discoveryCache?.expiresAt && this.discoveryCache.expiresAt > now ? this.discoveryCache.results : undefined;
     if (!results) {
-      let writerPaths = config.fallbackWriterPaths; try { const html = await this.http.getText(new URL(config.landingPath, this.config.baseUrl).href); writerPaths = internalPaths(html, this.config.baseUrl, config.writerPath); } catch { /* The fixed writer index remains a safe fallback. */ }
-      if (!writerPaths.length) writerPaths = config.fallbackWriterPaths; if (writerPaths.length > 50) throw new Error(`${this.displayName} writer index exceeds the 50-page safety limit`);
-      const authorPaths = new Set<string>(); for (const path of writerPaths) { try { for (const item of internalPaths(await this.http.getText(new URL(path, this.config.baseUrl).href), this.config.baseUrl, config.authorPath)) authorPaths.add(item); } catch { /* One stale writer page must not discard the remaining index. */ } }
-      if (!authorPaths.size) throw new Error(`${this.displayName} author discovery index was not found`); if (authorPaths.size > 2_000) throw new Error(`${this.displayName} author index exceeds the 2,000-page safety limit`);
-      const found: NovelSearchResult[] = []; const seen = new Set<string>();
-      for (const path of authorPaths) { let html: string; try { html = await this.http.getText(new URL(path, this.config.baseUrl).href); } catch { continue; } const $ = load(html); const author = clean($("h1").first().text()).replace(/^作者[:：]?/u, "").replace(/作品全集$/u, "").trim();
-        $("tr").each((_, row) => { const links = $(row).find("a[href]").toArray(); for (const link of links) { const href = $(link).attr("href"); if (!href) continue; const url = new URL(href, this.config.baseUrl); const parsed = this.config.parseUrl(url); const title = clean($(link).text()).replace(/[《》]/gu, ""); if (!parsed?.bookId || !title || seen.has(parsed.bookId)) continue; seen.add(parsed.bookId); found.push({ provider: this.id, bookId: parsed.bookId, url: this.config.bookUrl(parsed.bookId), title, author: optional(author), description: optional($(row).text().replace($(link).text(), "")) }); break; } }); }
-      results = found; this.discoveryCache = { results, expiresAt: now + (config.ttlMs ?? 24 * 60 * 60 * 1000) };
+      if (!this.discoveryBuild) {
+        const controller = new AbortController(); const deadlineMs = config.deadlineMs ?? 120_000;
+        const timer = setTimeout(() => controller.abort(new Error(`${this.displayName} discovery index exceeded its ${deadlineMs}ms deadline`)), deadlineMs); timer.unref?.();
+        this.discoveryBuild = this.buildDiscoveryIndex(controller.signal).catch((error) => { if (controller.signal.aborted) throw controller.signal.reason; throw error; }).finally(() => { clearTimeout(timer); this.discoveryBuild = undefined; });
+      }
+      results = await this.discoveryBuild;
+      this.discoveryCache = { results, expiresAt: Date.now() + (config.ttlMs ?? 24 * 60 * 60 * 1000) };
     }
     const needle = query.toLocaleLowerCase(); return results.filter((item) => `${item.title}\n${item.author ?? ""}\n${item.description ?? ""}`.toLocaleLowerCase().includes(needle)).slice(0, Math.max(0, limit));
+  }
+  private async buildDiscoveryIndex(signal: AbortSignal): Promise<NovelSearchResult[]> {
+      const config = this.config.discoveryIndex!; const failures: string[] = [];
+      let writerPaths = config.fallbackWriterPaths; try { const html = await this.http.getText(new URL(config.landingPath, this.config.baseUrl).href, { signal }); assertPage(html, `${this.displayName} discovery landing page`); writerPaths = internalPaths(html, this.config.baseUrl, config.writerPath); } catch (error) { if (signal.aborted) throw error; /* The fixed writer index remains a safe fallback. */ }
+      if (!writerPaths.length) writerPaths = config.fallbackWriterPaths; if (writerPaths.length > 50) throw new Error(`${this.displayName} writer index exceeds the 50-page safety limit`);
+      const authorPaths = new Set<string>(); for (const path of writerPaths) { try { const html = await this.http.getText(new URL(path, this.config.baseUrl).href, { signal }); assertPage(html, `${this.displayName} writer index ${path}`); for (const item of internalPaths(html, this.config.baseUrl, config.authorPath)) authorPaths.add(item); } catch (error) { if (signal.aborted) throw error; failures.push(`${path}: ${error instanceof Error ? error.message : String(error)}`); } }
+      if (!authorPaths.size) throw new Error(`${this.displayName} author discovery index was not found`); if (authorPaths.size > 2_000) throw new Error(`${this.displayName} author index exceeds the 2,000-page safety limit`);
+      const found: NovelSearchResult[] = []; const seen = new Set<string>();
+      for (const path of authorPaths) { let html: string; try { html = await this.http.getText(new URL(path, this.config.baseUrl).href, { signal }); assertPage(html, `${this.displayName} author index ${path}`); } catch (error) { if (signal.aborted) throw error; failures.push(`${path}: ${error instanceof Error ? error.message : String(error)}`); continue; } const $ = load(html); const author = clean($("h1").first().text()).replace(/^作者[:：]?/u, "").replace(/作品全集$/u, "").trim();
+        $("tr").each((_, row) => { const links = $(row).find("a[href]").toArray(); for (const link of links) { const href = $(link).attr("href"); if (!href) continue; const url = new URL(href, this.config.baseUrl); const parsed = this.config.parseUrl(url); const title = clean($(link).text()).replace(/[《》]/gu, ""); if (!parsed?.bookId || !title || seen.has(parsed.bookId)) continue; seen.add(parsed.bookId); found.push({ provider: this.id, bookId: parsed.bookId, url: this.config.bookUrl(parsed.bookId), title, author: optional(author), description: optional($(row).text().replace($(link).text(), "")) }); break; } }); }
+      if (failures.length) throw new Error(`${this.displayName} discovery index was incomplete (${failures.length} page failures); it was not cached. First failure: ${failures[0]}`);
+      return found;
   }
   private parse(input: string) { let url: URL; try { url = new URL(input); } catch (error) { throw new Error(`Invalid ${this.displayName} URL`, { cause: error }); } const parsed = this.config.parseUrl(url); if (!parsed) throw new Error(`Unsupported ${this.displayName} URL: ${input}`); return parsed; }
   private clean(value: string, title?: string) { const line = clean(value); if (!line) return undefined; return this.config.cleanLine?.(line, title) ?? line; }
@@ -113,3 +130,4 @@ function absolute(value: string | undefined, base: string) { if (!value) return 
 function explicitChapterNumber(title?: string) { const match = title ? /第\s*(\d+)\s*(?:章|话|話|节|節)/u.exec(title) : undefined; return match ? Number(match[1]) : undefined; }
 function dedupe(values: string[]) { return values.filter((value, index) => index === 0 || value !== values[index - 1]); }
 function assertPage(html: string, provider: string) { if (/captcha|cloudflare|正在验证|安全验证|checking your browser|challenge=/iu.test(html)) throw new Error(`${provider} requires an authorized browser challenge before access`); }
+function isChallengePage(html: string) { return /captcha|cloudflare|正在验证|安全验证|checking your browser|challenge=/iu.test(html); }

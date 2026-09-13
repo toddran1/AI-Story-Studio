@@ -87,6 +87,9 @@ export const sourceManifestSchema = z.object({
     chapter: z.number().int().positive(),
     file: z.string().regex(/^chapters\/\d{4,}\.txt$/),
     fingerprint: sha256Schema,
+    // Kept separate from provenance so refreshed validation evidence, source
+    // URLs, and title formatting cannot invalidate expensive production work.
+    contentFingerprint: sha256Schema.optional(),
     ref: chapterReferenceSchema,
   })),
 }).superRefine((manifest, context) => {

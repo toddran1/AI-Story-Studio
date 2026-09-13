@@ -11,6 +11,7 @@ import { atomicWrite, atomicWriteJson } from "../storage/atomic-write.js";
 import { readJsonIfExists, readTextIfExists } from "../storage/story-files.js";
 import { storyPaths } from "../storage/paths.js";
 import { fingerprint } from "../utils/hash.js";
+import { fileFingerprint } from "../utils/file-fingerprint.js";
 import { logger } from "../utils/logger.js";
 import { TRANSLATION_PROMPT_VERSION } from "../translation/prompts.js";
 import { translate } from "../translation/translator.js";
@@ -222,7 +223,7 @@ export class ChapterPipeline {
     // generated with a different voice.
     const ttsProvider = this.tts.forName(ttsConfig.provider);
     const referenceId = ttsProvider.resolveReferenceId?.(ttsConfig.referenceId) ?? ttsConfig.referenceId;
-    const ttsFp = fingerprint({ narration: fingerprint(ttsScript), config: { ...ttsConfig, referenceId }, deliveryProfile });
+    const ttsFp = fingerprint({ narration: fingerprint(ttsScript), config: { ...ttsConfig, referenceId }, deliveryProfile, inputNormalizationVersion: ttsProvider.inputNormalizationVersion });
     if (!(await fileFingerprint(paths.audioRaw)) && chapter.stages.tts.status === "complete" && await fileFingerprint(paths.audio)) await atomicWrite(paths.audioRaw, await readFile(paths.audio));
     await runStage("tts", ttsFp, paths.audioRaw, { provider: ttsConfig.provider, model: ttsConfig.model }, async () => {
       const result = await ttsProvider.synthesize({ text: ttsScript, model: ttsConfig.model, referenceId,
@@ -266,11 +267,6 @@ async function requireText(path: string, stage: string): Promise<string> {
 
 const wordCount = (text: string) => text.trim() ? text.trim().split(/\s+/).length : 0;
 const sameLanguage = (source: string, output: string) => source.trim().toLowerCase().replaceAll("_", "-") === output.trim().toLowerCase().replaceAll("_", "-");
-async function fileFingerprint(path: string): Promise<string | undefined> {
-  try { const data = await readFile(path); return data.length ? fingerprint(data.toString("base64")) : undefined; }
-  catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; }
-}
-
 function invalidateDownstream(chapter: Chapter, stage: StageName) {
   // Continuity is an independently retryable analysis branch, not an input to paid production stages.
   if (stage === "continuity") return;

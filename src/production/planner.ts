@@ -1,10 +1,11 @@
-import { readFile, stat } from "node:fs/promises";
+import { stat } from "node:fs/promises";
 import { Chapter, StageName, chapterSchema } from "../domain/chapter.js";
 import { Story } from "../domain/story.js";
 import { sceneManifestSchema } from "../scenes/types.js";
 import { sceneImagePath, storyPaths } from "../storage/paths.js";
 import { readJsonIfExists } from "../storage/story-files.js";
 import { fingerprint } from "../utils/hash.js";
+import { fileFingerprint, filesFingerprint } from "../utils/file-fingerprint.js";
 import { ProductionForce, ProductionOutput, ProductionPlan, ProductionProfile, ProductionStage, defaultProductionProfiles, productionProfileSchema } from "./types.js";
 
 const core: StageName[] = ["ingestion", "translation", "narration", "qa", "storyBible", "continuity", "tts", "audioMastering"];
@@ -38,7 +39,7 @@ export async function buildProductionPlan(options: { root: string; story: Story;
     if (stages.includes("artwork")) {
       const manifestRaw = await readJsonIfExists(paths.scenesManifest); const manifest = manifestRaw ? sceneManifestSchema.safeParse(manifestRaw) : undefined;
       if (!manifest?.success) { imagesPendingPlanning++; chapterRequired = true; if (!requiredStages.includes("artwork")) requiredStages.push("artwork"); }
-      else for (const scene of manifest.data.scenes) { const path = sceneImagePath(options.root, options.story.slug, number, scene.id); const actual = await fileHash(path); if (isProductionStageForced(options.force, "artwork") || scene.artwork.status !== "complete" || !scene.artwork.imageFingerprint || actual !== scene.artwork.imageFingerprint) { imageOperations++; chapterRequired = true; if (!requiredStages.includes("artwork")) requiredStages.push("artwork"); } }
+      else for (const scene of manifest.data.scenes) { const path = sceneImagePath(options.root, options.story.slug, number, scene.id); const actual = await fileFingerprint(path); if (isProductionStageForced(options.force, "artwork") || scene.artwork.status !== "complete" || !scene.artwork.imageFingerprint || actual !== scene.artwork.imageFingerprint) { imageOperations++; chapterRequired = true; if (!requiredStages.includes("artwork")) requiredStages.push("artwork"); } }
     }
     if (chapterRequired) { requiredChapters.push(number); chapterRequirements[String(number)] = requiredStages; }
   }
@@ -63,9 +64,7 @@ async function stageLooksReusable(chapter: Chapter, stage: StageName, paths: Ret
   if (stage === "artwork") return chapter.scenes?.generated === chapter.scenes?.total;
   const selected = files[stage] ?? []; if (!(await Promise.all(selected.map(nonEmpty))).every(Boolean)) return false;
   if (!state.outputFingerprint) return true;
-  const actual = selected.length === 1 ? await fileHash(selected[0]!) : await filesHash(selected); return actual === state.outputFingerprint;
+  const actual = selected.length === 1 ? await fileFingerprint(selected[0]!) : await filesFingerprint(selected); return actual === state.outputFingerprint;
 }
-async function fileHash(path: string) { try { const data = await readFile(path); return data.length ? fingerprint(data.toString("base64")) : undefined; } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; } }
-async function filesHash(paths: string[]) { try { const data = await Promise.all(paths.map((path) => readFile(path))); return data.every((item) => item.length) ? fingerprint(data.map((item) => item.toString("base64"))) : undefined; } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; } }
 async function nonEmpty(path: string) { try { return (await stat(path)).size > 0; } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return false; throw error; } }
 function unique<T>(items: readonly T[]) { return [...new Set(items)]; }

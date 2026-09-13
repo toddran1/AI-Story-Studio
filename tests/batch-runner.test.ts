@@ -34,6 +34,14 @@ describe("batch runner", () => {
     const persisted = JSON.parse(await readFile(batchPaths(ctx.root, "demo-story", result.id).manifest!, "utf8"));
     expect(persisted.chapters["2"].status).toBe("complete"); expect(persisted.chapters["3"].status).toBe("failed");
   });
+  it("continues through later chapters when continuing past failures is enabled", async () => {
+    const calls: number[] = [];
+    const ctx = await setup({ run: async ({ chapter }) => { calls.push(chapter); if (chapter === 2) throw new Error("Chapter needs review"); } });
+    ctx.state.options.continueOnError = true;
+    const result = await ctx.runner.run({ ...ctx, story: testStory(), chapters: discovered, retry, sleep: async () => undefined });
+    expect(calls).toEqual([1, 2, 3, 4]); expect(result.status).toBe("completed_with_errors");
+    expect(result.chapters["2"]?.status).toBe("failed"); expect(result.chapters["4"]?.status).toBe("complete");
+  });
   it("resume selection begins at the failed chapter", async () => {
     const calls: number[] = []; const resume = discovered.slice(2);
     const ctx = await setup({ run: async ({ chapter }) => { calls.push(chapter); } }, resume);

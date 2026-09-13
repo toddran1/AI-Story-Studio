@@ -7,10 +7,11 @@ import { FanqieSource } from "./fanqie/fanqie-source.js";
 import { Ixdzs8Source } from "./ixdzs8/ixdzs8-source.js";
 import { ShuhaigeSource } from "./shuhaige/shuhaige-source.js";
 import { SourceType, StorySourceProvider } from "./types.js";
-import { WebHttpClient } from "./web/http-client.js";
+import { WebHttpClient, WebHttpError } from "./web/http-client.js";
 import { NovelProviderId, NovelSearchResult, NovelSourceProvider } from "./novel-provider.js";
 import { ProviderCircuitBreaker, providerDescriptor } from "./provider-catalog.js";
 import { builtinSelectorSources } from "./html/builtin-selector-sources.js";
+import { SourceInputError, SourceOperationError, SourceUpstreamError } from "./errors.js";
 
 export class SourceProviderRegistry {
   private readonly providers = new Map<SourceType, StorySourceProvider>(); private readonly novelProviders = new Map<NovelProviderId, NovelSourceProvider & StorySourceProvider>();
@@ -28,7 +29,7 @@ export class SourceProviderRegistry {
     const semanticType = requested ?? novel?.type ?? await detectType(sourcePath);
     const providerType = semanticType === "manual" || semanticType === "original" ? "text" : novel?.type ?? semanticType;
     const provider = novel ?? this.providers.get(providerType);
-    if (!provider) throw new Error(`Source type '${semanticType}' is not supported`);
+    if (!provider) throw new SourceInputError(`Source type '${semanticType}' is not supported`);
     return { provider, semanticType: providerType };
   }
 
@@ -37,7 +38,11 @@ export class SourceProviderRegistry {
   listNovelProviders() { return [...this.novelProviders.values()].map((provider) => ({ ...providerDescriptor(provider), health: this.breaker.state(provider.id) })).sort((a, b) => a.priority - b.priority || a.displayName.localeCompare(b.displayName)); }
   async inspect(provider: StorySourceProvider, source: string, options?: Parameters<StorySourceProvider["inspect"]>[1]) {
     if (!isNovelProvider(provider)) return provider.inspect(source, options);
-    return this.execute(provider, () => provider.inspect(source, options));
+    return this.execute(provider, () => provider.inspect(source, options), (inspection) => {
+      const requested = options?.chapters?.length ?? ((options?.chapter !== undefined || options?.from !== undefined || options?.to !== undefined || options?.probe !== undefined || options?.acquisition === "bulk-download") ? 1 : 0);
+      return requested > 0 && inspection.chapters.length === 0 && inspection.warnings.some((warning) => warning.code === "unavailable_chapter")
+        ? new Error(`${provider.displayName} returned no valid requested chapters`) : undefined;
+    });
   }
   async diagnoseNovelProvider(id: NovelProviderId) {
     const provider = this.getNovelProvider(id); if (!provider.healthCheck) return { ...providerDescriptor(provider), health: this.breaker.state(id), checked: false };
@@ -54,10 +59,10 @@ export class SourceProviderRegistry {
     settled.forEach((item, index) => { const provider = selected[index]!; if (item.status === "fulfilled") results.push(...item.value); else warnings.push({ provider: provider.id, message: item.reason instanceof Error ? item.reason.message : String(item.reason) }); });
     return { results: results.slice(0, Math.max(0, limit)), warnings };
   }
-  private async execute<T>(provider: NovelSourceProvider, operation: () => Promise<T>) {
+  private async execute<T>(provider: NovelSourceProvider, operation: () => Promise<T>, semanticFailure?: (result: T) => Error | undefined) {
     this.breaker.assertAvailable(provider.id);
-    try { const result = await operation(); this.breaker.success(provider.id); return result; }
-    catch (error) { this.breaker.failure(provider.id, error); throw error; }
+    try { const result = await operation(); const failure = semanticFailure?.(result); if (failure) this.breaker.failure(provider.id, failure); else this.breaker.success(provider.id); return result; }
+    catch (error) { this.breaker.failure(provider.id, error); if (error instanceof SourceOperationError || error instanceof WebHttpError) throw error; throw new SourceUpstreamError(`${provider.displayName} source operation failed: ${error instanceof Error ? error.message : String(error)}`, { cause: error }); }
   }
 }
 
@@ -66,12 +71,12 @@ async function detectType(sourcePath: string): Promise<SourceType> {
     const url = new URL(sourcePath); if (url.protocol !== "https:") throw new Error(`Only HTTPS web sources are allowed: ${sourcePath}`);
     if (isFanqieUrl(sourcePath)) return "fanqie";
     if (isIxdzs8Url(sourcePath) || isShuhaigeUrl(sourcePath)) return "web";
-    throw new Error(`No web source adapter recognizes '${sourcePath}'`);
+    throw new SourceInputError(`No web source adapter recognizes '${sourcePath}'`);
   }
   const absolute = resolve(sourcePath); const info = await stat(absolute); if (info.isDirectory()) return "text";
   const extension = extname(absolute).toLowerCase();
   if (extension === ".txt") return "text"; if (extension === ".epub") return "epub"; if (extension === ".docx") return "docx";
-  throw new Error(`Cannot detect source type from '${sourcePath}'. Use --type.`);
+  throw new SourceInputError(`Cannot detect source type from '${sourcePath}'. Use --type.`);
 }
 
 function isUrl(value: string) { try { new URL(value); return true; } catch { return false; } }

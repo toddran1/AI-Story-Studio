@@ -8,6 +8,7 @@ import { atomicWrite, atomicWriteJson } from "../storage/atomic-write.js";
 import { storyPaths } from "../storage/paths.js";
 import { exists, readJsonIfExists } from "../storage/story-files.js";
 import { fingerprint } from "../utils/hash.js";
+import { fileFingerprint } from "../utils/file-fingerprint.js";
 import { AudioProbe } from "./ffmpeg.js";
 import { AudioMasteringProcessor } from "./mastering.js";
 
@@ -50,8 +51,7 @@ async function masteringInputs(segmentsDirectory: string, rawAudio: string) {
   catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
   if (segments.length) return segments; if (await exists(rawAudio)) return [rawAudio]; throw new AudioError("TTS metadata is complete but raw audio and segments are missing");
 }
-async function inputFingerprints(paths: string[]) { return Promise.all(paths.map(async (path) => fingerprint((await readFile(path)).toString("base64")))); }
-async function fileFingerprint(path: string) { try { const data = await readFile(path); return data.length ? fingerprint(data.toString("base64")) : undefined; } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; } }
+async function inputFingerprints(paths: string[]) { return Promise.all(paths.map(async (path) => { const value = await fileFingerprint(path); if (!value) throw new AudioError(`Mastering input is missing or empty: ${path}`); return value; })); }
 async function persist(path: string, chapter: Chapter) { chapter.updatedAt = new Date().toISOString(); await atomicWriteJson(path, chapterSchema.parse(chapter)); }
 
 export class CopyingAudioProcessor implements AudioMasteringProcessor {

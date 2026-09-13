@@ -2,19 +2,23 @@ import { fingerprint } from "../utils/hash.js";
 import { chapterProvenance, NovelSourceProvider } from "./novel-provider.js";
 import { RawChapter, SourceInspectOptions, SourceInspection, SourceType, SourceWarning } from "./types.js";
 import { splitText } from "./txt-source.js";
+import { SourceValidationError } from "./errors.js";
 
 export async function inspectNovelProvider(provider: NovelSourceProvider, sourcePath: string, options: SourceInspectOptions = {}, adapterVersion: string): Promise<SourceInspection> {
-  if (options.from !== undefined && options.to !== undefined && options.from > options.to) throw new Error("--from cannot be greater than --to");
+  if (options.from !== undefined && options.to !== undefined && options.from > options.to) throw new SourceValidationError("--from cannot be greater than --to");
   const book = await provider.getBook(sourcePath); const directory = await provider.getChapterList(book);
+  if (!directory.length) throw new Error(`${provider.displayName} exposed an empty chapter directory`);
+  const minimumChapter = Math.min(...directory.map((item) => item.chapter)); const maximumChapter = Math.max(...directory.map((item) => item.chapter));
   const requested = options.chapters ? new Set(options.chapters) : undefined;
   let selected = requested ? directory.filter((item) => requested.has(item.chapter)) : options.from !== undefined || options.to !== undefined
-    ? directory.filter((item) => item.chapter >= (options.from ?? 1) && item.chapter <= (options.to ?? directory.length))
+    ? directory.filter((item) => item.chapter >= (options.from ?? minimumChapter) && item.chapter <= (options.to ?? maximumChapter))
     : options.probe ? directory.slice(0, options.probe) : [];
   if (requested && selected.length !== requested.size) {
     const found = new Set(selected.map((item) => item.chapter));
-    throw new Error(`Requested chapters are not present in the ${provider.displayName} directory: ${[...requested].filter((item) => !found.has(item)).join(", ")}`);
+    throw new SourceValidationError(`Requested chapters are not present in the ${provider.displayName} directory: ${[...requested].filter((item) => !found.has(item)).join(", ")}`);
   }
-  if ((options.from !== undefined && options.from > directory.length) || (options.to !== undefined && options.to > directory.length)) throw new Error(`Requested range ${options.from ?? 1}-${options.to ?? directory.length} exceeds the ${directory.length} exposed ${provider.displayName} chapters`);
+  if ((options.from !== undefined && (options.from < minimumChapter || options.from > maximumChapter)) || (options.to !== undefined && (options.to < minimumChapter || options.to > maximumChapter))) throw new SourceValidationError(`Requested range ${options.from ?? minimumChapter}-${options.to ?? maximumChapter} exceeds the ${directory.length} exposed ${provider.displayName} chapters (available chapter numbers ${minimumChapter}-${maximumChapter}, with possible gaps)`);
+  if ((options.from !== undefined || options.to !== undefined) && !selected.length) throw new SourceValidationError(`Requested range ${options.from ?? minimumChapter}-${options.to ?? maximumChapter} contains no chapters in the ${provider.displayName} directory (available ${minimumChapter}-${maximumChapter}, with possible gaps)`);
 
   const chapters: RawChapter[] = []; const warnings: SourceWarning[] = [];
   const bulk = options.acquisition === "bulk-download" ? await loadBulkChapters(provider, book, sourcePath) : undefined;

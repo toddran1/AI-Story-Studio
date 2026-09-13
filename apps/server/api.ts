@@ -12,6 +12,7 @@ import { SceneManifest, sceneManifestSchema } from "../../src/scenes/types.js";
 import { readJsonIfExists } from "../../src/storage/story-files.js";
 import { BatchValidationError, ConfigurationError, ProviderError, StorageError } from "../../src/pipeline/errors.js";
 import { WebHttpError } from "../../src/source/web/http-client.js";
+import { SourceOperationError } from "../../src/source/errors.js";
 import { logger } from "../../src/utils/logger.js";
 import { backupPath } from "../../src/studio/projects.js";
 import { exists } from "../../src/storage/story-files.js";
@@ -114,6 +115,8 @@ export function createApiHandler(operations: StudioOperations) {
       if (chapterMatch && request.method === "GET") return send(response, 200, await getChapter(operations.root, chapterMatch[1]!, Number(chapterMatch[2])));
       const chapterTextMatch = /^\/api\/stories\/([a-z0-9-]+)\/chapters\/(\d+)\/text$/.exec(url.pathname);
       if (chapterTextMatch && request.method === "PUT") return send(response, 200, await operations.editChapterText(chapterTextMatch[1]!, Number(chapterTextMatch[2]), await jsonBody(request)));
+      const chapterQaRepairMatch = /^\/api\/stories\/([a-z0-9-]+)\/chapters\/(\d+)\/qa\/repair$/.exec(url.pathname);
+      if (chapterQaRepairMatch && request.method === "POST") return send(response, 202, operations.startQaRepair(chapterQaRepairMatch[1]!, Number(chapterQaRepairMatch[2]), await jsonBody(request)));
       const audioMatch = /^\/api\/stories\/([a-z0-9-]+)\/chapters\/(\d+)\/audio$/.exec(url.pathname);
       if (audioMatch && request.method === "GET") {
         const chapter = await getChapter(operations.root, audioMatch[1]!, Number(audioMatch[2]));
@@ -196,9 +199,11 @@ export function createApiHandler(operations: StudioOperations) {
           type: optionalString(url.searchParams.get("type")) as never, chapter: optionalInteger(url.searchParams.get("chapter")), splitChapters: url.searchParams.get("split") === "true", allowGaps: url.searchParams.get("allowGaps") === "true" }, updateContext));
       }
       const importMatch = /^\/api\/stories\/([a-z0-9-]+)\/source\/import$/.exec(url.pathname);
-      if (importMatch && request.method === "POST") { const input = z.object({ inspectionId: z.string().uuid(), allowGaps: z.boolean().default(false) }).parse(await jsonBody(request)); return send(response, 200, await operations.importInspection(importMatch[1]!, input.inspectionId, input.allowGaps)); }
+      if (importMatch && request.method === "POST") { const input = z.object({ inspectionId: z.string().uuid(), allowGaps: z.boolean().default(false), overwriteExisting: z.boolean().default(false) }).parse(await jsonBody(request)); return send(response, 200, await operations.importInspection(importMatch[1]!, input.inspectionId, input.allowGaps, input.overwriteExisting)); }
       const batchMatch = /^\/api\/stories\/([a-z0-9-]+)\/jobs\/batch$/.exec(url.pathname);
       if (batchMatch && request.method === "POST") return send(response, 202, operations.startBatch(batchMatch[1]!, await jsonBody(request)));
+      const qaRecheckMatch = /^\/api\/stories\/([a-z0-9-]+)\/chapters\/(\d+)\/qa\/recheck$/.exec(url.pathname);
+      if (qaRecheckMatch && request.method === "POST") { await jsonBody(request); return send(response, 202, operations.startQaRecheck(qaRecheckMatch[1]!, Number(qaRecheckMatch[2]))); }
       const previewMatch = /^\/api\/stories\/([a-z0-9-]+)\/jobs\/preview$/.exec(url.pathname);
       if (previewMatch && request.method === "POST") return send(response, 202, operations.startPreview(previewMatch[1]!, await jsonBody(request)));
       const audioJobMatch = /^\/api\/stories\/([a-z0-9-]+)\/jobs\/audio$/.exec(url.pathname);
@@ -287,8 +292,9 @@ function parseRange(header: string | undefined, size: number): { start: number; 
   return { start, end: Math.min(end, size - 1) };
 }
 
-function statusFor(error: unknown): number {
+export function statusFor(error: unknown): number {
   if (error instanceof HttpError) return error.status;
+  if (error instanceof SourceOperationError) return error.status;
   if (error instanceof z.ZodError) return 400;
   if (error instanceof JobConflictError || /locked by PID|already has active job/.test(String(error))) return 409;
   if (error instanceof QueueConflictError) return 409;

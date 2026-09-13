@@ -72,9 +72,13 @@ export function ChapterImportPage({ storySlug, stories, navigate }: { storySlug?
     } catch (cause) { setError(errorMessage(cause)); } finally { setBusy(false); }
   };
   const importChapters = async () => {
-    if (!inspection) return; setBusy(true); setError("");
+    if (!inspection) return;
+    const replacements = inspection.update?.replaced ?? [];
+    const overwriteExisting = !replacements.length || window.confirm(`Replace Chapter${replacements.length === 1 ? "" : "s"} ${replacements.join(", ")}? Existing audio and other derived files will be retained for recovery, but marked stale and excluded from new exports.`);
+    if (!overwriteExisting) return;
+    setBusy(true); setError("");
     try {
-      await post(`/stories/${slug}/source/import`, { inspectionId: inspection.id, allowGaps: true });
+      await post(`/stories/${slug}/source/import`, { inspectionId: inspection.id, allowGaps: true, overwriteExisting });
       navigate(`/stories/${slug}`);
     } catch (cause) { setError(errorMessage(cause)); setBusy(false); }
   };

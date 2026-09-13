@@ -14,6 +14,7 @@ import { chapterSchema } from "../src/domain/chapter.js";
 import { ChapterReference, SourceInspection } from "../src/source/types.js";
 import { atomicWriteJson } from "../src/storage/atomic-write.js";
 import { storyPaths } from "../src/storage/paths.js";
+import { fingerprint } from "../src/utils/hash.js";
 
 describe("source ingestion", () => {
   it("splits English and Chinese multi-chapter TXT without lexicographic ordering", () => {
@@ -127,9 +128,27 @@ describe("source ingestion", () => {
     const cross = await importSource(root, "novel", inspection("web", [ixdzs8Ref(1), ixdzs8Ref(1500), ixdzs8Ref(1501)], [1500, 1501], "ixdzs8"));
     expect(cross.added).toEqual([1500, 1501]);
     const again = await importSource(root, "novel", inspection("web", [ixdzs8Ref(1), ixdzs8Ref(2), ixdzs8Ref(3), ixdzs8Ref(1500), ixdzs8Ref(1501)], [2, 3], "ixdzs8"));
-    expect(again.modified).toEqual([2, 3]);
+    // A provider/provenance change with identical normalized chapter text does
+    // not invalidate translation, narration, QA, or media.
+    expect(again.modified).toEqual([]);
     const reordered = inspection("web", [ixdzs8Ref(1), ixdzs8Ref(2), ixdzs8Ref(3), { ...ixdzs8Ref(1500), sourceId: "p1500-renewed" }], [2], "ixdzs8");
     await expect(importSource(root, "novel", reordered)).rejects.toThrow(/remote Chapter 1500 was removed or reordered/);
+  });
+
+  it("does not invalidate production when only remote provenance or title formatting changes", async () => {
+    const root = await mkdtemp(join(tmpdir(), "source-provenance-refresh-"));
+    const now = new Date().toISOString();
+    const makeInspection = (title: string, retrievedAt: string): SourceInspection => {
+      const ref: ChapterReference = { chapter: 1, sourceId: "p1", originalTitle: title, sourceType: "web", metadata: { provider: "ixdzs8", bookId: "568509", retrievedAt, validation: { status: "COMPLETE", evidence: { extractedCharacters: 1200 } } } };
+      return { sourcePath: "https://ixdzs8.com/read/568509/", sourceType: "web", fingerprint: fingerprint({ title, retrievedAt }), additive: true, chapters: [{ ref, text: "第1章 正文\n相同的章节内容" }], directory: [ref], warnings: [], unnumberedSections: [], origin: { url: "https://ixdzs8.com/read/568509/", bookId: "568509" }, remote: { lastInspectedAt: retrievedAt, chapterCountAtInspection: 1 }, metadata: { provider: "ixdzs8" } };
+    };
+    await importSource(root, "novel", makeInspection("第1章正文", now));
+    const chapterPath = storyPaths(root, "novel", 1).chapterMeta;
+    const complete = { status: "complete" as const, fingerprint: "paid-stage", outputFingerprint: "paid-output" };
+    await atomicWriteJson(chapterPath, chapterSchema.parse({ chapter: 1, sourceLanguage: "zh-CN", outputLanguage: "en-US", counts: { originalCharacters: 12, englishWords: 10, narrationWords: 10 }, createdAt: now, updatedAt: now, stages: { ingestion: complete, translation: complete, narration: complete, qa: complete, storyBible: complete, tts: complete } }));
+    const result = await importSource(root, "novel", makeInspection("第1章 正文", new Date(Date.now() + 1000).toISOString()), undefined, { overwriteExisting: false });
+    expect(result.modified).toEqual([]);
+    expect(chapterSchema.parse(JSON.parse(await readFile(chapterPath, "utf8"))).stages.translation.status).toBe("complete");
   });
 
   it("rejects a compressed archive whose expanded entry is too large", async () => {

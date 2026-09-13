@@ -6,6 +6,7 @@ import { SourceInspectOptions, SourceInspection, StorySourceProvider } from "../
 import { WebHttpClient } from "../web/http-client.js";
 import { decodeNovelTextDownload } from "../bulk-download.js";
 import { parseShuhaigeUrl, shuhaigeBookUrl, shuhaigeChapterUrl } from "./shuhaige-url.js";
+import { fingerprint } from "../../utils/hash.js";
 
 const VERSION = "shuhaige-v2"; const BASE = "https://www.shuhaige.net"; const MAX_PAGES = 50;
 
@@ -21,7 +22,7 @@ export class ShuhaigeSource implements StorySourceProvider, NovelSourceProvider 
   async search(query: string, limit = 20): Promise<NovelSearchResult[]> {
     if (!query.trim()) return [];
     const html = await this.http.postForm(`${BASE}/search.html`, { searchtype: "all", searchkey: query.trim() }, { headers: { Origin: BASE, Referer: `${BASE}/` } });
-    const $ = load(html); const results: NovelSearchResult[] = []; const seen = new Set<string>();
+    assertNotInterstitial(html, "Shuhaige search"); const $ = load(html); const results: NovelSearchResult[] = []; const seen = new Set<string>();
     $("#sitembox dl").each((_, element) => {
       const link = $(element).find("h3 a, dt a").first(); const href = link.attr("href") ?? ""; const id = /\/(\d+)\/?$/.exec(new URL(href, BASE).pathname)?.[1];
       if (!id || seen.has(id)) return; seen.add(id); const title = clean(link.text() || $(element).find("img").first().attr("alt") || ""); if (!title) return;
@@ -50,12 +51,12 @@ export class ShuhaigeSource implements StorySourceProvider, NovelSourceProvider 
   }
 
   async getChapter(ref: NovelChapterRef): Promise<FetchedNovelChapter> {
-    const pages: string[] = []; let next = ref.url; const visited = new Set<string>();
+    const pages: string[] = []; let next = ref.url; const visited = new Set<string>(); const pageSignatures = new Set<string>();
     for (let page = 1; page <= MAX_PAGES; page++) {
       if (visited.has(next)) throw new Error("Shuhaige multi-page chapter contains a pagination loop"); visited.add(next);
-      const html = await this.http.getText(next); pages.push(html);
-      if (/captcha|cloudflare|正在验证|安全验证|访问过于频繁|challenge=/iu.test(html)) break;
-      const $ = load(html); const expectedNext = shuhaigeChapterUrl(ref.bookId, ref.chapterId, page + 1);
+      const html = await this.http.getText(next); assertNotInterstitial(html, `Shuhaige chapter page ${page}`); const $ = load(html); const container = $("#content").first(); const signature = fingerprint(clean(container.text()));
+      if (container.length && pageSignatures.has(signature)) throw new Error(`Shuhaige chapter pagination repeated content on page ${page}`); if (container.length) pageSignatures.add(signature); pages.push(html);
+      const expectedNext = shuhaigeChapterUrl(ref.bookId, ref.chapterId, page + 1);
       const hasNext = $("a[href]").toArray().some((element) => new URL($(element).attr("href") ?? "", next).href === expectedNext);
       if (!hasNext) break; next = expectedNext;
       if (page === MAX_PAGES) throw new Error(`Shuhaige chapter exceeds the ${MAX_PAGES}-page safety limit`);
@@ -71,14 +72,16 @@ export class ShuhaigeSource implements StorySourceProvider, NovelSourceProvider 
   async getBulkDownloads(book: NovelBook) {
     const pages = Array.isArray(book.metadata?.downloadPages) ? book.metadata.downloadPages.filter((value): value is string => typeof value === "string") : [];
     const candidates = pages.length ? pages : [`https://m.shuhaige.net/txt_${book.bookId}.html`]; const downloads = new Map<string, { url: string; label?: string; container: "plain" | "zip" }>();
+    const failures: string[] = [];
     for (const page of candidates.slice(0, 5)) {
       if (/\.(?:txt|zip)(?:$|[?#])/iu.test(page)) { downloads.set(page, { url: page, label: "Full TXT", container: /\.zip(?:$|[?#])/iu.test(page) ? "zip" : "plain" }); continue; }
-      let html: string; try { html = await this.http.getText(page); } catch { continue; }
+      let html: string; try { html = await this.http.getText(page); assertNotInterstitial(html, `Shuhaige download page ${page}`); } catch (error) { failures.push(`${page}: ${error instanceof Error ? error.message : String(error)}`); continue; }
       const $ = load(html); $("a[href]").each((_, element) => {
         const label = clean($(element).text()); const href = $(element).attr("href"); if (!href || !/(?:全文|全集|全本).*(?:txt|下载)|(?:txt|下载).*(?:全文|全集|全本)/iu.test(label)) return;
         const url = safeShuhaigeDownloadUrl(href, page); if (!url) return; downloads.set(url, { url, label, container: /\.zip(?:$|[?#])/iu.test(url) ? "zip" : "plain" });
       });
     }
+    if (!downloads.size && failures.length) throw new Error(`Shuhaige could not inspect its TXT download pages. First failure: ${failures[0]}`);
     return [...downloads.values()].map((item) => ({ provider: this.id, bookId: book.bookId, format: "txt" as const, ...item }));
   }
   async fetchBulkDownload(reference: NovelDownloadReference) {

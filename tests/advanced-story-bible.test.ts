@@ -73,7 +73,7 @@ describe("advanced Story Bible continuity", () => {
     for (let chapter = 1; chapter <= 1600; chapter++) bible = mergeStoryBible(bible, update(chapter, { characters: [named(chapter % 2 ? "Su Ming" : "Doctor Su", chapter, { aliases: [chapter % 2 ? "Doctor Su" : "Su Ming"] })], relationships: chapter === 147 ? [{ subject: "Su Ming", object: "Azure Sect", relationship: "member of", firstSeenChapter: chapter, lastSeenChapter: chapter }] : chapter === 612 ? [{ subject: "Su Ming", object: "Azure Sect", relationship: "member of", firstSeenChapter: chapter, lastSeenChapter: chapter, endChapter: chapter, state: "historical" }] : [] }), chapter);
     const context = retrieveRelevantContext(bible, "Doctor Su remembers Azure Sect.", 1601, { maxEntities: 8, maxTimelineEvents: 12, maxCharacters: 7000 }); const su = context.canonicalEntities.find((item) => item.canonicalName === "Su Ming");
     expect(su?.lastKnownAppearance).toBe(1600); expect(context.canonicalEntities.length).toBeLessThanOrEqual(8); expect(context.entityTimeline.length).toBeLessThanOrEqual(12); expect(JSON.stringify(context).length).toBeLessThanOrEqual(7000);
-  }, 15_000);
+  });
 
   it("enforces a small context character budget even with oversized entity fields", () => { let bible = mergeStoryBible(emptyStoryBible(), update(1, { characters: [named("Verbose Hero", 1, { aliases: Array.from({ length: 50 }, (_, index) => `Hero Alias ${index}`), description: "x".repeat(9000) })] }), 1); const context = retrieveRelevantContext(bible, "Verbose Hero", 2, { maxCharacters: 1000 }); expect(JSON.stringify(context).length).toBeLessThanOrEqual(1000); });
 });

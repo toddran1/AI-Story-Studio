@@ -18,7 +18,7 @@ import { StorySourceProvider, sourceManifestSchema } from "../src/source/types.j
 import { NovelSourceProvider } from "../src/source/novel-provider.js";
 import { atomicWrite, atomicWriteJson } from "../src/storage/atomic-write.js";
 import { storyPaths } from "../src/storage/paths.js";
-import { exists } from "../src/storage/story-files.js";
+import { exists, readJsonIfExists } from "../src/storage/story-files.js";
 import { fingerprint } from "../src/utils/hash.js";
 import { MockLLM, MockTTS } from "./helpers.js";
 import { AudioMasteringProcessor } from "../src/audio/mastering.js";
@@ -26,8 +26,9 @@ import { AudiobookProcessor } from "../src/audio/audiobook.js";
 import { VideoProcessor } from "../src/video/renderer.js";
 import { VideoExportProcessor } from "../src/video/video-export.js";
 import { ImageProvider } from "../src/artwork/provider.js";
-import { integerParam, publicJob, validateLocalRequest, validationIssues } from "../apps/server/api.js";
+import { integerParam, publicJob, statusFor, validateLocalRequest, validationIssues } from "../apps/server/api.js";
 import { z } from "zod";
+import { SourceConflictError, SourceInputError, SourceUpstreamError, SourceValidationError } from "../src/source/errors.js";
 
 const webAudio: AudioMasteringProcessor = { version: "web-audio-v1", master: async (_inputs, output) => { await atomicWrite(output, Buffer.from("mastered")); return { durationSeconds: 9, codec: "mp3", container: "mp3" }; } };
 const webBook: AudiobookProcessor = { version: "web-book-v1", assemble: async (_chapters, output, format) => { await atomicWrite(output, Buffer.from("book")); return { durationSeconds: 9, codec: format === "m4b" ? "aac" : "mp3", container: format === "m4b" ? "mp4" : "mp3" }; } };
@@ -47,6 +48,10 @@ async function storyFixture() {
 
 describe("web service layer", () => {
   it("classifies malformed pagination as an HTTP 400 client error", () => { expect(() => integerParam("abc", 1)).toThrow(expect.objectContaining({ status: 400 })); expect(() => integerParam("0", 1)).toThrow(expect.objectContaining({ status: 400 })); expect(integerParam(null, 7)).toBe(7); });
+  it("classifies expected source failures as actionable HTTP responses", () => {
+    expect(statusFor(new SourceInputError("bad source"))).toBe(400); expect(statusFor(new SourceConflictError("replacement"))).toBe(409);
+    expect(statusFor(new SourceValidationError("invalid chapter"))).toBe(422); expect(statusFor(new SourceUpstreamError("provider failed"))).toBe(502);
+  });
   it("exposes safe field paths for invalid editable input", () => {
     const failure = z.object({ tts: z.object({ model: z.string().min(1) }) }).safeParse({ tts: { model: "" } });
     expect(failure.success).toBe(false);
@@ -70,6 +75,14 @@ describe("web service layer", () => {
     expect(JSON.stringify(cards)).not.toMatch(/API_KEY|secret|credential/i);
   });
 
+  it("restores preserved original metadata when output returns to the source language", async () => {
+    const { root, story, paths } = await storyFixture(); story.title = "Night Lantern"; story.author = "Translated Author"; story.description = "Translated description"; story.tags = ["fantasy"];
+    story.outputLanguage = "zh-CN"; story.metadataTranslationSource = { title: "夜灯", author: "原作者", description: "原始简介", tags: ["玄幻"], language: "zh-CN" }; story.metadataTranslatedAt = new Date().toISOString(); await atomicWriteJson(paths.storyConfig, story);
+    const jobs = new JobManager(); const operations = new StudioOperations(root, env, jobs); const result = await waitForJob(jobs, operations.startMetadataTranslation(story.slug).id);
+    expect(result.status).toBe("completed"); expect((await readJsonIfExists<any>(paths.storyConfig))).toMatchObject({ title: "夜灯", author: "原作者", description: "原始简介", tags: ["玄幻"] });
+    expect((await readJsonIfExists<any>(paths.storyConfig))).not.toHaveProperty("metadataTranslatedAt"); await operations.close();
+  });
+
   it("keeps healthy library entries when another project is corrupt", async () => {
     const { root } = await storyFixture(); const broken = storyPaths(root, "broken-story", 1); await atomicWriteJson(broken.storyConfig, { title: "missing required fields" });
     const warnings: string[] = []; const cards = await listStories(root, warnings); expect(cards.map((item) => item.slug)).toEqual(["night-lantern"]); expect(warnings[0]).toContain("broken-story");
@@ -84,6 +97,35 @@ describe("web service layer", () => {
     await atomicWriteJson(paths.chapterMeta, chapter); await atomicWriteJson(paths.qa, qa);
     const detail = await getChapter(root, story.slug, 1); const dashboard = await getQaDashboard(root, story.slug);
     expect(detail.qa?.status).toBe("warn"); expect(dashboard.counts.warn).toBe(1); expect(dashboard.categories.terminology).toBe(1);
+  });
+
+  it("repairs selected QA findings with the configured model and invalidates the old QA result", async () => {
+    const { root, story, paths } = await storyFixture(); const now = new Date().toISOString(); const complete = { status: "complete" as const, fingerprint: "in", outputFingerprint: "out" };
+    const current = "The lantern keeper crossed the silent courtyard and carefully counted ten blue flames. ".repeat(12);
+    const repaired = current.replace("ten blue flames", "the ten canonical azure flames");
+    const chapter = chapterSchema.parse({ chapter: 1, sourceLanguage: story.sourceLanguage, outputLanguage: story.outputLanguage, counts: { originalCharacters: 100, englishWords: 120, narrationWords: 120 }, createdAt: now, updatedAt: now, stages: { ingestion: complete, translation: complete, narration: complete, qa: complete, storyBible: pending(), tts: pending() } });
+    const qa = qaResultSchema.parse({ status: "warn", score: .8, issues: [{ category: "terminology", severity: "warn", message: "Use the canonical ability name", evidence: "Azure Flame is the locked term." }], checks: { completeness: "pass", names: "pass", numbers: "pass", terminology: "warn", dialogue: "pass", storyConsistency: "pass", narrationFidelity: "pass" } });
+    await atomicWriteJson(paths.chapterMeta, chapter); await atomicWriteJson(paths.qa, qa); await atomicWrite(paths.original, "守灯人穿过庭院。".repeat(50)); await atomicWrite(paths.english, current); await atomicWrite(paths.narration, current); await atomicWriteJson(paths.storyContext, {});
+    const gemini = new MockLLM("gemini", [repaired]); const openai = new MockLLM("openai", [repaired]); const jobs = new JobManager(); const operations = new StudioOperations(root, env, jobs, { llm: new LLMRouter(new Map([["gemini", gemini], ["openai", openai]])) });
+    const finished = await waitForJob(jobs, operations.startQaRepair(story.slug, 1, { issueIndexes: [0] }).id);
+    expect(finished.status).toBe("completed"); expect(await readFile(paths.english, "utf8")).toBe(repaired.trim());
+    const retained = await getChapter(root, story.slug, 1); expect(retained.qa?.status).toBe("warn"); expect(retained.qaStale).toBe(true);
+    expect((await readJsonIfExists<any>(paths.chapterMeta))?.stages).toMatchObject({ translation: { provider: "manual", model: "studio-editor" }, qa: { status: "pending" } });
+    await operations.close();
+  });
+
+  it("rechecks retained artifacts through QA only", async () => {
+    const { root, story, paths } = await storyFixture(); const now = new Date().toISOString(); const pendingStage = pending();
+    const chapter = chapterSchema.parse({ chapter: 1, sourceLanguage: story.sourceLanguage, outputLanguage: story.outputLanguage, counts: { originalCharacters: 100, englishWords: 2, narrationWords: 2 }, createdAt: now, updatedAt: now,
+      stages: { ingestion: pendingStage, translation: pending(), narration: pending(), qa: pending(), storyBible: pending(), tts: pending() } });
+    await atomicWriteJson(paths.chapterMeta, chapter); await atomicWrite(paths.original, "原文".repeat(100)); await atomicWrite(paths.english, "Retained translation."); await atomicWrite(paths.narration, "Retained narration.");
+    const openai = new MockLLM("openai"); const gemini = new MockLLM("gemini"); const jobs = new JobManager(); const operations = new StudioOperations(root, env, jobs, { llm: new LLMRouter(new Map([["openai", openai], ["gemini", gemini]])) });
+    const finished = await waitForJob(jobs, operations.startQaRecheck(story.slug, 1).id);
+    expect(finished.status).toBe("completed"); expect(finished.result).toMatchObject({ chapter: 1, qaOnly: true });
+    expect(openai.calls).toHaveLength(1); expect(openai.calls[0]).toMatchObject({ structured: true, schemaName: "chapter_qa" }); expect(gemini.calls).toHaveLength(0);
+    expect(await readFile(paths.english, "utf8")).toBe("Retained translation."); expect(await readFile(paths.narration, "utf8")).toBe("Retained narration.");
+    const after = chapterSchema.parse(await readJsonIfExists(paths.chapterMeta)); expect(after.stages.qa).toMatchObject({ status: "complete", provider: "openai" }); expect(after.stages.translation.status).toBe("pending"); expect(after.stages.narration.status).toBe("pending");
+    await operations.close();
   });
 
   it("inspects and imports an uploaded TXT through existing source services", async () => {
@@ -107,6 +149,8 @@ describe("web service layer", () => {
     expect(later.update).toMatchObject({ existingCount: 2, afterCount: 4, added: [29, 30], replaced: [], preservedCount: 2, missingCount: 26 });
     await operations.importInspection("update-story", later.id, true);
     expect((await loadImportedChapters(root, "update-story")).chapters.map((item) => item.chapter)).toEqual([1, 2, 29, 30]);
+    expect((await getChapter(root, "update-story", 29)).navigation).toMatchObject({ previous: { chapter: 2 }, next: { chapter: 30 } });
+    expect((await getChapter(root, "update-story", 1)).navigation).toMatchObject({ next: { chapter: 2 } });
     await operations.close();
   });
 
@@ -125,8 +169,8 @@ describe("web service layer", () => {
     const root = await mkdtemp(join(tmpdir(), "story-web-job-")); const jobs = new JobManager();
     const operations = new StudioOperations(root, env, jobs, { pipeline: { run: async ({ chapter }) => ({ chapter, quality: { status: "pass", score: 1, issueCategories: [] } }) } });
     const inspection = await operations.inspectSource({ filename: "chapter.txt", file: Buffer.from("A chapter."), chapter: 1 }); await operations.importInspection("job-story", inspection.id);
-    const started = operations.startBatch("job-story", { from: 1, to: 1 }); const finished = await waitForJob(jobs, started.id);
-    expect(finished.status).toBe("completed"); expect((finished.result as any).summary.complete).toBe(1);
+    const started = operations.startBatch("job-story", { from: 1, to: 1, continueOnError: true }); const finished = await waitForJob(jobs, started.id);
+    expect(finished.status).toBe("completed"); expect((finished.result as any).summary.complete).toBe(1); expect((finished.result as any).options.continueOnError).toBe(true);
   });
 
   it("plans and runs a no-cost production job through the web job boundary", async () => {
@@ -183,10 +227,12 @@ describe("web service layer", () => {
       stages: { ingestion: complete, translation: complete, narration: complete, qa: complete, storyBible: complete, tts: complete, audioMastering: complete } });
     await atomicWriteJson(paths.chapterMeta, metadata); await writeFile(paths.audio, Buffer.from("audio"));
     expect(await getStoryOverview(root, "stale-story")).toMatchObject({ counts: { minChapter: 101, maxChapter: 101, complete: 1 } });
-    inspection = await operations.inspectSource({ filename: "chapter.txt", file: Buffer.from("Changed"), chapter: 101 }); await operations.importInspection("stale-story", inspection.id);
+    inspection = await operations.inspectSource({ filename: "chapter.txt", file: Buffer.from("Changed"), chapter: 101 });
+    await expect(operations.importInspection("stale-story", inspection.id)).rejects.toThrow(/explicitly confirm replacement/);
+    await operations.importInspection("stale-story", inspection.id, false, true);
     const invalidated = JSON.parse(await readFile(paths.chapterMeta, "utf8")); expect(invalidated.stages.ingestion.status).toBe("pending"); expect(invalidated.stages.tts.status).toBe("pending");
-    expect(await getChapter(root, "stale-story", 101)).toMatchObject({ stale: true, audioAvailable: false, audioUrl: undefined });
-    expect((await getChapterPage(root, "stale-story", { page: 1, pageSize: 50, filter: "all" })).items[0]).toMatchObject({ chapter: 101, translation: "pending", tts: "pending", audioAvailable: false });
+    expect(await getChapter(root, "stale-story", 101)).toMatchObject({ stale: true, audioAvailable: true, audioStale: true, audioUrl: "/api/stories/stale-story/chapters/101/audio" });
+    expect((await getChapterPage(root, "stale-story", { page: 1, pageSize: 50, filter: "all" })).items[0]).toMatchObject({ chapter: 101, translation: "pending", tts: "pending", audioAvailable: true, audioStale: true });
     inspection = await operations.inspectSource({ filename: "chapter.txt", file: Buffer.from("Replacement"), chapter: 102 }); await operations.importInspection("stale-story", inspection.id);
     const page = await getChapterPage(root, "stale-story", { page: 1, pageSize: 50, filter: "all" }); expect(page.items.map((item) => item.chapter)).toEqual([102]);
     await operations.close();

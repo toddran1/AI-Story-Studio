@@ -20,6 +20,7 @@ import { ProductionManifest } from "../../src/production/types.js";
 import { applyManualBibleOverlay } from "../../src/studio/workflow.js";
 import { getStorageUsage, invalidateStoryForConfigChange, readActivity } from "../../src/studio/projects.js";
 import { fingerprint } from "../../src/utils/hash.js";
+import { fileFingerprint } from "../../src/utils/file-fingerprint.js";
 import { logger } from "../../src/utils/logger.js";
 import { AlignmentArtifact, alignmentArtifactSchema } from "../../src/alignment/types.js";
 import { SubtitleDocument, subtitleDocumentSchema } from "../../src/subtitles/types.js";
@@ -36,7 +37,7 @@ export function invalidateCatalogCache(root: string, slug: string) { const key =
 
 export type ChapterSummary = {
   chapter: number; originalTitle?: string; translation: string; narration: string; qa?: QaResult["status"];
-  qaScore?: number; qaIssues?: QaResult["issues"]; tts: string; audioMastering: string; continuity: string; alignment: string; subtitles: string; scenePlanning: string; artwork: string; video: string; audioAvailable: boolean; videoAvailable: boolean; durationSeconds?: number;
+  qaScore?: number; qaIssues?: QaResult["issues"]; qaStale: boolean; tts: string; audioMastering: string; continuity: string; alignment: string; subtitles: string; scenePlanning: string; artwork: string; video: string; audioAvailable: boolean; audioStale: boolean; videoAvailable: boolean; durationSeconds?: number;
 };
 
 export async function listStories(root: string, warnings: string[] = []) {
@@ -99,17 +100,25 @@ export async function getChapter(root: string, slug: string, chapter: number) {
   const paths = storyPaths(root, slug, chapter); const metadataRaw = await readJsonIfExists<Chapter>(paths.chapterMeta);
   const metadata = metadataRaw ? chapterSchema.parse(metadataRaw) : undefined; const index = await loadChapterIndex(root, slug);
   if (index.manifest && !index.manifestByChapter.has(chapter)) throw new Error(`Chapter ${chapter} was not found`);
+  const position = index.numbers.indexOf(chapter);
+  const navigation = {
+    previous: position > 0 ? chapterLink(index, index.numbers[position - 1]!) : undefined,
+    next: position >= 0 && position < index.numbers.length - 1 ? chapterLink(index, index.numbers[position + 1]!) : undefined,
+  };
   const fresh = isCurrent(metadata, index.manifestByChapter.get(chapter), Boolean(index.manifest));
-  const qaRaw = fresh && metadata?.stages.qa.status === "complete" ? await readJsonIfExists<QaResult>(paths.qa) : undefined;
+  const qaRaw = await readJsonIfExists<QaResult>(paths.qa);
   const alignmentRaw = fresh && metadata?.stages.alignment.status === "complete" ? await readJsonIfExists<AlignmentArtifact>(paths.alignment) : undefined;
   const alignment = alignmentRaw ? alignmentArtifactSchema.safeParse(alignmentRaw) : undefined;
   const subtitleRaw = fresh && metadata?.stages.subtitles.status === "complete" ? await readJsonIfExists<SubtitleDocument>(paths.subtitlesDocument) : undefined;
   const subtitleDocument = subtitleRaw ? subtitleDocumentSchema.safeParse(subtitleRaw) : undefined;
-  const audioAvailable = fresh && metadata?.stages.audioMastering.status === "complete" && await exists(paths.audio);
+  // A source replacement makes derived audio stale, but it must remain
+  // playable and recoverable until the user explicitly regenerates it.
+  const audioAvailable = await exists(paths.audio);
+  const audioStale = audioAvailable && (!fresh || metadata?.stages.audioMastering.status !== "complete");
   return {
-    chapter, metadata, stale: !fresh, original: fresh ? await readTextIfExists(paths.original) : undefined,
-    translation: fresh ? await readTextIfExists(paths.english) : undefined, narration: fresh ? await readTextIfExists(paths.narration) : undefined,
-    qa: qaRaw ? qaResultSchema.parse(qaRaw) : undefined, storyContext: fresh ? await readJsonIfExists(paths.storyContext) : undefined, audioAvailable, alignment: alignment?.success ? alignment.data : undefined, subtitleDocument: subtitleDocument?.success ? subtitleDocument.data : undefined,
+    chapter, navigation, metadata, stale: !fresh || metadata?.stages.ingestion.status !== "complete", original: await readTextIfExists(paths.original),
+    translation: await readTextIfExists(paths.english), narration: await readTextIfExists(paths.narration),
+    qa: qaRaw ? qaResultSchema.parse(qaRaw) : undefined, qaStale: Boolean(qaRaw) && (!fresh || metadata?.stages.qa.status !== "complete"), storyContext: fresh ? await readJsonIfExists(paths.storyContext) : undefined, audioAvailable, audioStale, alignment: alignment?.success ? alignment.data : undefined, subtitleDocument: subtitleDocument?.success ? subtitleDocument.data : undefined,
     audioUrl: audioAvailable ? `/api/stories/${slug}/chapters/${chapter}/audio` : undefined,
     subtitles: fresh && metadata?.stages.subtitles.status === "complete" ? await readTextIfExists(paths.subtitlesVtt) : undefined,
     subtitlesUrl: fresh && metadata?.stages.subtitles.status === "complete" ? `/api/stories/${slug}/chapters/${chapter}/subtitles.vtt` : undefined,
@@ -117,11 +126,13 @@ export async function getChapter(root: string, slug: string, chapter: number) {
   };
 }
 
+function chapterLink(index: ChapterIndex, chapter: number) { return { chapter, title: index.titles.get(chapter) }; }
+
 export async function getQaDashboard(root: string, slug: string) {
   const chapters = await loadChapterSummaries(root, slug); const issues: Record<string, number> = {}; const items = [];
   for (const chapter of chapters) {
     if (!chapter.qa) continue; const qaIssues = chapter.qaIssues ?? [];
-    items.push({ chapter: chapter.chapter, title: chapter.originalTitle, status: chapter.qa, score: chapter.qaScore, issues: qaIssues });
+    items.push({ chapter: chapter.chapter, title: chapter.originalTitle, status: chapter.qa, score: chapter.qaScore, issues: qaIssues, stale: chapter.qaStale });
     for (const category of new Set(qaIssues.map((issue) => issue.category))) issues[category] = (issues[category] ?? 0) + 1;
   }
   return { counts: countQa(chapters), categories: issues, chapters: items };
@@ -210,14 +221,17 @@ async function loadSummaries(root: string, slug: string, numbers: number[], inde
   return mapLimit(numbers, 16, async (chapter) => {
     const chapterPaths = storyPaths(root, slug, chapter); const raw = await readJsonIfExists<Chapter>(chapterPaths.chapterMeta); const parsed = raw ? chapterSchema.safeParse(raw) : undefined;
     const metadata = parsed?.success ? parsed.data : undefined; const fresh = isCurrent(metadata, index.manifestByChapter.get(chapter), Boolean(index.manifest));
-    const qaRaw = fresh && metadata?.stages.qa.status === "complete" ? await readJsonIfExists<QaResult>(chapterPaths.qa) : undefined;
+    const qaRaw = await readJsonIfExists<QaResult>(chapterPaths.qa);
     const qa = qaRaw ? qaResultSchema.safeParse(qaRaw) : undefined; const tts = fresh ? metadata?.stages.tts.status ?? "pending" : "pending";
     const audioMastering = fresh ? metadata?.stages.audioMastering.status ?? "pending" : "pending"; const continuity = fresh ? metadata?.stages.continuity.status ?? "pending" : "pending"; const alignment = fresh ? metadata?.stages.alignment.status ?? "pending" : "pending"; const subtitles = fresh ? metadata?.stages.subtitles.status ?? "pending" : "pending"; const scenePlanning = fresh ? metadata?.stages.scenePlanning.status ?? "pending" : "pending"; const artwork = fresh ? metadata?.stages.artwork.status ?? "pending" : "pending"; const video = fresh ? metadata?.stages.video.status ?? "pending" : "pending";
-    return { chapter, originalTitle: metadata?.originalTitle ?? index.titles.get(chapter), translation: fresh ? metadata?.stages.translation.status ?? "pending" : "pending",
-      narration: fresh ? metadata?.stages.narration.status ?? "pending" : "pending", qa: qa?.success ? qa.data.status : undefined,
-      qaScore: qa?.success ? qa.data.score : undefined, qaIssues: qa?.success ? qa.data.issues : undefined, tts, audioMastering, continuity, alignment, subtitles, scenePlanning, artwork, video,
-      durationSeconds: audioMastering === "complete" ? metadata?.audio?.durationSeconds : undefined,
-      audioAvailable: audioMastering === "complete" && await exists(chapterPaths.audio), videoAvailable: video === "complete" && await exists(chapterPaths.video) };
+    const [audioFileExists, translationFileExists, narrationFileExists] = await Promise.all([exists(chapterPaths.audio), exists(chapterPaths.english), exists(chapterPaths.narration)]); const audioStale = audioFileExists && audioMastering !== "complete";
+    const translationStatus = fresh && metadata?.stages.translation.status === "complete" ? "complete" : translationFileExists ? "stale" : "pending";
+    const narrationStatus = fresh && metadata?.stages.narration.status === "complete" ? "complete" : narrationFileExists ? "stale" : "pending";
+    return { chapter, originalTitle: metadata?.originalTitle ?? index.titles.get(chapter), translation: translationStatus,
+      narration: narrationStatus, qa: qa?.success ? qa.data.status : undefined,
+      qaScore: qa?.success ? qa.data.score : undefined, qaIssues: qa?.success ? qa.data.issues : undefined, qaStale: Boolean(qa?.success) && (!fresh || metadata?.stages.qa.status !== "complete"), tts, audioMastering, continuity, alignment, subtitles, scenePlanning, artwork, video,
+      durationSeconds: audioFileExists ? metadata?.audio?.durationSeconds : undefined,
+      audioAvailable: audioFileExists, audioStale, videoAvailable: video === "complete" && await exists(chapterPaths.video) };
   });
 }
 
@@ -228,7 +242,7 @@ export async function getAudioDashboard(root: string, slug: string) {
   const exports = (await mapLimit(names, 8, async (name) => { const raw = await readJsonIfExists(join(exportsDirectory, name)); const parsed = raw ? exportManifestSchema.safeParse(raw) : undefined; if (!parsed?.success || parsed.data.story !== slug || !(await currentAudioExport(root, slug, parsed.data))) return undefined; const { output: _output, ...manifest } = parsed.data; return { ...manifest, downloadUrl: `/api/stories/${slug}/exports/${parsed.data.from}-${parsed.data.to}.${parsed.data.format}` }; }))
     .filter((item): item is NonNullable<typeof item> => Boolean(item)).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   const mastered = chapters.filter((item) => item.audioMastering === "complete" && item.durationSeconds);
-  return { settings: story.audio, chapters: chapters.map(({ chapter, originalTitle, audioMastering, durationSeconds, audioAvailable }) => ({ chapter, title: originalTitle, status: audioMastering, durationSeconds, audioAvailable })),
+  return { settings: story.audio, chapters: chapters.map(({ chapter, originalTitle, audioMastering, durationSeconds, audioAvailable, audioStale }) => ({ chapter, title: originalTitle, status: audioStale ? "stale" : audioMastering, durationSeconds, audioAvailable, audioStale })),
     counts: { total: chapters.length, mastered: mastered.length },
     totalDurationSeconds: mastered.reduce((sum, item) => sum + (item.durationSeconds ?? 0), 0) + story.audio.chapterGapSeconds * Math.max(0, mastered.length - 1), exports };
 }
@@ -288,8 +302,6 @@ async function currentExportBadges(root: string, slug: string, names: string[], 
 function isCurrent(metadata: Chapter | undefined, source: SourceManifest["chapters"][number] | undefined, hasManifest: boolean) {
   return !hasManifest || Boolean(metadata?.source?.fingerprint && source && metadata.source.fingerprint === source.fingerprint);
 }
-
-async function fileFingerprint(path: string) { try { const data = await readFile(path); return data.length ? fingerprint(data.toString("base64")) : undefined; } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; } }
 
 async function mapLimit<T, R>(values: T[], concurrency: number, mapper: (value: T) => Promise<R>): Promise<R[]> {
   const result = new Array<R>(values.length); let next = 0;

@@ -101,6 +101,16 @@ describe("web HTTP client", () => {
     await expect(client.getText("https://example.com/book")).resolves.toBe("ok"); expect(fetcher).toHaveBeenCalledTimes(2);
   });
 
+  it("retries transient POST and binary download failures", async () => {
+    const postFetcher = vi.fn().mockResolvedValueOnce(new Response("busy", { status: 503 })).mockResolvedValueOnce(new Response("results"));
+    const post = new WebHttpClient({ fetcher: postFetcher as typeof fetch, maxRetries: 1, requestDelayMs: 0, sleep: async () => {}, allowedHosts: ["example.com"] });
+    await expect(post.postForm("https://example.com/search", { q: "story" })).resolves.toBe("results");
+    const binaryFetcher = vi.fn().mockRejectedValueOnce(new TypeError("network failed")).mockResolvedValueOnce(new Response(new Uint8Array([1, 2, 3])));
+    const binary = new WebHttpClient({ fetcher: binaryFetcher as typeof fetch, maxRetries: 1, requestDelayMs: 0, sleep: async () => {}, allowedHosts: ["example.com"] });
+    await expect(binary.getBinary("https://example.com/book.txt")).resolves.toMatchObject({ bytes: new Uint8Array([1, 2, 3]) });
+    expect(postFetcher).toHaveBeenCalledTimes(2); expect(binaryFetcher).toHaveBeenCalledTimes(2);
+  });
+
   it("retries network errors and revalidates cached ETags", async () => {
     const networkFetcher = vi.fn().mockRejectedValueOnce(new TypeError("fetch failed")).mockResolvedValueOnce(new Response("recovered"));
     const network = new WebHttpClient({ fetcher: networkFetcher, maxRetries: 1, requestDelayMs: 0, sleep: async () => {}, allowedHosts: ["example.com"] });

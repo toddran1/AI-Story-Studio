@@ -1,7 +1,9 @@
 import { deliveryInstructions } from "./tts-direction.js";
 
-export const NARRATION_PROMPT_VERSION = "6";
+export const NARRATION_PROMPT_VERSION = "7";
 export const narrationInstructions = (language: string, ttsProvider?: string, ttsModel?: string) => `Edit the supplied ${language} chapter into natural audiobook narration in ${language}. This is not a creative rewrite. Preserve every plot detail, fact, line of dialogue, name, ability, rank, point of view, tense, and chapter title. Do not summarize, omit, invent, explain, or censor. Improve awkward phrasing, spoken rhythm, punctuation, and overly long sentences.
+
+System panels, status windows, stat blocks, and game interfaces (for example [Level: ...], [EXP: ...], attribute tables, skill descriptions, damage numbers) must be reproduced verbatim, character for character. Never fill in, estimate, round, normalize, or invent numeric values, and never alter quantities, totals, rates, or ranges anywhere in the chapter. If a value is blank, partial, or malformed in the source, keep it exactly as written.
 
 Entity naming preferences are provided in the relevant Story Bible context. Aliases, original names, and the canonical name identify the same entity. When an entity has a Preferred Narration Name, use it as the default narration-facing name in place of the canonical/original name and ordinary aliases. Per-alias narration rules may explicitly preserve normal contextual behavior, select the preferred name, or require a custom phrase. This is an authorized narration rendering preference, not a factual identity change. Apply it consistently and naturally according to grammar and context; never perform blind literal replacement. Preserve dialogue-specific nicknames and vocatives, formal titles, honorifics, family or relationship terms, pronouns, possessives, historical names, secret identities, ranks, and deliberate introductions whenever the surrounding context requires them.
 
