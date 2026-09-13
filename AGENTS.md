@@ -62,7 +62,7 @@ npm run story:produce -- --story undead-disaster --from 1 --to 25 --profile audi
 ## Security considerations
 
 - The web server binds to `127.0.0.1` only; browser endpoints accept validated story slugs and chapter numbers, never arbitrary filesystem paths.
-- Remote ingestion (Fanqie) is HTTPS-only with redirect validation, bounded retries/timeouts, streaming response-size limits, rate limiting, and ETag/Last-Modified cache revalidation.
+- Remote ingestion (Fanqie) is HTTPS-only with redirect validation, bounded retries/timeouts, streaming response-size limits, rate limiting, ETag/Last-Modified cache revalidation, a persisted per-host cookie jar (`cache/cookies/`), and bounded JS-redirect browser-challenge solving that only triggers when a challenge interstitial is detected.
 - EPUB/DOCX ZIP containers are rejected when compressed/expanded size, entry size, or entry count limits are exceeded. Backup restore rejects absolute paths, traversal, and oversized/expansion-bomb archives.
 - Forced alignment (`src/alignment`) runs locally via whisper.cpp `whisper-cli`; no audio bytes leave the machine. Audio is passed by path and hashed as a stream.
 - Story deletion moves projects to recoverable trash; exports only expose known artifacts.

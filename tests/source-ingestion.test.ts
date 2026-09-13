@@ -11,6 +11,7 @@ import { splitText, TxtSource } from "../src/source/txt-source.js";
 import { sourceManifestSchema } from "../src/source/types.js";
 import { readSafeZip } from "../src/source/zip-safety.js";
 import { chapterSchema } from "../src/domain/chapter.js";
+import { ChapterReference, SourceInspection } from "../src/source/types.js";
 import { atomicWriteJson } from "../src/storage/atomic-write.js";
 import { storyPaths } from "../src/storage/paths.js";
 
@@ -109,6 +110,26 @@ describe("source ingestion", () => {
     const gap = await provider.inspect(gapDirectory, { allowGaps: true }); gap.additive = true;
     await importSource(root, "long-story", gap);
     expect((await loadImportedChapters(root, "long-story")).chapters.map((item) => item.chapter)).toEqual(Array.from({ length: 40 }, (_, index) => index + 1));
+  });
+
+  it("allows additive imports to mix providers and still guards same-provider reordering", async () => {
+    const root = await mkdtemp(join(tmpdir(), "source-additive-providers-"));
+    const fp = "a".repeat(64); const now = new Date().toISOString();
+    const fanqieRef = (chapter: number): ChapterReference => ({ chapter, sourceId: `fq-${chapter}`, sourceType: "fanqie", metadata: { bookId: "fanqie-book" } });
+    const ixdzs8Ref = (chapter: number): ChapterReference => ({ chapter, sourceId: `p${chapter}`, sourceType: "web", metadata: { provider: "ixdzs8", bookId: "568509" } });
+    const inspection = (sourceType: "fanqie" | "web", refs: ChapterReference[], chapters: number[], provider?: string): SourceInspection => ({
+      sourcePath: "https://example.com/book", sourceType, fingerprint: fp, additive: true,
+      chapters: chapters.map((chapter) => ({ ref: refs.find((ref) => ref.chapter === chapter)!, text: `Chapter ${chapter} text` })),
+      directory: refs, unnumberedSections: [], warnings: [], origin: { url: "https://example.com/book", bookId: "book" },
+      metadata: provider ? { provider } : {}, remote: { lastInspectedAt: now, chapterCountAtInspection: refs.length },
+    });
+    await importSource(root, "novel", inspection("fanqie", [fanqieRef(1), fanqieRef(2), fanqieRef(3)], [1, 2, 3]));
+    const cross = await importSource(root, "novel", inspection("web", [ixdzs8Ref(1), ixdzs8Ref(1500), ixdzs8Ref(1501)], [1500, 1501], "ixdzs8"));
+    expect(cross.added).toEqual([1500, 1501]);
+    const again = await importSource(root, "novel", inspection("web", [ixdzs8Ref(1), ixdzs8Ref(2), ixdzs8Ref(3), ixdzs8Ref(1500), ixdzs8Ref(1501)], [2, 3], "ixdzs8"));
+    expect(again.modified).toEqual([2, 3]);
+    const reordered = inspection("web", [ixdzs8Ref(1), ixdzs8Ref(2), ixdzs8Ref(3), { ...ixdzs8Ref(1500), sourceId: "p1500-renewed" }], [2], "ixdzs8");
+    await expect(importSource(root, "novel", reordered)).rejects.toThrow(/remote Chapter 1500 was removed or reordered/);
   });
 
   it("rejects a compressed archive whose expanded entry is too large", async () => {

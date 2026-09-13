@@ -131,6 +131,66 @@ describe("web HTTP client", () => {
     await client.getText("https://example.com/book", { refresh: true }); await client.getText("https://example.com/chapter", { refresh: true });
     expect(cache.set).toHaveBeenCalledTimes(1);
   });
+
+  it("solves JS redirect challenges with the session cookie when enabled", async () => {
+    const token = Buffer.from("1789251833:fa25c4c0ab34243cc95857cf2e179b3b8d5df454f9cdfd48255a04defd9a9110").toString("base64");
+    const challenge = `<html><head><title>正在验证浏览器</title></head><body><script>let token = "${token}"; window.location.href = location.pathname + "?challenge=" + encodeURIComponent(token);</script></body></html>`;
+    const seen: string[] = [];
+    const fetcher = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input); seen.push(url); const cookie = new Headers(init?.headers).get("cookie");
+      if (seen.length === 1) return new Response(challenge, { headers: { "set-cookie": "PHPSESSID=abc; Path=/" } });
+      expect(cookie).toBe("PHPSESSID=abc");
+      if (new URL(url).searchParams.get("challenge")) return new Response(null, { status: 302, headers: { location: "https://example.com/read/1/p1.html" } });
+      return new Response("<html><body>chapter text</body></html>");
+    });
+    const client = new WebHttpClient({ fetcher: fetcher as typeof fetch, maintainCookies: true, solveBrowserChallenge: true, requestDelayMs: 0, maxRetries: 0, allowedHosts: ["example.com"] });
+    await expect(client.getText("https://example.com/read/1/p1.html")).resolves.toContain("chapter text");
+    expect(seen).toHaveLength(4); expect(new URL(seen[1]!).searchParams.get("challenge")).toBe(token);
+  });
+
+  it("solves challenges on form posts and binary downloads", async () => {
+    const token = Buffer.from("1789251834:fa25c4c0ab34243cc95857cf2e179b3b8d5df454f9cdfd48255a04defd9a9110").toString("base64");
+    const challenge = `<title>正在验证浏览器</title><script>let token = "${token}"; window.location.href = location.pathname + "?challenge=" + encodeURIComponent(token);</script>`;
+    let cleared = false; const posts: string[] = [];
+    const fetcher = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(String(input));
+      if (url.searchParams.get("challenge") === token) { cleared = true; return new Response(null, { status: 302, headers: { location: url.pathname } }); }
+      if (!cleared) return new Response(challenge, { headers: { "set-cookie": "PHPSESSID=abc; Path=/" } });
+      if (init?.method === "POST") { posts.push(String(init.body)); return new Response(JSON.stringify({ data: [1, 2] })); }
+      return new Response(new TextEncoder().encode("txt payload"));
+    });
+    const client = new WebHttpClient({ fetcher: fetcher as typeof fetch, maintainCookies: true, solveBrowserChallenge: true, requestDelayMs: 0, maxRetries: 0, allowedHosts: ["example.com"] });
+    await expect(client.postForm("https://example.com/novel/clist/", { bid: "1" })).resolves.toBe(JSON.stringify({ data: [1, 2] }));
+    expect(posts).toEqual(["bid=1"]);
+    const download = await client.getBinary("https://example.com/d/1.txt");
+    expect(new TextDecoder().decode(download.bytes)).toBe("txt payload");
+  });
+
+  it("restores persisted cookies in a fresh client and saves new ones", async () => {
+    const stored: Record<string, Record<string, string>> = { "example.com": { PHPSESSID: "restored" } };
+    const cookieStore = {
+      get: vi.fn(async (host: string) => stored[host]), set: vi.fn(async (host: string, cookies: Record<string, string>) => { stored[host] = cookies; }),
+    };
+    const fetcher = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+      const cookie = new Headers(init?.headers).get("cookie");
+      return cookie?.includes("PHPSESSID=restored") ? new Response("ok", { headers: { "set-cookie": "clearance=done; Path=/" } }) : new Response("no cookie", { status: 403 });
+    });
+    const client = new WebHttpClient({ fetcher: fetcher as typeof fetch, cookieStore, maintainCookies: true, requestDelayMs: 0, maxRetries: 0, allowedHosts: ["example.com"] });
+    await expect(client.getText("https://example.com/book")).resolves.toBe("ok");
+    expect(cookieStore.get).toHaveBeenCalledWith("example.com");
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(cookieStore.set).toHaveBeenCalledWith("example.com", { PHPSESSID: "restored", clearance: "done" });
+  });
+
+  it("returns challenge pages untouched when solving is disabled or loops forever", async () => {
+    const challenge = `<title>正在验证浏览器</title><script>let token = "abcdefghijklmnop"; window.location.href = location.pathname + "?challenge=" + encodeURIComponent(token);</script>`;
+    const passive = new WebHttpClient({ fetcher: vi.fn(async () => new Response(challenge)) as typeof fetch, maintainCookies: true, requestDelayMs: 0, maxRetries: 0, allowedHosts: ["example.com"] });
+    await expect(passive.getText("https://example.com/read/1/p1.html")).resolves.toContain("正在验证浏览器");
+    const fetcher = vi.fn(async () => new Response(challenge));
+    const looping = new WebHttpClient({ fetcher: fetcher as typeof fetch, maintainCookies: true, solveBrowserChallenge: true, requestDelayMs: 0, maxRetries: 0, allowedHosts: ["example.com"] });
+    await expect(looping.getText("https://example.com/read/1/p1.html")).resolves.toContain("正在验证浏览器");
+    expect(fetcher).toHaveBeenCalledTimes(7);
+  });
 });
 
 function fanqieSource(fetcher: ReturnType<typeof vi.fn>) {

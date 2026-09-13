@@ -11,6 +11,11 @@ export interface HttpCache {
   set(url: string, entry: HttpCacheEntry): Promise<void>;
 }
 
+export interface CookieStore {
+  get(host: string): Promise<Record<string, string> | undefined>;
+  set(host: string, cookies: Record<string, string>): Promise<void>;
+}
+
 export type WebHttpClientOptions = {
   fetcher?: typeof fetch;
   timeoutMs?: number;
@@ -22,6 +27,8 @@ export type WebHttpClientOptions = {
   cache?: HttpCache;
   cacheTtlMs?: number;
   maintainCookies?: boolean;
+  cookieStore?: CookieStore;
+  solveBrowserChallenge?: boolean;
   defaultHeaders?: Record<string, string>;
   sleep?: (ms: number) => Promise<void>;
 };

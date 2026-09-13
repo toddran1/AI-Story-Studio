@@ -143,10 +143,15 @@ function assertCompatibleAdditiveSource(previous: SourceManifest, inspection: So
   if (sameProvider && previous.remote && inspection.directory) {
     const current = new Map(inspection.directory.map((ref) => [ref.chapter, ref]));
     for (const item of previous.chapters) {
+      if (referenceProvider(item.ref) !== incomingProvider) continue;
       const ref = current.get(item.chapter);
       if (!ref || ref.sourceId !== item.ref.sourceId) throw new Error(`Refusing additive import because remote Chapter ${item.chapter} was removed or reordered`);
     }
   }
+}
+
+function referenceProvider(ref: SourceManifest["chapters"][number]["ref"]) {
+  return typeof ref.metadata.provider === "string" ? ref.metadata.provider : ref.sourceType;
 }
 
 function providerFromManifest(manifest: SourceManifest) {

@@ -13,7 +13,7 @@ export class ShuhaigeSource implements StorySourceProvider, NovelSourceProvider 
   readonly type = "web" as const; readonly id = "shuhaige" as const; readonly displayName = "Shuhaige";
   readonly capabilities = { search: true, download: true, authentication: "none" as const, multiPageChapters: true, acquisition: ["html", "bulk-download"] as Array<"html" | "bulk-download">, bulkFormats: ["txt"] as Array<"txt"> };
   readonly descriptor: NovelProviderDescriptor = { id: this.id, displayName: this.displayName, domains: ["shuhaige.net", "www.shuhaige.net", "m.shuhaige.net", "*.shuhaige.net"], languages: ["zh-CN"], priority: 90, reliability: "preferred", enabledByDefault: true, capabilities: this.capabilities, rateLimit: { minimumDelayMs: 700, maximumConcurrency: 2 } };
-  constructor(private readonly http = new WebHttpClient({ allowedHosts: ["shuhaige.net", "www.shuhaige.net", "m.shuhaige.net", "*.shuhaige.net"], maintainCookies: true })) {}
+  constructor(private readonly http = new WebHttpClient({ allowedHosts: ["shuhaige.net", "www.shuhaige.net", "m.shuhaige.net", "*.shuhaige.net"], maintainCookies: true, solveBrowserChallenge: true })) {}
   supportsUrl(input: string) { try { parseShuhaigeUrl(input); return true; } catch { return false; } }
   async healthCheck() { await this.http.getText(`${BASE}/`, { refresh: true }); }
   inspect(path: string, options?: SourceInspectOptions): Promise<SourceInspection> { return inspectNovelProvider(this, path, options, VERSION); }

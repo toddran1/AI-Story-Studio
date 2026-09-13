@@ -14,7 +14,7 @@ export class Ixdzs8Source implements StorySourceProvider, NovelSourceProvider {
   readonly type = "web" as const; readonly id = "ixdzs8" as const; readonly displayName = "ixdzs8";
   readonly capabilities = { search: true, download: true, authentication: "none" as const, acquisition: ["html", "json-api", "bulk-download"] as Array<"html" | "json-api" | "bulk-download">, bulkFormats: ["txt"] as Array<"txt"> };
   readonly descriptor: NovelProviderDescriptor = { id: this.id, displayName: this.displayName, domains: ["ixdzs8.com", "www.ixdzs8.com", "*.ixdzs8.com"], languages: ["zh-CN"], priority: 100, reliability: "preferred", enabledByDefault: true, capabilities: this.capabilities, rateLimit: { minimumDelayMs: 700, maximumConcurrency: 2 } };
-  constructor(private readonly http = new WebHttpClient({ allowedHosts: ["ixdzs8.com", "www.ixdzs8.com", "*.ixdzs8.com"], maintainCookies: true })) {}
+  constructor(private readonly http = new WebHttpClient({ allowedHosts: ["ixdzs8.com", "www.ixdzs8.com", "*.ixdzs8.com"], maintainCookies: true, solveBrowserChallenge: true })) {}
   supportsUrl(input: string) { try { parseIxdzs8Url(input); return true; } catch { return false; } }
   async healthCheck() { await this.http.getText("https://ixdzs8.com/", { refresh: true }); }
   inspect(path: string, options?: SourceInspectOptions): Promise<SourceInspection> { return inspectNovelProvider(this, path, options, VERSION); }
