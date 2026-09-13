@@ -59,6 +59,12 @@ docker compose up -d postgres
 npm run db:migrate
 ```
 
+The Postgres service uses Docker's `unless-stopped` restart policy. After a
+computer restart, start Docker Desktop and wait for it to finish launching;
+Postgres will then resume automatically and `npm run web` can be used normally.
+If the database was explicitly stopped with `docker compose stop`, start it
+again with `docker compose up -d postgres`.
+
 Fill in `.env`:
 
 ```dotenv

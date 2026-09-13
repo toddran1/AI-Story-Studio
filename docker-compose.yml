@@ -1,6 +1,10 @@
 services:
   postgres:
     image: postgres:17-alpine
+    # Resume the local queue database whenever Docker Desktop starts after a
+    # reboot. An explicit `docker compose stop` still keeps it stopped until the
+    # user starts it again.
+    restart: unless-stopped
     environment:
       POSTGRES_DB: ai_story_studio
       POSTGRES_USER: ai_story_studio
