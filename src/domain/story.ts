@@ -7,6 +7,11 @@ import { artworkSettingsSchema, sceneSettingsSchema } from "../scenes/types.js";
 import { productionProfilesSchema } from "../production/types.js";
 import { storyNovelSourceSchema } from "../source/novel-provider.js";
 
+export const narrationSettingsSchema = z.object({
+  profanityMode: z.enum(["preserve", "soften-strong"]).default("preserve"),
+}).default({ profanityMode: "preserve" });
+export type NarrationProfanityMode = z.infer<typeof narrationSettingsSchema>["profanityMode"];
+
 const rawStorySchema = z.object({
   id: z.string().min(1),
   slug: z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/),
@@ -37,6 +42,7 @@ const rawStorySchema = z.object({
   context: z.object({
     recentChapterSummaries: z.number().int().min(0).max(100).default(5),
   }).default({ recentChapterSummaries: 5 }),
+  narrationSettings: narrationSettingsSchema,
   audio: audioSettingsSchema,
   subtitles: subtitleSettingsSchema,
   video: videoSettingsSchema,

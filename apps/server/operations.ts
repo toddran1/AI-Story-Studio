@@ -309,7 +309,7 @@ export class StudioOperations {
       for (const target of targets) {
         control.update({ type: "qa.repair.started", chapter, target, selectedIssues: issues.length });
         const config = story.pipeline[target]; const provider = this.llm.forStage(config);
-        const result = await withUsageScope({ story: slug, chapter, stage: `qaRepair.${target}` }, () => repairQaText(provider, config, { target, chapter, sourceLanguage: story.sourceLanguage, outputLanguage: story.outputLanguage, source, translation: currentTranslation, narration: currentNarration, issues: issues.filter((issue) => issueRepairTargets(issue).includes(target)), context }));
+        const result = await withUsageScope({ story: slug, chapter, stage: `qaRepair.${target}` }, () => repairQaText(provider, config, { target, chapter, sourceLanguage: story.sourceLanguage, outputLanguage: story.outputLanguage, source, translation: currentTranslation, narration: currentNarration, issues: issues.filter((issue) => issueRepairTargets(issue).includes(target)), context, profanityMode: story.narrationSettings.profanityMode }));
         await saveChapterTextEdit(this.root, slug, chapter, { field: target, text: result.text });
         if (target === "translation") currentTranslation = result.text; else currentNarration = result.text; repaired.push(target);
         control.update({ type: "qa.repair.completed", chapter, target, completed: repaired.length, total: targets.length });
@@ -333,11 +333,11 @@ export class StudioOperations {
       const context = contextRaw ? storyBibleSchema.parse(contextRaw) : emptyStoryBible();
       control.update({ type: "qa.recheck.started", chapter, stage: "qa" });
       const config = story.pipeline.qa; const result = await withUsageScope({ story: slug, chapter, stage: "qa" }, () => validateChapterQuality(this.llm.forStage(config), config, {
-        chapter, sourceLanguage: story.sourceLanguage, outputLanguage: story.outputLanguage, source, translation, narration, context,
+        chapter, sourceLanguage: story.sourceLanguage, outputLanguage: story.outputLanguage, source, translation, narration, context, profanityMode: story.narrationSettings.profanityMode,
       }));
       await atomicWriteJson(paths.qa, result.value);
       metadata.quality = { status: result.value.status, score: result.value.score, issueCategories: [...new Set(result.value.issues.map((issue) => issue.category))] };
-      metadata.stages.qa = { status: "complete", fingerprint: fingerprint({ source, translation, narration, config }), outputFingerprint: fingerprint(JSON.stringify(result.value)), provider: config.provider, model: config.model, promptVersion: "qa-only-v1", completedAt: new Date().toISOString(), usage: result.usage };
+      metadata.stages.qa = { status: "complete", fingerprint: fingerprint({ source, translation, narration, config, narrationSettings: story.narrationSettings }), outputFingerprint: fingerprint(JSON.stringify(result.value)), provider: config.provider, model: config.model, promptVersion: "qa-only-v1", completedAt: new Date().toISOString(), usage: result.usage };
       metadata.updatedAt = new Date().toISOString(); await atomicWriteJson(paths.chapterMeta, metadata);
       control.update({ type: "qa.recheck.completed", chapter, stage: "qa", status: result.value.status });
       invalidateCatalogCache(this.root, slug); await recordActivity(this.root, slug, "chapter.qa_rechecked", `Rechecked Chapter ${chapter} using its retained translation and narration`);

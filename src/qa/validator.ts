@@ -2,16 +2,17 @@ import { StageModelConfig } from "../domain/provider.js";
 import { QaResult, normalizeQaResult, qaResultSchema } from "../domain/qa.js";
 import { StoryBible } from "../domain/story-bible.js";
 import { LLMProvider } from "../llm/provider.js";
-import { qaInstructions } from "./prompts.js";
+import type { NarrationProfanityMode } from "../domain/story.js";
+import { qaInstructionsFor } from "./prompts.js";
 
 export async function validateChapterQuality(
   provider: LLMProvider,
   config: StageModelConfig,
-  input: { chapter: number; sourceLanguage: string; outputLanguage: string; source: string; translation: string; narration: string; context: StoryBible },
+  input: { chapter: number; sourceLanguage: string; outputLanguage: string; source: string; translation: string; narration: string; context: StoryBible; profanityMode?: NarrationProfanityMode },
 ): Promise<{ value: QaResult; usage?: { inputTokens?: number; outputTokens?: number; cachedTokens?: number; requestId?: string } }> {
   const result = await provider.generateStructured({
     model: config.model,
-    instructions: qaInstructions,
+    instructions: qaInstructionsFor(input.profanityMode),
     input: [
       `CHAPTER NUMBER: ${input.chapter}`,
       `SOURCE LANGUAGE: ${input.sourceLanguage}`,

@@ -2,6 +2,8 @@ import { QaResult } from "../domain/qa.js";
 import { StageModelConfig } from "../domain/provider.js";
 import { LLMProvider } from "../llm/provider.js";
 import { assertUsableTranslation } from "../translation/translator.js";
+import type { NarrationProfanityMode } from "../domain/story.js";
+import { softenStrongProfanity } from "../narration/profanity.js";
 
 export function selectRepairStage(qa: QaResult): "translation" | "narration" {
   const translationCategories = new Set(["completeness", "names", "numbers", "terminology", "dialogue"]);
@@ -26,7 +28,7 @@ export function issueRepairTargets(issue: QaResult["issues"][number]): QaRepairT
 
 export async function repairQaText(provider: LLMProvider, config: StageModelConfig, input: {
   target: QaRepairTarget; chapter: number; sourceLanguage: string; outputLanguage: string; source: string;
-  translation: string; narration: string; issues: QaResult["issues"]; context?: unknown;
+  translation: string; narration: string; issues: QaResult["issues"]; context?: unknown; profanityMode?: NarrationProfanityMode;
 }) {
   const current = input.target === "translation" ? input.translation : input.narration;
   if (!current.trim()) throw new Error(`Chapter ${input.chapter} has no ${input.target} to repair`);
@@ -38,6 +40,9 @@ export async function repairQaText(provider: LLMProvider, config: StageModelConf
     input.target === "translation"
       ? `Keep the result faithful to the ${input.sourceLanguage} source and natural in ${input.outputLanguage}.`
       : `Keep the narration faithful to the approved ${input.outputLanguage} translation; do not introduce new story information.`,
+    input.target === "narration" && input.profanityMode === "soften-strong"
+      ? "Honor the story's narration-only preference: replace strong profanity with natural milder wording while preserving hostility, emotion, intent, and meaning. Ass, hell, and damn are allowed."
+      : "",
   ].join(" ");
   const result = await provider.generateText({
     model: config.model,
@@ -52,7 +57,7 @@ export async function repairQaText(provider: LLMProvider, config: StageModelConf
       `TEXT TO REPAIR (${input.target.toUpperCase()}):\n${current}`,
     ].join("\n\n"),
   });
-  const text = stripFence(result.text);
+  const text = softenStrongProfanity(stripFence(result.text), input.target === "narration" ? (input.profanityMode ?? "preserve") : "preserve");
   validateRepair(text, current, input.target);
   return { ...result, text };
 }

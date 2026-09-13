@@ -32,6 +32,7 @@ export type StoryConfig = {
   metadataTranslationSource?: { title: string; author?: string; description?: string; tags?: string[]; language: string }; metadataTranslatedAt?: string;
   sources: Array<{ provider: string; bookId: string; url: string; title?: string; author?: string; addedAt: string; lastInspectedAt?: string; priority: number; enabled: boolean }>;
   context: { recentChapterSummaries: number };
+  narrationSettings: { profanityMode: "preserve" | "soften-strong" };
   audio: AudioSettings;
   subtitles: SubtitleSettings; video: VideoSettings; scenes: SceneSettings; artwork: ArtworkSettings;
   pipeline: { translation: Model; narration: Model; qa: Model; storyBible: Model; scenePlanner: Model; tts: FishTtsConfig };

@@ -171,6 +171,7 @@ async function outputItem(path: string, value: Record<string, unknown>) { try { 
 export const settingsUpdateSchema = z.object({
   title: z.string().trim().min(1), author: z.string().trim().optional(), description: z.string().max(10_000).default(""), tags: z.array(z.string()).max(30).default([]), notes: z.string().max(20_000).default(""), sourceLanguage: z.string().trim().min(2), outputLanguage: z.string().trim().min(2),
   recentChapterSummaries: z.number().int().min(0).max(100),
+  narrationSettings: z.object({ profanityMode: z.enum(["preserve", "soften-strong"]) }).optional(),
   translation: z.object({ provider: z.enum(["openai", "gemini"]), model: z.string().trim().min(1) }),
   narration: z.object({ provider: z.enum(["openai", "gemini"]), model: z.string().trim().min(1) }),
   qa: z.object({ provider: z.enum(["openai", "gemini"]), model: z.string().trim().min(1) }),
@@ -189,6 +190,7 @@ export async function updateStorySettings(root: string, slug: string, input: unk
     const current = await loadStory(paths.storyConfig);
     const story = storySchema.parse({ ...current, title: update.title, author: update.author || undefined, description: update.description, tags: update.tags, notes: update.notes, sourceLanguage: update.sourceLanguage, outputLanguage: update.outputLanguage,
       context: { ...current.context, recentChapterSummaries: update.recentChapterSummaries },
+      narrationSettings: update.narrationSettings ?? current.narrationSettings,
       audio: { ...current.audio, ...update.audio }, subtitles: { ...current.subtitles, ...update.subtitles }, video: { ...current.video, ...update.video }, scenes: { ...current.scenes, ...update.scenes }, artwork: { ...current.artwork, ...update.artwork }, pipeline: { ...current.pipeline, translation: update.translation, narration: update.narration, qa: update.qa, scenePlanner: update.scenePlanner ?? current.pipeline.scenePlanner,
         tts: { ...current.pipeline.tts, provider: update.tts.provider ?? current.pipeline.tts.provider, model: update.tts.model ?? current.pipeline.tts.model, referenceId: update.tts.referenceId || undefined, speed: update.tts.speed } } });
     await invalidateStoryForConfigChange(root, slug, current, story); await atomicWriteJson(paths.storyConfig, story); await atomicWriteJson(paths.pipelineConfig, story.pipeline); return story;

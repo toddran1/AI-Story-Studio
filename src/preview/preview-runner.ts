@@ -35,11 +35,11 @@ export class PreviewRunner {
       const translation = sameLanguage(options.story.sourceLanguage, options.story.outputLanguage)
         ? source
         : (await translate(this.llms.forStage(preset.translation), preset.translation, source, translationContext, options.story.sourceLanguage, options.story.outputLanguage)).text;
-      const narrationScript = (await polishNarration(this.llms.forStage(preset.narration), preset.narration, translation, options.story.outputLanguage, context, preset.tts.provider, preset.tts.model)).text;
+      const narrationScript = (await polishNarration(this.llms.forStage(preset.narration), preset.narration, translation, options.story.outputLanguage, context, preset.tts.provider, preset.tts.model, options.story.narrationSettings.profanityMode)).text;
       const narration = stripDeliveryCues(narrationScript, preset.tts.provider, preset.tts.model);
       const qa = (await validateChapterQuality(this.llms.forStage(preset.qa), preset.qa, {
         chapter: options.chapter, sourceLanguage: options.story.sourceLanguage, outputLanguage: options.story.outputLanguage,
-        source, translation, narration, context,
+        source, translation, narration, context, profanityMode: options.story.narrationSettings.profanityMode,
       })).value;
       await atomicWrite(choice === "a" ? paths.translationA : paths.translationB, translation);
       await atomicWrite(choice === "a" ? paths.narrationA : paths.narrationB, narration);
@@ -60,7 +60,7 @@ export class PreviewRunner {
     const b = await runPreset("b");
     const manifest = previewManifestSchema.parse({
       id, story: options.story.slug, chapter: options.chapter, createdAt: new Date().toISOString(),
-      inputFingerprint: fingerprint({ source, context }), audioPreview: options.audioPreview,
+      inputFingerprint: fingerprint({ source, context, narrationSettings: options.story.narrationSettings }), audioPreview: options.audioPreview,
       presets: options.presets, results: { a, b },
     });
     await atomicWriteJson(paths.manifest, manifest);

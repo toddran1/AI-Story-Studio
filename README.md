@@ -231,6 +231,14 @@ Story configuration now supports a bounded summary window:
 {"context":{"recentChapterSummaries":5}}
 ```
 
+Each story can also soften strong profanity in newly generated narration while retaining the original and translation exactly as imported/generated:
+
+```json
+{"narrationSettings":{"profanityMode":"soften-strong"}}
+```
+
+Enable **Soften strong profanity** in Story settings. Harsh terms are replaced with natural milder wording while mild words such as “ass,” “hell,” and “damn” remain allowed. Existing manual narration edits remain protected; generated narration and dependent QA/audio artifacts are marked for regeneration when this preference changes.
+
 Canonical entities remain available, while only the latest configured number of chapter summaries enters model context.
 
 The result is stored under:

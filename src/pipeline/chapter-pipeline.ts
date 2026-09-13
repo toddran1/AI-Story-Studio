@@ -143,11 +143,11 @@ export class ChapterPipeline {
     const narrationConfig = options.story.pipeline.narration;
     const ttsConfig = options.story.pipeline.tts;
     const deliveryProfile = narrationDeliveryProfile(ttsConfig.provider, ttsConfig.model);
-    const narrationFp = fingerprint({ english: fingerprint(english), context: priorContext, config: narrationConfig, deliveryProfile, prompt: NARRATION_PROMPT_VERSION });
+    const narrationFp = fingerprint({ english: fingerprint(english), context: priorContext, config: narrationConfig, narrationSettings: options.story.narrationSettings, deliveryProfile, prompt: NARRATION_PROMPT_VERSION });
     const narrationResult = await runStage("narration", narrationFp, paths.narration, {
       provider: narrationConfig.provider, model: narrationConfig.model, promptVersion: NARRATION_PROMPT_VERSION,
     }, async () => {
-      const result = await polishNarration(this.llms.forStage(narrationConfig), narrationConfig, english, options.story.outputLanguage, priorContext, ttsConfig.provider, ttsConfig.model);
+      const result = await polishNarration(this.llms.forStage(narrationConfig), narrationConfig, english, options.story.outputLanguage, priorContext, ttsConfig.provider, ttsConfig.model, options.story.narrationSettings.profanityMode);
       const cleanNarration = stripDeliveryCues(result.text, ttsConfig.provider, ttsConfig.model);
       if (!cleanNarration) throw new PipelineError("Narration delivery cues cannot replace the chapter's spoken narration");
       await atomicWrite(paths.narration, cleanNarration);
@@ -162,14 +162,14 @@ export class ChapterPipeline {
     const qaConfig = options.story.pipeline.qa;
     const qaFp = fingerprint({
       source: ingestionFp, translation: fingerprint(english), narration: fingerprint(narration),
-      context: priorContext, config: qaConfig, prompt: QA_PROMPT_VERSION,
+      context: priorContext, config: qaConfig, narrationSettings: options.story.narrationSettings, prompt: QA_PROMPT_VERSION,
     });
     const qaResult = await runStage("qa", qaFp, paths.qa, {
       provider: qaConfig.provider, model: qaConfig.model, promptVersion: QA_PROMPT_VERSION,
     }, async () => {
       const result = await validateChapterQuality(this.llms.forStage(qaConfig), qaConfig, {
         chapter: options.chapter, sourceLanguage: options.story.sourceLanguage, outputLanguage: options.story.outputLanguage,
-        source, translation: english, narration, context: priorContext,
+        source, translation: english, narration, context: priorContext, profanityMode: options.story.narrationSettings.profanityMode,
       });
       await atomicWriteJson(paths.qa, result.value);
       chapter.stages.qa.usage = result.usage;
