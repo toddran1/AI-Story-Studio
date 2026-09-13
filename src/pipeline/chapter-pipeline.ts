@@ -35,6 +35,7 @@ export type ForceStage = "translation" | "narration" | "qa" | "story-bible" | "c
 export type PipelineStageEvent = { stage: StageName; status: "started" | "completed" | "reused"; state: StageState };
 export type PipelineOptions = {
   root: string; story: Story; chapter: number; inputPath: string; force?: ForceStage;
+  stopAfter?: StageName;
   source?: Chapter["source"];
   productionRunId?: string; queueJobId?: string;
   onStageEvent?: (event: PipelineStageEvent) => void;
@@ -136,6 +137,7 @@ export class ChapterPipeline {
       return result.text;
     });
     const english = translationResult ?? await requireText(paths.english, "translation");
+    if (options.stopAfter === "translation") { await persist(); return chapter; }
 
     const narrationConfig = options.story.pipeline.narration;
     const ttsConfig = options.story.pipeline.tts;
@@ -154,6 +156,7 @@ export class ChapterPipeline {
       return cleanNarration;
     });
     const narration = narrationResult ?? await requireText(paths.narration, "narration");
+    if (options.stopAfter === "narration") { await persist(); return chapter; }
 
     const qaConfig = options.story.pipeline.qa;
     const qaFp = fingerprint({
@@ -184,6 +187,7 @@ export class ChapterPipeline {
       // the pre-chapter context. The rejected chapter can be retried later.
       throw new QualityGateError(`Chapter ${options.chapter} failed QA`, quality);
     }
+    if (options.stopAfter === "qa") { await persist(); return chapter; }
 
     const bibleConfig = options.story.pipeline.storyBible;
     const bibleFp = fingerprint({ narration: fingerprint(narration), config: bibleConfig, prompt: STORY_BIBLE_PROMPT_VERSION, context: priorContext });
@@ -204,9 +208,11 @@ export class ChapterPipeline {
       bible = mergeStoryBible(bible, cachedUpdate, options.chapter);
       await atomicWriteJson(paths.bible, bible);
     }
+    if (options.stopAfter === "storyBible") { await persist(); return chapter; }
 
     const continuityFp = fingerprint({ bible: bible.version, entities: bible.canonicalEntities, relationships: bible.canonicalRelationships, timeline: bible.entityTimeline });
     await runStage("continuity", continuityFp, paths.continuityAnalysis, { provider: "local", model: "deterministic-continuity-v1" }, async () => analyzeAndPersistContinuity(options.root, options.story.slug, bible, options.chapter));
+    if (options.stopAfter === "continuity") { await persist(); return chapter; }
 
     // Reader-facing narration remains clean for QA, subtitles, Story Bible, and
     // scene planning. Only Fish receives the model-specific delivery script.
@@ -231,6 +237,7 @@ export class ChapterPipeline {
         characters: [...ttsScript].length, bytes: result.audio.byteLength,
       };
     });
+    if (options.stopAfter === "tts") { await persist(); return chapter; }
 
     const mastered = await masterStoredChapter({ root: options.root, story: options.story, chapter: options.chapter, processor: this.audio,
       force: isForced(options.force, "audioMastering"), onEvent: (event) => options.onStageEvent?.({ stage: "audioMastering", status: event.status, state: event.state }) });

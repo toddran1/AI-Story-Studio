@@ -42,7 +42,7 @@ export const batchStateSchema = z.object({
   inputDirectory: z.string(), selection: z.object({ from: z.number().int().positive(), to: z.number().int().positive() }),
   status: z.enum(["pending", "running", "completed", "completed_with_errors", "failed", "cancelled", "paused"]),
   stopReason: z.string().optional(),
-  options: z.object({ allowGaps: z.boolean(), continueOnError: z.boolean(), delayMs: z.number(), force: z.string().optional() }),
+  options: z.object({ allowGaps: z.boolean(), continueOnError: z.boolean(), delayMs: z.number(), force: z.string().optional(), stopAfter: z.string().optional() }),
   chapters: z.record(z.string(), batchChapterStateSchema),
   summary: z.object({ total: z.number(), complete: z.number(), failed: z.number(), pending: z.number(), skipped: z.number(), cancelled: z.number() }),
   usage: z.record(z.string(), usageTotalsSchema),

@@ -38,6 +38,22 @@ describe("chapter pipeline", () => {
     expect(ctx.tts.calls).toBe(1);
   });
 
+  it("stops after the selected stage and reuses valid earlier work on later runs", async () => {
+    const ctx = await setup();
+    const chapter = await ctx.pipeline.run({ root: ctx.root, story: testStory(), chapter: 1, inputPath: ctx.input, stopAfter: "translation" });
+    expect(await readFile(ctx.paths.original, "utf8")).toContain("林遥");
+    expect(await readFile(ctx.paths.english, "utf8")).toBe("English translation");
+    expect(chapter.stages.translation.status).toBe("complete");
+    expect(chapter.stages.narration.status).toBe("pending");
+    expect(ctx.openai.calls).toHaveLength(0); expect(ctx.tts.calls).toBe(0);
+    const translationCalls = ctx.gemini.calls.length;
+    const resumed = await ctx.pipeline.run({ root: ctx.root, story: testStory(), chapter: 1, inputPath: ctx.input, stopAfter: "narration" });
+    expect(resumed.stages.narration.status).toBe("complete");
+    expect(resumed.stages.qa.status).toBe("pending");
+    expect(ctx.gemini.calls.length).toBe(translationCalls);
+    expect(ctx.tts.calls).toBe(0);
+  });
+
   it("keeps S2 delivery cues in the TTS script but out of the reader-facing narration", async () => {
     const root = await mkdtemp(join(tmpdir(), "story-studio-s2-cues-")); const input = join(root, "chapter.txt"); await writeFile(input, "正文", "utf8");
     const gemini = new MockLLM("gemini", ["Translation"]); const openai = new MockLLM("openai", ["[sad] The [System] spoke. [pause] Then she left."]); const tts = new MockTTS();

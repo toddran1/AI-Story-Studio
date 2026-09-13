@@ -42,6 +42,7 @@ export class BatchRunner {
           // Force is an invocation intent, not a retry intent. Later attempts
           // rely on ChapterPipeline fingerprints to avoid repeating paid work.
           force: currentAttempt === 1 ? options.state.options.force as PipelineOptions["force"] : undefined,
+          stopAfter: options.state.options.stopAfter as PipelineOptions["stopAfter"],
           onStageEvent: (event) => {
             entry.currentStage = event.stage;
             options.onProgress?.({ type: "stage", chapter: discovered.chapter, event });

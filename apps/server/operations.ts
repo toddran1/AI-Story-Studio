@@ -61,6 +61,7 @@ import { estimatePlanCost } from "../../src/cost/estimate.js";
 import { withUsageScope } from "../../src/cost/context.js";
 import { invalidateNarrationNamingChange } from "../../src/story-bible/narration-names.js";
 import { findChapterGaps } from "../../src/batch/gaps.js";
+import { StageName } from "../../src/domain/chapter.js";
 import { fingerprint } from "../../src/utils/hash.js";
 import { NovelProviderId, novelProviderIdSchema, storyNovelSourceSchema } from "../../src/source/novel-provider.js";
 
@@ -263,7 +264,7 @@ export class StudioOperations {
     slugSchema.parse(slug); const input = batchInputSchema.parse(raw);
     return this.jobs.create("batch", slug, async (control) => withStoryLock(this.root, slug, "web batch", async () => {
       const story = await loadStory(storyPaths(this.root, slug, 1).storyConfig); const imported = await loadImportedChapters(this.root, slug);
-      const selected = selectChapterRange(imported.chapters, input.from, input.to); const state = createBatchState({ root: this.root, story: slug, inputDirectory: imported.directory, chapters: selected, allowGaps: true, continueOnError: false, delayMs: 0, force: input.force });
+      const selected = selectChapterRange(imported.chapters, input.from, input.to); const state = createBatchState({ root: this.root, story: slug, inputDirectory: imported.directory, chapters: selected, allowGaps: true, continueOnError: false, delayMs: 0, force: input.force, stopAfter: batchStopAfter(input.force) });
       const shutdown = new ShutdownController(); control.setPause(() => shutdown.request());
       return new BatchRunner(this.pipeline).run({ root: this.root, story, chapters: selected, state, shutdown, retry: retryConfigSchema.parse({}),
         onProgress: (event: ProgressEvent) => control.update(event) });
@@ -406,6 +407,11 @@ export class StudioOperations {
 }
 
 function supportsBulk(provider: StorySourceProvider) { const capabilities = (provider as unknown as { capabilities?: { acquisition?: string[] } }).capabilities; return capabilities?.acquisition?.includes("bulk-download") === true; }
+
+function batchStopAfter(force?: z.infer<typeof batchInputSchema>["force"]): StageName | undefined {
+  if (!force || force === "all") return undefined;
+  return force === "story-bible" ? "storyBible" : force === "audio" ? "audioMastering" : force;
+}
 
 function sourceUpdatePreview(previous: SourceManifest, inspection: SourceInspection) {
   const before = new Map(previous.chapters.map((item) => [item.chapter, item.fingerprint]));
