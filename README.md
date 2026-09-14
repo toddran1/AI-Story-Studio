@@ -555,6 +555,20 @@ npm run story:summary -- delete undead-disaster sum_<uuid>
 
 Use `--model provider:model` for an explicit routing override. Without it, summary generation follows the story's configured narration model. Progress is printed for source preparation, first-pass batches, combination levels, and finalization.
 
+### Localized narration names
+
+`story:names` uses the same canonical Story Bible overlay, invalidation rules, and localization suggestion service as the browser. It changes narration-facing localization only; canonical translation names remain unchanged.
+
+```sh
+npm run story:names -- list undead-disaster --type character
+npm run story:names -- show undead-disaster ent_<24-hex-id>
+npm run story:names -- suggest undead-disaster ent_<24-hex-id> --locale en-US --count 5
+npm run story:names -- set undead-disaster ent_<24-hex-id> --locale en-US --full "Malakai Sterling" --short "Malakai" --mode ai_contextual
+npm run story:names -- clear undead-disaster ent_<24-hex-id>
+```
+
+`ai_contextual` gives the narration model the full and familiar forms plus contextual guidance; it deliberately does not apply a deterministic text replacement. Use `always_full`, `always_short`, or `manual` only when you need an explicit non-contextual rule.
+
 ## Verification
 
 ```sh

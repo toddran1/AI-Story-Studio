@@ -78,6 +78,28 @@ describe("preferred narration names", () => {
     expect(request.input).toContain('"preferredNarrationName": "Big Mike"'); expect(request.input).toContain('"behavior": "use_preferred"'); expect(request.instructions).toMatch(/context requires/);
   });
 
+  it("gives the narration provider contextual Malakai Sterling guidance without deterministic replacement", async () => {
+    const outputs = [
+      "Malakai Sterling fell into the monster horde...",
+      "None of them noticed Malakai seething with fury...",
+      "“Hey Malakai, what are you doing over there?”",
+      "The official record identified Malakai Sterling as the academy's representative.",
+    ];
+    const requests: any[] = []; const provider: LLMProvider = { name: "openai", validateConfiguration: async () => undefined, generateText: async (request) => { requests.push(request); return { text: outputs.shift()! }; }, generateStructured: async () => { throw new Error("unused"); } };
+    const context = { canonicalEntities: [{ canonicalName: "Su Ming", originalName: "苏铭", aliases: ["Student Su"], preferredNarrationName: undefined, aliasNarrationRules: [], localizedNaming: { locale: "en-US", fullName: "Malakai Sterling", shortName: "Malakai", usageMode: "ai_contextual" } }] };
+    const source = ["Su Ming fell into the monster horde...", "None of them noticed Su Ming seething with fury...", "“Hey Su Ming, what are you doing over there?”", "The official record identified Su Ming as the academy's representative."];
+    const rendered = [];
+    for (const chapter of source) rendered.push((await polishNarration(provider, { provider: "openai", model: "test-model" }, chapter, "English", context)).text);
+    expect(rendered).toEqual([
+      "Malakai Sterling fell into the monster horde...",
+      "None of them noticed Malakai seething with fury...",
+      "“Hey Malakai, what are you doing over there?”",
+      "The official record identified Malakai Sterling as the academy's representative.",
+    ]);
+    for (const request of requests) { expect(request.input).toContain('"canonicalName": "Su Ming"'); expect(request.input).toContain('"fullName": "Malakai Sterling"'); expect(request.input).toContain('"shortName": "Malakai"'); }
+    expect(requests[0]!.instructions).toMatch(/first introductions/i); expect(requests[0]!.instructions).toMatch(/established narration/i); expect(requests[0]!.instructions).toMatch(/familiar dialogue/i); expect(requests[0]!.instructions).toMatch(/formal\/legal\/official/i);
+  });
+
   it("enforces a preferred canonical name inside quoted dialogue and possessives", () => {
     const narration = `The crowd pointed at Su Ming. “It's Su Ming!” someone shouted. Su Ming's expression darkened.`;
     const result = applyNarrationNamingPreferences(narration, { canonicalEntities: [{ canonicalName: "Su Ming", originalName: "苏铭", aliases: [], preferredNarrationName: "Shi Wang", aliasNarrationRules: [] }] });
