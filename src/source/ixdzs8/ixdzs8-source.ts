@@ -45,7 +45,7 @@ export class Ixdzs8Source implements StorySourceProvider, NovelSourceProvider {
     return new JsonCatalogTransport(this.http, {
       label: "ixdzs8 catalog", request: { method: "POST_FORM", url: () => "https://ixdzs8.com/novel/clist/", fields: (value) => ({ bid: value.bookId }), headers: (value) => ({ Referer: value.url, Origin: "https://ixdzs8.com", "X-Requested-With": "XMLHttpRequest" }) },
       items: (payload) => { const data = (payload as { data?: unknown } | null)?.data; return Array.isArray(data) ? data : undefined; }, detectChallenge: challengeIndicators,
-      chapter: (item, index, value) => { const row = item as { ordernum?: unknown; title?: unknown; ctype?: unknown }; if (row.ctype !== undefined && String(row.ctype) !== "0") return undefined; const order = String(row.ordernum ?? "").trim(); if (!/^\d+$/.test(order)) return undefined; const title = typeof row.title === "string" ? clean(row.title) : undefined; const chapterId = `p${order}`; return { provider: this.id, bookId: value.bookId, chapterId, chapter: chapterNumber(title) ?? index + 1, title, url: ixdzs8ChapterUrl(value.bookId, chapterId) }; },
+      chapter: (item, _index, value) => { const row = item as { ordernum?: unknown; title?: unknown; ctype?: unknown }; if (row.ctype !== undefined && String(row.ctype) !== "0") return undefined; const order = String(row.ordernum ?? "").trim(); if (!/^\d+$/.test(order)) return undefined; const title = typeof row.title === "string" ? clean(row.title) : undefined; const chapterId = `p${order}`; return { provider: this.id, bookId: value.bookId, chapterId, chapter: Number(order), title, url: ixdzs8ChapterUrl(value.bookId, chapterId) }; },
     }).getChapterList(book);
   }
 
@@ -69,5 +69,4 @@ function optional(value: string) { return clean(value) || undefined; }
 function meta($: ReturnType<typeof load>, property: string) { return clean($(`meta[property='${property}']`).attr("content") ?? ""); }
 function absolute(value: string | undefined, base: string) { if (!value) return undefined; try { return new URL(value.startsWith("//") ? `https:${value}` : value, base).href; } catch { return undefined; } }
 function isAd(value: string) { return /ixdzs8|最新网址|手机用户请|加入书签|返回目录/iu.test(value); }
-function chapterNumber(title?: string) { const match = title ? /第\s*(\d+)\s*(?:章|话|話|节|節)/u.exec(title) : undefined; return match ? Number(match[1]) : undefined; }
 function safeDownloadHost(value: string) { try { const host = new URL(value).hostname.toLowerCase(); return host === "ixdzs8.com" || host.endsWith(".ixdzs8.com"); } catch { return false; } }

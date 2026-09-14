@@ -44,7 +44,11 @@ describe("Milestone 17 novel providers", () => {
       return new Response("missing", { status: 404 });
     });
     const source = new Ixdzs8Source(client(fetcher, ["ixdzs8.com", "*.ixdzs8.com"])); const book = await source.getBook("https://ixdzs8.com/read/568509/"); const list = await source.getChapterList(book);
-    expect(book).toMatchObject({ bookId: "568509", title: "亡灵天灾", author: "作者甲" }); expect(list.map((item) => item.chapterId)).toEqual(["p1499", "p1500"]);
+    expect(book).toMatchObject({ bookId: "568509", title: "亡灵天灾", author: "作者甲" });
+    expect(list.map((item) => ({ chapterId: item.chapterId, chapter: item.chapter, title: item.title }))).toEqual([
+      { chapterId: "p1499", chapter: 1499, title: "第1章 起点" },
+      { chapterId: "p1500", chapter: 1500, title: "第2章 延续" },
+    ]);
     expect(await source.getBulkDownloads(book)).toEqual([expect.objectContaining({ format: "txt", url: "https://down7.ixdzs8.com/txt/568509.txt" })]);
     const download = (await source.getBulkDownloads(book))[0]!; expect((await source.fetchBulkDownload(download)).text).toContain("下载正文");
     const chapter = await source.getChapter(list[0]!); expect(chapter.text).not.toContain("ixdzs8.com"); expect(source.validateChapter(chapter).status).toBe("COMPLETE");

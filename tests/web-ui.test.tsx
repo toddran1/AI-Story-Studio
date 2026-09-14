@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { App, shouldRefreshAfterJob } from "../apps/web/src/App.js";
 import { pretty } from "../apps/web/src/format.js";
 import { ChapterImportPage, savedStorySourceUrl } from "../apps/web/src/ChapterImportPage.js";
+import { SummariesPage } from "../apps/web/src/SummariesPage.js";
 
 describe("web UI", () => {
   it("uses readable labels for pipeline identifiers", () => {
@@ -13,6 +14,8 @@ describe("web UI", () => {
     expect(shouldRefreshAfterJob(running, { ...running, status: "completed" })).toBe(true);
     expect(shouldRefreshAfterJob({ ...running, status: "completed" }, { ...running, status: "completed" })).toBe(false);
     expect(shouldRefreshAfterJob(undefined, running)).toBe(false);
+    const preview = { ...running, type: "voicePreview" };
+    expect(shouldRefreshAfterJob(preview, { ...preview, status: "completed" })).toBe(false);
   });
   it("renders the studio shell and accessible navigation", () => {
     Object.defineProperty(globalThis, "location", { value: { pathname: "/" }, configurable: true });
@@ -30,5 +33,13 @@ describe("web UI", () => {
     const base = { source: undefined } as any;
     expect(savedStorySourceUrl({ ...base, story: { source: { url: " https://example.com/book/7 " } } })).toBe("https://example.com/book/7");
     expect(savedStorySourceUrl({ story: { source: {} }, source: { origin: { url: "https://example.com/legacy/7" } } } as any)).toBe("https://example.com/legacy/7");
+  });
+  it("renders the Summary Library creation and empty-state workflow", () => {
+    const html = renderToStaticMarkup(<SummariesPage slug="demo-story" onJob={() => undefined} />);
+    expect(html).toContain("Summary library");
+    expect(html).toContain("Search summaries");
+    expect(html).toContain("All summary types");
+    expect(html).toContain("All statuses");
+    expect(html).toContain("Create your first summary");
   });
 });

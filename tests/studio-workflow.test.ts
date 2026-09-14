@@ -43,7 +43,7 @@ describe("production studio workflow", () => {
   it("generates voice previews outside chapter artifacts", async () => {
     const { root, story, paths } = await fixture(); const jobs = new JobManager(); const tts = new MockTTS(); const operations = new StudioOperations(root, loadEnvironment({}), jobs, { tts });
     const started = operations.startVoicePreview(story.slug, { text: "Demo narration", model: "s2-pro" }); const finished = await wait(jobs, started.id); const id = (finished.result as { id: string }).id;
-    expect(tts.calls).toBe(1); expect(await readFile(voicePreviewPaths(root, story.slug, id).audio)).toHaveLength(3); await expect(readFile(paths.audioRaw)).rejects.toMatchObject({ code: "ENOENT" }); await operations.close();
+    expect(tts.calls).toBe(1); expect(tts.requests[0]).toMatchObject({ sampleRate: 44100, bitrate: 192, normalize: true }); expect(await readFile(voicePreviewPaths(root, story.slug, id).audio)).toHaveLength(3); await expect(readFile(paths.audioRaw)).rejects.toMatchObject({ code: "ENOENT" }); await operations.close();
   });
 
   it("aggregates dashboard progress without provider work", async () => {

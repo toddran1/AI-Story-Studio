@@ -15,6 +15,7 @@ import { retrieveRelevantContext } from "../src/story-bible/retrieval.js";
 import { mergeStoryBible } from "../src/story-bible/updater.js";
 import { qaInstructions } from "../src/qa/prompts.js";
 import { storyBibleInstructions } from "../src/story-bible/prompts.js";
+import { applyNarrationNamingPreferences } from "../src/narration/naming-preferences.js";
 
 const update = (chapter = 1) => storyBibleUpdateSchema.parse({ chapterSummary: "Michael enters.", characters: [{ canonicalEnglishName: "Michael Johnson", originalName: "米高", description: "A coach", aliases: ["Michael", "Mike", "Mikey", "Coach Johnson"], firstSeenChapter: chapter, lastSeenChapter: chapter }] });
 
@@ -56,5 +57,16 @@ describe("preferred narration names", () => {
     let request: any; const provider: LLMProvider = { name: "openai", validateConfiguration: async () => undefined, generateText: async (value) => { request = value; return { text: "Big Mike entered." }; }, generateStructured: async () => { throw new Error("unused"); } };
     await polishNarration(provider, { provider: "openai", model: "test-model" }, "Michael entered.", "English", { canonicalEntities: [{ canonicalName: "Michael Johnson", preferredNarrationName: "Big Mike", aliasNarrationRules: [{ alias: "Michael", behavior: "use_preferred" }] }] });
     expect(request.input).toContain('"preferredNarrationName": "Big Mike"'); expect(request.input).toContain('"behavior": "use_preferred"'); expect(request.instructions).toMatch(/context requires/);
+  });
+
+  it("enforces a preferred canonical name inside quoted dialogue and possessives", () => {
+    const narration = `The crowd pointed at Su Ming. “It's Su Ming!” someone shouted. Su Ming's expression darkened.`;
+    const result = applyNarrationNamingPreferences(narration, { canonicalEntities: [{ canonicalName: "Su Ming", originalName: "苏铭", aliases: [], preferredNarrationName: "Shi Wang", aliasNarrationRules: [] }] });
+    expect(result).toBe(`The crowd pointed at Shi Wang. “It's Shi Wang!” someone shouted. Shi Wang's expression darkened.`);
+  });
+
+  it("honors explicit alias exceptions and custom narration replacements", () => {
+    const context = { canonicalEntities: [{ canonicalName: "Su Ming", aliases: ["Brother Su", "Young Su"], preferredNarrationName: "Shi Wang", aliasNarrationRules: [{ alias: "Brother Su", behavior: "no_override" }, { alias: "Young Su", behavior: "custom", replacement: "Young Shi" }] }] };
+    expect(applyNarrationNamingPreferences(`“Su Ming! Brother Su! Young Su!”`, context)).toBe(`“Shi Wang! Brother Su! Young Shi!”`);
   });
 });

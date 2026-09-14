@@ -102,6 +102,15 @@ export function createApiHandler(operations: StudioOperations) {
       if (cleanupMatch && request.method === "POST") return send(response, 200, await operations.cleanup(cleanupMatch[1]!, await jsonBody(request)));
       const activityMatch = /^\/api\/stories\/([a-z0-9-]+)\/activity$/.exec(url.pathname);
       if (activityMatch && request.method === "GET") return send(response, 200, { activity: await operations.recentActivity(activityMatch[1]!, optionalInteger(url.searchParams.get("limit"))) });
+      const summariesMatch = /^\/api\/stories\/([a-z0-9-]+)\/summaries$/.exec(url.pathname);
+      if (summariesMatch && request.method === "GET") return send(response, 200, { summaries: await operations.listSummaries(summariesMatch[1]!, { query: optionalString(url.searchParams.get("q")), type: optionalString(url.searchParams.get("type")), status: optionalString(url.searchParams.get("status")), sort: z.enum(["coverage", "created", "updated"]).default("updated").parse(url.searchParams.get("sort") ?? undefined) }) });
+      if (summariesMatch && request.method === "POST") return send(response, 202, operations.startSummary(summariesMatch[1]!, await jsonBody(request)));
+      const summaryMatch = /^\/api\/stories\/([a-z0-9-]+)\/summaries\/(sum_[a-f0-9-]{36})$/.exec(url.pathname);
+      if (summaryMatch && request.method === "GET") return send(response, 200, { summary: await operations.getSummary(summaryMatch[1]!, summaryMatch[2]!) });
+      if (summaryMatch && request.method === "PUT") return send(response, 200, { summary: await operations.updateSummary(summaryMatch[1]!, summaryMatch[2]!, await jsonBody(request)) });
+      if (summaryMatch && request.method === "DELETE") { await jsonBody(request); return send(response, 200, await operations.deleteSummary(summaryMatch[1]!, summaryMatch[2]!)); }
+      const summaryRegenerateMatch = /^\/api\/stories\/([a-z0-9-]+)\/summaries\/(sum_[a-f0-9-]{36})\/regenerate$/.exec(url.pathname);
+      if (summaryRegenerateMatch && request.method === "POST") return send(response, 202, operations.regenerateSummary(summaryRegenerateMatch[1]!, summaryRegenerateMatch[2]!, await jsonBody(request)));
       const dashboardMatch = /^\/api\/stories\/([a-z0-9-]+)\/dashboard$/.exec(url.pathname);
       if (dashboardMatch && request.method === "GET") return send(response, 200, await getStoryDashboard(operations.root, dashboardMatch[1]!));
       const outputsMatch = /^\/api\/stories\/([a-z0-9-]+)\/outputs$/.exec(url.pathname);

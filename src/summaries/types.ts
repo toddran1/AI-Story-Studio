@@ -1,0 +1,74 @@
+import { z } from "zod";
+import { stageModelConfigSchema } from "../domain/provider.js";
+
+export const summaryTypeSchema = z.enum(["brief", "detailed", "mini-chapter", "arc", "character-focused", "custom"]);
+export const summarySourceModeSchema = z.enum(["original", "translated", "chapter-summaries"]);
+export const summaryStatusSchema = z.enum(["generating", "complete", "failed"]);
+export const summaryIdSchema = z.string().regex(/^sum_[a-f0-9-]{36}$/);
+
+export const summarySelectionSchema = z.object({
+  from: z.number().int().positive().optional(),
+  to: z.number().int().positive().optional(),
+  chapters: z.array(z.number().int().positive()).min(1).max(10_000).optional(),
+}).strict().superRefine((value, context) => {
+  const hasRange = value.from !== undefined || value.to !== undefined;
+  if (hasRange && (value.from === undefined || value.to === undefined)) context.addIssue({ code: "custom", message: "Chapter ranges require both from and to" });
+  if (value.from !== undefined && value.to !== undefined && value.to < value.from) context.addIssue({ code: "custom", message: "Range end must be at or after range start" });
+  if (hasRange === Boolean(value.chapters)) context.addIssue({ code: "custom", message: "Choose either a chapter range or a custom chapter list" });
+});
+
+export const summaryGenerationInputSchema = summarySelectionSchema.and(z.object({
+  title: z.string().trim().min(1).max(200),
+  summaryType: summaryTypeSchema.default("detailed"),
+  sourceMode: summarySourceModeSchema.default("translated"),
+  targetWords: z.number().int().min(50).max(20_000).default(800),
+  instructions: z.string().trim().max(5_000).optional(),
+  focus: z.string().trim().max(500).optional(),
+  model: stageModelConfigSchema.optional(),
+  chunkSize: z.number().int().min(1).max(100).default(25),
+  contextEligible: z.boolean().default(false),
+}));
+
+const provenanceBatchSchema = z.object({ batch: z.number().int().positive(), chapters: z.array(z.number().int().positive()), inputCharacters: z.number().int().nonnegative() });
+export const summarySchema = z.object({
+  id: summaryIdSchema,
+  storyId: z.string().min(1),
+  title: z.string().min(1).max(200),
+  chapters: z.array(z.number().int().positive()).min(1),
+  chapterRange: z.object({ from: z.number().int().positive(), to: z.number().int().positive() }).optional(),
+  summaryType: summaryTypeSchema,
+  sourceMode: summarySourceModeSchema,
+  targetLength: z.object({ words: z.number().int().min(50).max(20_000) }),
+  focus: z.string().max(500).optional(),
+  instructions: z.string().max(5_000).optional(),
+  text: z.string().max(1_000_000),
+  status: summaryStatusSchema,
+  origin: z.enum(["generated", "manual"]),
+  manuallyEdited: z.boolean().default(false),
+  contextEligible: z.boolean().default(false),
+  error: z.string().max(10_000).optional(),
+  createdAt: z.string().datetime(),
+  updatedAt: z.string().datetime(),
+  provenance: z.object({
+    model: stageModelConfigSchema,
+    promptVersion: z.string(),
+    chapterSources: z.array(z.object({ chapter: z.number().int().positive(), mode: summarySourceModeSchema, characters: z.number().int().nonnegative(), fingerprint: z.string() })),
+    levels: z.array(z.object({ level: z.number().int().nonnegative(), batches: z.array(provenanceBatchSchema) })),
+  }),
+});
+
+export type StorySummary = z.infer<typeof summarySchema>;
+export type SummaryGenerationInput = z.infer<typeof summaryGenerationInputSchema>;
+export type SummaryType = z.infer<typeof summaryTypeSchema>;
+export type SummarySourceMode = z.infer<typeof summarySourceModeSchema>;
+export type SummaryProgress = { phase: "preparing" | "summarizing" | "combining" | "finalizing" | "complete"; completed: number; total: number; level?: number; chapters?: number[] };
+
+export function normalizeSummaryChapters(input: z.input<typeof summarySelectionSchema>): number[] {
+  const selection = summarySelectionSchema.parse({ from: input.from, to: input.to, chapters: input.chapters });
+  if (selection.chapters) return [...new Set(selection.chapters)].sort((a, b) => a - b);
+  return Array.from({ length: selection.to! - selection.from! + 1 }, (_, index) => selection.from! + index);
+}
+
+export function contiguousRange(chapters: number[]) {
+  return chapters.every((chapter, index) => index === 0 || chapter === chapters[index - 1]! + 1) ? { from: chapters[0]!, to: chapters.at(-1)! } : undefined;
+}

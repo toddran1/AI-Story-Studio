@@ -1,0 +1,87 @@
+#!/usr/bin/env node
+import { pathToFileURL } from "node:url";
+import { loadEnvironment, resolveStudioRoot } from "../../src/config/env.js";
+import { createPipelineRuntime } from "../../src/pipeline/create-pipeline.js";
+import { SummaryService, coverage } from "../../src/summaries/service.js";
+import { summaryIdSchema, summarySourceModeSchema, summaryTypeSchema } from "../../src/summaries/types.js";
+import { withStoryLock } from "../../src/storage/story-lock.js";
+
+export type SummaryCommand =
+  | { action: "list"; story: string }
+  | { action: "show" | "delete"; story: string; id: string }
+  | { action: "regenerate"; story: string; id: string; overrides: Record<string, unknown> }
+  | { action: "generate"; story: string; input: Record<string, unknown> };
+
+export function parseSummaryArgs(values: string[]): SummaryCommand {
+  const [action, story, positionalId, ...rest] = values;
+  if (!action || !story || !["generate", "list", "show", "regenerate", "delete"].includes(action)) usage();
+  validateStory(story);
+  if (action === "list") { if (positionalId || rest.length) usage("List does not accept additional arguments"); return { action, story }; }
+  if (action === "show" || action === "delete") { if (!positionalId || rest.length) usage(`${action} requires one summary ID`); return { action, story, id: summaryIdSchema.parse(positionalId) }; }
+  if (action === "regenerate") {
+    if (!positionalId) usage("Regenerate requires a summary ID");
+    return { action, story, id: summaryIdSchema.parse(positionalId), overrides: parseOptions(rest, false) };
+  }
+  const valuesAfterStory = positionalId ? [positionalId, ...rest] : rest;
+  const input = parseOptions(valuesAfterStory, true);
+  const hasRange = input.from !== undefined || input.to !== undefined;
+  if (hasRange !== (input.chapters === undefined)) usage("Generate requires either --from and --to, or --chapters");
+  if (hasRange && (input.from === undefined || input.to === undefined)) usage("Chapter ranges require both --from and --to");
+  const selected = input.chapters as number[] | undefined;
+  input.title ??= hasRange ? `Chapters ${input.from}–${input.to} recap` : `Chapters ${coverage(selected!)} recap`;
+  return { action: "generate", story, input };
+}
+
+async function main() {
+  const command = parseSummaryArgs(process.argv.slice(2));
+  const env = loadEnvironment(); const root = resolveStudioRoot(env); const runtime = createPipelineRuntime(env); const service = new SummaryService(root, runtime.router);
+  await runSummaryCommand(command, { root, service, stdout: (text) => process.stdout.write(text), stderr: (text) => process.stderr.write(text) });
+}
+
+export async function runSummaryCommand(command: SummaryCommand, dependencies: { root: string; service: SummaryService; stdout: (text: string) => unknown; stderr: (text: string) => unknown }) {
+  const { root, service, stdout, stderr } = dependencies;
+  if (command.action === "list") {
+    const records = await service.list(command.story);
+    stdout(records.length ? records.map((item) => `${item.id}\t${item.status}\t${coverage(item.chapters)}\t${item.summaryType}\t${item.title}`).join("\n") + "\n" : "No summaries found.\n");
+    return;
+  }
+  if (command.action === "show") { stdout(`${JSON.stringify(await service.get(command.story, command.id), null, 2)}\n`); return; }
+  if (command.action === "delete") {
+    await withStoryLock(root, command.story, "summary deletion", () => service.delete(command.story, command.id));
+    stdout(`Deleted ${command.id}.\n`); return;
+  }
+  const progress = (event: { phase: string; completed: number; total: number; chapters?: number[] }) => stderr(`[${event.completed}/${event.total}] ${event.phase}${event.chapters?.length ? ` · chapters ${coverage(event.chapters)}` : ""}\n`);
+  if (command.action !== "generate" && command.action !== "regenerate") throw new Error(`Unsupported summary action: ${command.action}`);
+  const result = command.action === "generate"
+    ? await withStoryLock(root, command.story, "summary generation", () => service.generate(command.story, command.input, progress))
+    : await withStoryLock(root, command.story, "summary regeneration", () => service.regenerate(command.story, command.id, command.overrides, progress));
+  stdout(`${JSON.stringify(result, null, 2)}\n`);
+}
+
+function parseOptions(values: string[], selectionAllowed: boolean) {
+  const result: Record<string, unknown> = {};
+  for (let index = 0; index < values.length; index++) {
+    const key = values[index]!;
+    if (key === "--context") { result.contextEligible = true; continue; }
+    const value = values[++index]; if (!value || value.startsWith("--")) usage(`Missing value for ${key}`);
+    if (key === "--title") result.title = value;
+    else if (key === "--type") result.summaryType = summaryTypeSchema.parse(value);
+    else if (key === "--source") result.sourceMode = summarySourceModeSchema.parse(value);
+    else if (key === "--target-length") result.targetWords = integer(value, 50, 20_000, "Target length");
+    else if (key === "--chunk-size") result.chunkSize = integer(value, 1, 100, "Chunk size");
+    else if (key === "--focus") result.focus = value;
+    else if (key === "--instructions") result.instructions = value;
+    else if (key === "--model") { const separator = value.indexOf(":"); if (separator < 1 || separator === value.length - 1) usage("--model must use provider:model format"); result.model = { provider: value.slice(0, separator), model: value.slice(separator + 1) }; }
+    else if (selectionAllowed && key === "--from") result.from = integer(value, 1, Number.MAX_SAFE_INTEGER, "Chapter");
+    else if (selectionAllowed && key === "--to") result.to = integer(value, 1, Number.MAX_SAFE_INTEGER, "Chapter");
+    else if (selectionAllowed && key === "--chapters") { const chapters = [...new Set(value.split(",").map((item) => integer(item.trim(), 1, Number.MAX_SAFE_INTEGER, "Chapter")))].sort((a, b) => a - b); if (!chapters.length) usage("--chapters cannot be empty"); result.chapters = chapters; }
+    else usage(`Unknown argument: ${key}`);
+  }
+  return result;
+}
+
+function integer(value: string, min: number, max: number, label: string) { const number = Number(value); if (!Number.isSafeInteger(number) || number < min || number > max) usage(`${label} must be an integer from ${min} to ${max}`); return number; }
+function validateStory(story: string) { if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(story)) usage("Invalid story slug"); }
+function usage(message = "Invalid summary command"): never { throw new Error(`${message}\nUsage:\n  npm run story:summary -- generate <story> (--from N --to N | --chapters N,N) [--title text] [--type brief|detailed|mini-chapter|arc|character-focused|custom] [--source original|translated|chapter-summaries] [--target-length words] [--model provider:model] [--context]\n  npm run story:summary -- list <story>\n  npm run story:summary -- show <story> <summary-id>\n  npm run story:summary -- regenerate <story> <summary-id> [generation options]\n  npm run story:summary -- delete <story> <summary-id>`); }
+
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) main().catch((error: unknown) => { process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`); process.exitCode = 1; });

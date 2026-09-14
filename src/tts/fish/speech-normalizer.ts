@@ -1,3 +1,5 @@
+import { disambiguateFishS2Brackets } from "./control-cues.js";
+
 const TITLE_REPLACEMENTS: ReadonlyArray<readonly [RegExp, string]> = [
   [/\bMr\.(?=\s+\p{L})/gu, "Mister"],
   [/\bMrs\.(?=\s+\p{L})/gu, "Missus"],
@@ -81,8 +83,8 @@ function replaceAll(text: string, replacements: ReadonlyArray<readonly [RegExp, 
  * of uppercase words and ambiguous forms (for example St.) so names, ranks, and
  * fictional terminology are not silently changed.
  */
-export function normalizeFishSpeechText(text: string): string {
-  const withoutMarkup = stripFishMarkdownEmphasis(stripEmojiForSpeech(stripMarkdownForSpeech(text)));
+export function normalizeFishSpeechText(text: string, model?: string): string {
+  const withoutMarkup = disambiguateFishS2Brackets(stripFishMarkdownEmphasis(stripEmojiForSpeech(stripMarkdownForSpeech(text))), model);
   const normalizedValues = withoutMarkup
     .replace(/\$(\d+(?:,\d{3})*(?:\.\d+)?)([KMBT])\b/gi, (_match, amount: string, suffix: string) => {
       const scale = ({ K: "thousand", M: "million", B: "billion", T: "trillion" } as const)[suffix.toUpperCase() as "K" | "M" | "B" | "T"];

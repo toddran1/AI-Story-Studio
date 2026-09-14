@@ -1,0 +1,16 @@
+.summary-context-toggle {
+  display: flex !important;
+  flex-direction: row !important;
+  align-items: flex-start !important;
+  gap: 12px !important;
+  padding: 13px;
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, .018);
+}
+
+.summary-context-toggle input { width: auto !important; margin-top: 3px; }
+.summary-context-toggle span { display: grid; gap: 3px; }
+.summary-context-toggle b { color: var(--ink); font-size: 12px; letter-spacing: 0; text-transform: none; }
+.summary-context-toggle small { color: var(--muted); line-height: 1.4; letter-spacing: 0; text-transform: none; }
+.summary-context-toggle.editor { margin: 0 22px 14px; }
+

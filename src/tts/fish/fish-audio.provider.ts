@@ -8,7 +8,7 @@ export class FishAudioProvider implements TTSProvider {
   readonly name = "fish" as const;
   // Included in the TTS fingerprint so audio made before Markdown cleanup is not
   // silently reused after the normalizer changes.
-  readonly inputNormalizationVersion = "fish-speech-normalization-v2";
+  readonly inputNormalizationVersion = "fish-speech-normalization-v3";
   constructor(
     private readonly apiKey?: string,
     private readonly fetcher: typeof fetch = fetch,
@@ -17,7 +17,7 @@ export class FishAudioProvider implements TTSProvider {
   ) {}
 
   resolveReferenceId(referenceId?: string): string | undefined {
-    return referenceId?.trim() || this.defaultReferenceId;
+    return normalizeFishReferenceId(referenceId) ?? normalizeFishReferenceId(this.defaultReferenceId);
   }
 
   async validateConfiguration(): Promise<void> { if (!this.apiKey) throw new ConfigurationError("Missing required fish credential (FISH_AUDIO_API_KEY). Add it to .env."); }
@@ -25,7 +25,7 @@ export class FishAudioProvider implements TTSProvider {
     await this.validateConfiguration();
     const referenceId = this.resolveReferenceId(request.referenceId);
     const segments: Uint8Array[] = []; const requestIds: string[] = [];
-    const speechText = normalizeFishSpeechText(request.text);
+    const speechText = normalizeFishSpeechText(request.text, request.model);
     if (!speechText) throw new ProviderError("Fish Audio narration is empty after speech normalization");
     for (const text of splitForTTS(speechText, request.maxCharsPerRequest)) {
       let response: Response;
@@ -59,6 +59,19 @@ export class FishAudioProvider implements TTSProvider {
 }
 
 export { normalizeFishSpeechText, stripFishMarkdownEmphasis } from "./speech-normalizer.js";
+
+/** Accept either the API model ID or a public fish.audio model URL. */
+export function normalizeFishReferenceId(value?: string): string | undefined {
+  const trimmed = value?.trim();
+  if (!trimmed) return undefined;
+  try {
+    const url = new URL(trimmed);
+    if (url.hostname === "fish.audio" || url.hostname.endsWith(".fish.audio")) {
+      return /^\/app\/m\/([a-f0-9]{32})\/?$/i.exec(url.pathname)?.[1]?.toLowerCase() ?? trimmed;
+    }
+  } catch { /* A plain model ID is the normal API form. */ }
+  return trimmed;
+}
 
 /** Documented S2/S2.1 production defaults. Other/unknown models retain the portable request shape. */
 function fishS2Defaults(model: string) {

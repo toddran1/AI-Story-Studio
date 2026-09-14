@@ -31,6 +31,7 @@ import { retrieveRelevantContext } from "../story-bible/retrieval.js";
 import { analyzeAndPersistContinuity } from "../story-bible/continuity.js";
 import { withUsageScope } from "../cost/context.js";
 import { loadNarrationNamingEntities } from "../story-bible/narration-names.js";
+import { loadEligibleSummaryContext } from "../summaries/service.js";
 
 export type ForceStage = "translation" | "narration" | "qa" | "story-bible" | "continuity" | "tts" | "audio" | "all";
 export type PipelineStageEvent = { stage: StageName; status: "started" | "completed" | "reused"; state: StageState };
@@ -66,9 +67,12 @@ export class ChapterPipeline {
     const source = await readFile(options.inputPath, "utf8");
     if (!source.trim()) throw new PipelineError(`Input file is empty: ${options.inputPath}`);
     let bible = await rebuildStoryBibleBeforeChapter(options.root, options.story.slug, options.chapter);
-    const translationContext = retrieveRelevantContext(bible, source, options.chapter, { recentSummaryCount: options.story.context.recentChapterSummaries });
+    const eligibleSummaries = await loadEligibleSummaryContext(options.root, options.story.slug, options.chapter, source);
+    const baseTranslationContext = retrieveRelevantContext(bible, source, options.chapter, { recentSummaryCount: options.story.context.recentChapterSummaries });
+    const translationContext = eligibleSummaries.length ? { ...baseTranslationContext, eligibleSummaries } : baseTranslationContext;
     const narrationNamingEntities = await loadNarrationNamingEntities(options.root, options.story.slug);
-    const priorContext = retrieveRelevantContext(bible, source, options.chapter, { recentSummaryCount: options.story.context.recentChapterSummaries, narrationNamingEntities });
+    const basePriorContext = retrieveRelevantContext(bible, source, options.chapter, { recentSummaryCount: options.story.context.recentChapterSummaries, narrationNamingEntities });
+    const priorContext = eligibleSummaries.length ? { ...basePriorContext, eligibleSummaries } : basePriorContext;
     await atomicWriteJson(paths.storyContext, priorContext);
 
     const persist = async () => { chapter.updatedAt = new Date().toISOString(); await atomicWriteJson(paths.chapterMeta, chapter); };

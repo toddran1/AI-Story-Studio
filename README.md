@@ -536,6 +536,25 @@ npm run story:produce -- --story undead-disaster --from 1 --to 100 --force conti
 
 Translation, narration, QA, preview, and scene planning receive a deterministic, inspectable subset of the Bible instead of the full long-story history. The context is selected from chapter mentions, known aliases, locks, recent events, and relevant relationships, and is bounded before it reaches a provider. The canonical browser is server-paginated and supports type, name, alias, appearance, lock, provenance, duplicate, and conflict review for stories with thousands of entities.
 
+## Milestone 18 — Story Summaries and Arc Recaps
+
+The active-story **Summaries** workspace creates durable readable recaps from a contiguous range or any custom chapter list. It supports brief and detailed recaps, smooth mini-chapters, arc summaries, character-focused recaps, and custom instructions. Source material can be original text, translated text, or existing chapter summaries; source chapters are never changed.
+
+Large selections are reduced in deterministic, configurable batches and then combined hierarchically. Each record under `stories/<story>/summaries/` retains its complete chapter coverage, source fingerprints, provider/model, prompt version, and every reduction level. Manual edits remain authoritative until the user explicitly confirms regeneration. A summary can optionally be marked eligible for future chapter context; retrieval considers only completed, explicitly enabled, earlier summaries and enforces a strict item and character budget.
+
+The CLI uses the same service and storage as the browser:
+
+```sh
+npm run story:summary -- generate undead-disaster --from 100 --to 150 --type arc --target-length 1600
+npm run story:summary -- generate undead-disaster --chapters 12,18,31,44 --source translated --context
+npm run story:summary -- list undead-disaster
+npm run story:summary -- show undead-disaster sum_<uuid>
+npm run story:summary -- regenerate undead-disaster sum_<uuid> --instructions "Focus on Su Ming"
+npm run story:summary -- delete undead-disaster sum_<uuid>
+```
+
+Use `--model provider:model` for an explicit routing override. Without it, summary generation follows the story's configured narration model. Progress is printed for source preparation, first-pass batches, combination levels, and finalization.
+
 ## Verification
 
 ```sh

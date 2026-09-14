@@ -322,6 +322,19 @@ describe("web service layer", () => {
     await expect(operations.updateNovelSourcePriorities(story.slug, { sources: [{ provider: "unknown-source", bookId: "999", priority: 1, enabled: true }] })).rejects.toThrow(/already attached/);
     await operations.close();
   });
+
+  it("exposes durable Summary Library operations through the server service", async () => {
+    const { root, story, paths } = await storyFixture(); await atomicWrite(paths.original, "原始章节"); await atomicWrite(paths.english, "The lantern wakes in the tower.");
+    const openai = new MockLLM("openai", ["A lantern wakes.", "The lantern wakes again."]); const gemini = new MockLLM("gemini"); const jobs = new JobManager();
+    const operations = new StudioOperations(root, env, jobs, { llm: new LLMRouter(new Map([["openai", openai], ["gemini", gemini]])) });
+    const generated = await waitForJob(jobs, operations.startSummary(story.slug, { title: "Opening recap", chapters: [1], contextEligible: true }).id);
+    expect(generated.status).toBe("completed"); const id = (generated.result as any).id;
+    expect(await operations.listSummaries(story.slug)).toEqual([expect.objectContaining({ id, title: "Opening recap", contextEligible: true })]);
+    expect(await operations.getSummary(story.slug, id)).toMatchObject({ text: "A lantern wakes." });
+    await operations.updateSummary(story.slug, id, { text: "A manual recap." }); expect((await operations.getSummary(story.slug, id)).manuallyEdited).toBe(true);
+    const regenerated = await waitForJob(jobs, operations.regenerateSummary(story.slug, id, {}).id); expect(regenerated.status).toBe("completed");
+    await operations.deleteSummary(story.slug, id); expect(await operations.listSummaries(story.slug)).toEqual([]); await operations.close();
+  });
 });
 
 function waitForJob(jobs: JobManager, id: string): Promise<Job> {

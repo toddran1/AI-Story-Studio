@@ -70,6 +70,7 @@ import { issueRepairTargets, repairQaText, repairTargets } from "../../src/qa/re
 import { LLMRouter } from "../../src/llm/router.js";
 import { validateChapterQuality } from "../../src/qa/validator.js";
 import { emptyStoryBible, storyBibleSchema } from "../../src/domain/story-bible.js";
+import { SummaryService } from "../../src/summaries/service.js";
 
 const slugSchema = z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/);
 const batchInputSchema = z.object({ from: z.number().int().positive().optional(), to: z.number().int().positive().optional(), force: z.enum(["translation", "narration", "qa", "story-bible", "continuity", "tts", "audio", "all"]).optional(), continueOnError: z.boolean().default(false) }).strict();
@@ -296,6 +297,25 @@ export class StudioOperations {
   async costRecords(slug: string, filters: Parameters<PostgresUsageRepository["list"]>[0]) { slugSchema.parse(slug); if (!this.usage) throw new Error("Cost analytics requires DATABASE_URL"); return this.usage.list({ ...filters, story: slug }); }
   async appCostAnalytics(filters: Parameters<PostgresUsageRepository["summary"]>[0]) { if (!this.usage) throw new Error("Cost analytics requires DATABASE_URL"); return this.usage.summary(filters); }
 
+  listSummaries(slug: string, options?: Parameters<SummaryService["list"]>[1]) { slugSchema.parse(slug); return new SummaryService(this.root, this.llm).list(slug, options); }
+  getSummary(slug: string, id: string) { slugSchema.parse(slug); return new SummaryService(this.root, this.llm).get(slug, id); }
+  startSummary(slug: string, raw: unknown) {
+    slugSchema.parse(slug);
+    return this.jobs.create("summary", slug, async (control) => withStoryLock(this.root, slug, "summary generation", async () => {
+      const result = await withUsageScope({ story: slug, stage: "summary" }, () => new SummaryService(this.root, this.llm).generate(slug, raw, (event) => control.update(event)));
+      await recordActivity(this.root, slug, "summary.generated", `Generated summary '${result.title}' for ${result.chapters.length} chapter(s)`); return result;
+    }));
+  }
+  updateSummary(slug: string, id: string, raw: unknown) { slugSchema.parse(slug); return withStoryLock(this.root, slug, "summary edit", async () => { const result = await new SummaryService(this.root, this.llm).update(slug, id, raw); await recordActivity(this.root, slug, "summary.edited", `Edited summary '${result.title}'`); return result; }); }
+  regenerateSummary(slug: string, id: string, raw: unknown) {
+    slugSchema.parse(slug);
+    return this.jobs.create("summary", slug, async (control) => withStoryLock(this.root, slug, "summary regeneration", async () => {
+      const result = await withUsageScope({ story: slug, stage: "summary" }, () => new SummaryService(this.root, this.llm).regenerate(slug, id, raw, (event) => control.update(event)));
+      await recordActivity(this.root, slug, "summary.regenerated", `Regenerated summary '${result.title}'`); return result;
+    }));
+  }
+  deleteSummary(slug: string, id: string) { slugSchema.parse(slug); return withStoryLock(this.root, slug, "summary deletion", async () => { const result = await new SummaryService(this.root, this.llm).delete(slug, id); await recordActivity(this.root, slug, "summary.deleted", `Deleted summary ${id}`); return result; }); }
+
   async editChapterText(slug: string, chapter: number, raw: unknown) { slugSchema.parse(slug); const input = chapterTextEditSchema.parse(raw); return withStoryLock(this.root, slug, "manual chapter text edit", async () => { const result = await saveChapterTextEdit(this.root, slug, chapter, input); await recordActivity(this.root, slug, "chapter.edited", `Edited Chapter ${chapter} ${input.field}`); return result; }); }
   startQaRepair(slug: string, chapter: number, raw: unknown) {
     slugSchema.parse(slug); const input = qaRepairInputSchema.parse(raw);
@@ -369,7 +389,7 @@ export class StudioOperations {
     });
   }
 
-  startVoicePreview(slug: string, raw: unknown) { slugSchema.parse(slug); const input = voicePreviewSchema.parse(raw); return this.jobs.create("voicePreview", slug, async () => { const story = await loadStory(storyPaths(this.root, slug, 1).storyConfig); const config = story.pipeline.tts; const request = { ...input, provider: input.provider ?? config.provider, model: input.model ?? config.model, referenceId: input.referenceId ?? config.referenceId, speed: input.speed ?? config.speed }; const result = await withUsageScope({story:slug,stage:"voicePreview"},()=>this.tts.forName(request.provider).synthesize({ text: request.text, model: request.model, referenceId: request.referenceId, speed: request.speed, format: config.format, sampleRate: config.sampleRate, bitrate: config.bitrate, normalize: config.normalize, maxCharsPerRequest: config.maxCharsPerRequest })); const saved = await saveVoicePreview(this.root, slug, result.audio, request); await recordActivity(this.root, slug, "voice.preview", "Generated a voice preview"); return saved; }); }
+  startVoicePreview(slug: string, raw: unknown) { slugSchema.parse(slug); const input = voicePreviewSchema.parse(raw); return this.jobs.create("voicePreview", slug, async () => { const story = await loadStory(storyPaths(this.root, slug, 1).storyConfig); const config = story.pipeline.tts; const request = { ...input, provider: input.provider ?? config.provider, model: input.model ?? config.model, referenceId: input.referenceId ?? config.referenceId, speed: input.speed ?? config.speed }; const result = await withUsageScope({story:slug,stage:"voicePreview"},()=>this.tts.forName(request.provider).synthesize({ text: request.text, model: request.model, referenceId: request.referenceId, speed: request.speed, format: config.format, sampleRate: 44100, bitrate: 192, normalize: true, maxCharsPerRequest: config.maxCharsPerRequest })); const saved = await saveVoicePreview(this.root, slug, result.audio, request); await recordActivity(this.root, slug, "voice.preview", "Generated a voice preview"); return saved; }); }
 
   startProduction(slug: string, raw: unknown) { slugSchema.parse(slug); const input = productionInputSchema.parse(raw); return this.jobs.create("production", slug, async (control) => withStoryLock(this.root, slug, "end-to-end production", async () => { const story = await loadStory(storyPaths(this.root, slug, 1).storyConfig); const shutdown = new ShutdownController(); control.setPause(() => shutdown.request()); await recordActivity(this.root, slug, "production.started", `Started production for Chapters ${input.from}–${input.to}`); const manifest = (await runProduction({ root: this.root, story, ...input, pause: shutdown, recordedCost: this.usage ? () => this.usage!.recordedCost({ story: slug }) : undefined, onProgress: (event) => control.update(event) }, { pipeline: this.pipeline, loadChapters: async () => (await loadImportedChapters(this.root, slug)).chapters, refresh: (from, to) => refreshProductionRange({ root: this.root, story, from, to, registry: this.registry }), scenePlanner: this.scenePlanner ?? this.runtime.router.forStage(story.pipeline.scenePlanner), image: this.image, video: this.video, videoExport: this.videoExport, audiobook: this.audiobook, alignmentConfig: this.alignConfig, alignmentEngine: this.aligner })).manifest; await recordActivity(this.root, slug, `production.${manifest.status}`, `${manifest.status === "completed" ? "Completed" : "Stopped"} production for Chapters ${input.from}–${input.to}`); return manifest; })); }
   async submitProduction(slug:string,raw:unknown){if(this.queue)return this.queue.submit(slug,raw);return this.startProduction(slug,raw);}

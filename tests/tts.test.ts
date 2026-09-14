@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { FishAudioProvider, normalizeFishSpeechText } from "../src/tts/fish/fish-audio.provider.js";
+import { FishAudioProvider, normalizeFishReferenceId, normalizeFishSpeechText } from "../src/tts/fish/fish-audio.provider.js";
 import { splitForTTS } from "../src/tts/split-text.js";
 import { TTSRequest } from "../src/tts/types.js";
 
@@ -27,6 +27,11 @@ describe("Fish TTS", () => {
     expect(JSON.parse(String(request.body)).reference_id).toBe("environment-voice");
   });
 
+  it("accepts public Fish model URLs anywhere a reference ID is accepted", () => {
+    expect(normalizeFishReferenceId("https://fish.audio/app/m/f6c4a7319c314423839db215b5b29ec3")).toBe("f6c4a7319c314423839db215b5b29ec3");
+    expect(normalizeFishReferenceId("65f323abd1b643e8b4270b9c50d20877")).toBe("65f323abd1b643e8b4270b9c50d20877");
+  });
+
   it("uses Fish's documented S2.1 production controls for the paid and free S2.1 models", async () => {
     const fetcher = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => new Response(new Uint8Array([1, 2, 3]), { status: 200, headers: { "content-type": "audio/mpeg" } }));
     const provider = new FishAudioProvider("test-key", fetcher as typeof fetch);
@@ -41,7 +46,15 @@ describe("Fish TTS", () => {
     await provider.synthesize({ text: "**Important:** *whisper this.* [sad] 2 * 2", model: "s2.1-pro", speed: 1, format: "mp3", sampleRate: 44100, bitrate: 128, normalize: true, maxCharsPerRequest: 500 });
     const body = JSON.parse(String((fetcher.mock.calls[0]?.[1] as RequestInit).body));
     expect(body.text).toBe("Important: whisper this. [sad] 2 * 2");
-    expect(provider.inputNormalizationVersion).toBe("fish-speech-normalization-v2");
+    expect(provider.inputNormalizationVersion).toBe("fish-speech-normalization-v3");
+  });
+
+  it("keeps approved S2 cues but makes bracketed story notifications ordinary speech", async () => {
+    const fetcher = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => new Response(new Uint8Array([1]), { headers: { "content-type": "audio/mpeg" } }));
+    const provider = new FishAudioProvider("test-key", fetcher as typeof fetch);
+    await provider.synthesize({ text: "[sad] [Goblin Undead Information Extraction Complete] [pause]", model: "s2.1-pro-free", speed: 1, format: "mp3", sampleRate: 44100, bitrate: 128, normalize: true, maxCharsPerRequest: 500 });
+    const body = JSON.parse(String((fetcher.mock.calls[0]?.[1] as RequestInit).body));
+    expect(body.text).toBe("[sad] Goblin Undead Information Extraction Complete [pause]");
   });
 
   it("normalizes fiction abbreviations, titles, values, and units for speech", () => {

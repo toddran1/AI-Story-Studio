@@ -16,6 +16,7 @@ import { translate } from "../translation/translator.js";
 import { fingerprint } from "../utils/hash.js";
 import { PreviewManifest, PreviewPreset, previewManifestSchema } from "./types.js";
 import { loadNarrationNamingEntities } from "../story-bible/narration-names.js";
+import { loadEligibleSummaryContext } from "../summaries/service.js";
 
 export class PreviewRunner {
   private readonly tts: TTSProviderRouter;
@@ -25,8 +26,11 @@ export class PreviewRunner {
     const source = await readFile(options.inputPath, "utf8");
     if (!source.trim()) throw new Error(`Input file is empty: ${options.inputPath}`);
     const bible = await rebuildStoryBibleBeforeChapter(options.root, options.story.slug, options.chapter);
-    const translationContext = retrieveRelevantContext(bible, source, options.chapter, { recentSummaryCount: options.story.context.recentChapterSummaries });
-    const context = retrieveRelevantContext(bible, source, options.chapter, { recentSummaryCount: options.story.context.recentChapterSummaries, narrationNamingEntities: await loadNarrationNamingEntities(options.root, options.story.slug) });
+    const eligibleSummaries = await loadEligibleSummaryContext(options.root, options.story.slug, options.chapter, source);
+    const baseTranslationContext = retrieveRelevantContext(bible, source, options.chapter, { recentSummaryCount: options.story.context.recentChapterSummaries });
+    const translationContext = eligibleSummaries.length ? { ...baseTranslationContext, eligibleSummaries } : baseTranslationContext;
+    const baseContext = retrieveRelevantContext(bible, source, options.chapter, { recentSummaryCount: options.story.context.recentChapterSummaries, narrationNamingEntities: await loadNarrationNamingEntities(options.root, options.story.slug) });
+    const context = eligibleSummaries.length ? { ...baseContext, eligibleSummaries } : baseContext;
     const id = options.id ?? `${new Date().toISOString().replace(/[-:.]/g, "").replace("Z", "Z")}-${randomUUID().slice(0, 8)}`;
     const paths = previewPaths(options.root, options.story.slug, id);
 
