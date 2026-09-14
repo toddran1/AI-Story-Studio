@@ -1,14 +1,23 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import { App, shouldRefreshAfterJob } from "../apps/web/src/App.js";
+import { App, chapterPageSize, shouldRefreshAfterJob } from "../apps/web/src/App.js";
 import { pretty } from "../apps/web/src/format.js";
 import { ChapterImportPage, savedStorySourceUrl } from "../apps/web/src/ChapterImportPage.js";
 import { SummariesPage } from "../apps/web/src/SummariesPage.js";
 import { NamesLocalizationPage } from "../apps/web/src/NamesLocalizationPage.js";
+import { defaultLocale, LanguageSelect } from "../apps/web/src/languages.js";
 
 describe("web UI", () => {
   it("uses readable labels for pipeline identifiers", () => {
     expect(pretty("storyBible")).toBe("Story Bible"); expect(pretty("narrationFidelity")).toBe("Narration Fidelity"); expect(pretty("qa")).toBe("QA"); expect(pretty("tts")).toBe("TTS");
+  });
+  it("uses the shared curated language selector and maps legacy display names to locales", () => {
+    const html = renderToStaticMarkup(<LanguageSelect value="en-US" onChange={() => undefined} />);
+    expect(html).toContain("Chinese · Simplified"); expect(html).toContain("English"); expect(html).toContain("Portuguese · Brazil");
+    expect(defaultLocale("English")).toBe("en-US"); expect(defaultLocale("zh-CN")).toBe("zh-CN"); expect(defaultLocale("unrecognized")).toBe("en-US");
+  });
+  it("uses 50 chapters per page by default and permits the supported page sizes", () => {
+    expect(chapterPageSize("")).toBe(50); expect(chapterPageSize("?pageSize=10")).toBe(10); expect(chapterPageSize("?pageSize=100")).toBe(100); expect(chapterPageSize("?pageSize=75")).toBe(50);
   });
   it("refreshes the current workspace once when a web job becomes terminal", () => {
     const running = { id: "job-1", type: "batch", story: "demo", status: "running" } as any;

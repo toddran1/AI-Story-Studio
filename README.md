@@ -569,6 +569,24 @@ npm run story:names -- clear undead-disaster ent_<24-hex-id>
 
 `ai_contextual` gives the narration model the full and familiar forms plus contextual guidance; it deliberately does not apply a deterministic text replacement. Use `always_full`, `always_short`, or `manual` only when you need an explicit non-contextual rule.
 
+### Administration CLI
+
+The administration commands are thin adapters over the same Story Bible, continuity, project, provider, TTS, settings, and durable-queue services used by the browser. They print tab-separated lists or JSON details for scripting.
+
+```sh
+npm run story:bible -- list undead-disaster --type character
+npm run story:bible -- edit undead-disaster ent_<24-hex-id> --json '{"canonicalName":"Malakai Sterling"}'
+npm run story:continuity -- list undead-disaster --status open
+npm run story:continuity -- resolve undead-disaster ctf_<24-hex-id> --action keep-canonical
+npm run story:queue -- list --story undead-disaster
+npm run story:settings -- set undead-disaster --json '{"recentChapterSummaries":8}'
+npm run story:project -- backup undead-disaster --include-media
+npm run story:sources -- providers
+npm run story:voice -- preview --story undead-disaster --text "Test narration"
+```
+
+`story:queue` requires `DATABASE_URL` and a migrated durable queue. Destructive project deletion requires `--confirm` with the exact story title; deleted projects move to the recoverable project trash.
+
 ## Verification
 
 ```sh

@@ -1,6 +1,7 @@
 import { useDeferredValue, useEffect, useRef, useState } from "react";
 import { api, Job, post, put } from "./api.js";
 import { pretty } from "./format.js";
+import { defaultLocale, LanguageSelect } from "./languages.js";
 import "./names-localization.css";
 
 type Entity = {
@@ -56,7 +57,7 @@ export function NamesLocalizationPage({ slug, onJob, navigate }: { slug: string;
           <div className="localization-body">
             <section className="localization-form">
               <div className="localization-form-head"><div><span className="eyebrow">{pretty(entity.type)} · Ch. {entity.firstAppearance}—{entity.lastKnownAppearance}</span><h3>Localized naming rule</h3></div>{entity.localizedNaming && <button onClick={() => void remove()}>Remove</button>}</div>
-              <label><span>Target locale</span><input value={draft.locale} onChange={(event) => setDraft({ ...draft, locale: event.target.value })} placeholder="en-US" /></label>
+              <label><span>Target locale</span><LanguageSelect value={draft.locale} onChange={(locale) => setDraft({ ...draft, locale })} /></label>
               <div className="localized-name-pair"><label><span>{entity.type === "character" ? "Full name" : "Localized name"}</span><input ref={fullNameRef} value={draft.fullName} onChange={(event) => setDraft({ ...draft, fullName: event.target.value })} placeholder={entity.canonicalName} /></label>{entity.type === "character" && <label><span>Short name</span><input value={draft.shortName} onChange={(event) => setDraft({ ...draft, shortName: event.target.value })} placeholder="Familiar form" /></label>}</div>
               <label><span>Usage mode</span><select value={draft.usageMode} onChange={(event) => setDraft({ ...draft, usageMode: event.target.value as UsageMode })}><option value="ai_contextual">AI contextual</option><option value="always_full">Always full name</option><option value="always_short">Always short name</option><option value="manual">Manual rules</option></select><small>{modeHelp(draft.usageMode)}</small></label>
               <label><span>{draft.usageMode === "manual" ? "Required output rules" : "Localization notes"}</span><textarea value={draft.notes} onChange={(event) => setDraft({ ...draft, notes: event.target.value })} placeholder={draft.usageMode === "manual" ? "Describe exactly when each form should be used…" : "Optional cultural, pronunciation, title, or formality guidance…"} /></label>
@@ -74,5 +75,4 @@ export function NamesLocalizationPage({ slug, onJob, navigate }: { slug: string;
 }
 
 function modeHelp(mode: UsageMode) { return ({ ai_contextual: "The model chooses full or short form from familiarity, formality, introductions, dialogue, and ambiguity.", always_full: "Use the full localized name whenever this entity is named.", always_short: "Use the short localized name whenever this entity is named.", manual: "Follow the explicit rules below for every generated narration." } as const)[mode]; }
-function defaultLocale(language?: string) { const value = language?.trim(); if (value && /^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*$/.test(value)) return value; return ({ english: "en-US", chinese: "zh-CN", spanish: "es-ES", french: "fr-FR", german: "de-DE", japanese: "ja-JP", korean: "ko-KR", portuguese: "pt-BR", italian: "it-IT", russian: "ru-RU" } as Record<string, string>)[value?.toLocaleLowerCase() ?? ""] ?? "en-US"; }
 function message(value: unknown) { return value instanceof Error ? value.message : String(value); }

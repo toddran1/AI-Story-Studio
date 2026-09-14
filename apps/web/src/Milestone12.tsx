@@ -1,6 +1,7 @@
 import { FormEvent, ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { api, post, put, StoryCard, StoryConfig } from "./api.js";
 import { audioProviderCatalog, audioProviderIds } from "./tts-providers.js";
+import { LanguageSelect } from "./languages.js";
 
 export function LibraryPage({ stories, error, navigate }: { stories: StoryCard[]; error?: string; navigate: (path: string) => void }) {
   const [query, setQuery] = useState(""); const [sort, setSort] = useState("activity"); const [filter, setFilter] = useState("all"); const [view, setView] = useState<"grid" | "list">("grid"); const restoreRef = useRef<HTMLInputElement>(null); const [restoreError, setRestoreError] = useState("");
@@ -45,7 +46,12 @@ export function GlobalSettingsPage() { const [data, setData] = useState<any>(); 
 }
 
 function FileDrop({ accept, label, onChange }: { accept: string; label: string; onChange: (files: File[]) => void }) { return <label className="dropzone compact"><input type="file" accept={accept} onChange={(event) => onChange(Array.from(event.target.files ?? []))} /><b>{label}</b><span>Choose a local file</span></label>; }
-function Field({ label, children }: { label: string; children: ReactNode }) { return <label className="field"><span>{label}</span>{children}</label>; }
+function Field({ label, children }: { label: string; children: ReactNode }) {
+  const isLanguage = label === "Source language" || label === "Output language";
+  const input = children && typeof children === "object" && "props" in children && (children as any).type === "input" ? children as any : undefined;
+  if (isLanguage && input) return <label className="field"><span>{label}</span><LanguageSelect value={String(input.props.value ?? "")} onChange={(value) => input.props.onChange({ target: { value } })} /></label>;
+  return <label className="field"><span>{label}</span>{children}</label>;
+}
 function Notice({ children, kind = "success" }: { children: ReactNode; kind?: "success" | "error" }) { return <div className={`m12-notice ${kind}`}>{children}</div>; }
 function splitTags(value: string) { return [...new Set(value.split(",").map((tag) => tag.trim()).filter(Boolean))].slice(0, 30); }
 function slugify(value: string) { return value.normalize("NFKD").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 80); }
