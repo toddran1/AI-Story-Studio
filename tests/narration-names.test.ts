@@ -16,7 +16,7 @@ import { mergeStoryBible } from "../src/story-bible/updater.js";
 import { qaInstructions } from "../src/qa/prompts.js";
 import { storyBibleInstructions } from "../src/story-bible/prompts.js";
 import { applyNarrationNamingPreferences } from "../src/narration/naming-preferences.js";
-import { translationInstructions } from "../src/translation/prompts.js";
+import { TRANSLATION_FINGERPRINT_VERSION, TRANSLATION_PROMPT_VERSION, translationInstructions } from "../src/translation/prompts.js";
 
 const update = (chapter = 1) => storyBibleUpdateSchema.parse({ chapterSummary: "Michael enters.", characters: [{ canonicalEnglishName: "Michael Johnson", originalName: "米高", description: "A coach", aliases: ["Michael", "Mike", "Mikey", "Coach Johnson"], firstSeenChapter: chapter, lastSeenChapter: chapter }] });
 
@@ -60,6 +60,16 @@ describe("preferred narration names", () => {
     expect(narrationNamingChanged(before, after)).toBe(true);
     expect(translationInstructions("zh-CN", "en-US")).toMatch(/localizedNaming.*narration-facing/i);
     expect(translationInstructions("zh-CN", "en-US")).toMatch(/must not overwrite canonical translated names/i);
+    expect(TRANSLATION_PROMPT_VERSION).toBe("3"); expect(TRANSLATION_FINGERPRINT_VERSION).toBe("2");
+  });
+
+  it("preflights every affected chapter before invalidating any chapter metadata", async () => {
+    const root = await mkdtemp(join(tmpdir(), "narration-preflight-")); const base = mergeStoryBible(emptyStoryBible(), update(), 1); const before = base.canonicalEntities[0]!; const after = { ...before, preferredNarrationName: "Big Mike", provenance: [{ chapter: 1, kind: "extraction" as const, origin: "automatic" as const }, { chapter: 2, kind: "extraction" as const, origin: "automatic" as const }] };
+    const first = storyPaths(root, "demo-story", 1); const second = storyPaths(root, "demo-story", 2); await mkdir(first.chapterDir, { recursive: true }); await mkdir(second.chapterDir, { recursive: true });
+    const original = chapterSchema.parse({ chapter: 1, sourceLanguage: "zh-CN", outputLanguage: "en-US", counts: { originalCharacters: 10, englishWords: 2, narrationWords: 2 }, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), stages: { ingestion: { status: "complete" }, translation: { status: "complete" }, narration: { status: "complete", provider: "openai" }, qa: { status: "complete" }, storyBible: { status: "complete" }, tts: { status: "complete" } } });
+    await atomicWriteJson(first.chapterMeta, original); await writeFile(second.chapterMeta, "{broken");
+    await expect(invalidateNarrationNamingChange(root, "demo-story", before, after)).rejects.toThrow();
+    expect(chapterSchema.parse(JSON.parse(await readFile(first.chapterMeta, "utf8"))).stages.narration.status).toBe("complete");
   });
 
   it("passes structured naming rules into the narration request", async () => {

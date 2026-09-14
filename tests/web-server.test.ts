@@ -26,9 +26,10 @@ import { AudiobookProcessor } from "../src/audio/audiobook.js";
 import { VideoProcessor } from "../src/video/renderer.js";
 import { VideoExportProcessor } from "../src/video/video-export.js";
 import { ImageProvider } from "../src/artwork/provider.js";
-import { integerParam, publicJob, statusFor, validateLocalRequest, validationIssues } from "../apps/server/api.js";
+import { chapterParam, continuityStatusFilter, entitySortFilter, entityTypeFilter, integerParam, publicJob, statusFor, validateLocalRequest, validationIssues } from "../apps/server/api.js";
 import { z } from "zod";
 import { SourceConflictError, SourceInputError, SourceUpstreamError, SourceValidationError } from "../src/source/errors.js";
+import { ConfigurationError } from "../src/pipeline/errors.js";
 
 const webAudio: AudioMasteringProcessor = { version: "web-audio-v1", master: async (_inputs, output) => { await atomicWrite(output, Buffer.from("mastered")); return { durationSeconds: 9, codec: "mp3", container: "mp3" }; } };
 const webBook: AudiobookProcessor = { version: "web-book-v1", assemble: async (_chapters, output, format) => { await atomicWrite(output, Buffer.from("book")); return { durationSeconds: 9, codec: format === "m4b" ? "aac" : "mp3", container: format === "m4b" ? "mp4" : "mp3" }; } };
@@ -48,6 +49,14 @@ async function storyFixture() {
 
 describe("web service layer", () => {
   it("classifies malformed pagination as an HTTP 400 client error", () => { expect(() => integerParam("abc", 1)).toThrow(expect.objectContaining({ status: 400 })); expect(() => integerParam("0", 1)).toThrow(expect.objectContaining({ status: 400 })); expect(integerParam(null, 7)).toBe(7); });
+  it("rejects zero chapter routes and unknown Story Bible filters as client errors", () => {
+    expect(() => chapterParam("0")).toThrow(expect.objectContaining({ status: 400 })); expect(chapterParam("1501")).toBe(1501);
+    expect(() => entityTypeFilter("bogus")).toThrow(z.ZodError); expect(() => entitySortFilter("bogus")).toThrow(z.ZodError); expect(() => continuityStatusFilter("bogus")).toThrow(z.ZodError);
+  });
+  it("classifies a missing story configuration as HTTP 404 through wrapped causes", () => {
+    const missing = Object.assign(new Error("missing"), { code: "ENOENT" });
+    expect(statusFor(new ConfigurationError("Unable to load story configuration", { cause: missing }))).toBe(404);
+  });
   it("classifies expected source failures as actionable HTTP responses", () => {
     expect(statusFor(new SourceInputError("bad source"))).toBe(400); expect(statusFor(new SourceConflictError("replacement"))).toBe(409);
     expect(statusFor(new SourceValidationError("invalid chapter"))).toBe(422); expect(statusFor(new SourceUpstreamError("provider failed"))).toBe(502);

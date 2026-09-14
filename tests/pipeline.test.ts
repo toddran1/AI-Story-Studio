@@ -10,6 +10,7 @@ import { CopyingAudioProcessor } from "../src/audio/chapter-audio.js";
 import { saveChapterTextEdit } from "../src/studio/workflow.js";
 import { emptyStoryBible } from "../src/domain/story-bible.js";
 import { atomicWriteJson } from "../src/storage/atomic-write.js";
+import { TRANSLATION_FINGERPRINT_VERSION, TRANSLATION_PROMPT_VERSION } from "../src/translation/prompts.js";
 
 class CountingAudioProcessor extends CopyingAudioProcessor { calls = 0; override async master(inputs: string[], output: string) { this.calls++; return super.master(inputs, output); } }
 
@@ -52,6 +53,20 @@ describe("chapter pipeline", () => {
     expect(resumed.stages.qa.status).toBe("pending");
     expect(ctx.gemini.calls.length).toBe(translationCalls);
     expect(ctx.tts.calls).toBe(0);
+  });
+
+  it("reuses an existing v2 translation fingerprint after the output-neutral prompt clarification", async () => {
+    const ctx = await setup();
+    await ctx.pipeline.run({ root: ctx.root, story: testStory(), chapter: 1, inputPath: ctx.input, stopAfter: "translation" });
+    const metadata = JSON.parse(await readFile(ctx.paths.chapterMeta, "utf8"));
+    expect(TRANSLATION_PROMPT_VERSION).toBe("3");
+    expect(TRANSLATION_FINGERPRINT_VERSION).toBe("2");
+    expect(metadata.stages.translation.promptVersion).toBe("3");
+    metadata.stages.translation.promptVersion = "2";
+    await writeFile(ctx.paths.chapterMeta, JSON.stringify(metadata), "utf8");
+    const calls = ctx.gemini.calls.length;
+    await ctx.pipeline.run({ root: ctx.root, story: testStory(), chapter: 1, inputPath: ctx.input, stopAfter: "translation" });
+    expect(ctx.gemini.calls).toHaveLength(calls);
   });
 
   it("keeps S2 delivery cues in the TTS script but out of the reader-facing narration", async () => {

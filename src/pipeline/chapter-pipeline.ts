@@ -13,7 +13,7 @@ import { storyPaths } from "../storage/paths.js";
 import { fingerprint } from "../utils/hash.js";
 import { fileFingerprint } from "../utils/file-fingerprint.js";
 import { logger } from "../utils/logger.js";
-import { TRANSLATION_PROMPT_VERSION } from "../translation/prompts.js";
+import { TRANSLATION_FINGERPRINT_VERSION, TRANSLATION_PROMPT_VERSION } from "../translation/prompts.js";
 import { translate } from "../translation/translator.js";
 import { NARRATION_PROMPT_VERSION } from "../narration/prompts.js";
 import { polishNarration } from "../narration/narration-editor.js";
@@ -123,7 +123,7 @@ export class ChapterPipeline {
 
     const translationConfig = options.story.pipeline.translation;
     const passthroughTranslation = sameLanguage(options.story.sourceLanguage, options.story.outputLanguage);
-    const translationFp = fingerprint({ source: ingestionFp, config: passthroughTranslation ? "passthrough" : translationConfig, prompt: passthroughTranslation ? "passthrough-v1" : TRANSLATION_PROMPT_VERSION, context: translationContext });
+    const translationFp = fingerprint({ source: ingestionFp, config: passthroughTranslation ? "passthrough" : translationConfig, prompt: passthroughTranslation ? "passthrough-v1" : TRANSLATION_FINGERPRINT_VERSION, context: translationContext });
     const translationResult = await runStage("translation", translationFp, paths.english, {
       provider: passthroughTranslation ? "passthrough" : translationConfig.provider,
       model: passthroughTranslation ? undefined : translationConfig.model,

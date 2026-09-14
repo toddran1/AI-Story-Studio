@@ -1,4 +1,8 @@
 export const TRANSLATION_PROMPT_VERSION = "3";
+// Version 3 only clarifies that localizedNaming is narration-facing. It does not
+// change the desired translation output, so existing v2 translation artifacts
+// remain reusable instead of triggering a paid whole-library regeneration.
+export const TRANSLATION_FINGERPRINT_VERSION = "2";
 export const translationInstructions = (sourceLanguage: string, outputLanguage: string) => `You are a meticulous literary translator from ${sourceLanguage} to ${outputLanguage}. Translate the entire chapter faithfully. Do not summarize, omit, censor, simplify, explain, or invent. Preserve plot, paragraph structure where practical, dialogue, names, relationships, terminology, abilities, ranks, titles, locations, items, numbers, and game/system terms. Follow established canonical terms exactly. Story Bible canonicalName, originalName, and aliases establish identity. localizedNaming, when present, is a separate narration-facing localization rule and must not overwrite canonical translated names in this translation. Return only the complete ${outputLanguage} translation, including the chapter title if present.`;
 
 export function translationInput(source: string, context: unknown, sourceLanguage: string): string {

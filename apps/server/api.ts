@@ -121,27 +121,27 @@ export function createApiHandler(operations: StudioOperations) {
         filter: chapterFilterSchema.parse(url.searchParams.get("filter") ?? "all"), query: url.searchParams.get("q") ?? undefined,
       }));
       const chapterMatch = /^\/api\/stories\/([a-z0-9-]+)\/chapters\/(\d+)$/.exec(url.pathname);
-      if (chapterMatch && request.method === "GET") return send(response, 200, await getChapter(operations.root, chapterMatch[1]!, Number(chapterMatch[2])));
+      if (chapterMatch && request.method === "GET") return send(response, 200, await getChapter(operations.root, chapterMatch[1]!, chapterParam(chapterMatch[2]!)));
       const chapterTextMatch = /^\/api\/stories\/([a-z0-9-]+)\/chapters\/(\d+)\/text$/.exec(url.pathname);
-      if (chapterTextMatch && request.method === "PUT") return send(response, 200, await operations.editChapterText(chapterTextMatch[1]!, Number(chapterTextMatch[2]), await jsonBody(request)));
+      if (chapterTextMatch && request.method === "PUT") return send(response, 200, await operations.editChapterText(chapterTextMatch[1]!, chapterParam(chapterTextMatch[2]!), await jsonBody(request)));
       const chapterQaRepairMatch = /^\/api\/stories\/([a-z0-9-]+)\/chapters\/(\d+)\/qa\/repair$/.exec(url.pathname);
-      if (chapterQaRepairMatch && request.method === "POST") return send(response, 202, operations.startQaRepair(chapterQaRepairMatch[1]!, Number(chapterQaRepairMatch[2]), await jsonBody(request)));
+      if (chapterQaRepairMatch && request.method === "POST") return send(response, 202, operations.startQaRepair(chapterQaRepairMatch[1]!, chapterParam(chapterQaRepairMatch[2]!), await jsonBody(request)));
       const audioMatch = /^\/api\/stories\/([a-z0-9-]+)\/chapters\/(\d+)\/audio$/.exec(url.pathname);
       if (audioMatch && request.method === "GET") {
-        const chapter = await getChapter(operations.root, audioMatch[1]!, Number(audioMatch[2]));
+        const chapterNumber = chapterParam(audioMatch[2]!); const chapter = await getChapter(operations.root, audioMatch[1]!, chapterNumber);
         if (!chapter.audioAvailable) return send(response, 404, { error: "Current chapter audio was not found" });
-        return sendFile(request, response, storyPaths(operations.root, audioMatch[1]!, Number(audioMatch[2])).audio, "audio/mpeg");
+        return sendFile(request, response, storyPaths(operations.root, audioMatch[1]!, chapterNumber).audio, "audio/mpeg");
       }
       const subtitleFileMatch = /^\/api\/stories\/([a-z0-9-]+)\/chapters\/(\d+)\/subtitles\.(srt|vtt)$/.exec(url.pathname);
-      if (subtitleFileMatch && request.method === "GET") { const chapter = await getChapter(operations.root, subtitleFileMatch[1]!, Number(subtitleFileMatch[2])); if (!chapter.subtitles) return send(response, 404, { error: "Chapter subtitles were not found" }); const paths = storyPaths(operations.root, subtitleFileMatch[1]!, Number(subtitleFileMatch[2])); return sendFile(request, response, subtitleFileMatch[3] === "srt" ? paths.subtitlesSrt : paths.subtitlesVtt, subtitleFileMatch[3] === "srt" ? "application/x-subrip" : "text/vtt; charset=utf-8"); }
+      if (subtitleFileMatch && request.method === "GET") { const chapterNumber = chapterParam(subtitleFileMatch[2]!); const chapter = await getChapter(operations.root, subtitleFileMatch[1]!, chapterNumber); if (!chapter.subtitles) return send(response, 404, { error: "Chapter subtitles were not found" }); const paths = storyPaths(operations.root, subtitleFileMatch[1]!, chapterNumber); return sendFile(request, response, subtitleFileMatch[3] === "srt" ? paths.subtitlesSrt : paths.subtitlesVtt, subtitleFileMatch[3] === "srt" ? "application/x-subrip" : "text/vtt; charset=utf-8"); }
       const subtitleEditMatch = /^\/api\/stories\/([a-z0-9-]+)\/chapters\/(\d+)\/subtitles$/.exec(url.pathname);
-      if (subtitleEditMatch && request.method === "PUT") return send(response, 200, await operations.editSubtitles(subtitleEditMatch[1]!, Number(subtitleEditMatch[2]), await jsonBody(request)));
+      if (subtitleEditMatch && request.method === "PUT") return send(response, 200, await operations.editSubtitles(subtitleEditMatch[1]!, chapterParam(subtitleEditMatch[2]!), await jsonBody(request)));
       const subtitleResetMatch = /^\/api\/stories\/([a-z0-9-]+)\/chapters\/(\d+)\/subtitles\/reset$/.exec(url.pathname);
-      if (subtitleResetMatch && request.method === "POST") return send(response, 200, await operations.resetSubtitles(subtitleResetMatch[1]!, Number(subtitleResetMatch[2])));
+      if (subtitleResetMatch && request.method === "POST") return send(response, 200, await operations.resetSubtitles(subtitleResetMatch[1]!, chapterParam(subtitleResetMatch[2]!)));
       const chapterVideoMatch = /^\/api\/stories\/([a-z0-9-]+)\/chapters\/(\d+)\/video$/.exec(url.pathname);
-      if (chapterVideoMatch && request.method === "GET") { const chapter = await getChapter(operations.root, chapterVideoMatch[1]!, Number(chapterVideoMatch[2])); if (!chapter.videoUrl) return send(response, 404, { error: "Chapter video was not found" }); return sendFile(request, response, storyPaths(operations.root, chapterVideoMatch[1]!, Number(chapterVideoMatch[2])).video, "video/mp4"); }
+      if (chapterVideoMatch && request.method === "GET") { const chapterNumber = chapterParam(chapterVideoMatch[2]!); const chapter = await getChapter(operations.root, chapterVideoMatch[1]!, chapterNumber); if (!chapter.videoUrl) return send(response, 404, { error: "Chapter video was not found" }); return sendFile(request, response, storyPaths(operations.root, chapterVideoMatch[1]!, chapterNumber).video, "video/mp4"); }
       const sceneImageMatch = /^\/api\/stories\/([a-z0-9-]+)\/chapters\/(\d+)\/scenes\/(scene-\d{3})\.png$/.exec(url.pathname);
-      if (sceneImageMatch && request.method === "GET") { const raw = await readJsonIfExists<SceneManifest>(storyPaths(operations.root, sceneImageMatch[1]!, Number(sceneImageMatch[2])).scenesManifest); const manifest = raw ? sceneManifestSchema.safeParse(raw) : undefined; const scene = manifest?.success ? manifest.data.scenes.find((item) => item.id === sceneImageMatch[3]) : undefined; if (!scene || scene.artwork.status !== "complete") return send(response, 404, { error: "Scene artwork was not found" }); return sendFile(request, response, sceneImagePath(operations.root, sceneImageMatch[1]!, Number(sceneImageMatch[2]), sceneImageMatch[3]!), "image/png"); }
+      if (sceneImageMatch && request.method === "GET") { const chapterNumber = chapterParam(sceneImageMatch[2]!); const raw = await readJsonIfExists<SceneManifest>(storyPaths(operations.root, sceneImageMatch[1]!, chapterNumber).scenesManifest); const manifest = raw ? sceneManifestSchema.safeParse(raw) : undefined; const scene = manifest?.success ? manifest.data.scenes.find((item) => item.id === sceneImageMatch[3]) : undefined; if (!scene || scene.artwork.status !== "complete") return send(response, 404, { error: "Scene artwork was not found" }); return sendFile(request, response, sceneImagePath(operations.root, sceneImageMatch[1]!, chapterNumber, sceneImageMatch[3]!), "image/png"); }
       const qaMatch = /^\/api\/stories\/([a-z0-9-]+)\/qa$/.exec(url.pathname);
       if (qaMatch && request.method === "GET") return send(response, 200, await getQaDashboard(operations.root, qaMatch[1]!));
       const audioDashboardMatch = /^\/api\/stories\/([a-z0-9-]+)\/audio$/.exec(url.pathname);
@@ -161,22 +161,22 @@ export function createApiHandler(operations: StudioOperations) {
       const productionPlanMatch = /^\/api\/stories\/([a-z0-9-]+)\/production\/plan$/.exec(url.pathname);
       if (productionPlanMatch && request.method === "POST") return send(response, 200, await operations.productionPlan(productionPlanMatch[1]!, await jsonBody(request)));
       const scenesEditMatch = /^\/api\/stories\/([a-z0-9-]+)\/chapters\/(\d+)\/scenes$/.exec(url.pathname);
-      if (scenesEditMatch && request.method === "PUT") { const input = z.object({ scenes: z.array(z.unknown()) }).strict().parse(await jsonBody(request)); return send(response, 200, { manifest: await operations.updateScenes(scenesEditMatch[1]!, Number(scenesEditMatch[2]), input.scenes) }); }
+      if (scenesEditMatch && request.method === "PUT") { const input = z.object({ scenes: z.array(z.unknown()) }).strict().parse(await jsonBody(request)); return send(response, 200, { manifest: await operations.updateScenes(scenesEditMatch[1]!, chapterParam(scenesEditMatch[2]!), input.scenes) }); }
       const artworkReviewMatch = /^\/api\/stories\/([a-z0-9-]+)\/chapters\/(\d+)\/scenes\/(scene-\d{3})\/review$/.exec(url.pathname);
-      if (artworkReviewMatch && request.method === "POST") { const input = z.object({ review: z.enum(["unreviewed", "approved", "rejected", "needs-regeneration"]) }).strict().parse(await jsonBody(request)); return send(response, 200, { manifest: await operations.reviewArtwork(artworkReviewMatch[1]!, Number(artworkReviewMatch[2]), artworkReviewMatch[3]!, input.review) }); }
+      if (artworkReviewMatch && request.method === "POST") { const input = z.object({ review: z.enum(["unreviewed", "approved", "rejected", "needs-regeneration"]) }).strict().parse(await jsonBody(request)); return send(response, 200, { manifest: await operations.reviewArtwork(artworkReviewMatch[1]!, chapterParam(artworkReviewMatch[2]!), artworkReviewMatch[3]!, input.review) }); }
       const exportMatch = /^\/api\/stories\/([a-z0-9-]+)\/exports\/(\d+)-(\d+)\.(mp3|m4b)$/.exec(url.pathname);
       if (exportMatch && request.method === "GET") {
-        const from = Number(exportMatch[2]); const to = Number(exportMatch[3]); const format = exportMatch[4] as "mp3" | "m4b";
+        const from = chapterParam(exportMatch[2]!); const to = chapterParam(exportMatch[3]!); const format = exportMatch[4] as "mp3" | "m4b";
         if (to < from) throw new HttpError("Invalid export range", 400);
         return sendFile(request, response, exportPaths(operations.root, exportMatch[1]!, from, to, format).output, format === "m4b" ? "audio/mp4" : "audio/mpeg");
       }
       const videoExportMatch = /^\/api\/stories\/([a-z0-9-]+)\/video-exports\/(\d+)-(\d+)\.mp4$/.exec(url.pathname);
-      if (videoExportMatch && request.method === "GET") { const from = Number(videoExportMatch[2]); const to = Number(videoExportMatch[3]); if (to < from) throw new HttpError("Invalid video export range", 400); return sendFile(request, response, videoExportPaths(operations.root, videoExportMatch[1]!, from, to).output, "video/mp4"); }
+      if (videoExportMatch && request.method === "GET") { const from = chapterParam(videoExportMatch[2]!); const to = chapterParam(videoExportMatch[3]!); if (to < from) throw new HttpError("Invalid video export range", 400); return sendFile(request, response, videoExportPaths(operations.root, videoExportMatch[1]!, from, to).output, "video/mp4"); }
       const bibleMatch = /^\/api\/stories\/([a-z0-9-]+)\/story-bible$/.exec(url.pathname);
       if (bibleMatch && request.method === "GET") return send(response, 200, await getStoryBibleView(operations.root, bibleMatch[1]!));
       if (bibleMatch && request.method === "POST") return send(response, 201, await operations.addBibleEntry(bibleMatch[1]!, await jsonBody(request)));
       const bibleEntitiesMatch = /^\/api\/stories\/([a-z0-9-]+)\/story-bible\/entities$/.exec(url.pathname);
-      if (bibleEntitiesMatch && request.method === "GET") return send(response, 200, await getCanonicalEntitiesPage(operations.root, bibleEntitiesMatch[1]!, { page: integerParam(url.searchParams.get("page"), 1), pageSize: boundedPageSize(url.searchParams.get("pageSize")), type: optionalString(url.searchParams.get("type")), query: optionalString(url.searchParams.get("q")), sort: optionalString(url.searchParams.get("sort")) }));
+      if (bibleEntitiesMatch && request.method === "GET") return send(response, 200, await getCanonicalEntitiesPage(operations.root, bibleEntitiesMatch[1]!, { page: integerParam(url.searchParams.get("page"), 1), pageSize: boundedPageSize(url.searchParams.get("pageSize")), type: entityTypeFilter(url.searchParams.get("type")), query: optionalString(url.searchParams.get("q")), sort: entitySortFilter(url.searchParams.get("sort")) }));
       const bibleEntityMatch = /^\/api\/stories\/([a-z0-9-]+)\/story-bible\/entities\/(ent_[a-f0-9]{24})$/.exec(url.pathname);
       if (bibleEntityMatch && request.method === "GET") return send(response, 200, await getCanonicalEntityDetail(operations.root, bibleEntityMatch[1]!, bibleEntityMatch[2]!));
       if (bibleEntityMatch && request.method === "PUT") return send(response, 200, await operations.updateCanonicalEntity(bibleEntityMatch[1]!, bibleEntityMatch[2]!, await jsonBody(request)));
@@ -187,7 +187,7 @@ export function createApiHandler(operations: StudioOperations) {
       const bibleMergeUndoMatch = /^\/api\/stories\/([a-z0-9-]+)\/story-bible\/merges\/([a-f0-9-]{36})\/undo$/.exec(url.pathname);
       if (bibleMergeUndoMatch && request.method === "POST") return send(response, 200, await operations.undoCanonicalMerge(bibleMergeUndoMatch[1]!, bibleMergeUndoMatch[2]!));
       const continuityMatch = /^\/api\/stories\/([a-z0-9-]+)\/continuity$/.exec(url.pathname);
-      if (continuityMatch && request.method === "GET") return send(response, 200, await getContinuityReview(operations.root, continuityMatch[1]!, optionalString(url.searchParams.get("status"))));
+      if (continuityMatch && request.method === "GET") return send(response, 200, await getContinuityReview(operations.root, continuityMatch[1]!, continuityStatusFilter(url.searchParams.get("status"))));
       const continuityFindingMatch = /^\/api\/stories\/([a-z0-9-]+)\/continuity\/(ctf_[a-f0-9]{24})$/.exec(url.pathname);
       if (continuityFindingMatch && request.method === "PUT") return send(response, 200, await operations.resolveContinuity(continuityFindingMatch[1]!, continuityFindingMatch[2]!, await jsonBody(request)));
       const bibleEntryMatch = /^\/api\/stories\/([a-z0-9-]+)\/story-bible\/([a-f0-9-]+|auto-[a-f0-9]+)$/.exec(url.pathname);
@@ -214,7 +214,7 @@ export function createApiHandler(operations: StudioOperations) {
       const batchMatch = /^\/api\/stories\/([a-z0-9-]+)\/jobs\/batch$/.exec(url.pathname);
       if (batchMatch && request.method === "POST") return send(response, 202, operations.startBatch(batchMatch[1]!, await jsonBody(request)));
       const qaRecheckMatch = /^\/api\/stories\/([a-z0-9-]+)\/chapters\/(\d+)\/qa\/recheck$/.exec(url.pathname);
-      if (qaRecheckMatch && request.method === "POST") { await jsonBody(request); return send(response, 202, operations.startQaRecheck(qaRecheckMatch[1]!, Number(qaRecheckMatch[2]))); }
+      if (qaRecheckMatch && request.method === "POST") { await jsonBody(request); return send(response, 202, operations.startQaRecheck(qaRecheckMatch[1]!, chapterParam(qaRecheckMatch[2]!))); }
       const previewMatch = /^\/api\/stories\/([a-z0-9-]+)\/jobs\/preview$/.exec(url.pathname);
       if (previewMatch && request.method === "POST") return send(response, 202, operations.startPreview(previewMatch[1]!, await jsonBody(request)));
       const audioJobMatch = /^\/api\/stories\/([a-z0-9-]+)\/jobs\/audio$/.exec(url.pathname);
@@ -287,7 +287,11 @@ async function sendFile(request: IncomingMessage, response: ServerResponse, path
 async function body(request: IncomingMessage, limit = MAX_BODY_BYTES): Promise<Buffer> { const parts: Buffer[] = []; let size = 0; for await (const chunk of request) { const part = Buffer.from(chunk); size += part.length; if (size > limit) throw new HttpError(`Request body exceeds ${Math.floor(limit / 1_000_000)} MB`, 413); parts.push(part); } return Buffer.concat(parts); }
 async function jsonBody(request: IncomingMessage, limit = MAX_JSON_BYTES): Promise<unknown> { const raw = await body(request, limit); if (!raw.length) return {}; try { return JSON.parse(raw.toString("utf8")); } catch { throw new HttpError("Request body must be valid JSON", 400); } }
 export function integerParam(value: string | null, fallback: number) { if (value === null) return fallback; const number = Number(value); if (!Number.isInteger(number) || number < 1) throw new HttpError("Pagination values must be positive integers", 400); return number; }
+export function chapterParam(value: string) { const chapter = Number(value); if (!Number.isSafeInteger(chapter) || chapter < 1) throw new HttpError("Chapter must be a positive integer", 400); return chapter; }
 function optionalInteger(value: string | null) { if (value === null) return undefined; return integerParam(value, 1); }
+export function entityTypeFilter(value: string | null) { return value === null ? undefined : z.enum(["all", "character", "location", "organization", "ability", "item", "concept"]).parse(value); }
+export function entitySortFilter(value: string | null) { return value === null ? undefined : z.enum(["last", "first", "name"]).parse(value); }
+export function continuityStatusFilter(value: string | null) { return value === null ? undefined : z.enum(["all", "open", "accepted_new", "kept_existing", "intentional", "corrected", "merged", "dismissed"]).parse(value); }
 function csvCell(value:unknown){const text=value===undefined||value===null?"":String(value);return /[",\n]/.test(text)?`"${text.replaceAll('"','""')}"`:text;}
 function costFilters(url: URL) { return { chapterFrom: optionalInteger(url.searchParams.get("chapterFrom")), chapterTo: optionalInteger(url.searchParams.get("chapterTo")), productionRunId: optionalString(url.searchParams.get("run")), queueJobId: optionalString(url.searchParams.get("job")), stage: optionalString(url.searchParams.get("stage")), provider: optionalString(url.searchParams.get("provider")), model: optionalString(url.searchParams.get("model")), fromDate: optionalString(url.searchParams.get("fromDate")), toDate: optionalString(url.searchParams.get("toDate")) }; }
 function optionalString(value: string | null) { return value?.trim() || undefined; }
@@ -312,13 +316,15 @@ export function statusFor(error: unknown): number {
   if (error instanceof QueueNotFoundError) return 404;
   if (/already exists/.test(String(error))) return 409;
   if (/Confirmation|Unsafe backup|invalid ZIP|Backup must|Cover must|Select between|Select a |Chapter folder|Only HTTPS|exceeds the .* limit|Duplicate chapter|Entity merge|Merge must|requires a manual Story Bible correction|does not contain a canonical status|Story context maxCharacters/.test(String(error))) return 400;
-  if (/not found|does not exist/.test(String(error))) return 404;
+  if (/not found|does not exist/.test(String(error)) || errorCodeInChain(error, "ENOENT")) return 404;
   if (error instanceof ConfigurationError || error instanceof BatchValidationError) return 422;
   if (error instanceof WebHttpError) return isTimeout(error) ? 504 : 502;
   if (error instanceof ProviderError) return isTimeout(error) ? 504 : 502;
   if (error instanceof StorageError) return 500;
   return 500;
 }
+
+function errorCodeInChain(error: unknown, code: string) { let current: unknown = error; const seen = new Set<unknown>(); while (current && typeof current === "object" && !seen.has(current)) { seen.add(current); if ((current as { code?: unknown }).code === code) return true; current = (current as { cause?: unknown }).cause; } return false; }
 
 /** A deliberately small, value-free validation contract for every editable API route. */
 export function validationIssues(error: unknown): Array<{ path: string; message: string; code: string }> | undefined {

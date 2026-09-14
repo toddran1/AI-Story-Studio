@@ -23,7 +23,7 @@ import { translateStoryMetadata } from "../../src/translation/story-metadata.js"
 import { SourceInspection, SourceManifest, SourceType, StorySourceProvider, sourceManifestSchema, sourceTypeSchema } from "../../src/source/types.js";
 import { createWebHttpClient } from "../../src/source/web/create-client.js";
 import { SourceConflictError, SourceInputError, SourceOperationError, SourceValidationError } from "../../src/source/errors.js";
-import { atomicWriteJson } from "../../src/storage/atomic-write.js";
+import { atomicWrite, atomicWriteJson } from "../../src/storage/atomic-write.js";
 import { previewPaths, storyPaths } from "../../src/storage/paths.js";
 import { exists, readJsonIfExists } from "../../src/storage/story-files.js";
 import { withStoryLock } from "../../src/storage/story-lock.js";
@@ -368,7 +368,20 @@ export class StudioOperations {
   async addBibleEntry(slug: string, raw: unknown) { slugSchema.parse(slug); const input = z.object({ category: bibleCategorySchema, value: z.record(z.string(), z.unknown()), replacementKey: z.string().optional() }).strict().parse(raw); return withStoryLock(this.root, slug, "manual Story Bible add", async () => { const base = await getStoryBible(this.root, slug); const id = await addManualBibleEntry(this.root, slug, base, input.category, input.value, input.replacementKey); await recordActivity(this.root, slug, "bible.edited", `Added or corrected ${input.category} entry`); return { id }; }); }
   async updateBibleEntry(slug: string, id: string, raw: unknown) { slugSchema.parse(slug); const input = z.object({ value: z.record(z.string(), z.unknown()) }).strict().parse(raw); return withStoryLock(this.root, slug, "manual Story Bible edit", async () => { const base = await getStoryBible(this.root, slug); await updateManualBibleEntry(this.root, slug, base, id, input.value); await recordActivity(this.root, slug, "bible.edited", "Updated a Story Bible entry"); return { status: "updated" }; }); }
   async deleteBibleEntry(slug: string, id: string) { slugSchema.parse(slug); return withStoryLock(this.root, slug, "manual Story Bible delete", async () => { const base = await getStoryBible(this.root, slug); await deleteBibleEntry(this.root, slug, base, id); await recordActivity(this.root, slug, "bible.edited", "Deleted a manual Story Bible entry"); return { status: "deleted" }; }); }
-  async updateCanonicalEntity(slug: string, id: string, raw: unknown) { slugSchema.parse(slug); return withStoryLock(this.root, slug, "canonical entity edit", async () => { const current = await getStoryBible(this.root, slug); const before = current.canonicalEntities.find((item) => item.id === id); if (!before) throw new Error("Canonical entity was not found"); const base = await getStoryBible(this.root, slug, { includeCanonicalOverlay: false }); const result = await updateCanonicalEntity(this.root, slug, base, id, raw); const entity = result.bible.canonicalEntities.find((item) => item.id === id); if (!entity) throw new Error("Canonical entity was not found after update"); const invalidation = await invalidateNarrationNamingChange(this.root, slug, before, entity); invalidateCatalogCache(this.root, slug); await recordActivity(this.root, slug, "bible.entity.edited", invalidation.affectedChapters.length ? `Updated canonical entity ${id}; marked ${invalidation.affectedChapters.length} chapter(s) affected by narration naming` : `Updated canonical entity ${id}`); return { entity, invalidation }; }); }
+  async updateCanonicalEntity(slug: string, id: string, raw: unknown) { slugSchema.parse(slug); return withStoryLock(this.root, slug, "canonical entity edit", async () => {
+    const current = await getStoryBible(this.root, slug); const before = current.canonicalEntities.find((item) => item.id === id); if (!before) throw new Error("Canonical entity was not found");
+    const base = await getStoryBible(this.root, slug, { includeCanonicalOverlay: false }); const overlayPath = storyPaths(this.root, slug, 1).bibleCanonicalManual;
+    const priorOverlay = await readFile(overlayPath).catch((error: NodeJS.ErrnoException) => { if (error.code === "ENOENT") return undefined; throw error; });
+    const result = await updateCanonicalEntity(this.root, slug, base, id, raw); let entity; let invalidation;
+    try { entity = result.bible.canonicalEntities.find((item) => item.id === id); if (!entity) throw new Error("Canonical entity was not found after update"); invalidation = await invalidateNarrationNamingChange(this.root, slug, before, entity); }
+    catch (error) {
+      try { if (priorOverlay) await atomicWrite(overlayPath, priorOverlay); else await rm(overlayPath, { force: true }); }
+      catch (rollbackError) { throw new AggregateError([error, rollbackError], "Canonical entity update failed and its overlay could not be restored"); }
+      throw error;
+    }
+    if (invalidation.exportCleanupWarnings.length) logger.warn({ event: "bible.entity.export_cleanup_incomplete", story: slug, entityId: id, manifests: invalidation.exportCleanupWarnings });
+    invalidateCatalogCache(this.root, slug); await recordActivity(this.root, slug, "bible.entity.edited", invalidation.affectedChapters.length ? `Updated canonical entity ${id}; marked ${invalidation.affectedChapters.length} chapter(s) affected by narration naming` : `Updated canonical entity ${id}`); return { entity, invalidation };
+  }); }
   startLocalizationSuggestions(slug: string, id: string, raw: unknown) {
     slugSchema.parse(slug); const input = localizationSuggestionRequestSchema.parse(raw);
     return this.jobs.create("entityLocalizationSuggestions", slug, async () => {
