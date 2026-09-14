@@ -10,19 +10,20 @@ import { LLMProvider } from "../src/llm/provider.js";
 import { atomicWriteJson } from "../src/storage/atomic-write.js";
 import { storyPaths } from "../src/storage/paths.js";
 import { applyCanonicalOverlay, updateCanonicalEntity } from "../src/story-bible/canonical.js";
-import { invalidateNarrationNamingChange, loadNarrationNamingEntities } from "../src/story-bible/narration-names.js";
+import { invalidateNarrationNamingChange, loadNarrationNamingEntities, narrationNamingChanged } from "../src/story-bible/narration-names.js";
 import { retrieveRelevantContext } from "../src/story-bible/retrieval.js";
 import { mergeStoryBible } from "../src/story-bible/updater.js";
 import { qaInstructions } from "../src/qa/prompts.js";
 import { storyBibleInstructions } from "../src/story-bible/prompts.js";
 import { applyNarrationNamingPreferences } from "../src/narration/naming-preferences.js";
+import { translationInstructions } from "../src/translation/prompts.js";
 
 const update = (chapter = 1) => storyBibleUpdateSchema.parse({ chapterSummary: "Michael enters.", characters: [{ canonicalEnglishName: "Michael Johnson", originalName: "米高", description: "A coach", aliases: ["Michael", "Mike", "Mikey", "Coach Johnson"], firstSeenChapter: chapter, lastSeenChapter: chapter }] });
 
 describe("preferred narration names", () => {
   it("persists preferred names and per-alias behavior through protected-overlay rebuilds", async () => {
     const root = await mkdtemp(join(tmpdir(), "narration-names-")); const base = mergeStoryBible(emptyStoryBible(), update(), 1); const entity = base.canonicalEntities[0]!;
-    const patch = { preferredNarrationName: "Big Mike", aliasNarrationRules: [{ alias: "Michael", behavior: "use_preferred" as const }, { alias: "Coach Johnson", behavior: "custom" as const, replacement: "Coach Big Mike" }, { alias: "Mikey", behavior: "no_override" as const }] };
+    const patch = { preferredNarrationName: "Big Mike", localizedNaming: { locale: "en-GB", fullName: "Michael Johnson", shortName: "Mike", usageMode: "ai_contextual" as const, notes: "Use the full name in formal coaching scenes." }, aliasNarrationRules: [{ alias: "Michael", behavior: "use_preferred" as const }, { alias: "Coach Johnson", behavior: "custom" as const, replacement: "Coach Big Mike" }, { alias: "Mikey", behavior: "no_override" as const }] };
     const saved = await updateCanonicalEntity(root, "demo-story", base, entity.id, patch); expect(saved.bible.canonicalEntities[0]).toMatchObject(patch);
     const rebuilt = mergeStoryBible(emptyStoryBible(), update(), 1); const reapplied = await applyCanonicalOverlay(root, "demo-story", rebuilt); expect(reapplied.bible.canonicalEntities[0]).toMatchObject(patch);
   });
@@ -46,11 +47,19 @@ describe("preferred narration names", () => {
 
   it("instructs the model to preserve grammar and contextual references instead of blind replacement", () => {
     const prompt = narrationInstructions("English"); expect(prompt).toMatch(/default narration-facing name in place of the canonical\/original name/i); expect(prompt).toMatch(/never perform blind literal replacement/i); expect(prompt).toMatch(/possessives/); expect(prompt).toMatch(/dialogue-specific nicknames and vocatives/); expect(prompt).toMatch(/formal titles/); expect(prompt).toMatch(/pronouns/);
+    expect(prompt).toMatch(/canonical identity and localized naming are different/i); expect(prompt).toMatch(/ai_contextual/); expect(prompt).toMatch(/familiar dialogue/i);
   });
 
   it("teaches QA and Story Bible extraction that preferred names preserve canonical identity", () => {
     expect(qaInstructions).toMatch(/authorized narration-facing rendering/i); expect(qaInstructions).toMatch(/do not flag an authorized preferred\/custom name substitution/i);
     expect(storyBibleInstructions).toMatch(/resolve it back to that existing canonical entity/i); expect(storyBibleInstructions).toMatch(/never create a duplicate entity/i);
+  });
+
+  it("treats localization as narration-facing context and as an invalidating naming change", () => {
+    const before = mergeStoryBible(emptyStoryBible(), update(), 1).canonicalEntities[0]!; const after = { ...before, localizedNaming: { locale: "en-US", fullName: "Michael Johnson", shortName: "Mike", usageMode: "ai_contextual" as const } };
+    expect(narrationNamingChanged(before, after)).toBe(true);
+    expect(translationInstructions("zh-CN", "en-US")).toMatch(/localizedNaming.*narration-facing/i);
+    expect(translationInstructions("zh-CN", "en-US")).toMatch(/must not overwrite canonical translated names/i);
   });
 
   it("passes structured naming rules into the narration request", async () => {
@@ -68,5 +77,11 @@ describe("preferred narration names", () => {
   it("honors explicit alias exceptions and custom narration replacements", () => {
     const context = { canonicalEntities: [{ canonicalName: "Su Ming", aliases: ["Brother Su", "Young Su"], preferredNarrationName: "Shi Wang", aliasNarrationRules: [{ alias: "Brother Su", behavior: "no_override" }, { alias: "Young Su", behavior: "custom", replacement: "Young Shi" }] }] };
     expect(applyNarrationNamingPreferences(`“Su Ming! Brother Su! Young Su!”`, context)).toBe(`“Shi Wang! Brother Su! Young Shi!”`);
+  });
+
+  it("leaves first-class localized naming to contextual generation instead of blind replacement", () => {
+    const narration = `Su Ming entered. “Su Ming?” the registrar asked.`;
+    const result = applyNarrationNamingPreferences(narration, { canonicalEntities: [{ canonicalName: "Su Ming", originalName: "苏铭", aliases: [], preferredNarrationName: "Legacy Name", aliasNarrationRules: [], localizedNaming: { locale: "en-US", fullName: "Simon Su", shortName: "Simon", usageMode: "ai_contextual" } }] });
+    expect(result).toBe(narration);
   });
 });

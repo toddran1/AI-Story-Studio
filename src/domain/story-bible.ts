@@ -10,6 +10,19 @@ export const aliasNarrationRuleSchema = z.object({
   replacement: z.string().trim().min(1).max(300).optional(),
 }).superRefine((value, context) => { if (value.behavior === "custom" && !value.replacement) context.addIssue({ code: "custom", message: "A custom narration replacement is required", path: ["replacement"] }); });
 
+export const localizedNamingSchema = z.object({
+  locale: z.string().trim().min(2).max(35).regex(/^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*$/, "Use a language or locale such as en-US"),
+  fullName: z.string().trim().min(1).max(300).optional(),
+  shortName: z.string().trim().min(1).max(300).optional(),
+  usageMode: z.enum(["ai_contextual", "always_full", "always_short", "manual"]),
+  notes: z.string().trim().max(5_000).optional(),
+}).superRefine((value, context) => {
+  if (!value.fullName && !value.shortName) context.addIssue({ code: "custom", message: "Provide a localized full or short name", path: ["fullName"] });
+  if (value.usageMode === "always_full" && !value.fullName) context.addIssue({ code: "custom", message: "Always full requires a full name", path: ["fullName"] });
+  if (value.usageMode === "always_short" && !value.shortName) context.addIssue({ code: "custom", message: "Always short requires a short name", path: ["shortName"] });
+});
+export type LocalizedNaming = z.infer<typeof localizedNamingSchema>;
+
 const namedEntity = z.object({
   canonicalEnglishName: z.string().min(1).max(300), originalName: z.string().max(300).default(""), description: z.string().max(10_000).default(""),
   firstSeenChapter: z.number().int().positive(), lastSeenChapter: z.number().int().positive(),
@@ -36,6 +49,7 @@ export const storyBibleUpdateSchema = z.object({
 export const canonicalEntitySchema = z.object({
   id: z.string().regex(/^ent_[a-f0-9]{24}$/), type: entityTypeSchema, canonicalName: z.string().min(1).max(300), aliases: z.array(z.string().min(1).max(300)).max(100).default([]), originalName: z.string().max(300).default(""), description: z.string().max(10_000).default(""),
   preferredNarrationName: z.string().trim().min(1).max(300).optional(), aliasNarrationRules: z.array(aliasNarrationRuleSchema).max(100).default([]),
+  localizedNaming: localizedNamingSchema.optional(),
   firstAppearance: z.number().int().positive(), lastKnownAppearance: z.number().int().positive(), status: z.string().max(500).default("unknown"), notes: z.string().max(10_000).default(""), canonicalNameLocked: z.boolean().default(false),
   origin: factOriginSchema.default("automatic"), provenance: z.array(provenanceSchema).default([]), mergedFromIds: z.array(z.string()).default([]),
 });

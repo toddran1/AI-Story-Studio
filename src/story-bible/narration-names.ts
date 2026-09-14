@@ -10,12 +10,12 @@ import { applyCanonicalOverlay } from "./canonical.js";
 const downstream: StageName[] = ["qa", "tts", "audioMastering", "alignment", "subtitles", "scenePlanning", "artwork", "video"];
 
 export function narrationNamingChanged(before: CanonicalEntity, after: CanonicalEntity) {
-  return before.preferredNarrationName !== after.preferredNarrationName || JSON.stringify(before.aliasNarrationRules) !== JSON.stringify(after.aliasNarrationRules);
+  return before.preferredNarrationName !== after.preferredNarrationName || JSON.stringify(before.aliasNarrationRules) !== JSON.stringify(after.aliasNarrationRules) || JSON.stringify(before.localizedNaming) !== JSON.stringify(after.localizedNaming);
 }
 
 export async function loadNarrationNamingEntities(root: string, slug: string) {
   const raw = await readJsonIfExists<StoryBible>(storyPaths(root, slug, 1).bible); if (!raw) return [];
-  return (await applyCanonicalOverlay(root, slug, storyBibleSchema.parse(raw))).bible.canonicalEntities.filter((entity) => entity.preferredNarrationName || entity.aliasNarrationRules.length);
+  return (await applyCanonicalOverlay(root, slug, storyBibleSchema.parse(raw))).bible.canonicalEntities.filter((entity) => entity.localizedNaming || entity.preferredNarrationName || entity.aliasNarrationRules.length);
 }
 
 export async function invalidateNarrationNamingChange(root: string, slug: string, before: CanonicalEntity, after: CanonicalEntity) {

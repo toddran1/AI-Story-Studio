@@ -180,6 +180,8 @@ export function createApiHandler(operations: StudioOperations) {
       const bibleEntityMatch = /^\/api\/stories\/([a-z0-9-]+)\/story-bible\/entities\/(ent_[a-f0-9]{24})$/.exec(url.pathname);
       if (bibleEntityMatch && request.method === "GET") return send(response, 200, await getCanonicalEntityDetail(operations.root, bibleEntityMatch[1]!, bibleEntityMatch[2]!));
       if (bibleEntityMatch && request.method === "PUT") return send(response, 200, await operations.updateCanonicalEntity(bibleEntityMatch[1]!, bibleEntityMatch[2]!, await jsonBody(request)));
+      const localizationSuggestionsMatch = /^\/api\/stories\/([a-z0-9-]+)\/story-bible\/entities\/(ent_[a-f0-9]{24})\/localization-suggestions$/.exec(url.pathname);
+      if (localizationSuggestionsMatch && request.method === "POST") return send(response, 202, operations.startLocalizationSuggestions(localizationSuggestionsMatch[1]!, localizationSuggestionsMatch[2]!, await jsonBody(request)));
       const bibleMergeMatch = /^\/api\/stories\/([a-z0-9-]+)\/story-bible\/merges$/.exec(url.pathname);
       if (bibleMergeMatch && request.method === "POST") return send(response, 201, await operations.mergeCanonicalEntities(bibleMergeMatch[1]!, await jsonBody(request)));
       const bibleMergeUndoMatch = /^\/api\/stories\/([a-z0-9-]+)\/story-bible\/merges\/([a-f0-9-]{36})\/undo$/.exec(url.pathname);

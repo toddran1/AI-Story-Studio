@@ -4,6 +4,7 @@ import { App, shouldRefreshAfterJob } from "../apps/web/src/App.js";
 import { pretty } from "../apps/web/src/format.js";
 import { ChapterImportPage, savedStorySourceUrl } from "../apps/web/src/ChapterImportPage.js";
 import { SummariesPage } from "../apps/web/src/SummariesPage.js";
+import { NamesLocalizationPage } from "../apps/web/src/NamesLocalizationPage.js";
 
 describe("web UI", () => {
   it("uses readable labels for pipeline identifiers", () => {
@@ -41,5 +42,10 @@ describe("web UI", () => {
     expect(html).toContain("All summary types");
     expect(html).toContain("All statuses");
     expect(html).toContain("Create your first summary");
+  });
+  it("renders the entity localization workspace", () => {
+    Object.defineProperty(globalThis, "location", { value: { pathname: "/stories/demo-story/names", search: "" }, configurable: true });
+    const html = renderToStaticMarkup(<NamesLocalizationPage slug="demo-story" onJob={() => undefined} navigate={() => undefined} />);
+    expect(html).toContain("Names / Localization"); expect(html).toContain("Search any name"); expect(html).toContain("Select an entity to localize"); expect(html).toContain("Open Story Bible");
   });
 });

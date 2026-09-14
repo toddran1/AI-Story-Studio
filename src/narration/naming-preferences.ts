@@ -5,6 +5,7 @@ type NamingEntity = {
   aliases?: unknown;
   preferredNarrationName?: unknown;
   aliasNarrationRules?: unknown;
+  localizedNaming?: unknown;
 };
 
 /**
@@ -17,6 +18,9 @@ export function applyNarrationNamingPreferences(text: string, context?: unknown)
   const replacements = new Map<string, { source: string; replacement: string }>();
 
   for (const entity of entities) {
+    // First-class localization is contextual and is handled by the narration
+    // model. This deterministic layer remains only for legacy preferences.
+    if (entity.localizedNaming) continue;
     const preferred = stringValue(entity.preferredNarrationName);
     if (!preferred) continue;
     for (const source of [stringValue(entity.canonicalName), stringValue(entity.originalName)]) {

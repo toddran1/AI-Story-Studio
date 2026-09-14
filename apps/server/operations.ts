@@ -71,6 +71,7 @@ import { LLMRouter } from "../../src/llm/router.js";
 import { validateChapterQuality } from "../../src/qa/validator.js";
 import { emptyStoryBible, storyBibleSchema } from "../../src/domain/story-bible.js";
 import { SummaryService } from "../../src/summaries/service.js";
+import { generateLocalizedNameSuggestions, localizationSuggestionRequestSchema } from "../../src/story-bible/localization.js";
 
 const slugSchema = z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/);
 const batchInputSchema = z.object({ from: z.number().int().positive().optional(), to: z.number().int().positive().optional(), force: z.enum(["translation", "narration", "qa", "story-bible", "continuity", "tts", "audio", "all"]).optional(), continueOnError: z.boolean().default(false) }).strict();
@@ -368,6 +369,25 @@ export class StudioOperations {
   async updateBibleEntry(slug: string, id: string, raw: unknown) { slugSchema.parse(slug); const input = z.object({ value: z.record(z.string(), z.unknown()) }).strict().parse(raw); return withStoryLock(this.root, slug, "manual Story Bible edit", async () => { const base = await getStoryBible(this.root, slug); await updateManualBibleEntry(this.root, slug, base, id, input.value); await recordActivity(this.root, slug, "bible.edited", "Updated a Story Bible entry"); return { status: "updated" }; }); }
   async deleteBibleEntry(slug: string, id: string) { slugSchema.parse(slug); return withStoryLock(this.root, slug, "manual Story Bible delete", async () => { const base = await getStoryBible(this.root, slug); await deleteBibleEntry(this.root, slug, base, id); await recordActivity(this.root, slug, "bible.edited", "Deleted a manual Story Bible entry"); return { status: "deleted" }; }); }
   async updateCanonicalEntity(slug: string, id: string, raw: unknown) { slugSchema.parse(slug); return withStoryLock(this.root, slug, "canonical entity edit", async () => { const current = await getStoryBible(this.root, slug); const before = current.canonicalEntities.find((item) => item.id === id); if (!before) throw new Error("Canonical entity was not found"); const base = await getStoryBible(this.root, slug, { includeCanonicalOverlay: false }); const result = await updateCanonicalEntity(this.root, slug, base, id, raw); const entity = result.bible.canonicalEntities.find((item) => item.id === id); if (!entity) throw new Error("Canonical entity was not found after update"); const invalidation = await invalidateNarrationNamingChange(this.root, slug, before, entity); invalidateCatalogCache(this.root, slug); await recordActivity(this.root, slug, "bible.entity.edited", invalidation.affectedChapters.length ? `Updated canonical entity ${id}; marked ${invalidation.affectedChapters.length} chapter(s) affected by narration naming` : `Updated canonical entity ${id}`); return { entity, invalidation }; }); }
+  startLocalizationSuggestions(slug: string, id: string, raw: unknown) {
+    slugSchema.parse(slug); const input = localizationSuggestionRequestSchema.parse(raw);
+    return this.jobs.create("entityLocalizationSuggestions", slug, async () => {
+      const story = await loadStory(storyPaths(this.root, slug, 1).storyConfig);
+      const bible = await getStoryBible(this.root, slug); const entity = bible.canonicalEntities.find((item) => item.id === id);
+      if (!entity) throw new Error("Canonical entity was not found");
+      const names = new Map(bible.canonicalEntities.map((item) => [item.id, item.canonicalName]));
+      const relationships = bible.canonicalRelationships.filter((item) => item.sourceEntityId === id || item.targetEntityId === id).slice(0, 30).map((item) => ({
+        relation: item.type,
+        otherEntity: names.get(item.sourceEntityId === id ? item.targetEntityId : item.sourceEntityId) ?? "Unknown entity",
+      }));
+      const config = story.pipeline.narration;
+      const result = await withUsageScope({ story: slug, stage: "entityLocalization" }, () => generateLocalizedNameSuggestions(this.llm.forStage(config), config, {
+        entity, sourceLanguage: story.sourceLanguage, targetLanguage: story.outputLanguage, locale: input.locale ?? defaultLocale(story.outputLanguage), count: input.count, relationships,
+      }));
+      await recordActivity(this.root, slug, "bible.localization.suggested", `Generated localized name suggestions for ${entity.canonicalName}`);
+      return { entityId: id, locale: input.locale ?? defaultLocale(story.outputLanguage), model: config, suggestions: result.suggestions };
+    });
+  }
   async mergeCanonicalEntities(slug: string, raw: unknown) { slugSchema.parse(slug); const input = z.object({ targetEntityId: z.string(), sourceEntityIds: z.array(z.string()).min(1).max(50), reason: z.string().trim().min(1).max(1000) }).strict().parse(raw); return withStoryLock(this.root, slug, "canonical entity merge", async () => { const base = await getStoryBible(this.root, slug, { includeCanonicalOverlay: false }); const result = await mergeCanonicalEntities(this.root, slug, base, input.targetEntityId, input.sourceEntityIds, input.reason); await recordActivity(this.root, slug, "bible.entities.merged", `Merged ${input.sourceEntityIds.length} duplicate entity record(s)`); return { merge: result.merge, entity: result.bible.canonicalEntities.find((item) => item.id === input.targetEntityId) }; }); }
   async undoCanonicalMerge(slug: string, mergeId: string) { slugSchema.parse(slug); return withStoryLock(this.root, slug, "undo canonical entity merge", async () => { const base = await getStoryBible(this.root, slug, { includeCanonicalOverlay: false }); await undoCanonicalMerge(this.root, slug, base, mergeId); await recordActivity(this.root, slug, "bible.merge.undone", "Undid a canonical entity merge"); return { status: "undone" }; }); }
   async resolveContinuity(slug: string, id: string, raw: unknown) {
@@ -497,6 +517,7 @@ export class StudioOperations {
 
 function supportsBulk(provider: StorySourceProvider) { const capabilities = (provider as unknown as { capabilities?: { acquisition?: string[] } }).capabilities; return capabilities?.acquisition?.includes("bulk-download") === true; }
 function sameLanguage(left: string, right: string) { return left.trim().toLowerCase().replaceAll("_", "-") === right.trim().toLowerCase().replaceAll("_", "-"); }
+function defaultLocale(language: string) { const value = language.trim(); if (/^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*$/.test(value)) return value; return ({ english: "en-US", chinese: "zh-CN", spanish: "es-ES", french: "fr-FR", german: "de-DE", japanese: "ja-JP", korean: "ko-KR", portuguese: "pt-BR", italian: "it-IT", russian: "ru-RU" } as Record<string, string>)[value.toLocaleLowerCase()] ?? "en-US"; }
 
 function batchStopAfter(force?: z.infer<typeof batchInputSchema>["force"]): StageName | undefined {
   if (!force || force === "all") return undefined;
