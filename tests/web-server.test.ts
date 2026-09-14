@@ -254,9 +254,10 @@ describe("web service layer", () => {
     const { root, story, paths } = await storyFixture(); const now = new Date().toISOString(); const complete = { status: "complete" as const };
     await atomicWriteJson(paths.chapterMeta, chapterSchema.parse({ chapter: 1, sourceLanguage: story.sourceLanguage, outputLanguage: story.outputLanguage, counts: { originalCharacters: 20, englishWords: 4, narrationWords: 4 }, createdAt: now, updatedAt: now, stages: { ingestion: complete, translation: complete, narration: { ...complete, provider: "openai" }, qa: complete, storyBible: complete, tts: complete, audioMastering: complete } }));
     const valid = { title: "Revised", sourceLanguage: story.sourceLanguage, outputLanguage: story.outputLanguage, recentChapterSummaries: story.context.recentChapterSummaries, narrationSettings: { profanityMode: "soften-strong" as const },
-      translation: story.pipeline.translation, narration: story.pipeline.narration, qa: story.pipeline.qa, tts: { model: "s2.1-pro-free", referenceId: "voice", speed: 1.1 } };
+      translation: story.pipeline.translation, narration: story.pipeline.narration, qa: story.pipeline.qa, tts: { model: "s2.1-pro-free", referenceId: "voice", secondaryReferenceId: "dialogue-voice", voiceMode: "narrator-dialogue" as const, deliveryIntensity: "restrained" as const, qualityGuard: true, speed: 1.1 } };
     expect((await updateStorySettings(root, story.slug, valid)).title).toBe("Revised");
     expect((await updateStorySettings(root, story.slug, valid)).pipeline.tts.model).toBe("s2.1-pro-free");
+    expect((await updateStorySettings(root, story.slug, valid)).pipeline.tts).toMatchObject({ secondaryReferenceId: "dialogue-voice", voiceMode: "narrator-dialogue", deliveryIntensity: "restrained", qualityGuard: true });
     expect((await updateStorySettings(root, story.slug, valid)).narrationSettings.profanityMode).toBe("soften-strong");
     const chapter = chapterSchema.parse(await readJsonIfExists(paths.chapterMeta)); expect(chapter.stages.translation.status).toBe("complete"); expect(chapter.stages.narration.status).toBe("pending"); expect(chapter.stages.qa.status).toBe("pending");
     const persisted = await readFile(storyPaths(root, story.slug, 1).storyConfig, "utf8");

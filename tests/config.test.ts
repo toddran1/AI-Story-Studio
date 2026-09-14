@@ -13,7 +13,7 @@ describe("configuration", () => {
   it("uses an explicit FISH_AUDIO_MODEL for new stories", () => {
     const env = loadEnvironment({ FISH_AUDIO_MODEL: "s2.1-pro-free" });
     expect(env.FISH_AUDIO_MODEL).toBe("s2.1-pro-free");
-    expect(defaultStory("new-story", env).pipeline.tts.model).toBe("s2.1-pro-free");
+    expect(defaultStory("new-story", env).pipeline.tts).toMatchObject({ model: "s2.1-pro-free", voiceMode: "same-voice-dialogue", deliveryIntensity: "restrained", qualityGuard: true });
   });
 
   it("reports a missing provider key without revealing secrets", () => {
@@ -32,5 +32,11 @@ describe("configuration", () => {
       pipeline: { translation: { provider: "unknown", model: "x" }, narration: { provider: "openai", model: "x" }, storyBible: { provider: "gemini", model: "x" }, tts: { provider: "fish", model: "s2-pro" } },
     });
     expect(result.success).toBe(false);
+  });
+
+  it("migrates an empty two-voice cast to same-voice dialogue delivery", () => {
+    const story = defaultStory("new-story", loadEnvironment({}));
+    const parsed = storySchema.parse({ ...story, pipeline: { ...story.pipeline, tts: { ...story.pipeline.tts, voiceMode: "narrator-dialogue", secondaryReferenceId: undefined } } });
+    expect(parsed.pipeline.tts.voiceMode).toBe("same-voice-dialogue");
   });
 });

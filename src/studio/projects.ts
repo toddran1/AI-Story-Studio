@@ -103,6 +103,7 @@ export async function invalidateStoryForConfigChange(root: string, slug: string,
   if (changed(before.pipeline.narration, after.pipeline.narration) || changed(before.narrationSettings, after.narrationSettings)) add("narration", "qa", "storyBible", "continuity", "tts", "audioMastering", "alignment", "subtitles", "scenePlanning", "artwork", "video");
   if (changed(before.pipeline.qa, after.pipeline.qa)) add("qa");
   if (changed(before.pipeline.storyBible, after.pipeline.storyBible)) add("storyBible", "continuity");
+  if (before.pipeline.tts.deliveryIntensity !== after.pipeline.tts.deliveryIntensity) add("narration", "qa", "storyBible", "continuity");
   if (changed(before.pipeline.tts, after.pipeline.tts)) add("tts", "audioMastering", "alignment", "subtitles", "scenePlanning", "artwork", "video");
   if (changed(before.audio, after.audio)) add("audioMastering", "alignment", "subtitles", "scenePlanning", "artwork", "video");
   if (changed(before.subtitles, after.subtitles)) add("subtitles", "video");

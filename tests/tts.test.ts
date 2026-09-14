@@ -37,7 +37,7 @@ describe("Fish TTS", () => {
     const provider = new FishAudioProvider("test-key", fetcher as typeof fetch);
     await provider.synthesize({ text: "Hello", model: "s2.1-pro-free", speed: 1, format: "mp3", sampleRate: 44100, bitrate: 128, normalize: true, maxCharsPerRequest: 500 });
     const body = JSON.parse(String((fetcher.mock.calls[0]?.[1] as RequestInit).body));
-    expect(body).toMatchObject({ temperature: .7, top_p: .7, chunk_length: 300, repetition_penalty: 1.2, condition_on_previous_chunks: true });
+    expect(body).toMatchObject({ temperature: .5, top_p: .55, chunk_length: 300, repetition_penalty: 1.2, condition_on_previous_chunks: true, features: ["quality-guard"] });
   });
 
   it("does not send Markdown emphasis asterisks to Fish as spoken text", async () => {
@@ -46,7 +46,52 @@ describe("Fish TTS", () => {
     await provider.synthesize({ text: "**Important:** *whisper this.* [sad] 2 * 2", model: "s2.1-pro", speed: 1, format: "mp3", sampleRate: 44100, bitrate: 128, normalize: true, maxCharsPerRequest: 500 });
     const body = JSON.parse(String((fetcher.mock.calls[0]?.[1] as RequestInit).body));
     expect(body.text).toBe("Important: whisper this. [sad] 2 * 2");
-    expect(provider.inputNormalizationVersion).toBe("fish-speech-normalization-v3");
+    expect(provider.inputNormalizationVersion).toBe("fish-speech-normalization-v5");
+  });
+
+  it("casts every quoted line to one configured dialogue voice", async () => {
+    const fetcher = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => new Response(new Uint8Array([1]), { headers: { "content-type": "audio/mpeg" } }));
+    const provider = new FishAudioProvider("test-key", fetcher as typeof fetch);
+    await provider.synthesize({ text: "The guard nodded. \"Stop there,\" he said. \"Now go.\"", model: "s2.1-pro-free", referenceId: "narrator", secondaryReferenceId: "dialogue", voiceMode: "narrator-dialogue", deliveryIntensity: "restrained", qualityGuard: true, speed: 1, format: "mp3", sampleRate: 44100, bitrate: 128, normalize: true, maxCharsPerRequest: 500 });
+    const body = JSON.parse(String((fetcher.mock.calls[0]?.[1] as RequestInit).body));
+    expect(body.reference_id).toEqual(["narrator", "dialogue"]);
+    expect(body.text).toBe("<|speaker:0|>The guard nodded. <|speaker:1|>\"Stop there,\"<|speaker:0|> he said. <|speaker:1|>\"Now go.\"<|speaker:0|>");
+  });
+
+  it("falls back to the narrator when dialogue mode has no secondary voice", async () => {
+    const fetcher = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => new Response(new Uint8Array([1]), { headers: { "content-type": "audio/mpeg" } }));
+    const provider = new FishAudioProvider("test-key", fetcher as typeof fetch);
+    await provider.synthesize({ text: "She said, \"Hello.\"", model: "s2.1-pro-free", referenceId: "narrator", voiceMode: "narrator-dialogue", speed: 1, format: "mp3", sampleRate: 44100, bitrate: 128, normalize: true, maxCharsPerRequest: 500 });
+    const body = JSON.parse(String((fetcher.mock.calls[0]?.[1] as RequestInit).body));
+    expect(body.reference_id).toBe("narrator");
+    expect(body.text).not.toContain("<|speaker:");
+  });
+
+  it("directs dialogue subtly without changing the reference voice", async () => {
+    const fetcher = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => new Response(new Uint8Array([1]), { headers: { "content-type": "audio/mpeg" } }));
+    const provider = new FishAudioProvider("test-key", fetcher as typeof fetch);
+    await provider.synthesize({ text: "The guard said, \"Stop.\" Then he left.", model: "s2.1-pro-free", referenceId: "narrator", voiceMode: "same-voice-dialogue", deliveryIntensity: "restrained", speed: 1, format: "mp3", sampleRate: 44100, bitrate: 128, normalize: true, maxCharsPerRequest: 500 });
+    const body = JSON.parse(String((fetcher.mock.calls[0]?.[1] as RequestInit).body));
+    expect(body.reference_id).toBe("narrator");
+    expect(body.text).toBe("The guard said, [soft] \"Stop.\"[calm] Then he left.");
+    expect(body.text).not.toContain("<|speaker:");
+  });
+
+  it("does not add dialogue direction when delivery intensity is none", async () => {
+    const fetcher = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => new Response(new Uint8Array([1]), { headers: { "content-type": "audio/mpeg" } }));
+    const provider = new FishAudioProvider("test-key", fetcher as typeof fetch);
+    await provider.synthesize({ text: "She said, \"Hello.\"", model: "s2.1-pro", referenceId: "narrator", voiceMode: "same-voice-dialogue", deliveryIntensity: "none", speed: 1, format: "mp3", sampleRate: 44100, bitrate: 128, normalize: true, maxCharsPerRequest: 500 });
+    const body = JSON.parse(String((fetcher.mock.calls[0]?.[1] as RequestInit).body));
+    expect(body.text).toBe("She said, \"Hello.\"");
+  });
+
+  it("supports expressive sampling and disabling quality guard", async () => {
+    const fetcher = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => new Response(new Uint8Array([1]), { headers: { "content-type": "audio/mpeg" } }));
+    const provider = new FishAudioProvider("test-key", fetcher as typeof fetch);
+    await provider.synthesize({ text: "Hello", model: "s2.1-pro", deliveryIntensity: "expressive", qualityGuard: false, speed: 1, format: "mp3", sampleRate: 44100, bitrate: 128, normalize: true, maxCharsPerRequest: 500 });
+    const body = JSON.parse(String((fetcher.mock.calls[0]?.[1] as RequestInit).body));
+    expect(body).toMatchObject({ temperature: .7, top_p: .7 });
+    expect(body).not.toHaveProperty("features");
   });
 
   it("keeps approved S2 cues but makes bracketed story notifications ordinary speech", async () => {

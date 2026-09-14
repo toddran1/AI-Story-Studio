@@ -66,7 +66,19 @@ export const storySchema = z.preprocess((value) => {
   const pipeline = story.pipeline;
   if (!pipeline || typeof pipeline !== "object") return withAudio;
   const stages = pipeline as Record<string, unknown>;
-  return { ...withAudio, pipeline: { ...stages, qa: stages.qa ?? stages.narration ?? stages.storyBible, scenePlanner: stages.scenePlanner ?? stages.narration ?? stages.storyBible } };
+  const rawTts = stages.tts;
+  const tts = rawTts && typeof rawTts === "object"
+    ? (() => {
+        const config = rawTts as Record<string, unknown>;
+        // A short-lived earlier default selected two-voice mode without a
+        // secondary voice. Interpret that inert combination as the intended
+        // same-voice dialogue treatment while preserving configured casts.
+        return config.voiceMode === "narrator-dialogue" && !config.secondaryReferenceId
+          ? { ...config, voiceMode: "same-voice-dialogue" }
+          : config;
+      })()
+    : rawTts;
+  return { ...withAudio, pipeline: { ...stages, tts, qa: stages.qa ?? stages.narration ?? stages.storyBible, scenePlanner: stages.scenePlanner ?? stages.narration ?? stages.storyBible } };
 }, rawStorySchema);
 
 export type Story = z.infer<typeof storySchema>;

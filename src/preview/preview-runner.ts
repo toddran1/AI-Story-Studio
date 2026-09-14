@@ -39,7 +39,7 @@ export class PreviewRunner {
       const translation = sameLanguage(options.story.sourceLanguage, options.story.outputLanguage)
         ? source
         : (await translate(this.llms.forStage(preset.translation), preset.translation, source, translationContext, options.story.sourceLanguage, options.story.outputLanguage)).text;
-      const narrationScript = (await polishNarration(this.llms.forStage(preset.narration), preset.narration, translation, options.story.outputLanguage, context, preset.tts.provider, preset.tts.model, options.story.narrationSettings.profanityMode)).text;
+      const narrationScript = (await polishNarration(this.llms.forStage(preset.narration), preset.narration, translation, options.story.outputLanguage, context, preset.tts.provider, preset.tts.model, options.story.narrationSettings.profanityMode, preset.tts.deliveryIntensity)).text;
       const narration = stripDeliveryCues(narrationScript, preset.tts.provider, preset.tts.model);
       const qa = (await validateChapterQuality(this.llms.forStage(preset.qa), preset.qa, {
         chapter: options.chapter, sourceLanguage: options.story.sourceLanguage, outputLanguage: options.story.outputLanguage,
@@ -51,7 +51,8 @@ export class PreviewRunner {
       let audioGenerated = false;
       if (options.audioPreview && qa.status !== "fail") {
         const sample = audioSample(narrationScript);
-        const result = await this.tts.forName(preset.tts.provider).synthesize({ text: sample, model: preset.tts.model, referenceId: preset.tts.referenceId,
+        const result = await this.tts.forName(preset.tts.provider).synthesize({ text: sample, model: preset.tts.model, referenceId: preset.tts.referenceId, secondaryReferenceId: preset.tts.secondaryReferenceId,
+          voiceMode: preset.tts.voiceMode, deliveryIntensity: preset.tts.deliveryIntensity, qualityGuard: preset.tts.qualityGuard,
           speed: preset.tts.speed, format: preset.tts.format, sampleRate: preset.tts.sampleRate, bitrate: preset.tts.bitrate,
           normalize: preset.tts.normalize, maxCharsPerRequest: preset.tts.maxCharsPerRequest });
         await atomicWrite(choice === "a" ? paths.audioA : paths.audioB, result.audio);

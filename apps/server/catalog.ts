@@ -176,7 +176,8 @@ export const settingsUpdateSchema = z.object({
   narration: z.object({ provider: z.enum(["openai", "gemini"]), model: z.string().trim().min(1) }),
   qa: z.object({ provider: z.enum(["openai", "gemini"]), model: z.string().trim().min(1) }),
   scenePlanner: z.object({ provider: z.enum(["openai", "gemini"]), model: z.string().trim().min(1) }).optional(),
-  tts: z.object({ provider: ttsProviderNameSchema.optional(), model: z.string().trim().min(1).optional(), referenceId: z.string().trim().optional(), speed: z.number().min(0.5).max(2) }),
+  tts: z.object({ provider: ttsProviderNameSchema.optional(), model: z.string().trim().min(1).optional(), referenceId: z.string().trim().optional(), secondaryReferenceId: z.string().trim().optional(),
+    voiceMode: z.enum(["narrator-only", "same-voice-dialogue", "narrator-dialogue"]).optional(), deliveryIntensity: z.enum(["none", "restrained", "expressive"]).optional(), qualityGuard: z.boolean().optional(), speed: z.number().min(0.5).max(2) }),
   audio: z.object({ loudnessTarget: z.number().min(-24).max(-12), truePeak: z.number().min(-6).max(-0.1), segmentGapSeconds: z.number().min(0).max(5),
     chapterGapSeconds: z.number().min(0).max(10), bitrate: z.enum(["64k", "96k", "128k", "160k", "192k", "256k", "320k"]), sampleRate: z.union([z.literal(32000), z.literal(44100), z.literal(48000)]) }).optional(),
   subtitles: z.object({ maxCharactersPerLine: z.number().int().min(20).max(80), maxLines: z.number().int().min(1).max(3), minimumDurationSeconds: z.number().min(.4).max(5), maximumDurationSeconds: z.number().min(2).max(12) }).optional(),
@@ -192,7 +193,9 @@ export async function updateStorySettings(root: string, slug: string, input: unk
       context: { ...current.context, recentChapterSummaries: update.recentChapterSummaries },
       narrationSettings: update.narrationSettings ?? current.narrationSettings,
       audio: { ...current.audio, ...update.audio }, subtitles: { ...current.subtitles, ...update.subtitles }, video: { ...current.video, ...update.video }, scenes: { ...current.scenes, ...update.scenes }, artwork: { ...current.artwork, ...update.artwork }, pipeline: { ...current.pipeline, translation: update.translation, narration: update.narration, qa: update.qa, scenePlanner: update.scenePlanner ?? current.pipeline.scenePlanner,
-        tts: { ...current.pipeline.tts, provider: update.tts.provider ?? current.pipeline.tts.provider, model: update.tts.model ?? current.pipeline.tts.model, referenceId: update.tts.referenceId || undefined, speed: update.tts.speed } } });
+        tts: { ...current.pipeline.tts, provider: update.tts.provider ?? current.pipeline.tts.provider, model: update.tts.model ?? current.pipeline.tts.model, referenceId: update.tts.referenceId || undefined,
+          secondaryReferenceId: update.tts.secondaryReferenceId || undefined, voiceMode: update.tts.voiceMode ?? current.pipeline.tts.voiceMode,
+          deliveryIntensity: update.tts.deliveryIntensity ?? current.pipeline.tts.deliveryIntensity, qualityGuard: update.tts.qualityGuard ?? current.pipeline.tts.qualityGuard, speed: update.tts.speed } } });
     await invalidateStoryForConfigChange(root, slug, current, story); await atomicWriteJson(paths.storyConfig, story); await atomicWriteJson(paths.pipelineConfig, story.pipeline); return story;
   });
 }

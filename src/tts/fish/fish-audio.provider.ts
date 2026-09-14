@@ -3,12 +3,14 @@ import { TTSProvider } from "../provider.js";
 import { TTSRequest } from "../types.js";
 import { splitForTTS } from "../split-text.js";
 import { normalizeFishSpeechText } from "./speech-normalizer.js";
+import { castQuotedDialogue, directQuotedDialogue, ensureChunkSpeakers } from "./dialogue-casting.js";
+import { isFishS2Model } from "./control-cues.js";
 
 export class FishAudioProvider implements TTSProvider {
   readonly name = "fish" as const;
-  // Included in the TTS fingerprint so audio made before Markdown cleanup is not
-  // silently reused after the normalizer changes.
-  readonly inputNormalizationVersion = "fish-speech-normalization-v3";
+  // Included in the TTS fingerprint so audio made before normalization or
+  // deterministic dialogue casting changes is never silently reused.
+  readonly inputNormalizationVersion = "fish-speech-normalization-v5";
   constructor(
     private readonly apiKey?: string,
     private readonly fetcher: typeof fetch = fetch,
@@ -24,19 +26,26 @@ export class FishAudioProvider implements TTSProvider {
   async synthesize(request: TTSRequest) {
     await this.validateConfiguration();
     const referenceId = this.resolveReferenceId(request.referenceId);
+    const secondaryReferenceId = normalizeFishReferenceId(request.secondaryReferenceId);
+    const multiSpeaker = request.voiceMode === "narrator-dialogue" && Boolean(referenceId) && Boolean(secondaryReferenceId) && isFishS2Model(request.model);
+    const directedSingleVoice = request.voiceMode === "same-voice-dialogue" && request.deliveryIntensity !== "none" && isFishS2Model(request.model);
     const segments: Uint8Array[] = []; const requestIds: string[] = [];
     const speechText = normalizeFishSpeechText(request.text, request.model);
     if (!speechText) throw new ProviderError("Fish Audio narration is empty after speech normalization");
-    for (const text of splitForTTS(speechText, request.maxCharsPerRequest)) {
+    const castText = multiSpeaker ? castQuotedDialogue(speechText) : directedSingleVoice ? directQuotedDialogue(speechText) : speechText;
+    const splitText = splitForTTS(castText, request.maxCharsPerRequest);
+    const chunks = multiSpeaker ? ensureChunkSpeakers(splitText) : splitText;
+    for (const text of chunks) {
       let response: Response;
       try {
         response = await this.fetcher("https://api.fish.audio/v1/tts", {
           method: "POST",
           signal: AbortSignal.timeout(this.timeoutMs),
           headers: { Authorization: `Bearer ${this.apiKey}`, "Content-Type": "application/json", model: request.model },
-          body: JSON.stringify({ text, reference_id: referenceId, format: request.format, sample_rate: request.sampleRate,
+          body: JSON.stringify({ text, reference_id: multiSpeaker ? [referenceId!, secondaryReferenceId!] : referenceId, format: request.format, sample_rate: request.sampleRate,
             mp3_bitrate: request.bitrate, normalize: request.normalize, prosody: { speed: request.speed, volume: 0, normalize_loudness: true },
-            ...fishS2Defaults(request.model) }),
+            ...(request.qualityGuard === false ? {} : { features: ["quality-guard"] }),
+            ...fishS2Defaults(request.model, request.deliveryIntensity) }),
         });
       } catch (error) { throw new ProviderError("Fish Audio network request failed", { cause: error }); }
       if (!response.ok) {
@@ -74,8 +83,11 @@ export function normalizeFishReferenceId(value?: string): string | undefined {
 }
 
 /** Documented S2/S2.1 production defaults. Other/unknown models retain the portable request shape. */
-function fishS2Defaults(model: string) {
+function fishS2Defaults(model: string, intensity: TTSRequest["deliveryIntensity"] = "restrained") {
   if (!new Set(["s2-pro", "s2.1-pro", "s2.1-pro-free"]).has(model.trim().toLowerCase())) return {};
-  return { temperature: 0.7, top_p: 0.7, chunk_length: 300, latency: "normal", max_new_tokens: 1024,
+  const sampling = intensity === "expressive" ? { temperature: 0.7, top_p: 0.7 }
+    : intensity === "none" ? { temperature: 0.4, top_p: 0.5 }
+    : { temperature: 0.5, top_p: 0.55 };
+  return { ...sampling, chunk_length: 300, latency: "normal", max_new_tokens: 1024,
     repetition_penalty: 1.2, min_chunk_length: 50, condition_on_previous_chunks: true, early_stop_threshold: 1 };
 }

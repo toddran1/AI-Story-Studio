@@ -6,6 +6,8 @@ describe("model-aware narration delivery", () => {
     expect(narrationDeliveryProfile("fish", "s2.1-pro")).toMatchObject({ id: "fish-s2", cueSyntax: "brackets" });
     expect(narrationDeliveryProfile("fish", "s2.1-pro-free")).toMatchObject({ id: "fish-s2", cueSyntax: "brackets" });
     expect(deliveryInstructions("fish", "s2.1-pro-free", "English")).toMatch(/Fish Audio S2/);
+    expect(deliveryInstructions("fish", "s2.1-pro-free", "English", "restrained")).toMatch(/at most one cue across any three paragraphs/);
+    expect(deliveryInstructions("fish", "s2.1-pro-free", "English", "none")).toMatch(/no TTS control tags/);
   });
 
   it("preserves reader-facing bracketed story text while removing controlled S2 directions", () => {

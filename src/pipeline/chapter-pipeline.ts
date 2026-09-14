@@ -147,11 +147,11 @@ export class ChapterPipeline {
     const narrationConfig = options.story.pipeline.narration;
     const ttsConfig = options.story.pipeline.tts;
     const deliveryProfile = narrationDeliveryProfile(ttsConfig.provider, ttsConfig.model);
-    const narrationFp = fingerprint({ english: fingerprint(english), context: priorContext, config: narrationConfig, narrationSettings: options.story.narrationSettings, deliveryProfile, prompt: NARRATION_PROMPT_VERSION });
+    const narrationFp = fingerprint({ english: fingerprint(english), context: priorContext, config: narrationConfig, narrationSettings: options.story.narrationSettings, deliveryProfile, deliveryIntensity: ttsConfig.deliveryIntensity, prompt: NARRATION_PROMPT_VERSION });
     const narrationResult = await runStage("narration", narrationFp, paths.narration, {
       provider: narrationConfig.provider, model: narrationConfig.model, promptVersion: NARRATION_PROMPT_VERSION,
     }, async () => {
-      const result = await polishNarration(this.llms.forStage(narrationConfig), narrationConfig, english, options.story.outputLanguage, priorContext, ttsConfig.provider, ttsConfig.model, options.story.narrationSettings.profanityMode);
+      const result = await polishNarration(this.llms.forStage(narrationConfig), narrationConfig, english, options.story.outputLanguage, priorContext, ttsConfig.provider, ttsConfig.model, options.story.narrationSettings.profanityMode, ttsConfig.deliveryIntensity);
       const cleanNarration = stripDeliveryCues(result.text, ttsConfig.provider, ttsConfig.model);
       if (!cleanNarration) throw new PipelineError("Narration delivery cues cannot replace the chapter's spoken narration");
       await atomicWrite(paths.narration, cleanNarration);
@@ -230,7 +230,8 @@ export class ChapterPipeline {
     const ttsFp = fingerprint({ narration: fingerprint(ttsScript), config: { ...ttsConfig, referenceId }, deliveryProfile, inputNormalizationVersion: ttsProvider.inputNormalizationVersion });
     if (!(await fileFingerprint(paths.audioRaw)) && chapter.stages.tts.status === "complete" && await fileFingerprint(paths.audio)) await atomicWrite(paths.audioRaw, await readFile(paths.audio));
     await runStage("tts", ttsFp, paths.audioRaw, { provider: ttsConfig.provider, model: ttsConfig.model }, async () => {
-      const result = await ttsProvider.synthesize({ text: ttsScript, model: ttsConfig.model, referenceId,
+      const result = await ttsProvider.synthesize({ text: ttsScript, model: ttsConfig.model, referenceId, secondaryReferenceId: ttsConfig.secondaryReferenceId,
+        voiceMode: ttsConfig.voiceMode, deliveryIntensity: ttsConfig.deliveryIntensity, qualityGuard: ttsConfig.qualityGuard,
         speed: ttsConfig.speed, format: ttsConfig.format, sampleRate: ttsConfig.sampleRate, bitrate: ttsConfig.bitrate,
         normalize: ttsConfig.normalize, maxCharsPerRequest: ttsConfig.maxCharsPerRequest });
       await atomicWrite(paths.audioRaw, result.audio);
