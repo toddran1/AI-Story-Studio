@@ -330,7 +330,7 @@ export class StudioOperations {
       for (const target of targets) {
         control.update({ type: "qa.repair.started", chapter, target, selectedIssues: issues.length });
         const config = story.pipeline[target]; const provider = this.llm.forStage(config);
-        const result = await withUsageScope({ story: slug, chapter, stage: `qaRepair.${target}` }, () => repairQaText(provider, config, { target, chapter, sourceLanguage: story.sourceLanguage, outputLanguage: story.outputLanguage, source, translation: currentTranslation, narration: currentNarration, issues: issues.filter((issue) => issueRepairTargets(issue).includes(target)), context, profanityMode: story.narrationSettings.profanityMode }));
+        const result = await withUsageScope({ story: slug, chapter, stage: `qaRepair.${target}` }, () => repairQaText(provider, config, { target, chapter, sourceLanguage: story.sourceLanguage, outputLanguage: story.outputLanguage, source, translation: currentTranslation, narration: currentNarration, issues: issues.filter((issue) => issueRepairTargets(issue).includes(target)), context, profanityMode: story.narrationSettings.profanityMode, includeChapterTitle: story.narrationSettings.includeChapterTitle !== false }));
         await saveChapterTextEdit(this.root, slug, chapter, { field: target, text: result.text });
         if (target === "translation") currentTranslation = result.text; else currentNarration = result.text; repaired.push(target);
         control.update({ type: "qa.repair.completed", chapter, target, completed: repaired.length, total: targets.length });
@@ -354,7 +354,7 @@ export class StudioOperations {
       const context = contextRaw ? storyBibleSchema.parse(contextRaw) : emptyStoryBible();
       control.update({ type: "qa.recheck.started", chapter, stage: "qa" });
       const config = story.pipeline.qa; const result = await withUsageScope({ story: slug, chapter, stage: "qa" }, () => validateChapterQuality(this.llm.forStage(config), config, {
-        chapter, sourceLanguage: story.sourceLanguage, outputLanguage: story.outputLanguage, source, translation, narration, context, profanityMode: story.narrationSettings.profanityMode,
+        chapter, sourceLanguage: story.sourceLanguage, outputLanguage: story.outputLanguage, source, translation, narration, context, profanityMode: story.narrationSettings.profanityMode, includeChapterTitle: story.narrationSettings.includeChapterTitle !== false,
       }));
       await atomicWriteJson(paths.qa, result.value);
       metadata.quality = { status: result.value.status, score: result.value.score, issueCategories: [...new Set(result.value.issues.map((issue) => issue.category))] };

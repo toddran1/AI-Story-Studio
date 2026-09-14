@@ -151,7 +151,7 @@ export class ChapterPipeline {
     const narrationResult = await runStage("narration", narrationFp, paths.narration, {
       provider: narrationConfig.provider, model: narrationConfig.model, promptVersion: NARRATION_PROMPT_VERSION,
     }, async () => {
-      const result = await polishNarration(this.llms.forStage(narrationConfig), narrationConfig, english, options.story.outputLanguage, priorContext, ttsConfig.provider, ttsConfig.model, options.story.narrationSettings.profanityMode, ttsConfig.deliveryIntensity);
+      const result = await polishNarration(this.llms.forStage(narrationConfig), narrationConfig, english, options.story.outputLanguage, priorContext, ttsConfig.provider, ttsConfig.model, options.story.narrationSettings.profanityMode, ttsConfig.deliveryIntensity, options.story.narrationSettings.includeChapterTitle !== false);
       const cleanNarration = stripDeliveryCues(result.text, ttsConfig.provider, ttsConfig.model);
       if (!cleanNarration) throw new PipelineError("Narration delivery cues cannot replace the chapter's spoken narration");
       await atomicWrite(paths.narration, cleanNarration);
@@ -173,7 +173,7 @@ export class ChapterPipeline {
     }, async () => {
       const result = await validateChapterQuality(this.llms.forStage(qaConfig), qaConfig, {
         chapter: options.chapter, sourceLanguage: options.story.sourceLanguage, outputLanguage: options.story.outputLanguage,
-        source, translation: english, narration, context: priorContext, profanityMode: options.story.narrationSettings.profanityMode,
+        source, translation: english, narration, context: priorContext, profanityMode: options.story.narrationSettings.profanityMode, includeChapterTitle: options.story.narrationSettings.includeChapterTitle !== false,
       });
       await atomicWriteJson(paths.qa, result.value);
       chapter.stages.qa.usage = result.usage;

@@ -39,11 +39,11 @@ export class PreviewRunner {
       const translation = sameLanguage(options.story.sourceLanguage, options.story.outputLanguage)
         ? source
         : (await translate(this.llms.forStage(preset.translation), preset.translation, source, translationContext, options.story.sourceLanguage, options.story.outputLanguage)).text;
-      const narrationScript = (await polishNarration(this.llms.forStage(preset.narration), preset.narration, translation, options.story.outputLanguage, context, preset.tts.provider, preset.tts.model, options.story.narrationSettings.profanityMode, preset.tts.deliveryIntensity)).text;
+      const narrationScript = (await polishNarration(this.llms.forStage(preset.narration), preset.narration, translation, options.story.outputLanguage, context, preset.tts.provider, preset.tts.model, options.story.narrationSettings.profanityMode, preset.tts.deliveryIntensity, options.story.narrationSettings.includeChapterTitle !== false)).text;
       const narration = stripDeliveryCues(narrationScript, preset.tts.provider, preset.tts.model);
       const qa = (await validateChapterQuality(this.llms.forStage(preset.qa), preset.qa, {
         chapter: options.chapter, sourceLanguage: options.story.sourceLanguage, outputLanguage: options.story.outputLanguage,
-        source, translation, narration, context, profanityMode: options.story.narrationSettings.profanityMode,
+        source, translation, narration, context, profanityMode: options.story.narrationSettings.profanityMode, includeChapterTitle: options.story.narrationSettings.includeChapterTitle !== false,
       })).value;
       await atomicWrite(choice === "a" ? paths.translationA : paths.translationB, translation);
       await atomicWrite(choice === "a" ? paths.narrationA : paths.narrationB, narration);

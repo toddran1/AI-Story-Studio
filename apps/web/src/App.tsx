@@ -332,7 +332,12 @@ function SettingsPage({ slug, onJob }: { slug: string; onJob: (job: Job) => void
       <div className="settings-group"><h3>Model profile</h3>{(["translation", "narration", "qa"] as const).map((key) => <ModelEditor key={key} label={pretty(key)} value={story.pipeline[key]} onChange={(value) => model(key, value)} />)}
         <label className={`narration-policy ${story.narrationSettings.profanityMode === "soften-strong" ? "active" : ""}`}>
           <div><span>NARRATION ONLY</span><b>Soften strong profanity</b><small>Uses milder wording for harsh terms while keeping the scene's meaning and intensity. Ass, hell, and damn remain allowed. Original and translation stay unchanged.</small></div>
-          <input type="checkbox" checked={story.narrationSettings.profanityMode === "soften-strong"} onChange={(event) => setStory({ ...story, narrationSettings: { profanityMode: event.target.checked ? "soften-strong" : "preserve" } })} />
+          <input type="checkbox" checked={story.narrationSettings.profanityMode === "soften-strong"} onChange={(event) => setStory({ ...story, narrationSettings: { ...story.narrationSettings, profanityMode: event.target.checked ? "soften-strong" : "preserve" } })} />
+          <i aria-hidden="true" />
+        </label>
+        <label className={`narration-policy ${story.narrationSettings.includeChapterTitle === false ? "active" : ""}`}>
+          <div><span>NARRATION ONLY</span><b>Omit chapter title</b><small>Starts narration with the chapter body. The original source and translated chapter keep their title.</small></div>
+          <input type="checkbox" checked={story.narrationSettings.includeChapterTitle === false} onChange={(event) => setStory({ ...story, narrationSettings: { ...story.narrationSettings, includeChapterTitle: !event.target.checked } })} />
           <i aria-hidden="true" />
         </label>
       </div>

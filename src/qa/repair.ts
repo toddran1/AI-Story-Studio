@@ -4,6 +4,7 @@ import { LLMProvider } from "../llm/provider.js";
 import { assertUsableTranslation } from "../translation/translator.js";
 import type { NarrationProfanityMode } from "../domain/story.js";
 import { softenStrongProfanity } from "../narration/profanity.js";
+import { removeLeadingChapterTitle } from "../narration/narration-editor.js";
 
 export function selectRepairStage(qa: QaResult): "translation" | "narration" {
   const translationCategories = new Set(["completeness", "names", "numbers", "terminology", "dialogue"]);
@@ -28,7 +29,7 @@ export function issueRepairTargets(issue: QaResult["issues"][number]): QaRepairT
 
 export async function repairQaText(provider: LLMProvider, config: StageModelConfig, input: {
   target: QaRepairTarget; chapter: number; sourceLanguage: string; outputLanguage: string; source: string;
-  translation: string; narration: string; issues: QaResult["issues"]; context?: unknown; profanityMode?: NarrationProfanityMode;
+  translation: string; narration: string; issues: QaResult["issues"]; context?: unknown; profanityMode?: NarrationProfanityMode; includeChapterTitle?: boolean;
 }) {
   const current = input.target === "translation" ? input.translation : input.narration;
   if (!current.trim()) throw new Error(`Chapter ${input.chapter} has no ${input.target} to repair`);
@@ -42,6 +43,9 @@ export async function repairQaText(provider: LLMProvider, config: StageModelConf
       : `Keep the narration faithful to the approved ${input.outputLanguage} translation; do not introduce new story information.`,
     input.target === "narration" && input.profanityMode === "soften-strong"
       ? "Honor the story's narration-only preference: replace strong profanity with natural milder wording while preserving hostility, emotion, intent, and meaning. Ass, hell, and damn are allowed."
+      : "",
+    input.target === "narration" && input.includeChapterTitle === false
+      ? "The story omits chapter titles from narration. Return the complete narration body without a chapter heading or title."
       : "",
   ].join(" ");
   const result = await provider.generateText({
@@ -57,7 +61,8 @@ export async function repairQaText(provider: LLMProvider, config: StageModelConf
       `TEXT TO REPAIR (${input.target.toUpperCase()}):\n${current}`,
     ].join("\n\n"),
   });
-  const text = softenStrongProfanity(stripFence(result.text), input.target === "narration" ? (input.profanityMode ?? "preserve") : "preserve");
+  let text = softenStrongProfanity(stripFence(result.text), input.target === "narration" ? (input.profanityMode ?? "preserve") : "preserve");
+  if (input.target === "narration" && input.includeChapterTitle === false) text = removeLeadingChapterTitle(text);
   validateRepair(text, current, input.target);
   return { ...result, text };
 }

@@ -9,6 +9,7 @@ import { storyNovelSourceSchema } from "../source/novel-provider.js";
 
 export const narrationSettingsSchema = z.object({
   profanityMode: z.enum(["preserve", "soften-strong"]).default("preserve"),
+  includeChapterTitle: z.boolean().optional(),
 }).default({ profanityMode: "preserve" });
 export type NarrationProfanityMode = z.infer<typeof narrationSettingsSchema>["profanityMode"];
 

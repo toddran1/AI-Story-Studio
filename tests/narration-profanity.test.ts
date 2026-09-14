@@ -46,4 +46,19 @@ describe("narration profanity preference", () => {
     expect(translation).toBe("What the fuck, you bitch?");
     expect(request.input).toContain(translation);
   });
+
+  it("can omit only the leading Markdown chapter title from narration", async () => {
+    const provider: LLMProvider = {
+      name: "openai",
+      validateConfiguration: async () => undefined,
+      generateText: async () => ({ text: "# Chapter 397: The Good Show Is About to Begin\n\nThe battle had already reached a fever pitch." }),
+      generateStructured: async () => { throw new Error("unused"); },
+    };
+    const translation = "# Chapter 397: The Good Show Is About to Begin\n\nThe battle had already reached a fever pitch.";
+    const result = await polishNarration(provider, { provider: "openai", model: "test" }, translation, "English", {}, "fish", "s2.1-pro", "preserve", "restrained", false);
+    expect(result.text).toBe("The battle had already reached a fever pitch.");
+    expect(translation).toMatch(/^# Chapter 397:/);
+    expect(narrationInstructions("English", "fish", "s2.1-pro", "preserve", "restrained", false)).toMatch(/omit the chapter title/i);
+    expect(qaInstructionsFor("preserve", false)).toMatch(/omission from the narration alone is intentional/i);
+  });
 });

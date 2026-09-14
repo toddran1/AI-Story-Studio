@@ -8,7 +8,10 @@ Honor the Story Bible's narration naming controls. A Preferred Narration Name is
 
 Do not rewrite the chapter. Return only the requested structured assessment. Use fail for material factual loss or alteration that must block publication, warn for plausible or minor concerns requiring review, and pass only when no concern remains. Include concise evidence for each issue.`;
 
-export function qaInstructionsFor(profanityMode: NarrationProfanityMode = "preserve") {
-  if (profanityMode !== "soften-strong") return qaInstructions;
-  return `${qaInstructions}\n\nThe story has explicitly enabled narration-only strong-profanity softening. Do not flag a natural strong-to-mild wording substitution in narration as a fidelity or dialogue error when its hostility, emotion, intent, and meaning remain intact. Mild words such as “ass,” “hell,” and “damn” are permitted. Still flag missing dialogue, flattened meaning, or unrelated censorship. The source and translation are not covered by this preference.`;
+export function qaInstructionsFor(profanityMode: NarrationProfanityMode = "preserve", includeChapterTitle = true) {
+  const preferences = [
+    profanityMode === "soften-strong" ? "The story has explicitly enabled narration-only strong-profanity softening. Do not flag a natural strong-to-mild wording substitution in narration as a fidelity or dialogue error when its hostility, emotion, intent, and meaning remain intact. Mild words such as “ass,” “hell,” and “damn” are permitted. Still flag missing dialogue, flattened meaning, or unrelated censorship. The source and translation are not covered by this preference." : "",
+    !includeChapterTitle ? "The story has explicitly disabled chapter titles in narration. The source and translation must retain the title, but its omission from the narration alone is intentional and must not be reported as an omission or fidelity problem." : "",
+  ].filter(Boolean);
+  return preferences.length ? `${qaInstructions}\n\n${preferences.join("\n\n")}` : qaInstructions;
 }

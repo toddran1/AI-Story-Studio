@@ -171,7 +171,7 @@ async function outputItem(path: string, value: Record<string, unknown>) { try { 
 export const settingsUpdateSchema = z.object({
   title: z.string().trim().min(1), author: z.string().trim().optional(), description: z.string().max(10_000).default(""), tags: z.array(z.string()).max(30).default([]), notes: z.string().max(20_000).default(""), sourceLanguage: z.string().trim().min(2), outputLanguage: z.string().trim().min(2),
   recentChapterSummaries: z.number().int().min(0).max(100),
-  narrationSettings: z.object({ profanityMode: z.enum(["preserve", "soften-strong"]) }).optional(),
+  narrationSettings: z.object({ profanityMode: z.enum(["preserve", "soften-strong"]), includeChapterTitle: z.boolean().optional() }).optional(),
   translation: z.object({ provider: z.enum(["openai", "gemini"]), model: z.string().trim().min(1) }),
   narration: z.object({ provider: z.enum(["openai", "gemini"]), model: z.string().trim().min(1) }),
   qa: z.object({ provider: z.enum(["openai", "gemini"]), model: z.string().trim().min(1) }),
