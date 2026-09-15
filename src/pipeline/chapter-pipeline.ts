@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { Chapter, StageName, StageState, chapterSchema } from "../domain/chapter.js";
 import { Story } from "../domain/story.js";
 import { StoryBibleUpdate, storyBibleUpdateSchema } from "../domain/story-bible.js";
-import { QaResult, qaResultSchema } from "../domain/qa.js";
+import { activeQaIssues, QaResult, qaResultSchema } from "../domain/qa.js";
 import { LLMRouter } from "../llm/router.js";
 import { TTSProvider } from "../tts/provider.js";
 import { TTSProviderRouter } from "../tts/router.js";
@@ -147,7 +147,8 @@ export class ChapterPipeline {
     const narrationConfig = options.story.pipeline.narration;
     const ttsConfig = options.story.pipeline.tts;
     const deliveryProfile = narrationDeliveryProfile(ttsConfig.provider, ttsConfig.model);
-    const narrationFp = fingerprint({ english: fingerprint(english), context: priorContext, config: narrationConfig, narrationSettings: options.story.narrationSettings, deliveryProfile, deliveryIntensity: ttsConfig.deliveryIntensity, prompt: NARRATION_PROMPT_VERSION });
+    const narrationBehavior = { profanityMode: options.story.narrationSettings.profanityMode, includeChapterTitle: options.story.narrationSettings.includeChapterTitle };
+    const narrationFp = fingerprint({ english: fingerprint(english), context: priorContext, config: narrationConfig, narrationSettings: narrationBehavior, deliveryProfile, deliveryIntensity: ttsConfig.deliveryIntensity, prompt: NARRATION_PROMPT_VERSION });
     const narrationResult = await runStage("narration", narrationFp, paths.narration, {
       provider: narrationConfig.provider, model: narrationConfig.model, promptVersion: NARRATION_PROMPT_VERSION,
     }, async () => {
@@ -166,7 +167,7 @@ export class ChapterPipeline {
     const qaConfig = options.story.pipeline.qa;
     const qaFp = fingerprint({
       source: ingestionFp, translation: fingerprint(english), narration: fingerprint(narration),
-      context: priorContext, config: qaConfig, narrationSettings: options.story.narrationSettings, prompt: QA_PROMPT_VERSION,
+      context: priorContext, config: qaConfig, narrationSettings: narrationBehavior, prompt: QA_PROMPT_VERSION,
     });
     const qaResult = await runStage("qa", qaFp, paths.qa, {
       provider: qaConfig.provider, model: qaConfig.model, promptVersion: QA_PROMPT_VERSION,
@@ -180,7 +181,7 @@ export class ChapterPipeline {
       return result.value;
     });
     const quality = qaResult ?? qaResultSchema.parse(await readJsonIfExists<QaResult>(paths.qa));
-    chapter.quality = { status: quality.status, score: quality.score, issueCategories: [...new Set(quality.issues.map((issue) => issue.category))] };
+    chapter.quality = { status: quality.status, score: quality.score, issueCategories: [...new Set(activeQaIssues(quality).map((issue) => issue.category))] };
     await persist();
     if (quality.status === "warn") logger.warn({ event: "pipeline.qa.warn", story: options.story.slug, chapter: options.chapter, score: quality.score, issues: quality.issues.length });
     if (quality.status === "fail") {
@@ -227,11 +228,13 @@ export class ChapterPipeline {
     // generated with a different voice.
     const ttsProvider = this.tts.forName(ttsConfig.provider);
     const referenceId = ttsProvider.resolveReferenceId?.(ttsConfig.referenceId) ?? ttsConfig.referenceId;
-    const ttsFp = fingerprint({ narration: fingerprint(ttsScript), config: { ...ttsConfig, referenceId }, deliveryProfile, inputNormalizationVersion: ttsProvider.inputNormalizationVersion });
+    const bleepStrongProfanity = options.story.narrationSettings.bleepStrongProfanity === true;
+    const ttsFp = fingerprint({ narration: fingerprint(ttsScript), config: { ...ttsConfig, referenceId }, deliveryProfile, inputNormalizationVersion: ttsProvider.inputNormalizationVersion,
+      ...(bleepStrongProfanity ? { bleepStrongProfanity: true } : {}) });
     if (!(await fileFingerprint(paths.audioRaw)) && chapter.stages.tts.status === "complete" && await fileFingerprint(paths.audio)) await atomicWrite(paths.audioRaw, await readFile(paths.audio));
     await runStage("tts", ttsFp, paths.audioRaw, { provider: ttsConfig.provider, model: ttsConfig.model }, async () => {
       const result = await ttsProvider.synthesize({ text: ttsScript, model: ttsConfig.model, referenceId, secondaryReferenceId: ttsConfig.secondaryReferenceId,
-        voiceMode: ttsConfig.voiceMode, deliveryIntensity: ttsConfig.deliveryIntensity, qualityGuard: ttsConfig.qualityGuard,
+        voiceMode: ttsConfig.voiceMode, deliveryIntensity: ttsConfig.deliveryIntensity, qualityGuard: ttsConfig.qualityGuard, bleepStrongProfanity,
         speed: ttsConfig.speed, format: ttsConfig.format, sampleRate: ttsConfig.sampleRate, bitrate: ttsConfig.bitrate,
         normalize: ttsConfig.normalize, maxCharsPerRequest: ttsConfig.maxCharsPerRequest });
       await atomicWrite(paths.audioRaw, result.audio);

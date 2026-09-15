@@ -53,6 +53,7 @@ export class PreviewRunner {
         const sample = audioSample(narrationScript);
         const result = await this.tts.forName(preset.tts.provider).synthesize({ text: sample, model: preset.tts.model, referenceId: preset.tts.referenceId, secondaryReferenceId: preset.tts.secondaryReferenceId,
           voiceMode: preset.tts.voiceMode, deliveryIntensity: preset.tts.deliveryIntensity, qualityGuard: preset.tts.qualityGuard,
+          bleepStrongProfanity: options.story.narrationSettings.bleepStrongProfanity,
           speed: preset.tts.speed, format: preset.tts.format, sampleRate: preset.tts.sampleRate, bitrate: preset.tts.bitrate,
           normalize: preset.tts.normalize, maxCharsPerRequest: preset.tts.maxCharsPerRequest });
         await atomicWrite(choice === "a" ? paths.audioA : paths.audioB, result.audio);

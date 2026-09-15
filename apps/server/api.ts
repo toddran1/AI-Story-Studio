@@ -126,6 +126,8 @@ export function createApiHandler(operations: StudioOperations) {
       if (chapterTextMatch && request.method === "PUT") return send(response, 200, await operations.editChapterText(chapterTextMatch[1]!, chapterParam(chapterTextMatch[2]!), await jsonBody(request)));
       const chapterQaRepairMatch = /^\/api\/stories\/([a-z0-9-]+)\/chapters\/(\d+)\/qa\/repair$/.exec(url.pathname);
       if (chapterQaRepairMatch && request.method === "POST") return send(response, 202, operations.startQaRepair(chapterQaRepairMatch[1]!, chapterParam(chapterQaRepairMatch[2]!), await jsonBody(request)));
+      const chapterQaDismissMatch = /^\/api\/stories\/([a-z0-9-]+)\/chapters\/(\d+)\/qa\/dismiss$/.exec(url.pathname);
+      if (chapterQaDismissMatch && request.method === "PUT") return send(response, 200, await operations.dismissQaFindings(chapterQaDismissMatch[1]!, chapterParam(chapterQaDismissMatch[2]!), await jsonBody(request)));
       const audioMatch = /^\/api\/stories\/([a-z0-9-]+)\/chapters\/(\d+)\/audio$/.exec(url.pathname);
       if (audioMatch && request.method === "GET") {
         const chapterNumber = chapterParam(audioMatch[2]!); const chapter = await getChapter(operations.root, audioMatch[1]!, chapterNumber);

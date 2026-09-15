@@ -29,6 +29,10 @@ const STRONG_PROFANITY_REPLACEMENTS: readonly Replacement[] = [
   [/\bcunt\b/gi, "creep"],
 ];
 
+// This intentionally matches the same strong-word family as the narration
+// softener. Mild terms such as "ass", "hell", and "damn" are not included.
+const STRONG_PROFANITY_WORD = /\b(?:motherfuckers?|fuck(?:ing|ed|ers?|s)?|bitch(?:ing|y|es)?|bullshit|shitheads?|shit|cunts?)\b/gi;
+
 /**
  * A final narration-only safety net. The narration model receives richer context
  * and should do the natural rewrite; this catches isolated strong terms it misses.
@@ -46,6 +50,15 @@ export function containsStrongProfanity(text: string): boolean {
     pattern.lastIndex = 0;
     return pattern.test(text);
   });
+}
+
+/**
+ * Produces a hidden, TTS-only script. The stored narration remains untouched;
+ * Fish speaks the replacement word where a strong term would have appeared.
+ */
+export function bleepStrongProfanityForTts(text: string, enabled: boolean): string {
+  if (!enabled) return text;
+  return text.replace(STRONG_PROFANITY_WORD, (match) => preserveCase(match, "bleep"));
 }
 
 function preserveCase(source: string, replacement: string): string {

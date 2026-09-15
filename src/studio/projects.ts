@@ -100,7 +100,9 @@ export async function invalidateStoryForConfigChange(root: string, slug: string,
   const stages = new Set<string>(); const changed = (left: unknown, right: unknown) => JSON.stringify(left) !== JSON.stringify(right); const add = (...items: string[]) => items.forEach((item) => stages.add(item));
   if (before.sourceLanguage !== after.sourceLanguage || before.outputLanguage !== after.outputLanguage) add("translation", "narration", "qa", "storyBible", "continuity", "tts", "audioMastering", "alignment", "subtitles", "scenePlanning", "artwork", "video");
   if (changed(before.pipeline.translation, after.pipeline.translation) || changed(before.context, after.context)) add("translation", "narration", "qa", "storyBible", "continuity", "tts", "audioMastering", "alignment", "subtitles", "scenePlanning", "artwork", "video");
-  if (changed(before.pipeline.narration, after.pipeline.narration) || changed(before.narrationSettings, after.narrationSettings)) add("narration", "qa", "storyBible", "continuity", "tts", "audioMastering", "alignment", "subtitles", "scenePlanning", "artwork", "video");
+  const narrationBehavior = (story: Story) => ({ profanityMode: story.narrationSettings.profanityMode, includeChapterTitle: story.narrationSettings.includeChapterTitle });
+  if (changed(before.pipeline.narration, after.pipeline.narration) || changed(narrationBehavior(before), narrationBehavior(after))) add("narration", "qa", "storyBible", "continuity", "tts", "audioMastering", "alignment", "subtitles", "scenePlanning", "artwork", "video");
+  if (before.narrationSettings.bleepStrongProfanity !== after.narrationSettings.bleepStrongProfanity) add("tts", "audioMastering", "alignment", "subtitles", "scenePlanning", "artwork", "video");
   if (changed(before.pipeline.qa, after.pipeline.qa)) add("qa");
   if (changed(before.pipeline.storyBible, after.pipeline.storyBible)) add("storyBible", "continuity");
   if (before.pipeline.tts.deliveryIntensity !== after.pipeline.tts.deliveryIntensity) add("narration", "qa", "storyBible", "continuity");

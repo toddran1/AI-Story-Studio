@@ -1,5 +1,5 @@
 import { StageModelConfig } from "../domain/provider.js";
-import { QaResult, normalizeQaResult, qaResultSchema } from "../domain/qa.js";
+import { generatedQaResultSchema, QaResult, normalizeQaResult } from "../domain/qa.js";
 import { StoryBible } from "../domain/story-bible.js";
 import { LLMProvider } from "../llm/provider.js";
 import type { NarrationProfanityMode } from "../domain/story.js";
@@ -23,7 +23,7 @@ export async function validateChapterQuality(
       `NARRATION:\n${input.narration}`,
     ].join("\n\n"),
     schemaName: "chapter_qa",
-    schema: qaResultSchema,
+    schema: generatedQaResultSchema,
   });
   return { ...result, value: normalizeQaResult(result.value) };
 }

@@ -1,6 +1,6 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import { App, chapterPageSize, shouldRefreshAfterJob } from "../apps/web/src/App.js";
+import { App, chapterPageSize, QaDetail, shouldRefreshAfterJob } from "../apps/web/src/App.js";
 import { pretty } from "../apps/web/src/format.js";
 import { ChapterImportPage, savedStorySourceUrl } from "../apps/web/src/ChapterImportPage.js";
 import { SummariesPage } from "../apps/web/src/SummariesPage.js";
@@ -19,6 +19,13 @@ describe("web UI", () => {
   it("uses 50 chapters per page by default and permits the supported page sizes", () => {
     expect(chapterPageSize("")).toBe(50); expect(chapterPageSize("?pageSize=10")).toBe(10); expect(chapterPageSize("?pageSize=100")).toBe(100); expect(chapterPageSize("?pageSize=75")).toBe(50);
   });
+  it("shows QA severity and the manual dismissal action", () => {
+    const html = renderToStaticMarkup(<QaDetail busy={false} onAddress={() => undefined} onDismiss={() => undefined} onRepair={() => undefined} onRerun={() => undefined} qa={{
+      status: "warn", score: .86, issues: [{ category: "dialogue", severity: "warn", message: "A threat is softened", evidence: "The intent remains intact." }],
+      checks: { completeness: "pass", names: "pass", numbers: "pass", terminology: "pass", dialogue: "warn", storyConsistency: "pass", narrationFidelity: "pass" },
+    }} />);
+    expect(html).toContain("Dismiss selected"); expect(html).toContain("Warn severity"); expect(html).toContain("Dialogue");
+  });
   it("refreshes the current workspace once when a web job becomes terminal", () => {
     const running = { id: "job-1", type: "batch", story: "demo", status: "running" } as any;
     expect(shouldRefreshAfterJob(running, { ...running, status: "completed" })).toBe(true);
@@ -26,6 +33,8 @@ describe("web UI", () => {
     expect(shouldRefreshAfterJob(undefined, running)).toBe(false);
     const preview = { ...running, type: "voicePreview" };
     expect(shouldRefreshAfterJob(preview, { ...preview, status: "completed" })).toBe(false);
+    const suggestions = { ...running, type: "entityLocalizationSuggestions" };
+    expect(shouldRefreshAfterJob(suggestions, { ...suggestions, status: "completed" })).toBe(false);
   });
   it("renders the studio shell and accessible navigation", () => {
     Object.defineProperty(globalThis, "location", { value: { pathname: "/" }, configurable: true });

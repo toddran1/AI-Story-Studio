@@ -49,6 +49,16 @@ describe("Fish TTS", () => {
     expect(provider.inputNormalizationVersion).toBe("fish-speech-normalization-v5");
   });
 
+  it("bleeps strong profanity only in the hidden Fish request", async () => {
+    const narration = "Fuck that bitch. This is damn hard as hell and hurts my ass.";
+    const fetcher = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => new Response(new Uint8Array([1]), { headers: { "content-type": "audio/mpeg" } }));
+    const provider = new FishAudioProvider("test-key", fetcher as typeof fetch);
+    await provider.synthesize({ text: narration, model: "s2.1-pro", bleepStrongProfanity: true, speed: 1, format: "mp3", sampleRate: 44100, bitrate: 128, normalize: true, maxCharsPerRequest: 500 });
+    const body = JSON.parse(String((fetcher.mock.calls[0]?.[1] as RequestInit).body));
+    expect(body.text).toBe("Bleep that bleep. This is damn hard as hell and hurts my ass.");
+    expect(narration).toBe("Fuck that bitch. This is damn hard as hell and hurts my ass.");
+  });
+
   it("casts every quoted line to one configured dialogue voice", async () => {
     const fetcher = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => new Response(new Uint8Array([1]), { headers: { "content-type": "audio/mpeg" } }));
     const provider = new FishAudioProvider("test-key", fetcher as typeof fetch);

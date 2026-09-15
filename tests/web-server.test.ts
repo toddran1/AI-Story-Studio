@@ -20,6 +20,7 @@ import { atomicWrite, atomicWriteJson } from "../src/storage/atomic-write.js";
 import { storyPaths } from "../src/storage/paths.js";
 import { exists, readJsonIfExists } from "../src/storage/story-files.js";
 import { fingerprint } from "../src/utils/hash.js";
+import { fileFingerprint } from "../src/utils/file-fingerprint.js";
 import { MockLLM, MockTTS } from "./helpers.js";
 import { AudioMasteringProcessor } from "../src/audio/mastering.js";
 import { AudiobookProcessor } from "../src/audio/audiobook.js";
@@ -106,6 +107,24 @@ describe("web service layer", () => {
     await atomicWriteJson(paths.chapterMeta, chapter); await atomicWriteJson(paths.qa, qa);
     const detail = await getChapter(root, story.slug, 1); const dashboard = await getQaDashboard(root, story.slug);
     expect(detail.qa?.status).toBe("warn"); expect(dashboard.counts.warn).toBe(1); expect(dashboard.categories.terminology).toBe(1);
+  });
+
+  it("dismisses selected QA findings without deleting their evidence", async () => {
+    const { root, story, paths } = await storyFixture(); const now = new Date().toISOString();
+    const complete = { status: "complete" as const, fingerprint: "in", outputFingerprint: "out" }; const retainedQa = pending();
+    const chapter = chapterSchema.parse({ chapter: 1, sourceLanguage: story.sourceLanguage, outputLanguage: story.outputLanguage, counts: { originalCharacters: 10, englishWords: 8, narrationWords: 8 }, createdAt: now, updatedAt: now,
+      stages: { ingestion: complete, translation: complete, narration: complete, qa: retainedQa, storyBible: pending(), tts: pending() }, quality: { status: "warn", score: .86, issueCategories: ["dialogue"] } });
+    const qa = qaResultSchema.parse({ status: "warn", score: .86, issues: [{ category: "dialogue", severity: "warn", message: "A threat is softened", evidence: "The meaning remains clear." }], checks: { completeness: "pass", names: "pass", numbers: "pass", terminology: "pass", dialogue: "warn", storyConsistency: "pass", narrationFidelity: "pass" } });
+    await atomicWriteJson(paths.chapterMeta, chapter); await atomicWriteJson(paths.qa, qa);
+    const operations = new StudioOperations(root, env);
+    const result = await operations.dismissQaFindings(story.slug, 1, { issueIndexes: [0] });
+    expect(result.qa.status).toBe("pass"); expect(result.qa.issues[0]).toMatchObject({ message: "A threat is softened", review: { disposition: "dismissed" } });
+    const detail = await getChapter(root, story.slug, 1); const dashboard = await getQaDashboard(root, story.slug);
+    expect(detail.qa?.issues[0]?.review?.disposition).toBe("dismissed"); expect(detail.metadata?.quality).toEqual({ status: "pass", score: .86, issueCategories: [] });
+    expect(detail.metadata?.stages.qa.status).toBe("pending"); expect(detail.qaStale).toBe(true);
+    expect(detail.metadata?.stages.qa.outputFingerprint).toBe(await fileFingerprint(paths.qa));
+    expect(dashboard.counts.pass).toBe(1); expect(dashboard.chapters[0]?.issues).toEqual([]);
+    await operations.close();
   });
 
   it("repairs selected QA findings with the configured model and invalidates the old QA result", async () => {
@@ -262,18 +281,31 @@ describe("web service layer", () => {
   it("validates settings and rejects credential-shaped fields", async () => {
     const { root, story, paths } = await storyFixture(); const now = new Date().toISOString(); const complete = { status: "complete" as const };
     await atomicWriteJson(paths.chapterMeta, chapterSchema.parse({ chapter: 1, sourceLanguage: story.sourceLanguage, outputLanguage: story.outputLanguage, counts: { originalCharacters: 20, englishWords: 4, narrationWords: 4 }, createdAt: now, updatedAt: now, stages: { ingestion: complete, translation: complete, narration: { ...complete, provider: "openai" }, qa: complete, storyBible: complete, tts: complete, audioMastering: complete } }));
-    const valid = { title: "Revised", sourceLanguage: story.sourceLanguage, outputLanguage: story.outputLanguage, recentChapterSummaries: story.context.recentChapterSummaries, narrationSettings: { profanityMode: "soften-strong" as const, includeChapterTitle: false },
+    const valid = { title: "Revised", sourceLanguage: story.sourceLanguage, outputLanguage: story.outputLanguage, recentChapterSummaries: story.context.recentChapterSummaries, narrationSettings: { profanityMode: "soften-strong" as const, bleepStrongProfanity: true, includeChapterTitle: false },
       translation: story.pipeline.translation, narration: story.pipeline.narration, qa: story.pipeline.qa, tts: { model: "s2.1-pro-free", referenceId: "voice", secondaryReferenceId: "dialogue-voice", voiceMode: "narrator-dialogue" as const, deliveryIntensity: "restrained" as const, qualityGuard: true, speed: 1.1 } };
     expect((await updateStorySettings(root, story.slug, valid)).title).toBe("Revised");
     expect((await updateStorySettings(root, story.slug, valid)).pipeline.tts.model).toBe("s2.1-pro-free");
     expect((await updateStorySettings(root, story.slug, valid)).pipeline.tts).toMatchObject({ secondaryReferenceId: "dialogue-voice", voiceMode: "narrator-dialogue", deliveryIntensity: "restrained", qualityGuard: true });
     expect((await updateStorySettings(root, story.slug, valid)).narrationSettings.profanityMode).toBe("soften-strong");
+    expect((await updateStorySettings(root, story.slug, valid)).narrationSettings.bleepStrongProfanity).toBe(true);
     expect((await updateStorySettings(root, story.slug, valid)).narrationSettings.includeChapterTitle).toBe(false);
     const chapter = chapterSchema.parse(await readJsonIfExists(paths.chapterMeta)); expect(chapter.stages.translation.status).toBe("complete"); expect(chapter.stages.narration.status).toBe("pending"); expect(chapter.stages.qa.status).toBe("pending");
     const persisted = await readFile(storyPaths(root, story.slug, 1).storyConfig, "utf8");
     await expect(updateStorySettings(root, story.slug, { ...valid, tts: { ...valid.tts, model: "" } })).rejects.toThrow();
     expect(await readFile(storyPaths(root, story.slug, 1).storyConfig, "utf8")).toBe(persisted);
     await expect(updateStorySettings(root, story.slug, { ...valid, OPENAI_API_KEY: "must-not-pass" })).rejects.toThrow();
+  });
+
+  it("invalidates only TTS and downstream media when strong-word bleeping changes", async () => {
+    const { root, story, paths } = await storyFixture(); const now = new Date().toISOString(); const complete = { status: "complete" as const };
+    await atomicWriteJson(paths.chapterMeta, chapterSchema.parse({ chapter: 1, sourceLanguage: story.sourceLanguage, outputLanguage: story.outputLanguage, counts: { originalCharacters: 20, englishWords: 4, narrationWords: 4 }, createdAt: now, updatedAt: now,
+      stages: { ingestion: complete, translation: complete, narration: complete, qa: complete, storyBible: complete, continuity: complete, tts: complete, audioMastering: complete, alignment: complete, subtitles: complete, scenePlanning: complete, artwork: complete, video: complete } }));
+    await updateStorySettings(root, story.slug, { title: story.title, sourceLanguage: story.sourceLanguage, outputLanguage: story.outputLanguage,
+      recentChapterSummaries: story.context.recentChapterSummaries, narrationSettings: { ...story.narrationSettings, bleepStrongProfanity: true },
+      translation: story.pipeline.translation, narration: story.pipeline.narration, qa: story.pipeline.qa, tts: { speed: story.pipeline.tts.speed } });
+    const chapter = chapterSchema.parse(await readJsonIfExists(paths.chapterMeta));
+    expect(chapter.stages.translation.status).toBe("complete"); expect(chapter.stages.narration.status).toBe("complete"); expect(chapter.stages.qa.status).toBe("complete");
+    expect(chapter.stages.storyBible.status).toBe("complete"); expect(chapter.stages.continuity.status).toBe("complete"); expect(chapter.stages.tts.status).toBe("pending"); expect(chapter.stages.video.status).toBe("pending");
   });
 
   it("refreshes a remote directory with the existing comparison service", async () => {

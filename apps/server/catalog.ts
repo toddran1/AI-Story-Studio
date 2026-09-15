@@ -2,7 +2,7 @@ import { readFile, readdir, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { z } from "zod";
 import { Chapter, chapterSchema } from "../../src/domain/chapter.js";
-import { QaResult, qaResultSchema } from "../../src/domain/qa.js";
+import { isQaIssueActive, QaResult, qaResultSchema } from "../../src/domain/qa.js";
 import { Story, storySchema } from "../../src/domain/story.js";
 import { StoryBible, emptyStoryBible, storyBibleSchema } from "../../src/domain/story-bible.js";
 import { SourceManifest, sourceManifestSchema } from "../../src/source/types.js";
@@ -132,8 +132,9 @@ export async function getQaDashboard(root: string, slug: string) {
   const chapters = await loadChapterSummaries(root, slug); const issues: Record<string, number> = {}; const items = [];
   for (const chapter of chapters) {
     if (!chapter.qa) continue; const qaIssues = chapter.qaIssues ?? [];
-    items.push({ chapter: chapter.chapter, title: chapter.originalTitle, status: chapter.qa, score: chapter.qaScore, issues: qaIssues, stale: chapter.qaStale });
-    for (const category of new Set(qaIssues.map((issue) => issue.category))) issues[category] = (issues[category] ?? 0) + 1;
+    const activeIssues = qaIssues.filter(isQaIssueActive);
+    items.push({ chapter: chapter.chapter, title: chapter.originalTitle, status: chapter.qa, score: chapter.qaScore, issues: activeIssues, stale: chapter.qaStale });
+    for (const category of new Set(activeIssues.map((issue) => issue.category))) issues[category] = (issues[category] ?? 0) + 1;
   }
   return { counts: countQa(chapters), categories: issues, chapters: items };
 }
@@ -171,7 +172,7 @@ async function outputItem(path: string, value: Record<string, unknown>) { try { 
 export const settingsUpdateSchema = z.object({
   title: z.string().trim().min(1), author: z.string().trim().optional(), description: z.string().max(10_000).default(""), tags: z.array(z.string()).max(30).default([]), notes: z.string().max(20_000).default(""), sourceLanguage: z.string().trim().min(2), outputLanguage: z.string().trim().min(2),
   recentChapterSummaries: z.number().int().min(0).max(100),
-  narrationSettings: z.object({ profanityMode: z.enum(["preserve", "soften-strong"]), includeChapterTitle: z.boolean().optional() }).optional(),
+  narrationSettings: z.object({ profanityMode: z.enum(["preserve", "soften-strong"]), bleepStrongProfanity: z.boolean().default(false), includeChapterTitle: z.boolean().optional() }).optional(),
   translation: z.object({ provider: z.enum(["openai", "gemini"]), model: z.string().trim().min(1) }),
   narration: z.object({ provider: z.enum(["openai", "gemini"]), model: z.string().trim().min(1) }),
   qa: z.object({ provider: z.enum(["openai", "gemini"]), model: z.string().trim().min(1) }),

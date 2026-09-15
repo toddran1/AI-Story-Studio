@@ -41,9 +41,13 @@ describe("production studio workflow", () => {
   });
 
   it("generates voice previews outside chapter artifacts", async () => {
-    const { root, story, paths } = await fixture(); const jobs = new JobManager(); const tts = new MockTTS(); const operations = new StudioOperations(root, loadEnvironment({}), jobs, { tts });
-    const started = operations.startVoicePreview(story.slug, { text: "Demo narration", model: "s2-pro" }); const finished = await wait(jobs, started.id); const id = (finished.result as { id: string }).id;
-    expect(tts.calls).toBe(1); expect(tts.requests[0]).toMatchObject({ sampleRate: 44100, bitrate: 192, normalize: true }); expect(await readFile(voicePreviewPaths(root, story.slug, id).audio)).toHaveLength(3); await expect(readFile(paths.audioRaw)).rejects.toMatchObject({ code: "ENOENT" }); await operations.close();
+    const { root, story, paths } = await fixture();
+    story.narrationSettings.bleepStrongProfanity = true;
+    story.pipeline.tts = { ...story.pipeline.tts, model: "s2.1-pro", referenceId: "narrator", secondaryReferenceId: "dialogue", voiceMode: "narrator-dialogue", deliveryIntensity: "expressive", qualityGuard: false, speed: 1.15 };
+    await atomicWriteJson(paths.storyConfig, story); await atomicWriteJson(paths.pipelineConfig, story.pipeline);
+    const jobs = new JobManager(); const tts = new MockTTS(); const operations = new StudioOperations(root, loadEnvironment({}), jobs, { tts });
+    const started = operations.startVoicePreview(story.slug, { text: "Demo narration" }); const finished = await wait(jobs, started.id); const id = (finished.result as { id: string }).id;
+    expect(tts.calls).toBe(1); expect(tts.requests[0]).toMatchObject({ model: "s2.1-pro", referenceId: "narrator", secondaryReferenceId: "dialogue", voiceMode: "narrator-dialogue", deliveryIntensity: "expressive", qualityGuard: false, bleepStrongProfanity: true, speed: 1.15, sampleRate: 44100, bitrate: 192, normalize: true }); expect(await readFile(voicePreviewPaths(root, story.slug, id).audio)).toHaveLength(3); await expect(readFile(paths.audioRaw)).rejects.toMatchObject({ code: "ENOENT" }); await operations.close();
   });
 
   it("aggregates dashboard progress without provider work", async () => {

@@ -64,8 +64,9 @@ import { invalidateNarrationNamingChange } from "../../src/story-bible/narration
 import { findChapterGaps } from "../../src/batch/gaps.js";
 import { Chapter, chapterSchema, StageName } from "../../src/domain/chapter.js";
 import { fingerprint } from "../../src/utils/hash.js";
+import { fileFingerprint } from "../../src/utils/file-fingerprint.js";
 import { NovelProviderId, novelProviderIdSchema, storyNovelSourceSchema } from "../../src/source/novel-provider.js";
-import { qaResultSchema } from "../../src/domain/qa.js";
+import { activeQaIssues, dismissQaIssues, qaResultSchema } from "../../src/domain/qa.js";
 import { issueRepairTargets, repairQaText, repairTargets } from "../../src/qa/repair.js";
 import { LLMRouter } from "../../src/llm/router.js";
 import { validateChapterQuality } from "../../src/qa/validator.js";
@@ -76,6 +77,7 @@ import { generateLocalizedNameSuggestions, localizationSuggestionRequestSchema }
 const slugSchema = z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/);
 const batchInputSchema = z.object({ from: z.number().int().positive().optional(), to: z.number().int().positive().optional(), force: z.enum(["translation", "narration", "qa", "story-bible", "continuity", "tts", "audio", "all"]).optional(), continueOnError: z.boolean().default(false) }).strict();
 const qaRepairInputSchema = z.object({ issueIndexes: z.array(z.number().int().nonnegative()).min(1).max(100) }).strict();
+const qaDismissInputSchema = z.object({ issueIndexes: z.array(z.number().int().nonnegative()).min(1).max(100) }).strict();
 const previewInputSchema = z.object({ chapter: z.number().int().positive(), audioPreview: z.boolean().default(false), presets: z.object({ a: previewPresetSchema, b: previewPresetSchema }) }).strict();
 const audioInputSchema = z.object({ from: z.number().int().positive().optional(), to: z.number().int().positive().optional(), force: z.boolean().default(false) }).strict();
 const audiobookInputSchema = z.object({ from: z.number().int().positive(), to: z.number().int().positive(), format: z.enum(["mp3", "m4b"]), force: z.boolean().default(false) }).strict();
@@ -318,6 +320,29 @@ export class StudioOperations {
   deleteSummary(slug: string, id: string) { slugSchema.parse(slug); return withStoryLock(this.root, slug, "summary deletion", async () => { const result = await new SummaryService(this.root, this.llm).delete(slug, id); await recordActivity(this.root, slug, "summary.deleted", `Deleted summary ${id}`); return result; }); }
 
   async editChapterText(slug: string, chapter: number, raw: unknown) { slugSchema.parse(slug); const input = chapterTextEditSchema.parse(raw); return withStoryLock(this.root, slug, "manual chapter text edit", async () => { const result = await saveChapterTextEdit(this.root, slug, chapter, input); await recordActivity(this.root, slug, "chapter.edited", `Edited Chapter ${chapter} ${input.field}`); return result; }); }
+  async dismissQaFindings(slug: string, chapter: number, raw: unknown) {
+    slugSchema.parse(slug); if (!Number.isSafeInteger(chapter) || chapter < 1) throw new ConfigurationError("Chapter must be a positive integer");
+    const input = qaDismissInputSchema.parse(raw);
+    return withStoryLock(this.root, slug, "QA finding dismissal", async () => {
+      const paths = storyPaths(this.root, slug, chapter);
+      const [qaRaw, chapterRaw] = await Promise.all([readJsonIfExists(paths.qa), readJsonIfExists<Chapter>(paths.chapterMeta)]);
+      if (!qaRaw || !chapterRaw) throw new Error(`Chapter ${chapter} does not have a QA result`);
+      const metadata = chapterSchema.parse(chapterRaw);
+      const uniqueIndexes = [...new Set(input.issueIndexes)];
+      const qa = dismissQaIssues(qaRaw, uniqueIndexes);
+      const activeIssues = activeQaIssues(qa);
+      await atomicWriteJson(paths.qa, qa);
+      metadata.quality = { status: qa.status, score: qa.score, issueCategories: [...new Set(activeIssues.map((issue) => issue.category))] };
+      const outputFingerprint = await fileFingerprint(paths.qa);
+      if (!outputFingerprint) throw new Error(`Chapter ${chapter} QA review could not be persisted`);
+      metadata.stages.qa = { ...metadata.stages.qa, outputFingerprint };
+      metadata.updatedAt = new Date().toISOString();
+      await atomicWriteJson(paths.chapterMeta, metadata);
+      invalidateCatalogCache(this.root, slug);
+      await recordActivity(this.root, slug, "chapter.qa_dismissed", `Dismissed ${uniqueIndexes.length} QA finding(s) for Chapter ${chapter}`);
+      return { chapter, dismissed: uniqueIndexes.length, qa };
+    });
+  }
   startQaRepair(slug: string, chapter: number, raw: unknown) {
     slugSchema.parse(slug); const input = qaRepairInputSchema.parse(raw);
     return this.jobs.create("qaRepair", slug, async (control) => withStoryLock(this.root, slug, "selected QA repair", async () => {
@@ -358,7 +383,11 @@ export class StudioOperations {
       }));
       await atomicWriteJson(paths.qa, result.value);
       metadata.quality = { status: result.value.status, score: result.value.score, issueCategories: [...new Set(result.value.issues.map((issue) => issue.category))] };
-      metadata.stages.qa = { status: "complete", fingerprint: fingerprint({ source, translation, narration, config, narrationSettings: story.narrationSettings }), outputFingerprint: fingerprint(JSON.stringify(result.value)), provider: config.provider, model: config.model, promptVersion: "qa-only-v1", completedAt: new Date().toISOString(), usage: result.usage };
+      const outputFingerprint = await fileFingerprint(paths.qa);
+      if (!outputFingerprint) throw new Error(`Chapter ${chapter} QA result could not be persisted`);
+      metadata.stages.qa = { status: "complete", fingerprint: fingerprint({ source, translation, narration, config,
+        narrationSettings: { profanityMode: story.narrationSettings.profanityMode, includeChapterTitle: story.narrationSettings.includeChapterTitle } }),
+        outputFingerprint, provider: config.provider, model: config.model, promptVersion: "qa-only-v1", completedAt: new Date().toISOString(), usage: result.usage };
       metadata.updatedAt = new Date().toISOString(); await atomicWriteJson(paths.chapterMeta, metadata);
       control.update({ type: "qa.recheck.completed", chapter, stage: "qa", status: result.value.status });
       invalidateCatalogCache(this.root, slug); await recordActivity(this.root, slug, "chapter.qa_rechecked", `Rechecked Chapter ${chapter} using its retained translation and narration`);
@@ -424,6 +453,7 @@ export class StudioOperations {
 
   startVoicePreview(slug: string, raw: unknown) { slugSchema.parse(slug); const input = voicePreviewSchema.parse(raw); return this.jobs.create("voicePreview", slug, async () => { const story = await loadStory(storyPaths(this.root, slug, 1).storyConfig); const config = story.pipeline.tts; const request = { ...input, provider: input.provider ?? config.provider, model: input.model ?? config.model, referenceId: input.referenceId ?? config.referenceId, speed: input.speed ?? config.speed }; const result = await withUsageScope({story:slug,stage:"voicePreview"},()=>this.tts.forName(request.provider).synthesize({ text: request.text, model: request.model, referenceId: request.referenceId,
     secondaryReferenceId: config.secondaryReferenceId, voiceMode: config.voiceMode, deliveryIntensity: config.deliveryIntensity, qualityGuard: config.qualityGuard,
+    bleepStrongProfanity: story.narrationSettings.bleepStrongProfanity,
     speed: request.speed, format: config.format, sampleRate: 44100, bitrate: 192, normalize: true, maxCharsPerRequest: config.maxCharsPerRequest })); const saved = await saveVoicePreview(this.root, slug, result.audio, request); await recordActivity(this.root, slug, "voice.preview", "Generated a voice preview"); return saved; }); }
 
   startProduction(slug: string, raw: unknown) { slugSchema.parse(slug); const input = productionInputSchema.parse(raw); return this.jobs.create("production", slug, async (control) => withStoryLock(this.root, slug, "end-to-end production", async () => { const story = await loadStory(storyPaths(this.root, slug, 1).storyConfig); const shutdown = new ShutdownController(); control.setPause(() => shutdown.request()); await recordActivity(this.root, slug, "production.started", `Started production for Chapters ${input.from}–${input.to}`); const manifest = (await runProduction({ root: this.root, story, ...input, pause: shutdown, recordedCost: this.usage ? () => this.usage!.recordedCost({ story: slug }) : undefined, onProgress: (event) => control.update(event) }, { pipeline: this.pipeline, loadChapters: async () => (await loadImportedChapters(this.root, slug)).chapters, refresh: (from, to) => refreshProductionRange({ root: this.root, story, from, to, registry: this.registry }), scenePlanner: this.scenePlanner ?? this.runtime.router.forStage(story.pipeline.scenePlanner), image: this.image, video: this.video, videoExport: this.videoExport, audiobook: this.audiobook, alignmentConfig: this.alignConfig, alignmentEngine: this.aligner })).manifest; await recordActivity(this.root, slug, `production.${manifest.status}`, `${manifest.status === "completed" ? "Completed" : "Stopped"} production for Chapters ${input.from}–${input.to}`); return manifest; })); }

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { LLMProvider } from "../src/llm/provider.js";
 import { polishNarration } from "../src/narration/narration-editor.js";
-import { containsStrongProfanity, softenStrongProfanity } from "../src/narration/profanity.js";
+import { bleepStrongProfanityForTts, containsStrongProfanity, softenStrongProfanity } from "../src/narration/profanity.js";
 import { narrationInstructions } from "../src/narration/prompts.js";
 import { qaInstructionsFor } from "../src/qa/prompts.js";
 
@@ -20,6 +20,12 @@ describe("narration profanity preference", () => {
 
   it("preserves useful capitalization", () => {
     expect(softenStrongProfanity("FUCK YOU! That BITCH lied.", "soften-strong")).toBe("SCREW YOU! That JERK lied.");
+  });
+
+  it("bleeps only strong terms in a hidden TTS script", () => {
+    const narration = "Fuck that bitch and her bullshit. This is damn hard as hell and hurts my ass.";
+    expect(bleepStrongProfanityForTts(narration, true)).toBe("Bleep that bleep and her bleep. This is damn hard as hell and hurts my ass.");
+    expect(bleepStrongProfanityForTts(narration, false)).toBe(narration);
   });
 
   it("instructs narration and QA to treat the enabled change as narration-only", () => {
