@@ -120,6 +120,10 @@ export function createApiHandler(operations: StudioOperations) {
         page: integerParam(url.searchParams.get("page"), 1), pageSize: integerParam(url.searchParams.get("pageSize"), 50),
         filter: chapterFilterSchema.parse(url.searchParams.get("filter") ?? "all"), query: url.searchParams.get("q") ?? undefined,
       }));
+      const markCurrentPreviewMatch = /^\/api\/stories\/([a-z0-9-]+)\/stages\/mark-current\/preview$/.exec(url.pathname);
+      if (markCurrentPreviewMatch && request.method === "POST") return send(response, 200, await operations.previewMarkStagesCurrent(markCurrentPreviewMatch[1]!, await jsonBody(request)));
+      const markCurrentMatch = /^\/api\/stories\/([a-z0-9-]+)\/stages\/mark-current$/.exec(url.pathname);
+      if (markCurrentMatch && request.method === "POST") return send(response, 200, await operations.markStagesCurrent(markCurrentMatch[1]!, await jsonBody(request)));
       const chapterMatch = /^\/api\/stories\/([a-z0-9-]+)\/chapters\/(\d+)$/.exec(url.pathname);
       if (chapterMatch && request.method === "GET") return send(response, 200, await getChapter(operations.root, chapterMatch[1]!, chapterParam(chapterMatch[2]!)));
       const chapterTextMatch = /^\/api\/stories\/([a-z0-9-]+)\/chapters\/(\d+)\/text$/.exec(url.pathname);

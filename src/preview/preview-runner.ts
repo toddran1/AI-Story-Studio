@@ -17,10 +17,11 @@ import { fingerprint } from "../utils/hash.js";
 import { PreviewManifest, PreviewPreset, previewManifestSchema } from "./types.js";
 import { loadNarrationNamingEntities } from "../story-bible/narration-names.js";
 import { loadEligibleSummaryContext } from "../summaries/service.js";
+import { CensorAudioService, FfmpegCensorAudioService } from "../tts/censor-audio.js";
 
 export class PreviewRunner {
   private readonly tts: TTSProviderRouter;
-  constructor(private readonly llms: LLMRouter, tts: TTSProviderRouter | TTSProvider) { this.tts = tts instanceof TTSProviderRouter ? tts : new TTSProviderRouter(tts); }
+  constructor(private readonly llms: LLMRouter, tts: TTSProviderRouter | TTSProvider, private readonly censor: CensorAudioService = new FfmpegCensorAudioService()) { this.tts = tts instanceof TTSProviderRouter ? tts : new TTSProviderRouter(tts); }
 
   async run(options: { root: string; story: Story; chapter: number; inputPath: string; presets: { a: PreviewPreset; b: PreviewPreset }; audioPreview: boolean; id?: string }): Promise<PreviewManifest> {
     const source = await readFile(options.inputPath, "utf8");
@@ -51,7 +52,7 @@ export class PreviewRunner {
       let audioGenerated = false;
       if (options.audioPreview && qa.status !== "fail") {
         const sample = audioSample(narrationScript);
-        const result = await this.tts.forName(preset.tts.provider).synthesize({ text: sample, model: preset.tts.model, referenceId: preset.tts.referenceId, secondaryReferenceId: preset.tts.secondaryReferenceId,
+        const result = await this.censor.synthesize(this.tts.forName(preset.tts.provider), { text: sample, model: preset.tts.model, referenceId: preset.tts.referenceId, secondaryReferenceId: preset.tts.secondaryReferenceId,
           voiceMode: preset.tts.voiceMode, deliveryIntensity: preset.tts.deliveryIntensity, qualityGuard: preset.tts.qualityGuard,
           bleepStrongProfanity: options.story.narrationSettings.bleepStrongProfanity,
           speed: preset.tts.speed, format: preset.tts.format, sampleRate: preset.tts.sampleRate, bitrate: preset.tts.bitrate,

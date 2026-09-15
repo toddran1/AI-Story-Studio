@@ -26,8 +26,8 @@ export class SummaryService {
     const filters = listOptionsSchema.parse(options);
     const records: StorySummary[] = [];
     for (const name of await readdir(summaryDirectory(this.root, story)).catch((error: NodeJS.ErrnoException) => error.code === "ENOENT" ? [] : Promise.reject(error))) {
-      if (!name.endsWith(".json")) continue;
-      const parsed = summarySchema.safeParse(await readJsonIfExists(join(summaryDirectory(this.root, story), name)));
+      if (!name.endsWith(".json") || name.startsWith(".")) continue;
+      const parsed = summarySchema.safeParse(await readJsonIfExists(join(summaryDirectory(this.root, story), name)).catch(() => undefined));
       if (parsed.success) records.push(parsed.data);
     }
     const query = filters.query?.trim().toLocaleLowerCase();
@@ -125,8 +125,8 @@ export async function loadEligibleSummaryContext(root: string, story: string, ch
   if (!maxItems || !remaining) return [];
   const candidates: StorySummary[] = [];
   for (const name of await readdir(summaryDirectory(root, story)).catch((error: NodeJS.ErrnoException) => error.code === "ENOENT" ? [] : Promise.reject(error))) {
-    if (!name.endsWith(".json")) continue;
-    const parsed = summarySchema.safeParse(await readJsonIfExists(join(summaryDirectory(root, story), name)));
+    if (!name.endsWith(".json") || name.startsWith(".")) continue;
+    const parsed = summarySchema.safeParse(await readJsonIfExists(join(summaryDirectory(root, story), name)).catch(() => undefined));
     if (parsed.success && parsed.data.status === "complete" && parsed.data.contextEligible && parsed.data.chapters.every((number) => number < chapter)) candidates.push(parsed.data);
   }
   const terms = searchTerms(sourceText);

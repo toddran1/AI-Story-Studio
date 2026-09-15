@@ -30,7 +30,7 @@ async function main() {
       b: applyOverrides(alternate, args.values.translationB, args.values.narrationB, args.values.qaB, env),
     };
     const runtime = createPipelineRuntime(env);
-    const preview = await new PreviewRunner(runtime.router, runtime.tts).run({ root, story, chapter: args.chapter, inputPath, presets, audioPreview: args.audioPreview });
+    const preview = await new PreviewRunner(runtime.router, runtime.tts, runtime.censor).run({ root, story, chapter: args.chapter, inputPath, presets, audioPreview: args.audioPreview });
     process.stdout.write(`${JSON.stringify({ status: "complete", preview: preview.id, directory: `stories/${story.slug}/previews/${preview.id}`, results: preview.results }, null, 2)}\n`);
   });
 }

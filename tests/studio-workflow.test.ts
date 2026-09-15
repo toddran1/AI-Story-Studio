@@ -12,6 +12,7 @@ import { atomicWrite, atomicWriteJson } from "../src/storage/atomic-write.js";
 import { storyPaths, voicePreviewPaths } from "../src/storage/paths.js";
 import { addManualBibleEntry, applyManualBibleOverlay, deleteBibleEntry, saveChapterTextEdit, updateManualBibleEntry } from "../src/studio/workflow.js";
 import { MockTTS, testStory } from "./helpers.js";
+import { CensorAudioService } from "../src/tts/censor-audio.js";
 
 const pending = () => ({ status: "pending" as const });
 async function fixture() { const root = await mkdtemp(join(tmpdir(), "studio-workflow-")); const story = testStory(); const paths = storyPaths(root, story.slug, 1); await atomicWriteJson(paths.storyConfig, story); await atomicWriteJson(paths.pipelineConfig, story.pipeline); return { root, story, paths }; }
@@ -45,9 +46,10 @@ describe("production studio workflow", () => {
     story.narrationSettings.bleepStrongProfanity = true;
     story.pipeline.tts = { ...story.pipeline.tts, model: "s2.1-pro", referenceId: "narrator", secondaryReferenceId: "dialogue", voiceMode: "narrator-dialogue", deliveryIntensity: "expressive", qualityGuard: false, speed: 1.15 };
     await atomicWriteJson(paths.storyConfig, story); await atomicWriteJson(paths.pipelineConfig, story.pipeline);
-    const jobs = new JobManager(); const tts = new MockTTS(); const operations = new StudioOperations(root, loadEnvironment({}), jobs, { tts });
+    const censorRequests: any[] = []; const censor: CensorAudioService = { version: "test-censor", synthesize: async (provider, request) => { censorRequests.push(request); return provider.synthesize({ ...request, bleepStrongProfanity: false }); } };
+    const jobs = new JobManager(); const tts = new MockTTS(); const operations = new StudioOperations(root, loadEnvironment({}), jobs, { tts, censor });
     const started = operations.startVoicePreview(story.slug, { text: "Demo narration" }); const finished = await wait(jobs, started.id); const id = (finished.result as { id: string }).id;
-    expect(tts.calls).toBe(1); expect(tts.requests[0]).toMatchObject({ model: "s2.1-pro", referenceId: "narrator", secondaryReferenceId: "dialogue", voiceMode: "narrator-dialogue", deliveryIntensity: "expressive", qualityGuard: false, bleepStrongProfanity: true, speed: 1.15, sampleRate: 44100, bitrate: 192, normalize: true }); expect(await readFile(voicePreviewPaths(root, story.slug, id).audio)).toHaveLength(3); await expect(readFile(paths.audioRaw)).rejects.toMatchObject({ code: "ENOENT" }); await operations.close();
+    expect(censorRequests[0]).toMatchObject({ model: "s2.1-pro", referenceId: "narrator", secondaryReferenceId: "dialogue", voiceMode: "narrator-dialogue", deliveryIntensity: "expressive", qualityGuard: false, bleepStrongProfanity: true, speed: 1.15, sampleRate: 44100, bitrate: 192, normalize: true }); expect(tts.requests[0]?.bleepStrongProfanity).toBe(false); expect(await readFile(voicePreviewPaths(root, story.slug, id).audio)).toHaveLength(3); await expect(readFile(paths.audioRaw)).rejects.toMatchObject({ code: "ENOENT" }); await operations.close();
   });
 
   it("aggregates dashboard progress without provider work", async () => {

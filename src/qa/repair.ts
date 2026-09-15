@@ -75,6 +75,7 @@ function stripFence(text: string) {
 
 function validateRepair(text: string, current: string, target: QaRepairTarget) {
   if (!text) throw new Error(`AI returned an empty ${target} repair`);
+  if (text === current.trim()) throw new Error(`AI returned an unchanged ${target} repair; no changes were saved. Review or dismiss the finding, or edit the text manually.`);
   if (target === "translation") assertUsableTranslation(text);
   const ratio = [...text].length / Math.max(1, [...current].length);
   if (ratio < 0.65 || ratio > 1.6) throw new Error(`AI ${target} repair changed the chapter length implausibly (${Math.round(ratio * 100)}% of the current text); no changes were saved`);

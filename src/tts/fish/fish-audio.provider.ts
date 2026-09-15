@@ -5,7 +5,6 @@ import { splitForTTS } from "../split-text.js";
 import { normalizeFishSpeechText } from "./speech-normalizer.js";
 import { castQuotedDialogue, directQuotedDialogue, ensureChunkSpeakers } from "./dialogue-casting.js";
 import { isFishS2Model } from "./control-cues.js";
-import { bleepStrongProfanityForTts } from "../../narration/profanity.js";
 
 export class FishAudioProvider implements TTSProvider {
   readonly name = "fish" as const;
@@ -31,7 +30,7 @@ export class FishAudioProvider implements TTSProvider {
     const multiSpeaker = request.voiceMode === "narrator-dialogue" && Boolean(referenceId) && Boolean(secondaryReferenceId) && isFishS2Model(request.model);
     const directedSingleVoice = request.voiceMode === "same-voice-dialogue" && request.deliveryIntensity !== "none" && isFishS2Model(request.model);
     const segments: Uint8Array[] = []; const requestIds: string[] = [];
-    const speechText = normalizeFishSpeechText(bleepStrongProfanityForTts(request.text, request.bleepStrongProfanity === true), request.model);
+    const speechText = normalizeFishSpeechText(request.text, request.model);
     if (!speechText) throw new ProviderError("Fish Audio narration is empty after speech normalization");
     const castText = multiSpeaker ? castQuotedDialogue(speechText) : directedSingleVoice ? directQuotedDialogue(speechText) : speechText;
     const splitText = splitForTTS(castText, request.maxCharsPerRequest);
@@ -64,7 +63,7 @@ export class FishAudioProvider implements TTSProvider {
     const length = segments.reduce((sum, segment) => sum + segment.length, 0);
     const audio = new Uint8Array(length); let offset = 0;
     for (const segment of segments) { audio.set(segment, offset); offset += segment.length; }
-    return { audio, segments, requestIds };
+    return { audio, segments, requestIds, providerRequests: segments.length };
   }
 }
 

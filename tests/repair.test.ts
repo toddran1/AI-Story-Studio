@@ -41,4 +41,11 @@ describe("repair stage selection", () => {
     const issue = qaResultSchema.parse({ status: "warn", score: 0.8, issues: [{ category: "terminology", severity: "warn", message: "Fix term", evidence: "Evidence" }], checks: { ...checks, terminology: "warn" } }).issues;
     await expect(repairQaText(provider, { provider: "openai", model: "repair-model" }, { target: "translation", chapter: 6, sourceLanguage: "zh-CN", outputLanguage: "en-US", source: "原文", translation: current, narration: current, issues: issue })).rejects.toThrow("length implausibly");
   });
+
+  it("rejects an unchanged repair instead of reporting a misleading success", async () => {
+    const current = "The complete chapter preserves every important detail. ".repeat(20);
+    const provider = new MockLLM("openai", [current]);
+    const issue = qaResultSchema.parse({ status: "warn", score: 0.8, issues: [{ category: "narrationFidelity", severity: "warn", message: "Narration adds an unsupported detail", evidence: "The source does not mention this event." }], checks: { ...checks, narrationFidelity: "warn" } }).issues;
+    await expect(repairQaText(provider, { provider: "openai", model: "repair-model" }, { target: "narration", chapter: 6, sourceLanguage: "zh-CN", outputLanguage: "en-US", source: "原文", translation: current, narration: current, issues: issue })).rejects.toThrow("unchanged narration repair");
+  });
 });

@@ -47,6 +47,7 @@ import { productionForceSchema, productionOutputSchema } from "../../src/product
 import { refreshProductionRange } from "../../src/production/refresh.js";
 import { TTSProvider } from "../../src/tts/provider.js";
 import { TTSProviderRouter } from "../../src/tts/router.js";
+import { CensorAudioService, FfmpegCensorAudioService } from "../../src/tts/censor-audio.js";
 import { addManualBibleEntry, bibleCategorySchema, chapterTextEditSchema, deleteBibleEntry, saveChapterTextEdit, saveVoicePreview, updateManualBibleEntry, voicePreviewSchema } from "../../src/studio/workflow.js";
 import { getStoryBible, invalidateCatalogCache } from "./catalog.js";
 import { buildStoryBackup, cleanupKindSchema, cleanupStory, createBlankStory, deleteStory, duplicateStory, getStorageUsage, invalidateStoryForConfigChange, loadGlobalSettings, readActivity, recordActivity, restoreStoryBackupFile, saveCover, saveGlobalSettings, systemStatus, updateStoryMetadata } from "../../src/studio/projects.js";
@@ -73,6 +74,7 @@ import { validateChapterQuality } from "../../src/qa/validator.js";
 import { emptyStoryBible, storyBibleSchema } from "../../src/domain/story-bible.js";
 import { SummaryService } from "../../src/summaries/service.js";
 import { generateLocalizedNameSuggestions, localizationSuggestionRequestSchema } from "../../src/story-bible/localization.js";
+import { inspectStagesForCurrent, markCurrentInputSchema, markStagesCurrent } from "../../src/studio/stage-acceptance.js";
 
 const slugSchema = z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/);
 const batchInputSchema = z.object({ from: z.number().int().positive().optional(), to: z.number().int().positive().optional(), force: z.enum(["translation", "narration", "qa", "story-bible", "continuity", "tts", "audio", "all"]).optional(), continueOnError: z.boolean().default(false) }).strict();
@@ -89,7 +91,7 @@ const artworkJobSchema = z.object({ from: z.number().int().positive(), to: z.num
 const productionInputSchema = z.object({ from: z.number().int().positive(), to: z.number().int().positive(), profile: z.string().optional(), outputs: z.array(productionOutputSchema).min(1).optional(), artwork: z.boolean().optional(), repairQa: z.boolean().optional(), alignment: z.boolean().optional(), refresh: z.boolean().default(false), dryRun: z.boolean().default(false), force: productionForceSchema.optional(), audiobookFormat: z.enum(["mp3", "m4b"]).optional(), maxProviderBudgetUsd: z.number().positive().max(1_000_000).optional() }).strict().refine((value) => value.to >= value.from, { message: "Range end must be at or after range start" });
 
 type InspectionRecord = { inspection: SourceInspection; temporaryDirectory?: string; createdAt: number; bytes: number };
-export type OperationsDependencies = { pipeline?: ChapterProcessor; preview?: PreviewRunner; registry?: SourceProviderRegistry; llm?: LLMRouter; audio?: AudioMasteringProcessor; audiobook?: AudiobookProcessor; video?: VideoProcessor; videoExport?: VideoExportProcessor; scenePlanner?: LLMProvider; image?: ImageProvider; tts?: TTSProvider | TTSProviderRouter; alignment?: AlignmentEngine; queue?: ProductionQueueService; usage?: PostgresUsageRepository };
+export type OperationsDependencies = { pipeline?: ChapterProcessor; preview?: PreviewRunner; registry?: SourceProviderRegistry; llm?: LLMRouter; audio?: AudioMasteringProcessor; audiobook?: AudiobookProcessor; video?: VideoProcessor; videoExport?: VideoExportProcessor; scenePlanner?: LLMProvider; image?: ImageProvider; tts?: TTSProvider | TTSProviderRouter; censor?: CensorAudioService; alignment?: AlignmentEngine; queue?: ProductionQueueService; usage?: PostgresUsageRepository };
 
 export class StudioOperations {
   private static readonly maxInspections = 10;
@@ -99,18 +101,27 @@ export class StudioOperations {
   private readonly audio: AudioMasteringProcessor; private readonly audiobook: AudiobookProcessor;
   private readonly video: VideoProcessor; private readonly videoExport: VideoExportProcessor;
   private readonly llm: LLMRouter;
-  private readonly scenePlanner?: LLMProvider; private readonly image: ImageProvider; private readonly tts: TTSProviderRouter; private readonly runtime: ReturnType<typeof createPipelineRuntime>;
+  private readonly scenePlanner?: LLMProvider; private readonly image: ImageProvider; private readonly tts: TTSProviderRouter; private readonly censor: CensorAudioService; private readonly runtime: ReturnType<typeof createPipelineRuntime>;
   private readonly alignConfig; private readonly aligner?: AlignmentEngine;
   private readonly inspectionTimer: NodeJS.Timeout; private inspectionBytes = 0;
   readonly queue?: ProductionQueueService; readonly usage?: PostgresUsageRepository;
   constructor(public readonly root: string, private readonly env: Environment, public readonly jobs = new JobManager(), dependencies: OperationsDependencies = {}) {
-    this.usage = dependencies.usage; const runtime = createPipelineRuntime(env, this.usage); this.runtime = runtime; this.llm = dependencies.llm ?? runtime.router; this.pipeline = dependencies.pipeline ?? runtime.pipeline; this.preview = dependencies.preview ?? new PreviewRunner(this.llm, runtime.tts);
+    this.usage = dependencies.usage; const runtime = createPipelineRuntime(env, this.usage); this.runtime = runtime; this.llm = dependencies.llm ?? runtime.router; this.pipeline = dependencies.pipeline ?? runtime.pipeline; this.censor = dependencies.censor ?? runtime.censor ?? new FfmpegCensorAudioService(); this.preview = dependencies.preview ?? new PreviewRunner(this.llm, runtime.tts, this.censor);
     this.registry = dependencies.registry ?? new SourceProviderRegistry(undefined, createWebHttpClient(root, env));
     this.audio = dependencies.audio ?? runtime.audio ?? new FfmpegMasteringProcessor(); this.audiobook = dependencies.audiobook ?? new FfmpegAudiobookProcessor();
     this.video = dependencies.video ?? new FfmpegVideoProcessor(); this.videoExport = dependencies.videoExport ?? new FfmpegVideoExportProcessor();
     this.scenePlanner = dependencies.scenePlanner; this.image = dependencies.image ?? runtime.images.forName("openai"); this.tts = dependencies.tts instanceof TTSProviderRouter ? dependencies.tts : dependencies.tts ? new TTSProviderRouter(dependencies.tts) : runtime.tts;
     this.queue = dependencies.queue; this.alignConfig = alignmentConfig(env, root); this.aligner = dependencies.alignment ?? createAlignmentEngine(this.alignConfig);
     this.inspectionTimer = setInterval(() => this.expireInspections(), 60_000); this.inspectionTimer.unref();
+  }
+  async previewMarkStagesCurrent(slug: string, raw: unknown) {
+    const input = z.object({ chapters: z.array(z.number().int().positive()).min(1).max(2_000) }).strict().parse(raw);
+    return inspectStagesForCurrent(this.root, slug, input.chapters);
+  }
+  async markStagesCurrent(slug: string, raw: unknown) {
+    const result = await markStagesCurrent(this.root, slug, markCurrentInputSchema.parse(raw));
+    invalidateCatalogCache(this.root, slug);
+    return result;
   }
 
   novelProviders() { return this.registry.listNovelProviders(); }
@@ -451,7 +462,7 @@ export class StudioOperations {
     });
   }
 
-  startVoicePreview(slug: string, raw: unknown) { slugSchema.parse(slug); const input = voicePreviewSchema.parse(raw); return this.jobs.create("voicePreview", slug, async () => { const story = await loadStory(storyPaths(this.root, slug, 1).storyConfig); const config = story.pipeline.tts; const request = { ...input, provider: input.provider ?? config.provider, model: input.model ?? config.model, referenceId: input.referenceId ?? config.referenceId, speed: input.speed ?? config.speed }; const result = await withUsageScope({story:slug,stage:"voicePreview"},()=>this.tts.forName(request.provider).synthesize({ text: request.text, model: request.model, referenceId: request.referenceId,
+  startVoicePreview(slug: string, raw: unknown) { slugSchema.parse(slug); const input = voicePreviewSchema.parse(raw); return this.jobs.create("voicePreview", slug, async () => { const story = await loadStory(storyPaths(this.root, slug, 1).storyConfig); const config = story.pipeline.tts; const request = { ...input, provider: input.provider ?? config.provider, model: input.model ?? config.model, referenceId: input.referenceId ?? config.referenceId, speed: input.speed ?? config.speed }; const result = await withUsageScope({story:slug,stage:"voicePreview"},()=>this.censor.synthesize(this.tts.forName(request.provider), { text: request.text, model: request.model, referenceId: request.referenceId,
     secondaryReferenceId: config.secondaryReferenceId, voiceMode: config.voiceMode, deliveryIntensity: config.deliveryIntensity, qualityGuard: config.qualityGuard,
     bleepStrongProfanity: story.narrationSettings.bleepStrongProfanity,
     speed: request.speed, format: config.format, sampleRate: 44100, bitrate: 192, normalize: true, maxCharsPerRequest: config.maxCharsPerRequest })); const saved = await saveVoicePreview(this.root, slug, result.audio, request); await recordActivity(this.root, slug, "voice.preview", "Generated a voice preview"); return saved; }); }

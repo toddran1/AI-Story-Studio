@@ -31,6 +31,7 @@
     "story:cost": "node --import tsx apps/cli/cost.ts",
     "story:summary": "node --import tsx apps/cli/summary.ts",
     "story:names": "node --import tsx apps/cli/names.ts",
+    "story:stages": "node --import tsx apps/cli/stages.ts",
     "story:bible": "node --import tsx apps/cli/bible.ts",
     "story:settings": "node --import tsx apps/cli/settings.ts",
     "story:project": "node --import tsx apps/cli/project.ts",

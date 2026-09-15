@@ -90,6 +90,15 @@ describe("story summaries", () => {
     expect(await loadEligibleSummaryContext(root, "demo-story", 1, "Misty")).toEqual([]);
   });
 
+  it("ignores AppleDouble and malformed files in the summary library", async () => {
+    await chapter(1, "原始", "Translation");
+    const summary = await service.generate("demo-story", { title: "Arc", chapters: [1] });
+    const directory = join(root, "stories", "demo-story", "summaries");
+    await atomicWrite(join(directory, `._${summary.id}.json`), Buffer.from([0x00, 0x05, 0x16, 0x07, 0x00, 0x02, 0x00, 0x00, 0x4d, 0x61]));
+    await atomicWrite(join(directory, "corrupted.json"), "{not json");
+    expect((await service.list("demo-story")).map((item) => item.id)).toEqual([summary.id]);
+  });
+
   it("parses primary CLI workflows and actionable errors", () => {
     expect(parseSummaryArgs(["generate", "demo-story", "--chapters", "12,18,12", "--type", "arc", "--model", "gemini:flash", "--context"])).toMatchObject({ action: "generate", story: "demo-story", input: { chapters: [12, 18], summaryType: "arc", model: { provider: "gemini", model: "flash" }, contextEligible: true } });
     expect(parseSummaryArgs(["list", "demo-story"])).toEqual({ action: "list", story: "demo-story" });

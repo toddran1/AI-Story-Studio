@@ -32,6 +32,7 @@ import { analyzeAndPersistContinuity } from "../story-bible/continuity.js";
 import { withUsageScope } from "../cost/context.js";
 import { loadNarrationNamingEntities } from "../story-bible/narration-names.js";
 import { loadEligibleSummaryContext } from "../summaries/service.js";
+import { CENSOR_AUDIO_VERSION, CensorAudioService, FfmpegCensorAudioService, censorToneConfig } from "../tts/censor-audio.js";
 
 export type ForceStage = "translation" | "narration" | "qa" | "story-bible" | "continuity" | "tts" | "audio" | "all";
 export type PipelineStageEvent = { stage: StageName; status: "started" | "completed" | "reused"; state: StageState };
@@ -47,7 +48,7 @@ const pending = (): StageState => ({ status: "pending" });
 
 export class ChapterPipeline {
   private readonly tts: TTSProviderRouter;
-  constructor(private readonly llms: LLMRouter, tts: TTSProviderRouter | TTSProvider, private readonly audio: AudioMasteringProcessor = new FfmpegMasteringProcessor()) { this.tts = tts instanceof TTSProviderRouter ? tts : new TTSProviderRouter(tts); }
+  constructor(private readonly llms: LLMRouter, tts: TTSProviderRouter | TTSProvider, private readonly audio: AudioMasteringProcessor = new FfmpegMasteringProcessor(), private readonly censor: CensorAudioService = new FfmpegCensorAudioService()) { this.tts = tts instanceof TTSProviderRouter ? tts : new TTSProviderRouter(tts); }
 
   async run(options: PipelineOptions): Promise<Chapter> {
     const paths = storyPaths(options.root, options.story.slug, options.chapter);
@@ -81,6 +82,11 @@ export class ChapterPipeline {
       const state = chapter.stages[stage];
       const forced = isForced(options.force, stage);
       const currentOutputFingerprint = await fileFingerprint(outputPath);
+      if (!forced && state.status === "complete" && state.manualAcceptance && currentOutputFingerprint && state.outputFingerprint === currentOutputFingerprint) {
+        logger.info({ event: "pipeline.stage.reused_manual_acceptance", story: options.story.slug, chapter: options.chapter, stage });
+        options.onStageEvent?.({ stage, status: "reused", state });
+        return undefined;
+      }
       if (!forced && state.status === "complete" && state.provider === "manual" && currentOutputFingerprint && state.outputFingerprint === currentOutputFingerprint) {
         logger.info({ event: "pipeline.stage.reused_manual", story: options.story.slug, chapter: options.chapter, stage });
         options.onStageEvent?.({ stage, status: "reused", state });
@@ -230,20 +236,23 @@ export class ChapterPipeline {
     const referenceId = ttsProvider.resolveReferenceId?.(ttsConfig.referenceId) ?? ttsConfig.referenceId;
     const bleepStrongProfanity = options.story.narrationSettings.bleepStrongProfanity === true;
     const ttsFp = fingerprint({ narration: fingerprint(ttsScript), config: { ...ttsConfig, referenceId }, deliveryProfile, inputNormalizationVersion: ttsProvider.inputNormalizationVersion,
-      ...(bleepStrongProfanity ? { bleepStrongProfanity: true } : {}) });
+      ...(bleepStrongProfanity ? { bleepStrongProfanity: true, censor: { version: this.censor.version || CENSOR_AUDIO_VERSION, config: censorToneConfig } } : {}) });
     if (!(await fileFingerprint(paths.audioRaw)) && chapter.stages.tts.status === "complete" && await fileFingerprint(paths.audio)) await atomicWrite(paths.audioRaw, await readFile(paths.audio));
     await runStage("tts", ttsFp, paths.audioRaw, { provider: ttsConfig.provider, model: ttsConfig.model }, async () => {
-      const result = await ttsProvider.synthesize({ text: ttsScript, model: ttsConfig.model, referenceId, secondaryReferenceId: ttsConfig.secondaryReferenceId,
+      const result = await this.censor.synthesize(ttsProvider, { text: ttsScript, model: ttsConfig.model, referenceId, secondaryReferenceId: ttsConfig.secondaryReferenceId,
         voiceMode: ttsConfig.voiceMode, deliveryIntensity: ttsConfig.deliveryIntensity, qualityGuard: ttsConfig.qualityGuard, bleepStrongProfanity,
         speed: ttsConfig.speed, format: ttsConfig.format, sampleRate: ttsConfig.sampleRate, bitrate: ttsConfig.bitrate,
         normalize: ttsConfig.normalize, maxCharsPerRequest: ttsConfig.maxCharsPerRequest });
       await atomicWrite(paths.audioRaw, result.audio);
       await rm(paths.segments, { recursive: true, force: true });
-      await mkdir(paths.segments, { recursive: true });
-      await Promise.all(result.segments.map((segment, index) => atomicWrite(join(paths.segments, `${String(index + 1).padStart(4, "0")}.mp3`), segment)));
+      if (!result.assembled) {
+        await mkdir(paths.segments, { recursive: true });
+        await Promise.all(result.segments.map((segment, index) => atomicWrite(join(paths.segments, `${String(index + 1).padStart(4, "0")}.mp3`), segment)));
+      }
       chapter.stages.tts.usage = {
-        requestId: result.requestIds?.join(","), requests: result.segments.length,
+        requestId: result.requestIds?.join(","), requests: result.providerRequests ?? (result.censor ? Math.max(0, result.segments.length - result.censor.segments) : result.segments.length),
         characters: [...ttsScript].length, bytes: result.audio.byteLength,
+        censoredSegments: result.censor?.segments, censorDurationSeconds: result.censor?.durationSeconds,
       };
     });
     if (options.stopAfter === "tts") { await persist(); return chapter; }

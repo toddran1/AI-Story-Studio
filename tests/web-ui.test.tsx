@@ -26,6 +26,13 @@ describe("web UI", () => {
     }} />);
     expect(html).toContain("Dismiss selected"); expect(html).toContain("Warn severity"); expect(html).toContain("Dialogue");
   });
+  it("keeps dismissed QA findings visible without a selectable checkbox", () => {
+    const html = renderToStaticMarkup(<QaDetail busy={false} onAddress={() => undefined} onDismiss={() => undefined} onRepair={() => undefined} onRerun={() => undefined} qa={{
+      status: "warn", score: .86, issues: [{ category: "dialogue", severity: "warn", message: "A threat is softened", evidence: "The intent remains intact.", review: { disposition: "dismissed" } }],
+      checks: { completeness: "pass", names: "pass", numbers: "pass", terminology: "pass", dialogue: "warn", storyConsistency: "pass", narrationFidelity: "pass" },
+    }} />);
+    expect(html).toContain("Dismissed · no action"); expect(html).not.toContain('type="checkbox"');
+  });
   it("refreshes the current workspace once when a web job becomes terminal", () => {
     const running = { id: "job-1", type: "batch", story: "demo", status: "running" } as any;
     expect(shouldRefreshAfterJob(running, { ...running, status: "completed" })).toBe(true);

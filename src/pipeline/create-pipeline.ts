@@ -11,6 +11,7 @@ import { ImageProviderRouter } from "../artwork/router.js";
 import { UsageSink } from "../cost/types.js";
 import { TrackedImageProvider, TrackedLLMProvider, TrackedTTSProvider } from "../cost/context.js";
 import { TTSProviderRouter } from "../tts/router.js";
+import { FfmpegCensorAudioService } from "../tts/censor-audio.js";
 
 export function createPipeline(env: Environment): ChapterPipeline {
   return createPipelineRuntime(env).pipeline;
@@ -26,7 +27,8 @@ export function createPipelineRuntime(env: Environment, usage?: UsageSink) {
   const trackedTts = usage ? new TrackedTTSProvider(rawTts, usage) : rawTts;
   const tts = new TTSProviderRouter(new Map([[trackedTts.name, trackedTts]]));
   const audio = new FfmpegMasteringProcessor();
+  const censor = new FfmpegCensorAudioService();
   const rawImage = new OpenAIImageProvider(env.OPENAI_API_KEY, env.PROVIDER_TIMEOUT_MS);
   const images = new ImageProviderRouter(new Map([["openai", usage ? new TrackedImageProvider(rawImage, usage) : rawImage]]));
-  return { router, images, tts, audio, pipeline: new ChapterPipeline(router, tts, audio) };
+  return { router, images, tts, audio, censor, pipeline: new ChapterPipeline(router, tts, audio, censor) };
 }

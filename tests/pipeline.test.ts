@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { access, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -11,6 +11,8 @@ import { saveChapterTextEdit } from "../src/studio/workflow.js";
 import { emptyStoryBible } from "../src/domain/story-bible.js";
 import { atomicWriteJson } from "../src/storage/atomic-write.js";
 import { TRANSLATION_FINGERPRINT_VERSION, TRANSLATION_PROMPT_VERSION } from "../src/translation/prompts.js";
+import { CensorAudioService } from "../src/tts/censor-audio.js";
+import { TTSRequest } from "../src/tts/types.js";
 
 class CountingAudioProcessor extends CopyingAudioProcessor { calls = 0; override async master(inputs: string[], output: string) { this.calls++; return super.master(inputs, output); } }
 
@@ -169,6 +171,33 @@ describe("chapter pipeline", () => {
     expect(ctx.audio.calls).toBe(2); expect(ctx.tts.calls).toBe(firstTtsCalls);
     await ctx.pipeline.run({ root: ctx.root, story: changed, chapter: 1, inputPath: ctx.input, force: "audio" });
     expect(ctx.audio.calls).toBe(3); expect(ctx.tts.calls).toBe(firstTtsCalls);
+  });
+
+  it("reassembles censored audio and records timing metadata without rerunning text stages", async () => {
+    const root = await mkdtemp(join(tmpdir(), "story-studio-censor-")); const input = join(root, "chapter.txt"); await writeFile(input, "正文", "utf8");
+    const gemini = new MockLLM("gemini", ["Translation"]); const openai = new MockLLM("openai", ["This shit is crazy."]); const tts = new MockTTS();
+    const censorCalls: TTSRequest[] = [];
+    const censor: CensorAudioService = {
+      version: "test-censor-v1",
+      synthesize: async (provider, request) => {
+        censorCalls.push(request);
+        if (!request.bleepStrongProfanity) return provider.synthesize(request);
+        const audio = new Uint8Array([7, 7, 7]);
+        return { audio, segments: [audio, audio, audio], assembled: true, providerRequests: 2, censor: { segments: 1, durationSeconds: 0.35 } };
+      },
+    };
+    const pipeline = new ChapterPipeline(new LLMRouter(new Map([["gemini", gemini], ["openai", openai]])), tts, new CopyingAudioProcessor(), censor);
+    const story = testStory(); const paths = storyPaths(root, story.slug, 1);
+    const first = await pipeline.run({ root, story, chapter: 1, inputPath: input });
+    const translationCalls = gemini.calls.length; const narrationCalls = openai.calls.filter((call) => !call.structured).length;
+    const censoredStory = { ...story, narrationSettings: { ...story.narrationSettings, bleepStrongProfanity: true } };
+    const second = await pipeline.run({ root, story: censoredStory, chapter: 1, inputPath: input });
+    expect(second.stages.tts.fingerprint).not.toBe(first.stages.tts.fingerprint);
+    expect(gemini.calls).toHaveLength(translationCalls); expect(openai.calls.filter((call) => !call.structured)).toHaveLength(narrationCalls);
+    expect(censorCalls.at(-1)).toMatchObject({ text: "This shit is crazy.", bleepStrongProfanity: true });
+    expect(second.stages.tts.usage).toMatchObject({ censoredSegments: 1, censorDurationSeconds: 0.35 });
+    expect(Array.from(await readFile(paths.audioRaw))).toEqual([7, 7, 7]);
+    await expect(access(paths.segments)).rejects.toThrow();
   });
 
   it("rejects chapter metadata copied into the wrong chapter directory", async () => {

@@ -12,6 +12,8 @@ const usageSchema = z.object({
   requests: z.number().optional(),
   characters: z.number().optional(),
   bytes: z.number().optional(),
+  censoredSegments: z.number().int().nonnegative().optional(),
+  censorDurationSeconds: z.number().nonnegative().optional(),
 }).optional();
 
 export const stageStateSchema = z.object({
@@ -28,6 +30,13 @@ export const stageStateSchema = z.object({
   error: z.object({ message: z.string(), cause: z.string().optional() }).optional(),
   staleReason: z.string().max(500).optional(),
   manualReviewRequired: z.boolean().optional(),
+  /** A deliberate, auditable acceptance of an existing artifact. */
+  manualAcceptance: z.object({
+    acceptedAt: z.string(),
+    acceptedReason: z.string().max(500).optional(),
+    previousFingerprint: z.string().optional(),
+    acceptedFingerprint: z.string(),
+  }).optional(),
 });
 
 const rawChapterSchema = z.object({
