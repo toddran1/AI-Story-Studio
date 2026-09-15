@@ -6,8 +6,15 @@ import { ChapterImportPage, savedStorySourceUrl } from "../apps/web/src/ChapterI
 import { SummariesPage } from "../apps/web/src/SummariesPage.js";
 import { NamesLocalizationPage } from "../apps/web/src/NamesLocalizationPage.js";
 import { defaultLocale, LanguageSelect } from "../apps/web/src/languages.js";
+import { PronunciationFields, PronunciationPanel } from "../apps/web/src/PronunciationPanel.js";
 
 describe("web UI", () => {
+  it("exposes pronunciation mode, language dropdown, protected settings and a management desk", () => {
+    const html = renderToStaticMarkup(<PronunciationFields value={{ mode: "custom", customPronunciation: "Jyang Yweh", sourceLanguage: "zh-CN", locked: true }} onChange={() => undefined} />);
+    expect(html).toContain("Original-language pronunciation"); expect(html).toContain("Custom spoken form"); expect(html).toContain("Lock pronunciation"); expect(html).toContain("Chinese · Simplified"); expect(html).toContain("Advanced pronunciation");
+    const desk = renderToStaticMarkup(<PronunciationPanel slug="demo-story" />);
+    expect(desk).toContain("Needs pronunciation"); expect(desk).toContain("Enrich missing pronunciations"); expect(desk).toContain("Low confidence");
+  });
   it("uses readable labels for pipeline identifiers", () => {
     expect(pretty("storyBible")).toBe("Story Bible"); expect(pretty("narrationFidelity")).toBe("Narration Fidelity"); expect(pretty("qa")).toBe("QA"); expect(pretty("tts")).toBe("TTS");
   });

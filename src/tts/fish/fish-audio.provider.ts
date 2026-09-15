@@ -5,9 +5,11 @@ import { splitForTTS } from "../split-text.js";
 import { normalizeFishSpeechText } from "./speech-normalizer.js";
 import { castQuotedDialogue, directQuotedDialogue, ensureChunkSpeakers } from "./dialogue-casting.js";
 import { isFishS2Model } from "./control-cues.js";
+import { adaptPronunciationText } from "../pronunciation.js";
 
 export class FishAudioProvider implements TTSProvider {
   readonly name = "fish" as const;
+  readonly pronunciationCapabilities = { phoneticText: true } as const;
   // Included in the TTS fingerprint so audio made before normalization or
   // deterministic dialogue casting changes is never silently reused.
   readonly inputNormalizationVersion = "fish-speech-normalization-v5";
@@ -30,7 +32,7 @@ export class FishAudioProvider implements TTSProvider {
     const multiSpeaker = request.voiceMode === "narrator-dialogue" && Boolean(referenceId) && Boolean(secondaryReferenceId) && isFishS2Model(request.model);
     const directedSingleVoice = request.voiceMode === "same-voice-dialogue" && request.deliveryIntensity !== "none" && isFishS2Model(request.model);
     const segments: Uint8Array[] = []; const requestIds: string[] = [];
-    const speechText = normalizeFishSpeechText(request.text, request.model);
+    const speechText = normalizeFishSpeechText(adaptPronunciationText(request.text, request.pronunciation ?? [], this.pronunciationCapabilities), request.model);
     if (!speechText) throw new ProviderError("Fish Audio narration is empty after speech normalization");
     const castText = multiSpeaker ? castQuotedDialogue(speechText) : directedSingleVoice ? directQuotedDialogue(speechText) : speechText;
     const splitText = splitForTTS(castText, request.maxCharsPerRequest);

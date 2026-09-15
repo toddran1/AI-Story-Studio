@@ -28,6 +28,8 @@ import { summaryPath } from "./service.js";
 import { validateSceneCoverage } from "../scenes/timing.js";
 import { withUsageScope } from "../cost/context.js";
 
+export class SummaryArtifactNotFoundError extends Error {}
+
 export const summaryVisualInputSchema = z.object({ force: z.boolean().default(false), missingOnly: z.boolean().default(false),
   scenes: z.array(z.string().regex(/^scene-\d{3}$/)).min(1).max(100).optional() }).strict();
 export const summaryProduceInputSchema = summaryScenesInputSchema.safeExtend({ missingOnly: z.boolean().default(false) });
@@ -182,7 +184,7 @@ export class SummaryVisualService {
   }
   async export(slug: string, id: string, type: "video" | "artwork", sceneId?: string) {
     const summary = await this.get(slug, id); const paths = this.paths(slug, id);
-    if (type === "video") { if (!summary.video?.outputFingerprint || summary.video.outputFingerprint !== await fileFingerprint(paths.video)) throw new Error("Summary video is missing or damaged; generate it first"); return { path: paths.video, name: `${id}-video.mp4`, contentType: "video/mp4" }; }
-    const scene = summary.scenePlan?.scenes.find((item) => item.id === sceneId); if (!scene || !scene.artwork.imageFingerprint || scene.artwork.imageFingerprint !== await validPngFingerprint(paths.image(scene.id))) throw new Error("Scene artwork is missing or damaged"); return { path: paths.image(scene.id), name: `${id}-${scene.id}.png`, contentType: "image/png" };
+    if (type === "video") { if (!summary.video?.outputFingerprint || summary.video.outputFingerprint !== await fileFingerprint(paths.video)) throw new SummaryArtifactNotFoundError("Summary video is missing or damaged; generate it first"); return { path: paths.video, name: `${id}-video.mp4`, contentType: "video/mp4" }; }
+    const scene = summary.scenePlan?.scenes.find((item) => item.id === sceneId); if (!scene || !scene.artwork.imageFingerprint || scene.artwork.imageFingerprint !== await validPngFingerprint(paths.image(scene.id))) throw new SummaryArtifactNotFoundError("Scene artwork is missing or damaged"); return { path: paths.image(scene.id), name: `${id}-${scene.id}.png`, contentType: "image/png" };
   }
 }

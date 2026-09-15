@@ -1,4 +1,5 @@
 export type TTSRequest = {
+  pronunciation?: import("./pronunciation.js").PronunciationOccurrence[];
   text: string; model: string; referenceId?: string; secondaryReferenceId?: string;
   voiceMode?: "narrator-only" | "same-voice-dialogue" | "narrator-dialogue";
   deliveryIntensity?: "none" | "restrained" | "expressive";

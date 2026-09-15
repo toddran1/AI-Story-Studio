@@ -1,4 +1,7 @@
+import { loadPronunciationEntities, enrichStoryPronunciations, clearPronunciationAttempt, invalidatePronunciationChange } from "../../src/story-bible/pronunciation.js";
+import { pronunciationProvider, pronunciationFingerprint, resolvePronunciations } from "../../src/tts/pronunciation.js";
 import { randomUUID } from "node:crypto";
+import { censorToneConfig } from "../../src/tts/censor-audio.js";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
 import { z } from "zod";
@@ -434,7 +437,7 @@ export class StudioOperations {
     const base = await getStoryBible(this.root, slug, { includeCanonicalOverlay: false }); const overlayPath = storyPaths(this.root, slug, 1).bibleCanonicalManual;
     const priorOverlay = await readFile(overlayPath).catch((error: NodeJS.ErrnoException) => { if (error.code === "ENOENT") return undefined; throw error; });
     const result = await updateCanonicalEntity(this.root, slug, base, id, raw); let entity; let invalidation;
-    try { entity = result.bible.canonicalEntities.find((item) => item.id === id); if (!entity) throw new Error("Canonical entity was not found after update"); invalidation = await invalidateNarrationNamingChange(this.root, slug, before, entity); }
+    try { entity = result.bible.canonicalEntities.find((item) => item.id === id); if (!entity) throw new Error("Canonical entity was not found after update"); invalidation = await invalidateNarrationNamingChange(this.root, slug, before, entity); const soundAffected = await invalidatePronunciationChange(this.root, slug, before, entity); invalidation.affectedChapters = [...new Set([...invalidation.affectedChapters, ...soundAffected])]; if ((raw as { pronunciation?: unknown }).pronunciation === null) await clearPronunciationAttempt(this.root, slug, id); }
     catch (error) {
       try { if (priorOverlay) await atomicWrite(overlayPath, priorOverlay); else await rm(overlayPath, { force: true }); }
       catch (rollbackError) { throw new AggregateError([error, rollbackError], "Canonical entity update failed and its overlay could not be restored"); }
@@ -443,6 +446,38 @@ export class StudioOperations {
     if (invalidation.exportCleanupWarnings.length) logger.warn({ event: "bible.entity.export_cleanup_incomplete", story: slug, entityId: id, manifests: invalidation.exportCleanupWarnings });
     invalidateCatalogCache(this.root, slug); await recordActivity(this.root, slug, "bible.entity.edited", invalidation.affectedChapters.length ? `Updated canonical entity ${id}; marked ${invalidation.affectedChapters.length} chapter(s) affected by narration naming` : `Updated canonical entity ${id}`); return { entity, invalidation };
   }); }
+  startPronunciationEnrichment(slug: string, raw: unknown) {
+    slugSchema.parse(slug);
+    const input = z.object({ entityId: z.string().regex(/^ent_[a-f0-9]{24}$/).optional() }).strict().parse(raw);
+    return this.jobs.create("pronunciation", slug, async () => withStoryLock(this.root, slug, "pronunciation enrichment", async () => {
+      const story = await loadStory(storyPaths(this.root, slug, 1).storyConfig);
+      const base = await getStoryBible(this.root, slug);
+      if (input.entityId && !base.canonicalEntities.some(entity => entity.id === input.entityId)) throw new Error("Canonical entity was not found");
+      const result = await withUsageScope({ story: slug, stage: "pronunciation" }, () => enrichStoryPronunciations(this.root, slug, base, this.llm.forStage(story.pipeline.storyBible), story.pipeline.storyBible, story.sourceLanguage, input.entityId ? [input.entityId] : undefined));
+      invalidateCatalogCache(this.root, slug);
+      return result;
+    }));
+  }
+  startPronunciationTest(slug: string, id: string) {
+    slugSchema.parse(slug); z.string().regex(/^ent_[a-f0-9]{24}$/).parse(id);
+    return this.jobs.create("pronunciation", slug, async () => {
+      const story = await loadStory(storyPaths(this.root, slug, 1).storyConfig);
+      const entities = await loadPronunciationEntities(this.root, slug);
+      const entity = entities.find(item => item.id === id); if (!entity) throw new Error("Canonical entity was not found");
+      const name = entity.localizedNaming?.fullName ?? entity.preferredNarrationName ?? entity.canonicalName;
+      const text = entity.type === "location" ? `They finally arrived in ${name}.` : `${name} followed them through the gate.`;
+      const config = story.pipeline.tts; const provider = pronunciationProvider(this.tts.forName(config.provider), entities);
+      const key = fingerprint({ text, config, reference: provider.resolveReferenceId?.(config.referenceId), pronunciation: pronunciationFingerprint(resolvePronunciations(text, entities)), normalization: provider.inputNormalizationVersion, censor: { version: this.censor.version, config: censorToneConfig }, bleep: story.narrationSettings.bleepStrongProfanity });
+      const cachePath = join(storyPaths(this.root, slug, 1).story, "pronunciation-previews", `${key}.json`);
+      const cachedRaw = await readJsonIfExists(cachePath);
+      const cacheResult = z.object({ id: z.string().uuid(), audioUrl: z.string(), bytes: z.number().positive() }).safeParse(cachedRaw);
+      const cached = cacheResult.success ? cacheResult.data : undefined;
+      if (cached && (await readFile(join(storyPaths(this.root, slug, 1).story, "voice-previews", `${cached.id}.mp3`)).catch(() => undefined))) return { ...cached, cached: true };
+      const result = await withUsageScope({ story: slug, stage: "pronunciationPreview" }, () => this.censor.synthesize(provider, { ...config, text, bleepStrongProfanity: story.narrationSettings.bleepStrongProfanity }));
+      const saved = await saveVoicePreview(this.root, slug, result.audio, { text });
+      await atomicWriteJson(cachePath, saved); return saved;
+    });
+  }
   startLocalizationSuggestions(slug: string, id: string, raw: unknown) {
     slugSchema.parse(slug); const input = localizationSuggestionRequestSchema.parse(raw);
     return this.jobs.create("entityLocalizationSuggestions", slug, async () => {
@@ -483,7 +518,7 @@ export class StudioOperations {
     });
   }
 
-  startVoicePreview(slug: string, raw: unknown) { slugSchema.parse(slug); const input = voicePreviewSchema.parse(raw); return this.jobs.create("voicePreview", slug, async () => { const story = await loadStory(storyPaths(this.root, slug, 1).storyConfig); const config = story.pipeline.tts; const request = { ...input, provider: input.provider ?? config.provider, model: input.model ?? config.model, referenceId: input.referenceId ?? config.referenceId, speed: input.speed ?? config.speed }; const result = await withUsageScope({story:slug,stage:"voicePreview"},()=>this.censor.synthesize(this.tts.forName(request.provider), { text: request.text, model: request.model, referenceId: request.referenceId,
+  startVoicePreview(slug: string, raw: unknown) { slugSchema.parse(slug); const input = voicePreviewSchema.parse(raw); return this.jobs.create("voicePreview", slug, async () => { const story = await loadStory(storyPaths(this.root, slug, 1).storyConfig); const config = story.pipeline.tts; const request = { ...input, provider: input.provider ?? config.provider, model: input.model ?? config.model, referenceId: input.referenceId ?? config.referenceId, speed: input.speed ?? config.speed }; const result = await withUsageScope({story:slug,stage:"voicePreview"},async ()=>this.censor.synthesize(pronunciationProvider(this.tts.forName(request.provider), await loadPronunciationEntities(this.root, slug)), { text: request.text, model: request.model, referenceId: request.referenceId,
     secondaryReferenceId: config.secondaryReferenceId, voiceMode: config.voiceMode, deliveryIntensity: config.deliveryIntensity, qualityGuard: config.qualityGuard,
     bleepStrongProfanity: story.narrationSettings.bleepStrongProfanity,
     speed: request.speed, format: config.format, sampleRate: 44100, bitrate: 192, normalize: true, maxCharsPerRequest: config.maxCharsPerRequest })); const saved = await saveVoicePreview(this.root, slug, result.audio, request); await recordActivity(this.root, slug, "voice.preview", "Generated a voice preview"); return saved; }); }

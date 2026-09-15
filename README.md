@@ -1,5 +1,29 @@
 # AI Story Studio
 
+## Milestone 20 — Entity pronunciation
+
+Pronunciation is separate from canonical identity, localization, and visible narration. The Story Bible editor includes source language, original text, romanization, automatic/original-language/custom modes, advanced IPA and phonetic hints, and a pronunciation lock. The collapsible **Pronunciation desk** on the Story Bible page supports search, entity-type filters, missing/low-confidence/manual/locked filters, bulk enrichment, and tests using the book's configured voice.
+
+Automatic enrichment caches both generated records and ordinary-English/no-pronunciation outcomes by canonical identity and source information. Manual, custom, and locked records are protected through rebuilds and extraction regeneration. Save **Return to automatic enrichment** before regenerating a manual record. Enrichment and uncached tests use configured providers and may incur charges; replaying an unchanged pronunciation test uses its saved preview.
+
+Chapter production, summary TTS, Voice Test, and pronunciation previews use the same identity-aware resolver. Fully localized English names and distinct preferred narration names do not inherit automatic foreign-language hints. Alias ambiguity is left unresolved rather than guessing. Possessives and recognized place suffixes reuse the same identity. Low-confidence automatic hints are retained for review but are not applied as phonetic substitutions.
+
+TTS requests carry provider-neutral pronunciation occurrences. Providers declare their capabilities and adapt only the outgoing synthesis representation. Fish currently uses phonetic-text fallback; IPA is stored for providers that support it, not sent as an unsupported Fish API parameter. Phonetic hints are approximations: use the pronunciation test and a custom spoken form to tune a difficult name. Visible narration, translations, canon, and subtitle text are never rewritten for a provider.
+
+Only referenced pronunciation records enter TTS fingerprints. Pronunciation edits mark affected chapter TTS, mastering, alignment, subtitle timing, and video stale while preserving existing files. Summary sound/timing/video freshness uses the same fingerprint architecture. Source, translation, narration, Story Bible, scene planning, and artwork are not invalidated by a pronunciation-only edit.
+
+```sh
+npm run story:pronunciation -- list undead-disaster
+npm run story:pronunciation -- show undead-disaster ent_123456789012345678901234
+npm run story:pronunciation -- enrich undead-disaster
+npm run story:pronunciation -- enrich undead-disaster ent_123456789012345678901234
+npm run story:pronunciation -- test undead-disaster ent_123456789012345678901234
+npm run story:pronunciation -- set undead-disaster ent_123456789012345678901234 '{"mode":"custom","sourceLanguage":"zh-CN","customPronunciation":"Jyang Yweh","locked":true}'
+npm run story:pronunciation -- clear undead-disaster ent_123456789012345678901234
+```
+
+The CLI reuses the web operations and canonical overlays. JSON output includes entity IDs and pronunciation records. Invalid arguments and missing entities/stories exit nonzero. API: `GET /api/stories/:slug/pronunciation`, `GET/PUT /api/stories/:slug/pronunciation/:entityId`, and `POST .../:entityId/enrich` or `.../:entityId/test`; posting `{}` to the list endpoint enriches missing records. A PUT body is a pronunciation object or `null` to return to automatic enrichment. Jobs use the existing job-status endpoint.
+
 ## Production Studio workflow
 
 The browser studio is the primary local workflow. Open a story dashboard to see import, QA, audio, artwork, video, and the most recent durable production run in one place. **Set up production** opens a guided flow: choose a chapter range and output, review the dry-run plan and cached versus provider-backed operations, then explicitly start production.

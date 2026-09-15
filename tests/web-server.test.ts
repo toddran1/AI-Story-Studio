@@ -30,7 +30,8 @@ import { ImageProvider } from "../src/artwork/provider.js";
 import { chapterParam, continuityStatusFilter, entitySortFilter, entityTypeFilter, integerParam, publicJob, statusFor, validateLocalRequest, validationIssues } from "../apps/server/api.js";
 import { z } from "zod";
 import { SourceConflictError, SourceInputError, SourceUpstreamError, SourceValidationError } from "../src/source/errors.js";
-import { ConfigurationError } from "../src/pipeline/errors.js";
+import { ConfigurationError, SceneError } from "../src/pipeline/errors.js";
+import { SummaryArtifactNotFoundError } from "../src/summaries/visuals.js";
 
 const webAudio: AudioMasteringProcessor = { version: "web-audio-v1", master: async (_inputs, output) => { await atomicWrite(output, Buffer.from("mastered")); return { durationSeconds: 9, codec: "mp3", container: "mp3" }; } };
 const webBook: AudiobookProcessor = { version: "web-book-v1", assemble: async (_chapters, output, format) => { await atomicWrite(output, Buffer.from("book")); return { durationSeconds: 9, codec: format === "m4b" ? "aac" : "mp3", container: format === "m4b" ? "mp4" : "mp3" }; } };
@@ -61,6 +62,10 @@ describe("web service layer", () => {
   it("classifies expected source failures as actionable HTTP responses", () => {
     expect(statusFor(new SourceInputError("bad source"))).toBe(400); expect(statusFor(new SourceConflictError("replacement"))).toBe(409);
     expect(statusFor(new SourceValidationError("invalid chapter"))).toBe(422); expect(statusFor(new SourceUpstreamError("provider failed"))).toBe(502);
+  });
+  it("classifies invalid summary scenes and unavailable summary media as client errors", () => {
+    expect(statusFor(new SceneError("scene-001 has an invalid time range"))).toBe(400);
+    expect(statusFor(new SummaryArtifactNotFoundError("Summary video is missing or damaged; generate it first"))).toBe(404);
   });
   it("exposes safe field paths for invalid editable input", () => {
     const failure = z.object({ tts: z.object({ model: z.string().min(1) }) }).safeParse({ tts: { model: "" } });

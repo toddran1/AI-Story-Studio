@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import { getStoryBible } from "./catalog.js";
+import { loadStory } from "../../src/config/load-config.js";
 import { createReadStream } from "node:fs";
 import { mkdir, open, rm, stat } from "node:fs/promises";
 import { isAbsolute, join } from "node:path";
@@ -10,7 +12,8 @@ import { StudioOperations } from "./operations.js";
 import { exportPaths, previewPaths, sceneImagePath, storyPaths, videoExportPaths, voicePreviewPaths } from "../../src/storage/paths.js";
 import { SceneManifest, sceneManifestSchema } from "../../src/scenes/types.js";
 import { readJsonIfExists } from "../../src/storage/story-files.js";
-import { BatchValidationError, ConfigurationError, ProviderError, StorageError } from "../../src/pipeline/errors.js";
+import { BatchValidationError, ConfigurationError, ProviderError, SceneError, StorageError } from "../../src/pipeline/errors.js";
+import { SummaryArtifactNotFoundError } from "../../src/summaries/visuals.js";
 import { WebHttpError } from "../../src/source/web/http-client.js";
 import { SourceOperationError } from "../../src/source/errors.js";
 import { logger } from "../../src/utils/logger.js";
@@ -202,6 +205,18 @@ export function createApiHandler(operations: StudioOperations) {
       if (bibleEntityMatch && request.method === "GET") return send(response, 200, await getCanonicalEntityDetail(operations.root, bibleEntityMatch[1]!, bibleEntityMatch[2]!));
       if (bibleEntityMatch && request.method === "PUT") return send(response, 200, await operations.updateCanonicalEntity(bibleEntityMatch[1]!, bibleEntityMatch[2]!, await jsonBody(request)));
       const localizationSuggestionsMatch = /^\/api\/stories\/([a-z0-9-]+)\/story-bible\/entities\/(ent_[a-f0-9]{24})\/localization-suggestions$/.exec(url.pathname);
+      const pronunciationMatch = /^\/api\/stories\/([a-z0-9-]+)\/pronunciation(?:\/(ent_[a-f0-9]{24})(?:\/(test|enrich))?)?$/.exec(url.pathname);
+      if (pronunciationMatch) {
+        const slug = pronunciationMatch[1]!, id = pronunciationMatch[2];
+        if (request.method === "GET") {
+          const entities = (await getStoryBible(operations.root, slug)).canonicalEntities;
+          await loadStory(storyPaths(operations.root, slug, 1).storyConfig);
+          if (id && !entities.some(entity => entity.id === id)) return send(response, 404, { error: "Canonical entity was not found" });
+          return send(response, 200, id ? entities.find(entity => entity.id === id) : { entities });
+        }
+        if (request.method === "PUT" && id) return send(response, 200, await operations.updateCanonicalEntity(slug, id, { pronunciation: await jsonBody(request) }));
+        if (request.method === "POST") return send(response, 202, pronunciationMatch[3] === "test" && id ? operations.startPronunciationTest(slug, id) : operations.startPronunciationEnrichment(slug, id ? { entityId: id } : await jsonBody(request)));
+      }
       if (localizationSuggestionsMatch && request.method === "POST") return send(response, 202, operations.startLocalizationSuggestions(localizationSuggestionsMatch[1]!, localizationSuggestionsMatch[2]!, await jsonBody(request)));
       const bibleMergeMatch = /^\/api\/stories\/([a-z0-9-]+)\/story-bible\/merges$/.exec(url.pathname);
       if (bibleMergeMatch && request.method === "POST") return send(response, 201, await operations.mergeCanonicalEntities(bibleMergeMatch[1]!, await jsonBody(request)));
@@ -335,6 +350,8 @@ export function statusFor(error: unknown): number {
   if (error instanceof JobConflictError || /locked by PID|already has active job/.test(String(error))) return 409;
   if (error instanceof QueueConflictError) return 409;
   if (error instanceof QueueNotFoundError) return 404;
+  if (error instanceof SummaryArtifactNotFoundError) return 404;
+  if (error instanceof SceneError) return 400;
   if (/already exists/.test(String(error))) return 409;
   if (/Confirmation|Unsafe backup|invalid ZIP|Backup must|Cover must|Select between|Select a |Chapter folder|Only HTTPS|exceeds the .* limit|Duplicate chapter|Entity merge|Merge must|requires a manual Story Bible correction|does not contain a canonical status|Story context maxCharacters/.test(String(error))) return 400;
   if (/not found|does not exist/.test(String(error)) || errorCodeInChain(error, "ENOENT")) return 404;

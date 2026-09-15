@@ -36,6 +36,21 @@ describe("summary narration and audio", () => {
   afterEach(async () => { await rm(root, { recursive: true, force: true }); });
   const create = () => summaries.generate("demo-story", { title: "Arc", chapters: [1] });
 
+  it("uses shared pronunciation and invalidates only summary sound dependencies", async () => {
+    const bible = mergeStoryBible(emptyStoryBible(), storyBibleUpdateSchema.parse({ chapterSummary: "Arrival", characters: [{ canonicalEnglishName: "Jiang Yue", originalName: "江月", firstSeenChapter: 1, lastSeenChapter: 1 }] }), 1);
+    bible.canonicalEntities[0]!.pronunciation = { mode: "custom", customPronunciation: "Jyang Yweh", source: "manual" };
+    await atomicWriteJson(storyPaths(root, "demo-story", 1).bible, bible);
+    const canonical = await create(); await media.editNarration("demo-story", canonical.id, { text: "Jiang Yue walked through the gate." });
+    const audio = await media.audio("demo-story", canonical.id);
+    expect(tts.requests[0]?.pronunciation?.[0]?.entityId).toBe(bible.canonicalEntities[0]!.id);
+    const unrelated = await create(); await media.editNarration("demo-story", unrelated.id, { text: "The sky turned red." }); await media.audio("demo-story", unrelated.id);
+    bible.canonicalEntities[0]!.pronunciation.customPronunciation = "Different hint"; await atomicWriteJson(storyPaths(root, "demo-story", 1).bible, bible);
+    const stale = await media.get("demo-story", canonical.id);
+    expect(stale.narration?.status).toBe("current"); expect(stale.text).toBe(canonical.text); expect(stale.tts?.status).toBe("stale"); expect(stale.audio?.status).toBe("stale");
+    expect(await readFile(summaryMediaPaths(root, "demo-story", canonical.id).audio)).toBeDefined();
+    expect((await media.get("demo-story", unrelated.id)).audio?.status).toBe("current"); expect(audio.narration?.text).toBe(stale.narration?.text);
+  });
+
   it("plans recap scenes through the shared provider and reuses current artifacts", async () => {
     const canonical = await create(); await media.audio("demo-story", canonical.id);
     const plan = vi.spyOn(llm, "generateStructured").mockImplementation(async (request) => ({ value: request.schema.parse({ scenes: [

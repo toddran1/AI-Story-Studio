@@ -23,6 +23,21 @@ export const localizedNamingSchema = z.object({
 });
 export type LocalizedNaming = z.infer<typeof localizedNamingSchema>;
 
+export const pronunciationSchema = z.object({
+  sourceLanguage: z.string().trim().regex(/^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*$/).optional(),
+  originalText: z.string().trim().min(1).max(300).optional(),
+  romanization: z.string().trim().min(1).max(300).optional(),
+  ipa: z.string().trim().min(1).max(500).optional(),
+  phoneticHint: z.string().trim().min(1).max(500).regex(/^[^<>\[\]]+$/, "Use spoken sounds, not provider control tags").optional(),
+  mode: z.enum(["automatic", "original_language", "custom"]),
+  customPronunciation: z.string().trim().min(1).max(500).regex(/^[^<>\[\]]+$/, "Use spoken sounds, not provider control tags").optional(),
+  locked: z.boolean().optional(), confidence: z.number().min(0).max(1).optional(),
+  source: z.enum(["ai", "manual", "imported"]).optional(), updatedAt: z.string().datetime().optional(),
+}).strict().superRefine((value, context) => {
+  if (value.mode === "custom" && !value.customPronunciation) context.addIssue({ code: "custom", path: ["customPronunciation"], message: "Custom pronunciation requires a spoken form" });
+});
+export type EntityPronunciation = z.infer<typeof pronunciationSchema>;
+
 const namedEntity = z.object({
   canonicalEnglishName: z.string().min(1).max(300), originalName: z.string().max(300).default(""), description: z.string().max(10_000).default(""),
   firstSeenChapter: z.number().int().positive(), lastSeenChapter: z.number().int().positive(),
@@ -50,6 +65,7 @@ export const canonicalEntitySchema = z.object({
   id: z.string().regex(/^ent_[a-f0-9]{24}$/), type: entityTypeSchema, canonicalName: z.string().min(1).max(300), aliases: z.array(z.string().min(1).max(300)).max(100).default([]), originalName: z.string().max(300).default(""), description: z.string().max(10_000).default(""),
   preferredNarrationName: z.string().trim().min(1).max(300).optional(), aliasNarrationRules: z.array(aliasNarrationRuleSchema).max(100).default([]),
   localizedNaming: localizedNamingSchema.optional(),
+  pronunciation: pronunciationSchema.optional(),
   firstAppearance: z.number().int().positive(), lastKnownAppearance: z.number().int().positive(), status: z.string().max(500).default("unknown"), notes: z.string().max(10_000).default(""), canonicalNameLocked: z.boolean().default(false),
   origin: factOriginSchema.default("automatic"), provenance: z.array(provenanceSchema).default([]), mergedFromIds: z.array(z.string()).default([]),
 });

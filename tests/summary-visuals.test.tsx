@@ -4,12 +4,14 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import { SummaryVisualService } from "../src/summaries/visuals.js";
-import { SummaryMediaService } from "../src/summaries/media.js";
+import { SummaryMediaService, summaryMediaPaths } from "../src/summaries/media.js";
 import { SummaryService } from "../src/summaries/service.js";
 import { LLMRouter } from "../src/llm/router.js";
 import { TTSProviderRouter } from "../src/tts/router.js";
 import { atomicWrite, atomicWriteJson } from "../src/storage/atomic-write.js";
 import { storyPaths } from "../src/storage/paths.js";
+import { fileFingerprint } from "../src/utils/file-fingerprint.js";
+import { summaryPath } from "../src/summaries/service.js";
 import { emptyStoryBible, storyBibleUpdateSchema } from "../src/domain/story-bible.js";
 import { mergeStoryBible } from "../src/story-bible/updater.js";
 import { tokenizeNarration } from "../src/alignment/quality.js";
@@ -79,6 +81,16 @@ describe("summary visual production", () => {
     expect(images.generate).toHaveBeenCalledTimes(3); expect(await visuals.get("demo-story", id)).toMatchObject({ narration: { status: "current" }, audio: { status: "current" }, scenes: { status: "current" }, video: { status: "stale" } });
     const story = testStory(); story.pipeline.tts.referenceId = "other-voice"; await atomicWriteJson(storyPaths(root, "demo-story", 1).storyConfig, story);
     expect(await visuals.get("demo-story", id)).toMatchObject({ audio: { status: "stale" }, artwork: { status: "current" }, video: { status: "stale" } });
+  });
+  it("invalidates alignment and video when a replacement recording keeps the same duration", async () => {
+    const produced = await produce(); expect(produced.alignment?.mode).toBe("aligned"); expect(produced.video?.status).toBe("current");
+    const paths = summaryMediaPaths(root, "demo-story", id); const stored = await summaries.get("demo-story", id);
+    await atomicWrite(paths.audio, "different-recording-with-the-same-duration");
+    stored.audio!.outputFingerprint = (await fileFingerprint(paths.audio))!;
+    await atomicWriteJson(summaryPath(root, "demo-story", id), stored);
+    const refreshed = await media.get("demo-story", id);
+    expect(refreshed.audio?.status).toBe("current"); expect(refreshed.alignment).toBeUndefined();
+    expect((await visuals.get("demo-story", id)).video?.status).toBe("stale");
   });
   it("protects approved artwork and supports explicit regeneration and damaged cache detection", async () => {
     const result = await produce(); await visuals.reviewArtwork("demo-story", id, "scene-001", "approved"); const scenes = structuredClone(result.scenePlan!.scenes); scenes[0]!.visualPrompt = "A new visual direction";

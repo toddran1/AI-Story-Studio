@@ -6,6 +6,8 @@ import { StoryBibleUpdate, storyBibleUpdateSchema } from "../domain/story-bible.
 import { activeQaIssues, QaResult, qaResultSchema } from "../domain/qa.js";
 import { LLMRouter } from "../llm/router.js";
 import { TTSProvider } from "../tts/provider.js";
+import { pronunciationProvider, pronunciationFingerprint, resolvePronunciations } from "../tts/pronunciation.js";
+import { enrichStoryPronunciations } from "../story-bible/pronunciation.js";
 import { TTSProviderRouter } from "../tts/router.js";
 import { atomicWrite, atomicWriteJson } from "../storage/atomic-write.js";
 import { readJsonIfExists, readTextIfExists } from "../storage/story-files.js";
@@ -233,10 +235,13 @@ export class ChapterPipeline {
     // A blank per-story voice intentionally inherits the environment default. Include
     // the resolved value in the fingerprint so a changed default cannot reuse audio
     // generated with a different voice.
-    const ttsProvider = this.tts.forName(ttsConfig.provider);
+    const pronunciationData = await withUsageScope({ story: options.story.slug, chapter: options.chapter, stage: "pronunciation" }, () => enrichStoryPronunciations(options.root, options.story.slug, bible, this.llms.forStage(bibleConfig), bibleConfig, options.story.sourceLanguage));
+    const ttsProvider = pronunciationProvider(this.tts.forName(ttsConfig.provider), pronunciationData.entities);
+    const pronunciationFp = pronunciationFingerprint(resolvePronunciations(ttsScript, pronunciationData.entities));
     const referenceId = ttsProvider.resolveReferenceId?.(ttsConfig.referenceId) ?? ttsConfig.referenceId;
     const bleepStrongProfanity = options.story.narrationSettings.bleepStrongProfanity === true;
     const ttsFp = fingerprint({ narration: fingerprint(ttsScript), config: { ...ttsConfig, referenceId }, deliveryProfile, inputNormalizationVersion: ttsProvider.inputNormalizationVersion,
+      ...(pronunciationFp ? { pronunciation: pronunciationFp } : {}),
       ...(bleepStrongProfanity ? { bleepStrongProfanity: true, censor: { version: this.censor.version || CENSOR_AUDIO_VERSION, config: censorToneConfig } } : {}) });
     if (!(await fileFingerprint(paths.audioRaw)) && chapter.stages.tts.status === "complete" && await fileFingerprint(paths.audio)) await atomicWrite(paths.audioRaw, await readFile(paths.audio));
     await runStage("tts", ttsFp, paths.audioRaw, { provider: ttsConfig.provider, model: ttsConfig.model }, async () => {

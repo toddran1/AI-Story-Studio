@@ -5,6 +5,8 @@ import { z } from "zod";
 import { loadStory } from "../config/load-config.js";
 import { storyBibleSchema } from "../domain/story-bible.js";
 import { emptyStoryBible } from "../domain/story-bible.js";
+import { enrichStoryPronunciations, loadPronunciationEntities } from "../story-bible/pronunciation.js";
+import { pronunciationProvider, pronunciationFingerprint, resolvePronunciations } from "../tts/pronunciation.js";
 import { loadNarrationNamingEntities } from "../story-bible/narration-names.js";
 import { retrieveRelevantContext } from "../story-bible/retrieval.js";
 import { polishNarration } from "../narration/narration-editor.js";
@@ -70,10 +72,13 @@ export class SummaryMediaService {
       model: story.pipeline.narration, language: story.outputLanguage, profanity: story.narrationSettings.profanityMode,
       includeTitle: story.narrationSettings.includeChapterTitle !== false, intensity: config.deliveryIntensity, delivery,
       promptVersion: NARRATION_PROMPT_VERSION, naming: context.canonicalEntities.map(({ id, canonicalName, originalName, aliases, localizedNaming, preferredNarrationName, aliasNarrationRules }) => ({ id, canonicalName, originalName, aliases, localizedNaming, preferredNarrationName, aliasNarrationRules })) });
-    const provider = this.ttsRouter.forName(config.provider);
+    const pronunciationEntities = await loadPronunciationEntities(this.root, slug);
+    const provider = pronunciationProvider(this.ttsRouter.forName(config.provider), pronunciationEntities);
+    const pronunciationFp = pronunciationFingerprint(resolvePronunciations(summary.narration?.ttsText ?? summary.narration?.text ?? "", pronunciationEntities));
     const referenceId = provider.resolveReferenceId?.(config.referenceId) ?? config.referenceId;
     const ttsFingerprint = fingerprint({ version: "summary-tts-v1", text: summary.narration?.ttsText ?? summary.narration?.text,
       config: { ...config, referenceId }, normalization: provider.inputNormalizationVersion,
+      ...(pronunciationFp ? { pronunciation: pronunciationFp } : {}),
       bleep: story.narrationSettings.bleepStrongProfanity, censor: { version: this.censor.version, config: censorToneConfig } });
     return { story, context, provider, referenceId, sourceFingerprint, namingFingerprint, configurationFingerprint, narrationFingerprint, ttsFingerprint,
       audioFingerprint: audioMasteringFingerprint(summary.tts?.outputFingerprint, story.audio, this.mastering.version, summary.tts?.segmentFingerprints ?? []) };
@@ -91,6 +96,10 @@ export class SummaryMediaService {
     }
     if (summary.tts?.status === "current" && (summary.narration?.status !== "current" || summary.tts.inputFingerprint !== input.ttsFingerprint || await fileFingerprint(paths.raw) !== summary.tts.outputFingerprint)) summary.tts.status = "stale";
     if (summary.audio?.status === "current" && (summary.tts?.status !== "current" || summary.audio.inputFingerprint !== input.audioFingerprint || await fileFingerprint(paths.audio) !== summary.audio.outputFingerprint)) summary.audio.status = "stale";
+    // Alignment is tied to the exact mastered recording, not merely its duration.
+    // A replacement recording of identical length still has different word timing.
+    if (summary.alignment && (summary.audio?.status !== "current" || summary.narration?.status !== "current" ||
+      summary.alignment.audioFingerprint !== summary.audio.outputFingerprint || summary.alignment.narrationFingerprint !== summary.narration.outputFingerprint)) summary.alignment = undefined;
     if (summary.scenes?.status === "current" && (summary.narration?.status !== "current" ||
       summary.scenes.sourceFingerprint !== fingerprint(summary.narration.text) ||
       summary.scenes.configurationFingerprint !== fingerprint({ config: input.story.pipeline.scenePlanner, settings: input.story.scenes }) ||
@@ -211,6 +220,15 @@ export class SummaryMediaService {
   async audio(slug: string, id: string, raw: unknown = {}, progress?: (event: { phase: string; completed: number; total: number }) => void) {
     const { force } = summaryMediaInputSchema.parse(raw); let summary = await this.get(slug, id);
     if (summary.narration?.status !== "current") summary = await this.narration(slug, id);
+    const pronunciationStory = await loadStory(storyPaths(this.root, slug, 1).storyConfig);
+    const pronunciationEntities = await loadPronunciationEntities(this.root, slug);
+    const missing = pronunciationEntities.filter(entity => !entity.pronunciation).map(entity => ({ ...entity, pronunciation: { mode: "automatic" as const } }));
+    const referenced = [...new Set(resolvePronunciations(summary.narration?.ttsText ?? summary.narration?.text ?? "", missing).map(occurrence => occurrence.entityId))];
+    if (referenced.length) {
+      const base = storyBibleSchema.parse(await readJsonIfExists(storyPaths(this.root, slug, 1).bible) ?? emptyStoryBible());
+      await enrichStoryPronunciations(this.root, slug, base, this.llms.forStage(pronunciationStory.pipeline.storyBible), pronunciationStory.pipeline.storyBible, pronunciationStory.sourceLanguage, referenced, false);
+      summary = await this.get(slug, id);
+    }
     const input = await this.inputs(slug, summary), paths = summaryMediaPaths(this.root, slug, id);
     if (!force && summary.audio?.status === "current") return summary;
     await mkdir(paths.directory, { recursive: true });

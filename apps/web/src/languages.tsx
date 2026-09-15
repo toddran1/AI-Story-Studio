@@ -9,11 +9,12 @@ export const LANGUAGE_OPTIONS = [
   ["pt-BR", "Portuguese · Brazil"],
   ["it-IT", "Italian"],
   ["ru-RU", "Russian"],
+  ["ar-SA", "Arabic"],
 ] as const;
 
 export function LanguageSelect({ value, onChange }: { value: string; onChange: (value: string) => void }) {
   const known = LANGUAGE_OPTIONS.some(([code]) => code === value);
-  return <select value={value} onChange={(event) => onChange(event.target.value)}>{!known && <option value={value}>{value} · Existing value</option>}{LANGUAGE_OPTIONS.map(([code, label]) => <option key={code} value={code}>{label}</option>)}</select>;
+  return <select value={value} onChange={(event) => onChange(event.target.value)}>{!known && <option value={value}>{value ? `${value} · Existing value` : "Infer automatically"}</option>}{LANGUAGE_OPTIONS.map(([code, label]) => <option key={code} value={code}>{label}</option>)}</select>;
 }
 
 export function defaultLocale(language?: string) {

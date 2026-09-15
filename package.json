@@ -37,6 +37,7 @@
     "story:project": "node --import tsx apps/cli/project.ts",
     "story:sources": "node --import tsx apps/cli/sources.ts",
     "story:voice": "node --import tsx apps/cli/voice.ts",
+    "story:pronunciation": "node --import tsx apps/cli/pronunciation.ts",
     "db:migrate": "node --import tsx apps/cli/migrate.ts",
     "web": "node --import tsx apps/server/index.ts --dev",
     "web:build": "vite build",
