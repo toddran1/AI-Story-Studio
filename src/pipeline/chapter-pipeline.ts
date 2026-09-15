@@ -37,6 +37,7 @@ import { loadNarrationNamingEntities } from "../story-bible/narration-names.js";
 import { loadEligibleSummaryContext } from "../summaries/service.js";
 import { CENSOR_AUDIO_VERSION, CensorAudioService, FfmpegCensorAudioService, censorToneConfig } from "../tts/censor-audio.js";
 import { manualAcceptanceFingerprint } from "../studio/stage-acceptance.js";
+import { StageExecutionNode, dependentProcessingStages } from "../studio/stage-execution.js";
 
 export type ForceStage = "translation" | "narration" | "qa" | "story-bible" | "continuity" | "tts" | "audio" | "all";
 export type PipelineStageEvent = { stage: StageName; status: "started" | "completed" | "reused"; state: StageState };
@@ -46,6 +47,8 @@ export type PipelineOptions = {
   source?: Chapter["source"];
   productionRunId?: string; queueJobId?: string;
   onStageEvent?: (event: PipelineStageEvent) => void;
+  /** A dependency-aware manual execution plan. Omitted for normal production. */
+  executionStages?: StageExecutionNode[];
 };
 
 const pending = (): StageState => ({ status: "pending" });
@@ -56,6 +59,8 @@ export class ChapterPipeline {
 
   async run(options: PipelineOptions): Promise<Chapter> {
     const paths = storyPaths(options.root, options.story.slug, options.chapter);
+    const executionStages = options.executionStages ? new Set(options.executionStages) : undefined;
+    const shouldRun = (stage: StageExecutionNode) => !executionStages || executionStages.has(stage);
     await mkdir(paths.chapterDir, { recursive: true });
     const now = new Date().toISOString();
     let chapter = chapterSchema.parse((await readJsonIfExists<Chapter>(paths.chapterMeta)) ?? {
@@ -80,13 +85,16 @@ export class ChapterPipeline {
     const narrationNamingEntities = await loadNarrationNamingEntities(options.root, options.story.slug);
     const basePriorContext = retrieveRelevantContext(bible, source, options.chapter, { recentSummaryCount: options.story.context.recentChapterSummaries, narrationNamingEntities });
     const priorContext = eligibleSummaries.length ? { ...basePriorContext, eligibleSummaries } : basePriorContext;
-    await atomicWriteJson(paths.storyContext, priorContext);
+    // A selected-only run may use an existing stale context. Do not rewrite it
+    // merely because it was read as part of a later-stage invocation.
+    if (shouldRun("context")) await atomicWriteJson(paths.storyContext, priorContext);
 
     const persist = async () => { chapter.updatedAt = new Date().toISOString(); await atomicWriteJson(paths.chapterMeta, chapter); };
     if (options.source) await persist();
     const runStage = async <T>(stage: StageName, fp: string, outputPath: string, details: Partial<StageState>, action: () => Promise<T>): Promise<T | undefined> => {
       const state = chapter.stages[stage];
-      const forced = isForced(options.force, stage);
+      if (!shouldRun(stage)) return undefined;
+      const forced = Boolean(executionStages?.has(stage)) || isForced(options.force, stage);
       const currentOutputFingerprint = await fileFingerprint(outputPath);
       if (!forced && state.status === "complete" && state.manualAcceptance && currentOutputFingerprint && state.outputFingerprint === currentOutputFingerprint && state.manualAcceptance.acceptedFingerprint === manualAcceptanceFingerprint(stage, currentOutputFingerprint, options.story)) {
         logger.info({ event: "pipeline.stage.reused_manual_acceptance", story: options.story.slug, chapter: options.chapter, stage });
@@ -192,18 +200,20 @@ export class ChapterPipeline {
       chapter.stages.qa.usage = result.usage;
       return result.value;
     });
-    const quality = qaResult ?? qaResultSchema.parse(await readJsonIfExists<QaResult>(paths.qa));
-    chapter.quality = { status: quality.status, score: quality.score, issueCategories: [...new Set(activeQaIssues(quality).map((issue) => issue.category))] };
-    await persist();
-    if (quality.status === "warn") logger.warn({ event: "pipeline.qa.warn", story: options.story.slug, chapter: options.chapter, score: quality.score, issues: quality.issues.length });
-    if (quality.status === "fail") {
-      chapter.stages.storyBible = pending();
-      chapter.stages.continuity = pending();
-      chapter.stages.tts = pending();
+    if (shouldRun("qa")) {
+      const quality = qaResult ?? qaResultSchema.parse(await readJsonIfExists<QaResult>(paths.qa));
+      chapter.quality = { status: quality.status, score: quality.score, issueCategories: [...new Set(activeQaIssues(quality).map((issue) => issue.category))] };
       await persist();
-      // QA failure must not replace the last known-good canonical snapshot with
-      // the pre-chapter context. The rejected chapter can be retried later.
-      throw new QualityGateError(`Chapter ${options.chapter} failed QA`, quality);
+      if (quality.status === "warn") logger.warn({ event: "pipeline.qa.warn", story: options.story.slug, chapter: options.chapter, score: quality.score, issues: quality.issues.length });
+      if (quality.status === "fail") {
+        chapter.stages.storyBible = pending();
+        chapter.stages.continuity = pending();
+        chapter.stages.tts = pending();
+        await persist();
+        // QA failure must not replace the last known-good canonical snapshot with
+        // the pre-chapter context. The rejected chapter can be retried later.
+        throw new QualityGateError(`Chapter ${options.chapter} failed QA`, quality);
+      }
     }
     if (options.stopAfter === "qa") { await persist(); return chapter; }
 
@@ -229,13 +239,20 @@ export class ChapterPipeline {
     if (bibleResult) bible = bibleResult;
     else {
       const cachedUpdate = storyBibleUpdateSchema.parse(await readJsonIfExists<StoryBibleUpdate>(paths.bibleUpdate));
-      await persistFullBible(cachedUpdate);
+      // Continuity and TTS need this chapter's cumulative Bible in memory, but
+      // selected-only mode must not modify reused Story Bible artifacts.
+      if (shouldRun("storyBible")) await persistFullBible(cachedUpdate);
+      else bible = mergeStoryBible(bible, cachedUpdate, options.chapter);
     }
     if (options.stopAfter === "storyBible") { await persist(); return chapter; }
 
     const continuityFp = fingerprint({ bible: bible.version, entities: bible.canonicalEntities, relationships: bible.canonicalRelationships, timeline: bible.entityTimeline });
     await runStage("continuity", continuityFp, paths.continuityAnalysis, { provider: "local", model: "deterministic-continuity-v1" }, async () => analyzeAndPersistContinuity(options.root, options.story.slug, bible, options.chapter));
     if (options.stopAfter === "continuity") { await persist(); return chapter; }
+
+    // A visual/manual stage can rely on existing audio without invoking Fish or
+    // rebuilding an unrelated core prefix.
+    if (executionStages && !shouldRun("tts") && !shouldRun("audioMastering")) { await persist(); return chapter; }
 
     // Reader-facing narration remains clean for QA, subtitles, Story Bible, and
     // scene planning. Only Fish receives the model-specific delivery script.
@@ -271,8 +288,9 @@ export class ChapterPipeline {
     });
     if (options.stopAfter === "tts") { await persist(); return chapter; }
 
+    if (!shouldRun("audioMastering")) { await persist(); return chapter; }
     const mastered = await masterStoredChapter({ root: options.root, story: options.story, chapter: options.chapter, processor: this.audio,
-      force: isForced(options.force, "audioMastering"), onEvent: (event) => options.onStageEvent?.({ stage: "audioMastering", status: event.status, state: event.state }) });
+      force: Boolean(executionStages?.has("audioMastering")) || isForced(options.force, "audioMastering"), onEvent: (event) => options.onStageEvent?.({ stage: "audioMastering", status: event.status, state: event.state }) });
     chapter = mastered.chapter;
 
     return chapter;
@@ -299,9 +317,6 @@ async function requireText(path: string, stage: string): Promise<string> {
 const wordCount = (text: string) => text.trim() ? text.trim().split(/\s+/).length : 0;
 const sameLanguage = (source: string, output: string) => source.trim().toLowerCase().replaceAll("_", "-") === output.trim().toLowerCase().replaceAll("_", "-");
 function invalidateDownstream(chapter: Chapter, stage: StageName) {
-  // Continuity is an independently retryable analysis branch, not an input to paid production stages.
-  if (stage === "continuity") return;
-  const order: StageName[] = ["ingestion", "translation", "narration", "qa", "storyBible", "continuity", "tts", "audioMastering", "alignment", "subtitles", "scenePlanning", "artwork", "video"];
-  for (const dependent of order.slice(order.indexOf(stage) + 1)) chapter.stages[dependent] = pending();
-  if (order.indexOf(stage) <= order.indexOf("qa")) chapter.quality = undefined;
+  for (const dependent of dependentProcessingStages(stage)) chapter.stages[dependent] = pending();
+  if (["ingestion", "translation", "narration", "qa"].includes(stage)) chapter.quality = undefined;
 }

@@ -80,9 +80,10 @@ import { SummaryMediaService, summaryMediaInputSchema, summaryNarrationEditSchem
 import { SummaryVisualService, summaryVisualInputSchema, summaryProduceInputSchema } from "../../src/summaries/visuals.js";
 import { generateLocalizedNameSuggestions, localizationSuggestionRequestSchema } from "../../src/story-bible/localization.js";
 import { inspectStagesForCurrent, markCurrentInputSchema, markStagesCurrent } from "../../src/studio/stage-acceptance.js";
+import { executeStagePlan, planStageExecution, stageExecutionInputSchema, stageExecutionModeSchema } from "../../src/studio/stage-execution.js";
 
 const slugSchema = z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/);
-const batchInputSchema = z.object({ from: z.number().int().positive().optional(), to: z.number().int().positive().optional(), force: z.enum(["translation", "narration", "qa", "story-bible", "continuity", "tts", "audio", "all"]).optional(), continueOnError: z.boolean().default(false) }).strict();
+const batchInputSchema = z.object({ from: z.number().int().positive().optional(), to: z.number().int().positive().optional(), force: z.enum(["translation", "narration", "qa", "story-bible", "continuity", "tts", "audio", "all"]).optional(), stage: z.enum(["ingestion", "translation", "narration", "qa", "storyBible", "continuity", "tts", "audioMastering", "alignment", "subtitles", "scenePlanning", "artwork", "video"]).optional(), mode: stageExecutionModeSchema.default("selected"), continueOnError: z.boolean().default(false) }).strict().refine((value) => !(value.stage && value.force), { message: "Choose either a manual stage or the legacy force stage, not both" });
 const qaRepairInputSchema = z.object({ issueIndexes: z.array(z.number().int().nonnegative()).min(1).max(100) }).strict();
 const qaDismissInputSchema = z.object({ issueIndexes: z.array(z.number().int().nonnegative()).min(1).max(100) }).strict();
 const previewInputSchema = z.object({ chapter: z.number().int().positive(), audioPreview: z.boolean().default(false), presets: z.object({ a: previewPresetSchema, b: previewPresetSchema }) }).strict();
@@ -128,6 +129,28 @@ export class StudioOperations {
     const result = await markStagesCurrent(this.root, slug, markCurrentInputSchema.parse(raw));
     invalidateCatalogCache(this.root, slug);
     return result;
+  }
+  async planStageExecution(slug: string, raw: unknown) {
+    slugSchema.parse(slug); const input = stageExecutionInputSchema.parse(raw);
+    return { chapters: await Promise.all(input.chapters.map(async (chapter) => ({ chapter, ...await planStageExecution({ root: this.root, story: slug, chapter, selectedStage: input.stage, mode: input.mode }) }))) };
+  }
+  startStageExecution(slug: string, raw: unknown) {
+    slugSchema.parse(slug); const input = stageExecutionInputSchema.parse(raw);
+    if (input.dryRun) return this.planStageExecution(slug, input);
+    return this.jobs.create("stageExecution", slug, async (control) => withStoryLock(this.root, slug, "manual stage processing", async () => {
+      const story = await loadStory(storyPaths(this.root, slug, 1).storyConfig); const imported = await loadImportedChapters(this.root, slug);
+      const sources = new Map(imported.chapters.map((item) => [item.chapter, item])); const results = [];
+      for (const chapter of input.chapters) {
+        const source = sources.get(chapter); if (!source) throw new ConfigurationError(`Chapter ${chapter} is not imported for story '${slug}'`);
+        const plan = await planStageExecution({ root: this.root, story: slug, chapter, selectedStage: input.stage, mode: input.mode });
+        control.update({ type: "stage-execution.chapter.planned", chapter, plan });
+        await executeStagePlan({ root: this.root, story, chapter, inputPath: source.path, source: source.source, plan,
+          runtime: { pipeline: this.pipeline, alignment: { config: this.alignConfig, engine: this.aligner }, scenePlanner: this.scenePlanner ?? this.runtime.router.forStage(story.pipeline.scenePlanner), image: this.image, video: this.video },
+          onStageEvent: (event) => control.update({ type: "stage", chapter, event }) });
+        results.push({ chapter, plan });
+      }
+      invalidateCatalogCache(this.root, slug); return { results };
+    }));
   }
 
   novelProviders() { return this.registry.listNovelProviders(); }
@@ -305,9 +328,14 @@ export class StudioOperations {
     slugSchema.parse(slug); const input = batchInputSchema.parse(raw);
     return this.jobs.create("batch", slug, async (control) => withStoryLock(this.root, slug, "web batch", async () => {
       const story = await loadStory(storyPaths(this.root, slug, 1).storyConfig); const imported = await loadImportedChapters(this.root, slug);
-      const selected = selectChapterRange(imported.chapters, input.from, input.to); const state = createBatchState({ root: this.root, story: slug, inputDirectory: imported.directory, chapters: selected, allowGaps: true, continueOnError: input.continueOnError, delayMs: 0, force: input.force, stopAfter: batchStopAfter(input.force) });
+      const selected = selectChapterRange(imported.chapters, input.from, input.to); const state = createBatchState({ root: this.root, story: slug, inputDirectory: imported.directory, chapters: selected, allowGaps: true, continueOnError: input.continueOnError, delayMs: 0, force: input.force, stopAfter: batchStopAfter(input.force), stage: input.stage, mode: input.mode });
       const shutdown = new ShutdownController(); control.setPause(() => shutdown.request());
-      return new BatchRunner(this.pipeline).run({ root: this.root, story, chapters: selected, state, shutdown, retry: retryConfigSchema.parse({}),
+      const processor: ChapterProcessor = input.stage ? { run: async (request) => {
+        const plan = await planStageExecution({ root: this.root, story: slug, chapter: request.chapter, selectedStage: input.stage!, mode: input.mode });
+        await executeStagePlan({ root: this.root, story, chapter: request.chapter, inputPath: request.inputPath, source: request.source, plan,
+          runtime: { pipeline: this.pipeline, alignment: { config: this.alignConfig, engine: this.aligner }, scenePlanner: this.scenePlanner ?? this.runtime.router.forStage(story.pipeline.scenePlanner), image: this.image, video: this.video }, onStageEvent: request.onStageEvent });
+      } } : this.pipeline;
+      return new BatchRunner(processor).run({ root: this.root, story, chapters: selected, state, shutdown, retry: retryConfigSchema.parse({}),
         onProgress: (event: ProgressEvent) => control.update(event) });
     }));
   }

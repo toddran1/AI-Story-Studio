@@ -142,6 +142,13 @@ export function createApiHandler(operations: StudioOperations) {
       if (markCurrentPreviewMatch && request.method === "POST") return send(response, 200, await operations.previewMarkStagesCurrent(markCurrentPreviewMatch[1]!, await jsonBody(request)));
       const markCurrentMatch = /^\/api\/stories\/([a-z0-9-]+)\/stages\/mark-current$/.exec(url.pathname);
       if (markCurrentMatch && request.method === "POST") return send(response, 200, await operations.markStagesCurrent(markCurrentMatch[1]!, await jsonBody(request)));
+      const stagePlanMatch = /^\/api\/stories\/([a-z0-9-]+)\/stages\/plan$/.exec(url.pathname);
+      if (stagePlanMatch && request.method === "POST") return send(response, 200, await operations.planStageExecution(stagePlanMatch[1]!, await jsonBody(request)));
+      const stageRunMatch = /^\/api\/stories\/([a-z0-9-]+)\/stages\/run$/.exec(url.pathname);
+      if (stageRunMatch && request.method === "POST") {
+        const result = await operations.startStageExecution(stageRunMatch[1]!, await jsonBody(request));
+        return send(response, "id" in result ? 202 : 200, result);
+      }
       const chapterMatch = /^\/api\/stories\/([a-z0-9-]+)\/chapters\/(\d+)$/.exec(url.pathname);
       if (chapterMatch && request.method === "GET") return send(response, 200, await getChapter(operations.root, chapterMatch[1]!, chapterParam(chapterMatch[2]!)));
       const chapterTextMatch = /^\/api\/stories\/([a-z0-9-]+)\/chapters\/(\d+)\/text$/.exec(url.pathname);

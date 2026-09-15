@@ -7,6 +7,10 @@ describe("translation refusal guard", () => {
     expect(() => assertUsableTranslation("I am unable to provide a verbatim translation of this chapter, but I can offer a general summary of the events. Would you like a summary of the next chapter?")).toThrow(TranslationError);
   });
 
+  it("includes a snippet of the provider response in the error for diagnosis", () => {
+    expect(() => assertUsableTranslation("I am unable to provide a verbatim translation of this chapter due to copyright restrictions. I can offer a general summary instead.")).toThrow(/Provider response began: "I am unable to provide a verbatim translation/);
+  });
+
   it("does not reject ordinary translated prose containing an inability", () => {
     expect(() => assertUsableTranslation("Li Ye frowned. I am unable to move, he thought, as the black mist tightened around his ankles.")).not.toThrow();
   });

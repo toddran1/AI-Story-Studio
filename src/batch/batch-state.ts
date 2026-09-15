@@ -3,6 +3,7 @@ import { BatchState, batchStateSchema } from "./types.js";
 import { DiscoveredChapter } from "./types.js";
 import { StageName } from "../domain/chapter.js";
 import { ForceStage } from "../pipeline/chapter-pipeline.js";
+import { StageExecutionMode } from "../studio/stage-execution.js";
 import { atomicWriteJson } from "../storage/atomic-write.js";
 import { batchPaths } from "../storage/paths.js";
 import { readJsonIfExists } from "../storage/story-files.js";
@@ -10,7 +11,7 @@ import { BatchValidationError } from "../pipeline/errors.js";
 
 export type NewBatchOptions = {
   root: string; story: string; inputDirectory: string; chapters: DiscoveredChapter[];
-  allowGaps: boolean; continueOnError: boolean; delayMs: number; force?: ForceStage; stopAfter?: StageName;
+  allowGaps: boolean; continueOnError: boolean; delayMs: number; force?: ForceStage; stopAfter?: StageName; stage?: StageName; mode?: StageExecutionMode;
 };
 
 export function createBatchState(options: NewBatchOptions): BatchState {
@@ -20,7 +21,7 @@ export function createBatchState(options: NewBatchOptions): BatchState {
   return batchStateSchema.parse({
     id, story: options.story, createdAt: now, updatedAt: now, inputDirectory: options.inputDirectory,
     selection: { from, to }, status: "pending",
-    options: { allowGaps: options.allowGaps, continueOnError: options.continueOnError, delayMs: options.delayMs, force: options.force, stopAfter: options.stopAfter },
+    options: { allowGaps: options.allowGaps, continueOnError: options.continueOnError, delayMs: options.delayMs, force: options.force, stopAfter: options.stopAfter, stage: options.stage, mode: options.mode },
     chapters: Object.fromEntries(options.chapters.map((item) => [String(item.chapter), { status: "pending", input: item.path, attempts: 0 }])),
     summary: { total: options.chapters.length, complete: 0, failed: 0, pending: options.chapters.length, skipped: 0, cancelled: 0 },
     usage: {}, qa: { pass: 0, warn: 0, fail: 0, issueCategories: {} }, elapsedMs: 0,
