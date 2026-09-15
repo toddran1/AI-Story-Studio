@@ -11,8 +11,10 @@ import { importSource } from "../src/source/importer.js";
 import { sourceManifestSchema } from "../src/source/types.js";
 import { TxtSource } from "../src/source/txt-source.js";
 import { computeStaleExtractionChapters, rebuildStoryBibleBeforeChapter } from "../src/story-bible/rebuild.js";
+import { updateCanonicalEntity } from "../src/story-bible/canonical.js";
 import { atomicWrite, atomicWriteJson } from "../src/storage/atomic-write.js";
 import { storyPaths } from "../src/storage/paths.js";
+import { readJsonIfExists } from "../src/storage/story-files.js";
 import { testStory } from "./helpers.js";
 
 const complete = { status: "complete" as const, fingerprint: "input", outputFingerprint: "output" };
@@ -163,5 +165,75 @@ describe("stale artifact visibility", () => {
     await atomicWriteJson(paths.chapterMeta, chapterMetadata(1, manifest.chapters[0]!.fingerprint, { narration: { status: "pending", staleReason: "naming changed" }, tts: { status: "pending" } }));
     const processor: AudioMasteringProcessor = { version: "guard-v1", master: async () => { throw new Error("must not run"); } };
     await expect(masterStoredChapter({ root, story, chapter: 1, processor })).rejects.toThrow("TTS is not complete");
+  });
+
+  it("preserves manual canonical naming and localization settings across a stale regeneration", async () => {
+    const root = await mkdtemp(join(tmpdir(), "stale-canonical-")); const slug = "story";
+    const { paths, manifest } = await importChapter(root, slug, "Original");
+    const firstFingerprint = manifest.chapters[0]!.fingerprint;
+    await atomicWriteJson(paths.bibleUpdate, storyBibleUpdateSchema.parse({
+      characters: [{ canonicalEnglishName: "Su Ming", originalName: "苏明", aliases: ["Ming"], description: "A quiet apprentice", status: "alive", firstSeenChapter: 1, lastSeenChapter: 1 }],
+      chapterSummary: "Su Ming finds the lamp",
+    }));
+    await atomicWriteJson(paths.chapterMeta, chapterMetadata(1, firstFingerprint));
+
+    const initial = await rebuildStoryBibleBeforeChapter(root, slug, 2);
+    const entity = initial.canonicalEntities.find((item) => item.canonicalName === "Su Ming");
+    expect(entity).toBeDefined(); const entityId = entity!.id;
+
+    await updateCanonicalEntity(root, slug, initial, entityId, {
+      canonicalNameLocked: true, notes: "Manual: protagonist keeps the Su Ming spelling.",
+      preferredNarrationName: "Malakai Sterling",
+      localizedNaming: { locale: "en-US", fullName: "Malakai Sterling", shortName: "Malakai", usageMode: "ai_contextual", notes: "Short form in dialogue." },
+      aliasNarrationRules: [{ alias: "Ming", behavior: "custom", replacement: "Mal" }],
+    });
+
+    await makeManifestStale(root, slug);
+    expect(await computeStaleExtractionChapters(root, slug)).toEqual([1]);
+
+    await atomicWriteJson(paths.bibleUpdate, storyBibleUpdateSchema.parse({
+      characters: [
+        { canonicalEnglishName: "Su Ming", originalName: "苏明", aliases: ["Ming", "Lampbearer"], description: "A quiet apprentice who awakened the star lamp", status: "ascended", firstSeenChapter: 1, lastSeenChapter: 1 },
+        { canonicalEnglishName: "Veyra", originalName: "薇拉", description: "A rival seeker", status: "alive", firstSeenChapter: 1, lastSeenChapter: 1 },
+      ],
+      chapterSummary: "Su Ming awakens the star lamp",
+    }));
+    // Regeneration re-runs against the replaced source, so the refreshed
+    // extraction is current again.
+    await atomicWriteJson(paths.chapterMeta, chapterMetadata(1, "f".repeat(64)));
+
+    const rebuilt = await rebuildStoryBibleBeforeChapter(root, slug, 2);
+    const refreshed = rebuilt.canonicalEntities.find((item) => item.id === entityId);
+    expect(refreshed).toBeDefined();
+    expect(refreshed!.canonicalName).toBe("Su Ming");
+    expect(refreshed!.localizedNaming).toMatchObject({ fullName: "Malakai Sterling", shortName: "Malakai", usageMode: "ai_contextual", notes: "Short form in dialogue." });
+    expect(refreshed!.preferredNarrationName).toBe("Malakai Sterling");
+    expect(refreshed!.aliasNarrationRules).toEqual([{ alias: "Ming", behavior: "custom", replacement: "Mal" }]);
+    expect(refreshed!.canonicalNameLocked).toBe(true);
+    expect(refreshed!.notes).toBe("Manual: protagonist keeps the Su Ming spelling.");
+    expect(refreshed!.origin).toBe("manual");
+
+    // Newly extracted facts, appearances, status, and provenance still update.
+    expect(refreshed!.description).toContain("awakened the star lamp");
+    expect(refreshed!.status).toBe("ascended");
+    expect(refreshed!.aliases).toContain("Lampbearer");
+    expect(refreshed!.provenance.some((item) => item.chapter === 1 && item.kind === "extraction")).toBe(true);
+    expect(rebuilt.entityTimeline.some((event) => event.entityId === entityId && event.type === "appearance" && event.chapter === 1)).toBe(true);
+    expect(rebuilt.chapterSummaries).toEqual({ "1": "Su Ming awakens the star lamp" });
+
+    // The refreshed extraction is current again, and the manual overlay survives.
+    expect(await computeStaleExtractionChapters(root, slug)).toEqual([]);
+    const overlay = await readJsonIfExists<{ overrides: Record<string, unknown> }>(storyPaths(root, slug, 1).bibleCanonicalManual);
+    expect(Object.keys(overlay?.overrides ?? {})).toEqual([entityId]);
+
+    // Manual settings never leak onto a genuinely different entity.
+    const other = rebuilt.canonicalEntities.find((item) => item.canonicalName === "Veyra");
+    expect(other).toBeDefined(); expect(other!.id).not.toBe(entityId);
+    expect(other!.localizedNaming).toBeUndefined();
+    expect(other!.preferredNarrationName).toBeUndefined();
+    expect(other!.aliasNarrationRules).toEqual([]);
+    expect(other!.canonicalNameLocked).toBe(false);
+    expect(other!.notes).toBe("");
+    expect(other!.origin).toBe("automatic");
   });
 });
