@@ -24,14 +24,26 @@ describe("Story Bible chronological reconstruction", () => {
     expect(beforeTwo.chapterSummaries).toEqual({ "1": "Found a lamp" });
   });
 
-  it("ignores a stale update after its Story Bible stage is invalidated", async () => {
+  it("retains a saved extraction as stale after its Story Bible stage is invalidated", async () => {
     const root = await mkdtemp(join(tmpdir(), "bible-invalidated-")); const slug = "story";
     const paths = storyPaths(root, slug, 1); const update = storyBibleUpdateSchema.parse({ chapterSummary: "Stale summary" });
     await mkdir(dirname(paths.bibleUpdate), { recursive: true });
     await writeFile(paths.bibleUpdate, JSON.stringify(update));
     await writeFile(paths.chapterMeta, JSON.stringify({ stages: { storyBible: { status: "pending" } } }));
     const rebuilt = await rebuildStoryBibleBeforeChapter(root, slug, 2);
-    expect(rebuilt.chapterSummaries).toEqual({});
+    expect(rebuilt.chapterSummaries).toEqual({ "1": "Stale summary" });
+    expect(await computeStaleExtractionChapters(root, slug)).toEqual([1]);
+  });
+
+  it("preserves later completed entities when an earlier chapter supplies a replacement update", async () => {
+    const root = await mkdtemp(join(tmpdir(), "bible-rebuild-replacement-")); const slug = "story";
+    const updates = ["Early", "Later", "Latest"].map((name) => storyBibleUpdateSchema.parse({ characters: [{ canonicalEnglishName: name, originalName: name, description: name, firstSeenChapter: 1, lastSeenChapter: 1 }], chapterSummary: name }));
+    for (const [index, update] of updates.entries()) {
+      const paths = storyPaths(root, slug, index + 1); await mkdir(dirname(paths.bibleUpdate), { recursive: true }); await writeFile(paths.bibleUpdate, JSON.stringify(update)); await writeFile(paths.chapterMeta, JSON.stringify({ stages: { storyBible: { status: "complete" } } }));
+    }
+    const replacement = storyBibleUpdateSchema.parse({ characters: [{ canonicalEnglishName: "Early revised", originalName: "Early", description: "Revised", firstSeenChapter: 1, lastSeenChapter: 1 }], chapterSummary: "Early revised" });
+    const rebuilt = await rebuildStoryBibleBeforeChapter(root, slug, Number.MAX_SAFE_INTEGER, { chapterOverride: { chapter: 1, update: replacement } });
+    expect(rebuilt.canonicalEntities.map((entity) => entity.canonicalName)).toEqual(expect.arrayContaining(["Early revised", "Later", "Latest"]));
   });
 
   it("keeps Story Bible updates whose imported source fingerprint is stale", async () => {

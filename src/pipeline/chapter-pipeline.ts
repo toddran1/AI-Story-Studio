@@ -2,7 +2,7 @@ import { mkdir, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { Chapter, StageName, StageState, chapterSchema } from "../domain/chapter.js";
 import { Story } from "../domain/story.js";
-import { StoryBibleUpdate, storyBibleUpdateSchema } from "../domain/story-bible.js";
+import { StoryBibleUpdate, storyBibleUpdateSchema, storyBibleSchema } from "../domain/story-bible.js";
 import { activeQaIssues, QaResult, qaResultSchema } from "../domain/qa.js";
 import { LLMRouter } from "../llm/router.js";
 import { TTSProvider } from "../tts/provider.js";
@@ -25,6 +25,7 @@ import { extractStoryBible } from "../story-bible/extractor.js";
 import { QA_PROMPT_VERSION } from "../qa/prompts.js";
 import { validateChapterQuality } from "../qa/validator.js";
 import { mergeStoryBible, normalizeStoryBibleUpdate } from "../story-bible/updater.js";
+import { backfillCanonicalSnapshots } from "../story-bible/canonical.js";
 import { rebuildStoryBibleBeforeChapter } from "../story-bible/rebuild.js";
 import { PipelineError, QualityGateError } from "./errors.js";
 import { AudioMasteringProcessor, FfmpegMasteringProcessor } from "../audio/mastering.js";
@@ -70,6 +71,8 @@ export class ChapterPipeline {
     }
     const source = await readFile(options.inputPath, "utf8");
     if (!source.trim()) throw new PipelineError(`Input file is empty: ${options.inputPath}`);
+    const savedBible = await readJsonIfExists(paths.bible);
+    if (savedBible) await backfillCanonicalSnapshots(options.root, options.story.slug, storyBibleSchema.parse(savedBible));
     let bible = await rebuildStoryBibleBeforeChapter(options.root, options.story.slug, options.chapter);
     const eligibleSummaries = await loadEligibleSummaryContext(options.root, options.story.slug, options.chapter, source);
     const baseTranslationContext = retrieveRelevantContext(bible, source, options.chapter, { recentSummaryCount: options.story.context.recentChapterSummaries });
@@ -206,22 +209,27 @@ export class ChapterPipeline {
 
     const bibleConfig = options.story.pipeline.storyBible;
     const bibleFp = fingerprint({ narration: fingerprint(narration), config: bibleConfig, prompt: STORY_BIBLE_PROMPT_VERSION, context: priorContext });
+    const persistFullBible = async (update: StoryBibleUpdate) => {
+      // A rerun of an early chapter starts with only its prior context. Never let
+      // that partial context replace the cumulative Story Bible snapshot.
+      bible = mergeStoryBible(bible, update, options.chapter);
+      const cumulative = await rebuildStoryBibleBeforeChapter(options.root, options.story.slug, Number.MAX_SAFE_INTEGER, { chapterOverride: { chapter: options.chapter, update } });
+      await atomicWriteJson(paths.bible, cumulative);
+    };
     const bibleResult = await runStage("storyBible", bibleFp, paths.bibleUpdate, {
       provider: bibleConfig.provider, model: bibleConfig.model, promptVersion: STORY_BIBLE_PROMPT_VERSION,
     }, async () => {
       const result = await extractStoryBible(this.llms.forStage(bibleConfig), bibleConfig, options.chapter, narration, priorContext);
       const update = normalizeStoryBibleUpdate(storyBibleUpdateSchema.parse(result.value), options.chapter);
       await atomicWriteJson(paths.bibleUpdate, update);
-      bible = mergeStoryBible(bible, update, options.chapter);
-      await atomicWriteJson(paths.bible, bible);
+      await persistFullBible(update);
       chapter.stages.storyBible.usage = result.usage;
       return bible;
     });
     if (bibleResult) bible = bibleResult;
     else {
       const cachedUpdate = storyBibleUpdateSchema.parse(await readJsonIfExists<StoryBibleUpdate>(paths.bibleUpdate));
-      bible = mergeStoryBible(bible, cachedUpdate, options.chapter);
-      await atomicWriteJson(paths.bible, bible);
+      await persistFullBible(cachedUpdate);
     }
     if (options.stopAfter === "storyBible") { await persist(); return chapter; }
 

@@ -59,7 +59,7 @@ import { alignmentConfig, createAlignmentEngine } from "../../src/alignment/conf
 import { AlignmentEngine } from "../../src/alignment/types.js";
 import { alignStoredChapter } from "../../src/alignment/chapter-alignment.js";
 import { discardManualSubtitles, saveManualSubtitles } from "../../src/subtitles/chapter-subtitles.js";
-import { mergeCanonicalEntities, undoCanonicalMerge, updateCanonicalEntity } from "../../src/story-bible/canonical.js";
+import { backfillCanonicalSnapshots, mergeCanonicalEntities, undoCanonicalMerge, updateCanonicalEntity } from "../../src/story-bible/canonical.js";
 import { continuityFindingSchema, resolveContinuityFinding } from "../../src/story-bible/continuity.js";
 import { PostgresUsageRepository } from "../../src/cost/repository.js";
 import { estimatePlanCost } from "../../src/cost/estimate.js";
@@ -434,6 +434,7 @@ export class StudioOperations {
   async deleteBibleEntry(slug: string, id: string) { slugSchema.parse(slug); return withStoryLock(this.root, slug, "manual Story Bible delete", async () => { const base = await getStoryBible(this.root, slug); await deleteBibleEntry(this.root, slug, base, id); await recordActivity(this.root, slug, "bible.edited", "Deleted a manual Story Bible entry"); return { status: "deleted" }; }); }
   async updateCanonicalEntity(slug: string, id: string, raw: unknown) { slugSchema.parse(slug); return withStoryLock(this.root, slug, "canonical entity edit", async () => {
     const current = await getStoryBible(this.root, slug); const before = current.canonicalEntities.find((item) => item.id === id); if (!before) throw new Error("Canonical entity was not found");
+    await backfillCanonicalSnapshots(this.root, slug, current);
     const base = await getStoryBible(this.root, slug, { includeCanonicalOverlay: false }); const overlayPath = storyPaths(this.root, slug, 1).bibleCanonicalManual;
     const priorOverlay = await readFile(overlayPath).catch((error: NodeJS.ErrnoException) => { if (error.code === "ENOENT") return undefined; throw error; });
     const result = await updateCanonicalEntity(this.root, slug, base, id, raw); let entity; let invalidation;

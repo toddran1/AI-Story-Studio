@@ -6,7 +6,7 @@ import { getCanonicalEntitiesPage } from "../apps/server/catalog.js";
 import { emptyStoryBible, storyBibleUpdateSchema } from "../src/domain/story-bible.js";
 import { atomicWriteJson } from "../src/storage/atomic-write.js";
 import { storyPaths } from "../src/storage/paths.js";
-import { applyCanonicalOverlay, findDuplicateSuggestions, mergeCanonicalEntities, undoCanonicalMerge, updateCanonicalEntity } from "../src/story-bible/canonical.js";
+import { applyCanonicalOverlay, backfillCanonicalSnapshots, findDuplicateSuggestions, mergeCanonicalEntities, undoCanonicalMerge, updateCanonicalEntity } from "../src/story-bible/canonical.js";
 import { analyzeAndPersistContinuity, detectContinuityFindings, resolveContinuityFinding } from "../src/story-bible/continuity.js";
 import { retrieveRelevantContext } from "../src/story-bible/retrieval.js";
 import { mergeStoryBible } from "../src/story-bible/updater.js";
@@ -34,11 +34,44 @@ describe("advanced Story Bible continuity", () => {
     await undoCanonicalMerge(root, "demo-story", bible, merged.merge.id); const restored = await applyCanonicalOverlay(root, "demo-story", bible); expect(restored.bible.canonicalEntities.map((item) => item.id)).toEqual(expect.arrayContaining([su!.id, doctor!.id]));
   });
 
+  it("keeps a protected canonical record visible when a partial rebuild omits its automatic entity", async () => {
+    const root = await mkdtemp(join(tmpdir(), "canonical-bible-orphan-"));
+    const complete = mergeStoryBible(emptyStoryBible(), update(4, { characters: [named("Su Qiang", 4, { originalName: "苏强" })] }), 4);
+    const su = complete.canonicalEntities[0]!;
+    await updateCanonicalEntity(root, "demo-story", complete, su.id, { localizedNaming: { locale: "en-US", fullName: "Barrett Sterling", usageMode: "ai_contextual" } });
+    const partial = emptyStoryBible();
+    const restored = await applyCanonicalOverlay(root, "demo-story", partial);
+    expect(restored.bible.canonicalEntities).toEqual(expect.arrayContaining([expect.objectContaining({ id: su.id, canonicalName: "Su Qiang", originalName: "苏强", localizedNaming: expect.objectContaining({ fullName: "Barrett Sterling" }), origin: "manual" })]));
+  });
+
   it("resolves chained merge references and rejects merge cycles", async () => {
     const root = await mkdtemp(join(tmpdir(), "canonical-chain-")); const base = mergeStoryBible(emptyStoryBible(), update(1, { characters: [named("Alpha", 1), named("Beta", 1), named("Gamma", 1)], relationships: [{ subject: "Alpha", object: "Beta", relationship: "ally", firstSeenChapter: 1, lastSeenChapter: 1 }] }), 1); const [alpha, beta, gamma] = base.canonicalEntities;
     await mergeCanonicalEntities(root, "demo-story", base, beta!.id, [alpha!.id], "First merge"); const chained = await mergeCanonicalEntities(root, "demo-story", base, gamma!.id, [beta!.id], "Second merge");
     expect(chained.bible.canonicalEntities.map((item) => item.id)).toEqual([gamma!.id]); expect(chained.bible.canonicalRelationships[0]).toMatchObject({ sourceEntityId: gamma!.id, targetEntityId: gamma!.id });
     const cycleRoot = await mkdtemp(join(tmpdir(), "canonical-cycle-")); await mergeCanonicalEntities(cycleRoot, "demo-story", base, beta!.id, [alpha!.id], "A to B"); await expect(mergeCanonicalEntities(cycleRoot, "demo-story", base, alpha!.id, [beta!.id], "B to A")).rejects.toThrow(/cycle/);
+  });
+
+  it("preserves a merge source and its references while the destination is absent", async () => {
+    const root = await mkdtemp(join(tmpdir(), "canonical-missing-target-"));
+    const base = mergeStoryBible(emptyStoryBible(), update(1, { characters: [named("Alpha", 1), named("Beta", 1)], relationships: [{ subject: "Alpha", object: "Beta", relationship: "ally", firstSeenChapter: 1, lastSeenChapter: 1 }] }), 1);
+    const [alpha, beta] = base.canonicalEntities;
+    await mergeCanonicalEntities(root, "demo-story", base, beta!.id, [alpha!.id], "Same person");
+    const partial = structuredClone(base); partial.canonicalEntities = [alpha!];
+    const result = await applyCanonicalOverlay(root, "demo-story", partial);
+    expect(result.bible.canonicalEntities.map((entity) => entity.id)).toContain(alpha!.id);
+    expect(result.bible.canonicalRelationships[0]?.sourceEntityId).toBe(alpha!.id);
+    expect(result.bible.entityTimeline.some((event) => event.entityId === alpha!.id)).toBe(true);
+  });
+
+  it("backfills legacy protected records and allows editing their recovered snapshots", async () => {
+    const root = await mkdtemp(join(tmpdir(), "canonical-legacy-"));
+    const base = mergeStoryBible(emptyStoryBible(), update(4, { characters: [named("Su Qiang", 4, { originalName: "苏强" })] }), 4);
+    const id = base.canonicalEntities[0]!.id;
+    await atomicWriteJson(storyPaths(root, "demo-story", 1).bibleCanonicalManual, { version: 1, overrides: { [id]: { preferredNarrationName: "Barrett Sterling", updatedAt: new Date().toISOString() } }, merges: [] });
+    expect(await backfillCanonicalSnapshots(root, "demo-story", base)).toBe(1);
+    expect(await backfillCanonicalSnapshots(root, "demo-story", base)).toBe(0);
+    const result = await updateCanonicalEntity(root, "demo-story", emptyStoryBible(), id, { notes: "Recovered record" });
+    expect(result.bible.canonicalEntities[0]).toMatchObject({ id, preferredNarrationName: "Barrett Sterling", notes: "Recovered record" });
   });
 
   it("learns aliases and provenance while canonical records are locked", () => {
