@@ -3,19 +3,30 @@ import { pathToFileURL } from "node:url";
 import { loadEnvironment, resolveStudioRoot } from "../../src/config/env.js";
 import { createPipelineRuntime } from "../../src/pipeline/create-pipeline.js";
 import { SummaryService, coverage } from "../../src/summaries/service.js";
-import { summaryIdSchema, summarySourceModeSchema, summaryTypeSchema } from "../../src/summaries/types.js";
+import { summaryIdSchema, summarySourceModeSchema, summaryTypeSchema, SUMMARY_WORDS_PER_MINUTE } from "../../src/summaries/types.js";
 import { withStoryLock } from "../../src/storage/story-lock.js";
+import { SummaryMediaService, summaryExportTypeSchema } from "../../src/summaries/media.js";
 
 export type SummaryCommand =
   | { action: "list"; story: string }
   | { action: "show" | "delete"; story: string; id: string }
   | { action: "regenerate"; story: string; id: string; overrides: Record<string, unknown> }
-  | { action: "generate"; story: string; input: Record<string, unknown> };
+  | { action: "generate"; story: string; input: Record<string, unknown> }
+  | { action: "narration" | "audio"; story: string; id: string; force: boolean }
+  | { action: "export"; story: string; id: string; type: "summary" | "narration" | "audio" };
 
 export function parseSummaryArgs(values: string[]): SummaryCommand {
   const [action, story, positionalId, ...rest] = values;
-  if (!action || !story || !["generate", "list", "show", "regenerate", "delete"].includes(action)) usage();
+  if (!action || !story || !["generate", "list", "show", "regenerate", "delete", "narration", "audio", "export"].includes(action)) usage();
   validateStory(story);
+  if (action === "narration" || action === "audio") {
+    if (!positionalId || (rest.length && (rest.length !== 1 || rest[0] !== "--force"))) usage(`${action} requires an ID and optionally --force`);
+    return { action, story, id: summaryIdSchema.parse(positionalId), force: rest[0] === "--force" };
+  }
+  if (action === "export") {
+    if (!positionalId || rest.length !== 2 || rest[0] !== "--type") usage("Export requires an ID and --type summary|narration|audio");
+    return { action, story, id: summaryIdSchema.parse(positionalId), type: summaryExportTypeSchema.parse(rest[1]) };
+  }
   if (action === "list") { if (positionalId || rest.length) usage("List does not accept additional arguments"); return { action, story }; }
   if (action === "show" || action === "delete") { if (!positionalId || rest.length) usage(`${action} requires one summary ID`); return { action, story, id: summaryIdSchema.parse(positionalId) }; }
   if (action === "regenerate") {
@@ -35,17 +46,25 @@ export function parseSummaryArgs(values: string[]): SummaryCommand {
 async function main() {
   const command = parseSummaryArgs(process.argv.slice(2));
   const env = loadEnvironment(); const root = resolveStudioRoot(env); const runtime = createPipelineRuntime(env); const service = new SummaryService(root, runtime.router);
-  await runSummaryCommand(command, { root, service, stdout: (text) => process.stdout.write(text), stderr: (text) => process.stderr.write(text) });
+  const media = new SummaryMediaService(root, runtime.router, runtime.tts, runtime.censor, runtime.audio);
+  await runSummaryCommand(command, { root, service, media, stdout: (text) => process.stdout.write(text), stderr: (text) => process.stderr.write(text) });
 }
 
-export async function runSummaryCommand(command: SummaryCommand, dependencies: { root: string; service: SummaryService; stdout: (text: string) => unknown; stderr: (text: string) => unknown }) {
+export async function runSummaryCommand(command: SummaryCommand, dependencies: { root: string; service: SummaryService; media?: SummaryMediaService; stdout: (text: string) => unknown; stderr: (text: string) => unknown }) {
   const { root, service, stdout, stderr } = dependencies;
   if (command.action === "list") {
     const records = await service.list(command.story);
     stdout(records.length ? records.map((item) => `${item.id}\t${item.status}\t${coverage(item.chapters)}\t${item.summaryType}\t${item.title}`).join("\n") + "\n" : "No summaries found.\n");
     return;
   }
-  if (command.action === "show") { stdout(`${JSON.stringify(await service.get(command.story, command.id), null, 2)}\n`); return; }
+  if (command.action === "show") { stdout(`${JSON.stringify(await (dependencies.media ?? service).get(command.story, command.id), null, 2)}\n`); return; }
+  if (command.action === "narration" || command.action === "audio" || command.action === "export") {
+    const media = dependencies.media; if (!media) throw new Error("Summary media services are not configured");
+    const result = await withStoryLock<unknown>(root, command.story, `summary ${command.action}`, () => command.action === "export"
+      ? media.export(command.story, command.id, command.type)
+      : media[command.action](command.story, command.id, { force: command.force }));
+    stdout(`${JSON.stringify(result, null, 2)}\n`); return;
+  }
   if (command.action === "delete") {
     await withStoryLock(root, command.story, "summary deletion", () => service.delete(command.story, command.id));
     stdout(`Deleted ${command.id}.\n`); return;
@@ -68,6 +87,7 @@ function parseOptions(values: string[], selectionAllowed: boolean) {
     else if (key === "--type") result.summaryType = summaryTypeSchema.parse(value);
     else if (key === "--source") result.sourceMode = summarySourceModeSchema.parse(value);
     else if (key === "--target-length") result.targetWords = integer(value, 50, 20_000, "Target length");
+    else if (key === "--target-minutes") { const minutes = Number(value); if (!Number.isFinite(minutes) || minutes < 50/SUMMARY_WORDS_PER_MINUTE || minutes > 20_000/SUMMARY_WORDS_PER_MINUTE) usage("Target minutes must be between 0.34 and 133.33"); result.targetWords = Math.round(minutes * SUMMARY_WORDS_PER_MINUTE); }
     else if (key === "--chunk-size") result.chunkSize = integer(value, 1, 100, "Chunk size");
     else if (key === "--focus") result.focus = value;
     else if (key === "--instructions") result.instructions = value;
@@ -82,6 +102,6 @@ function parseOptions(values: string[], selectionAllowed: boolean) {
 
 function integer(value: string, min: number, max: number, label: string) { const number = Number(value); if (!Number.isSafeInteger(number) || number < min || number > max) usage(`${label} must be an integer from ${min} to ${max}`); return number; }
 function validateStory(story: string) { if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(story)) usage("Invalid story slug"); }
-function usage(message = "Invalid summary command"): never { throw new Error(`${message}\nUsage:\n  npm run story:summary -- generate <story> (--from N --to N | --chapters N,N) [--title text] [--type brief|detailed|mini-chapter|arc|character-focused|custom] [--source original|translated|chapter-summaries] [--target-length words] [--model provider:model] [--context]\n  npm run story:summary -- list <story>\n  npm run story:summary -- show <story> <summary-id>\n  npm run story:summary -- regenerate <story> <summary-id> [generation options]\n  npm run story:summary -- delete <story> <summary-id>`); }
+function usage(message = "Invalid summary command"): never { throw new Error(`${message}\nUsage:\n  npm run story:summary -- generate <story> (--from N --to N | --chapters N,N) [--title text] [--type brief|detailed|mini-chapter|arc|character-focused|custom] [--source original|translated|chapter-summaries] [--target-length words] [--model provider:model] [--context]\n  npm run story:summary -- list <story>\n  npm run story:summary -- show <story> <summary-id>\n  npm run story:summary -- regenerate <story> <summary-id> [generation options]\n  npm run story:summary -- delete <story> <summary-id>\n  npm run story:summary -- narration <story> <summary-id> [--force]\n  npm run story:summary -- audio <story> <summary-id> [--force]\n  npm run story:summary -- export <story> <summary-id> --type summary|narration|audio\n  Generation also accepts --target-minutes N (150 words/minute).`); }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) main().catch((error: unknown) => { process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`); process.exitCode = 1; });

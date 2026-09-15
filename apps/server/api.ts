@@ -111,6 +111,15 @@ export function createApiHandler(operations: StudioOperations) {
       if (summaryMatch && request.method === "DELETE") { await jsonBody(request); return send(response, 200, await operations.deleteSummary(summaryMatch[1]!, summaryMatch[2]!)); }
       const summaryRegenerateMatch = /^\/api\/stories\/([a-z0-9-]+)\/summaries\/(sum_[a-f0-9-]{36})\/regenerate$/.exec(url.pathname);
       if (summaryRegenerateMatch && request.method === "POST") return send(response, 202, operations.regenerateSummary(summaryRegenerateMatch[1]!, summaryRegenerateMatch[2]!, await jsonBody(request)));
+      const summaryMediaMatch = /^\/api\/stories\/([a-z0-9-]+)\/summaries\/(sum_[a-f0-9-]{36})\/(narration|audio)$/.exec(url.pathname);
+      if (summaryMediaMatch && request.method === "POST") return send(response, 202, await operations.startSummaryMedia(summaryMediaMatch[1]!, summaryMediaMatch[2]!, summaryMediaMatch[3]! as "narration" | "audio", await jsonBody(request)));
+      if (summaryMediaMatch && summaryMediaMatch[3] === "narration" && request.method === "PUT") return send(response, 200, { summary: await operations.editSummaryNarration(summaryMediaMatch[1]!, summaryMediaMatch[2]!, await jsonBody(request)) });
+      const summaryExportMatch = /^\/api\/stories\/([a-z0-9-]+)\/summaries\/(sum_[a-f0-9-]{36})\/export\/(summary|narration|audio)$/.exec(url.pathname);
+      if (summaryExportMatch && request.method === "GET") {
+        const artifact = await operations.summaryMedia().export(summaryExportMatch[1]!, summaryExportMatch[2]!, summaryExportMatch[3]!);
+        if (url.searchParams.get("download") === "1") response.setHeader("content-disposition", `attachment; filename="${artifact.name}"`);
+        return sendFile(request, response, artifact.path, artifact.contentType);
+      }
       const dashboardMatch = /^\/api\/stories\/([a-z0-9-]+)\/dashboard$/.exec(url.pathname);
       if (dashboardMatch && request.method === "GET") return send(response, 200, await getStoryDashboard(operations.root, dashboardMatch[1]!));
       const outputsMatch = /^\/api\/stories\/([a-z0-9-]+)\/outputs$/.exec(url.pathname);

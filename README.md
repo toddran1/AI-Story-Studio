@@ -555,6 +555,29 @@ npm run story:summary -- delete undead-disaster sum_<uuid>
 
 Use `--model provider:model` for an explicit routing override. Without it, summary generation follows the story's configured narration model. Progress is printed for source preparation, first-pass batches, combination levels, and finalization.
 
+### Summary narration and listening copies
+
+Completed recaps have **Summary**, **Narration**, and **Audio** tabs. Summary is canonical text; naming, profanity, voice and mastering preferences never rewrite it. Narration uses the chapter narration service and the book’s narration model, localization full/short forms, contextual aliases and legacy preferred names. AI-contextual choices are made by the model, not deterministic replacement. Audio consumes only narration through the configured generic TTS router, existing censor-tone service and FFmpeg mastering.
+
+Manual narration edits are preserved. A naming/narration change marks them stale and review-required: retain/mark current after reviewing, or explicitly regenerate to replace them. Canonical edits invalidate narration and audio; voice changes invalidate TTS/mastering only; mastering changes reuse raw TTS. Every reuse verifies recorded fingerprints, including chunk files. Derivative provenance is stored with the summary JSON; text exports, raw audio, TTS chunks and mastered MP3 live in `summaries/<summary-id>/`.
+
+Choose a target in words or estimated audio minutes when creating a recap (default estimate: 150 words/minute; five minutes means 750 words). The Audio tab shows measured duration after mastering. Downloads are server-served TXT/MP3 files with chapter-based filenames; audio supports byte-range playback.
+
+```sh
+npm run story:summary -- generate undead-disaster --from 1 --to 4 --target-minutes 5
+npm run story:summary -- narration undead-disaster sum_<uuid>
+npm run story:summary -- narration undead-disaster sum_<uuid> --force # replaces manual narration
+npm run story:summary -- audio undead-disaster sum_<uuid>
+npm run story:summary -- audio undead-disaster sum_<uuid> --force # regenerates TTS and master
+npm run story:summary -- export undead-disaster sum_<uuid> --type summary
+npm run story:summary -- export undead-disaster sum_<uuid> --type narration
+npm run story:summary -- export undead-disaster sum_<uuid> --type audio
+```
+
+CLI exports return a JSON artifact descriptor containing its absolute path, filename and content type. The web/API and CLI use the same services. API operations: POST `/api/stories/<slug>/summaries/<id>/narration` or `/audio` with `{ "force": false }`; PUT `/narration` with `{ "text": "..." }` or `{ "acceptCurrent": true }`; GET `/export/summary`, `/export/narration`, or `/export/audio` (append `?download=1` for attachment download).
+
+Summary narration/audio jobs use the existing web job interface with durable filesystem records under `.data/summary-jobs/`, rather than forcing non-chapter work into the chapter-range Postgres queue. On restart, interrupted jobs are reported as paused; they are never silently replayed through paid providers. Re-run the summary action to resume from current artifacts (for example, completed TTS is reused after an interrupted master).
+
 ### Localized narration names
 
 `story:names` uses the same canonical Story Bible overlay, invalidation rules, and localization suggestion service as the browser. It changes narration-facing localization only; canonical translation names remain unchanged.

@@ -33,6 +33,7 @@ import { withUsageScope } from "../cost/context.js";
 import { loadNarrationNamingEntities } from "../story-bible/narration-names.js";
 import { loadEligibleSummaryContext } from "../summaries/service.js";
 import { CENSOR_AUDIO_VERSION, CensorAudioService, FfmpegCensorAudioService, censorToneConfig } from "../tts/censor-audio.js";
+import { manualAcceptanceFingerprint } from "../studio/stage-acceptance.js";
 
 export type ForceStage = "translation" | "narration" | "qa" | "story-bible" | "continuity" | "tts" | "audio" | "all";
 export type PipelineStageEvent = { stage: StageName; status: "started" | "completed" | "reused"; state: StageState };
@@ -82,7 +83,7 @@ export class ChapterPipeline {
       const state = chapter.stages[stage];
       const forced = isForced(options.force, stage);
       const currentOutputFingerprint = await fileFingerprint(outputPath);
-      if (!forced && state.status === "complete" && state.manualAcceptance && currentOutputFingerprint && state.outputFingerprint === currentOutputFingerprint) {
+      if (!forced && state.status === "complete" && state.manualAcceptance && currentOutputFingerprint && state.outputFingerprint === currentOutputFingerprint && state.manualAcceptance.acceptedFingerprint === manualAcceptanceFingerprint(stage, currentOutputFingerprint, options.story)) {
         logger.info({ event: "pipeline.stage.reused_manual_acceptance", story: options.story.slug, chapter: options.chapter, stage });
         options.onStageEvent?.({ stage, status: "reused", state });
         return undefined;

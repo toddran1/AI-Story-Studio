@@ -73,6 +73,7 @@ import { LLMRouter } from "../../src/llm/router.js";
 import { validateChapterQuality } from "../../src/qa/validator.js";
 import { emptyStoryBible, storyBibleSchema } from "../../src/domain/story-bible.js";
 import { SummaryService } from "../../src/summaries/service.js";
+import { SummaryMediaService, summaryMediaInputSchema, summaryNarrationEditSchema } from "../../src/summaries/media.js";
 import { generateLocalizedNameSuggestions, localizationSuggestionRequestSchema } from "../../src/story-bible/localization.js";
 import { inspectStagesForCurrent, markCurrentInputSchema, markStagesCurrent } from "../../src/studio/stage-acceptance.js";
 
@@ -312,7 +313,20 @@ export class StudioOperations {
   async appCostAnalytics(filters: Parameters<PostgresUsageRepository["summary"]>[0]) { if (!this.usage) throw new Error("Cost analytics requires DATABASE_URL"); return this.usage.summary(filters); }
 
   listSummaries(slug: string, options?: Parameters<SummaryService["list"]>[1]) { slugSchema.parse(slug); return new SummaryService(this.root, this.llm).list(slug, options); }
-  getSummary(slug: string, id: string) { slugSchema.parse(slug); return new SummaryService(this.root, this.llm).get(slug, id); }
+  summaryMedia() { return new SummaryMediaService(this.root, this.llm, this.tts, this.censor, this.audio); }
+  summaryJobsDirectory() { return join(this.root, ".data", "summary-jobs"); }
+  getSummary(slug: string, id: string) { slugSchema.parse(slug); return this.summaryMedia().get(slug, id); }
+  startSummaryMedia(slug: string, id: string, stage: "narration" | "audio", raw: unknown) {
+    slugSchema.parse(slug); const input = summaryMediaInputSchema.parse(raw);
+    return this.jobs.createDurable(this.summaryJobsDirectory(), slug, async (control) => withStoryLock(this.root, slug, `summary ${stage}`, () =>
+      withUsageScope({ story: slug, stage: stage === "audio" ? "tts" : "narration" }, () => stage === "narration"
+        ? this.summaryMedia().narration(slug, id, input)
+        : this.summaryMedia().audio(slug, id, input, (event) => control.update(event)))));
+  }
+  editSummaryNarration(slug: string, id: string, raw: unknown) {
+    slugSchema.parse(slug); summaryNarrationEditSchema.parse(raw);
+    return withStoryLock(this.root, slug, "summary narration edit", () => this.summaryMedia().editNarration(slug, id, raw));
+  }
   startSummary(slug: string, raw: unknown) {
     slugSchema.parse(slug);
     return this.jobs.create("summary", slug, async (control) => withStoryLock(this.root, slug, "summary generation", async () => {
@@ -560,7 +574,7 @@ export class StudioOperations {
     });
   }
 
-  async close() { clearInterval(this.inspectionTimer); await Promise.all([...this.inspections.keys()].map((id) => this.discardInspection(id))); }
+  async close() { clearInterval(this.inspectionTimer); await this.jobs.flushDurable(); await Promise.all([...this.inspections.keys()].map((id) => this.discardInspection(id))); }
   private expireInspections() { const cutoff = Date.now() - 30 * 60_000; for (const [id, record] of this.inspections) if (record.createdAt < cutoff) void this.discardInspection(id).catch((error) => logger.warn({ event: "web.inspection.cleanup_failed", inspectionId: id, error: error instanceof Error ? error.message : String(error) })); }
   private async discardInspection(id: string) {
     const record = this.inspections.get(id); if (!record) return;

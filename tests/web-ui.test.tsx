@@ -42,6 +42,8 @@ describe("web UI", () => {
     expect(shouldRefreshAfterJob(preview, { ...preview, status: "completed" })).toBe(false);
     const suggestions = { ...running, type: "entityLocalizationSuggestions" };
     expect(shouldRefreshAfterJob(suggestions, { ...suggestions, status: "completed" })).toBe(false);
+    const summary = { ...running, type: "summary" };
+    expect(shouldRefreshAfterJob(summary, { ...summary, status: "completed" })).toBe(false);
   });
   it("renders the studio shell and accessible navigation", () => {
     Object.defineProperty(globalThis, "location", { value: { pathname: "/" }, configurable: true });

@@ -6,6 +6,25 @@ export const summarySourceModeSchema = z.enum(["original", "translated", "chapte
 export const summaryStatusSchema = z.enum(["generating", "complete", "failed"]);
 export const summaryIdSchema = z.string().regex(/^sum_[a-f0-9-]{36}$/);
 
+export const SUMMARY_WORDS_PER_MINUTE = 150;
+export function estimateSummaryMinutes(text: string, wordsPerMinute = SUMMARY_WORDS_PER_MINUTE) {
+  return (text.trim() ? text.trim().split(/\s+/u).length : 0) / wordsPerMinute;
+}
+export const summaryDerivativeSchema = z.object({
+  status: z.enum(["current", "stale", "generating", "failed"]),
+  inputFingerprint: z.string(), outputFingerprint: z.string().optional(),
+  sourceFingerprint: z.string().optional(), configurationFingerprint: z.string().optional(), namingFingerprint: z.string().optional(),
+  editedAt: z.string().datetime().optional(),
+  text: z.string().max(1_000_000).optional(), ttsText: z.string().max(1_000_000).optional(),
+  manuallyEdited: z.boolean().default(false), reviewRequired: z.boolean().default(false),
+  provider: z.string().optional(), model: z.string().optional(), voice: z.string().optional(),
+  generatedAt: z.string().datetime().optional(), error: z.string().optional(),
+  durationSeconds: z.number().nonnegative().optional(), bytes: z.number().int().nonnegative().optional(),
+  censoredSegments: z.number().int().nonnegative().optional(), censorDurationSeconds: z.number().nonnegative().optional(),
+  segmentFingerprints: z.array(z.string()).optional(),
+});
+export type SummaryDerivative = z.infer<typeof summaryDerivativeSchema>;
+
 export const summarySelectionSchema = z.object({
   from: z.number().int().positive().optional(),
   to: z.number().int().positive().optional(),
@@ -22,12 +41,13 @@ export const summaryGenerationInputSchema = summarySelectionSchema.and(z.object(
   summaryType: summaryTypeSchema.default("detailed"),
   sourceMode: summarySourceModeSchema.default("translated"),
   targetWords: z.number().int().min(50).max(20_000).default(800),
+  targetMinutes: z.number().min(1/3).max(20_000 / SUMMARY_WORDS_PER_MINUTE).optional(),
   instructions: z.string().trim().max(5_000).optional(),
   focus: z.string().trim().max(500).optional(),
   model: stageModelConfigSchema.optional(),
   chunkSize: z.number().int().min(1).max(100).default(25),
   contextEligible: z.boolean().default(false),
-}));
+})).transform((input) => ({ ...input, targetWords: input.targetMinutes === undefined ? input.targetWords : Math.round(input.targetMinutes * SUMMARY_WORDS_PER_MINUTE) }));
 
 const provenanceBatchSchema = z.object({ batch: z.number().int().positive(), chapters: z.array(z.number().int().positive()), inputCharacters: z.number().int().nonnegative() });
 export const summarySchema = z.object({
@@ -49,6 +69,9 @@ export const summarySchema = z.object({
   error: z.string().max(10_000).optional(),
   createdAt: z.string().datetime(),
   updatedAt: z.string().datetime(),
+  narration: summaryDerivativeSchema.optional(),
+  tts: summaryDerivativeSchema.optional(),
+  audio: summaryDerivativeSchema.optional(),
   provenance: z.object({
     model: stageModelConfigSchema,
     promptVersion: z.string(),

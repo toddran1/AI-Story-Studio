@@ -1,4 +1,4 @@
-import { access, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -13,6 +13,7 @@ import { atomicWriteJson } from "../src/storage/atomic-write.js";
 import { TRANSLATION_FINGERPRINT_VERSION, TRANSLATION_PROMPT_VERSION } from "../src/translation/prompts.js";
 import { CensorAudioService } from "../src/tts/censor-audio.js";
 import { TTSRequest } from "../src/tts/types.js";
+import { markStagesCurrent } from "../src/studio/stage-acceptance.js";
 
 class CountingAudioProcessor extends CopyingAudioProcessor { calls = 0; override async master(inputs: string[], output: string) { this.calls++; return super.master(inputs, output); } }
 
@@ -25,6 +26,19 @@ async function setup() {
 }
 
 describe("chapter pipeline", () => {
+  it("reuses a manual acceptance only for the configuration it accepted", async () => {
+    const ctx = await setup(); const story = testStory();
+    await mkdir(join(ctx.root, "stories", story.slug), { recursive: true }); await atomicWriteJson(join(ctx.root, "stories", story.slug, "story.json"), story);
+    const chapter = await ctx.pipeline.run({ root: ctx.root, story, chapter: 1, inputPath: ctx.input, stopAfter: "translation" });
+    chapter.stages.translation.status = "pending"; await atomicWriteJson(ctx.paths.chapterMeta, chapter);
+    await markStagesCurrent(ctx.root, story.slug, { chapters: [1], stages: ["translation"] });
+    const before = ctx.gemini.calls.length;
+    await ctx.pipeline.run({ root: ctx.root, story, chapter: 1, inputPath: ctx.input, stopAfter: "translation" });
+    expect(ctx.gemini.calls).toHaveLength(before);
+    const changed = { ...story, pipeline: { ...story.pipeline, translation: { ...story.pipeline.translation, model: "changed-model" } } };
+    await ctx.pipeline.run({ root: ctx.root, story: changed, chapter: 1, inputPath: ctx.input, stopAfter: "translation" });
+    expect(ctx.gemini.calls).toHaveLength(before + 1);
+  });
   it("persists each representation and reuses valid outputs", async () => {
     const ctx = await setup();
     await ctx.pipeline.run({ root: ctx.root, story: testStory(), chapter: 1, inputPath: ctx.input });

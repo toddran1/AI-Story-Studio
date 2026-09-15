@@ -45,13 +45,13 @@ export function audioMasteringFingerprint(ttsOutputFingerprint: string | undefin
   return fingerprint({ ttsOutputFingerprint, settings, processorVersion, inputs });
 }
 
-async function masteringInputs(segmentsDirectory: string, rawAudio: string) {
+export async function masteringInputs(segmentsDirectory: string, rawAudio: string) {
   let segments: string[] = [];
   try { segments = (await readdir(segmentsDirectory)).filter((name) => /^\d+\.mp3$/.test(name)).sort().map((name) => join(segmentsDirectory, name)); }
   catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
   if (segments.length) return segments; if (await exists(rawAudio)) return [rawAudio]; throw new AudioError("TTS metadata is complete but raw audio and segments are missing");
 }
-async function inputFingerprints(paths: string[]) { return Promise.all(paths.map(async (path) => { const value = await fileFingerprint(path); if (!value) throw new AudioError(`Mastering input is missing or empty: ${path}`); return value; })); }
+export async function inputFingerprints(paths: string[]) { return Promise.all(paths.map(async (path) => { const value = await fileFingerprint(path); if (!value) throw new AudioError(`Mastering input is missing or empty: ${path}`); return value; })); }
 async function persist(path: string, chapter: Chapter) { chapter.updatedAt = new Date().toISOString(); await atomicWriteJson(path, chapterSchema.parse(chapter)); }
 
 export class CopyingAudioProcessor implements AudioMasteringProcessor {

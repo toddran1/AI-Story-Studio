@@ -1,0 +1,192 @@
+import { randomUUID } from "node:crypto";
+import { mkdir, rename, rm, stat } from "node:fs/promises";
+import { dirname, join } from "node:path";
+import { z } from "zod";
+import { loadStory } from "../config/load-config.js";
+import { storyBibleSchema } from "../domain/story-bible.js";
+import { emptyStoryBible } from "../domain/story-bible.js";
+import { loadNarrationNamingEntities } from "../story-bible/narration-names.js";
+import { retrieveRelevantContext } from "../story-bible/retrieval.js";
+import { polishNarration } from "../narration/narration-editor.js";
+import { NARRATION_PROMPT_VERSION } from "../narration/prompts.js";
+import { narrationDeliveryProfile, stripDeliveryCues } from "../narration/tts-direction.js";
+import type { LLMRouter } from "../llm/router.js";
+import type { TTSProviderRouter } from "../tts/router.js";
+import { censorToneConfig, type CensorAudioService } from "../tts/censor-audio.js";
+import type { AudioMasteringProcessor } from "../audio/mastering.js";
+import { audioMasteringFingerprint, masteringInputs, inputFingerprints } from "../audio/chapter-audio.js";
+import { atomicWrite, atomicWriteJson } from "../storage/atomic-write.js";
+import { storyPaths } from "../storage/paths.js";
+import { readJsonIfExists } from "../storage/story-files.js";
+import { fileFingerprint } from "../utils/file-fingerprint.js";
+import { fingerprint } from "../utils/hash.js";
+import { SummaryService, summaryPath } from "./service.js";
+import { summarySchema, type StorySummary } from "./types.js";
+
+export const summaryMediaInputSchema = z.object({ force: z.boolean().default(false) }).strict();
+export const summaryNarrationEditSchema = z.union([
+  z.object({ text: z.string().trim().min(1).max(1_000_000) }).strict(),
+  z.object({ acceptCurrent: z.literal(true) }).strict(),
+]);
+export const summaryExportTypeSchema = z.enum(["summary", "narration", "audio"]);
+export function summaryMediaPaths(root: string, story: string, id: string) {
+  const record = summaryPath(root, story, id);
+  const directory = record.slice(0, -5);
+  return { directory, segments: join(directory, "audio-segments"), canonical: join(directory, "summary.txt"), narration: join(directory, "narration.txt"), raw: join(directory, "audio-raw.mp3"), audio: join(directory, "audio.mp3") };
+}
+export function summaryDownloadName(summary: StorySummary, type: z.infer<typeof summaryExportTypeSchema>) {
+  const range = summary.chapterRange;
+  const prefix = range ? `chapters-${range.from}-${range.to}` : `chapters-${summary.chapters.slice(0, 8).join("-")}${summary.chapters.length > 8 ? "-recap" : ""}`;
+  return `${prefix}-${type === "narration" ? "narration.txt" : type === "audio" ? "summary.mp3" : "summary.txt"}`;
+}
+
+/** Summary-specific orchestration only; providers, naming, censoring and mastering
+ * remain the same services used by chapter production. Mutators require a story lock. */
+export class SummaryMediaService {
+  private readonly summaries: SummaryService;
+  constructor(private readonly root: string, private readonly llms: LLMRouter,
+    private readonly ttsRouter: TTSProviderRouter, private readonly censor: CensorAudioService,
+    private readonly mastering: AudioMasteringProcessor) { this.summaries = new SummaryService(root, llms); }
+
+  private async inputs(slug: string, summary: StorySummary) {
+    const story = await loadStory(storyPaths(this.root, slug, 1).storyConfig);
+    const names = await loadNarrationNamingEntities(this.root, slug);
+    const raw = await readJsonIfExists(storyPaths(this.root, slug, 1).bible);
+    const context = retrieveRelevantContext(raw ? storyBibleSchema.parse(raw) : emptyStoryBible(), summary.text, Math.max(...summary.chapters) + 1,
+      { recentSummaryCount: story.context.recentChapterSummaries, narrationNamingEntities: names });
+    const config = story.pipeline.tts;
+    const delivery = narrationDeliveryProfile(config.provider, config.model);
+    const sourceFingerprint = fingerprint(summary.text);
+    const namingFingerprint = fingerprint(context.canonicalEntities.map(({ id, canonicalName, originalName, aliases, localizedNaming, preferredNarrationName, aliasNarrationRules }) => ({ id, canonicalName, originalName, aliases, localizedNaming, preferredNarrationName, aliasNarrationRules })));
+    const configurationFingerprint = fingerprint({ model: story.pipeline.narration, language: story.outputLanguage, profanity: story.narrationSettings.profanityMode, includeTitle: story.narrationSettings.includeChapterTitle !== false, intensity: config.deliveryIntensity, delivery, promptVersion: NARRATION_PROMPT_VERSION });
+    const narrationFingerprint = fingerprint({ version: "summary-narration-v1", source: sourceFingerprint,
+      model: story.pipeline.narration, language: story.outputLanguage, profanity: story.narrationSettings.profanityMode,
+      includeTitle: story.narrationSettings.includeChapterTitle !== false, intensity: config.deliveryIntensity, delivery,
+      promptVersion: NARRATION_PROMPT_VERSION, naming: context.canonicalEntities.map(({ id, canonicalName, originalName, aliases, localizedNaming, preferredNarrationName, aliasNarrationRules }) => ({ id, canonicalName, originalName, aliases, localizedNaming, preferredNarrationName, aliasNarrationRules })) });
+    const provider = this.ttsRouter.forName(config.provider);
+    const referenceId = provider.resolveReferenceId?.(config.referenceId) ?? config.referenceId;
+    const ttsFingerprint = fingerprint({ version: "summary-tts-v1", text: summary.narration?.ttsText ?? summary.narration?.text,
+      config: { ...config, referenceId }, normalization: provider.inputNormalizationVersion,
+      bleep: story.narrationSettings.bleepStrongProfanity, censor: { version: this.censor.version, config: censorToneConfig } });
+    return { story, context, provider, referenceId, sourceFingerprint, namingFingerprint, configurationFingerprint, narrationFingerprint, ttsFingerprint,
+      audioFingerprint: audioMasteringFingerprint(summary.tts?.outputFingerprint, story.audio, this.mastering.version, summary.tts?.segmentFingerprints ?? []) };
+  }
+
+  async get(slug: string, id: string) {
+    const summary = await this.summaries.get(slug, id); const input = await this.inputs(slug, summary);
+    if (summary.narration && summary.narration.status === "current" && (summary.narration.inputFingerprint !== input.narrationFingerprint || fingerprint(summary.narration.text) !== summary.narration.outputFingerprint)) {
+      summary.narration.status = "stale"; summary.narration.reviewRequired = summary.narration.manuallyEdited;
+    }
+    const paths = summaryMediaPaths(this.root, slug, id);
+    if (summary.tts?.status === "current" && summary.tts.segmentFingerprints) {
+      const actual = await inputFingerprints(await masteringInputs(paths.segments, paths.raw)).catch(() => []);
+      if (fingerprint(actual) !== fingerprint(summary.tts.segmentFingerprints)) summary.tts.status = "stale";
+    }
+    if (summary.tts?.status === "current" && (summary.narration?.status !== "current" || summary.tts.inputFingerprint !== input.ttsFingerprint || await fileFingerprint(paths.raw) !== summary.tts.outputFingerprint)) summary.tts.status = "stale";
+    if (summary.audio?.status === "current" && (summary.tts?.status !== "current" || summary.audio.inputFingerprint !== input.audioFingerprint || await fileFingerprint(paths.audio) !== summary.audio.outputFingerprint)) summary.audio.status = "stale";
+    return summary;
+  }
+
+  private async save(slug: string, summary: StorySummary) {
+    const record = summarySchema.parse({ ...summary, updatedAt: new Date().toISOString() });
+    await atomicWriteJson(summaryPath(this.root, slug, record.id), record); return record;
+  }
+
+  async narration(slug: string, id: string, raw: unknown = {}) {
+    const { force } = summaryMediaInputSchema.parse(raw); const summary = await this.get(slug, id);
+    if (!summary.text.trim() || summary.status !== "complete") throw new Error("Complete the canonical summary before generating narration");
+    if (!force && summary.narration?.status === "current") return summary;
+    if (!force && summary.narration?.manuallyEdited) throw new Error("Manual narration requires review. Retain/mark current or explicitly regenerate to replace it.");
+    const input = await this.inputs(slug, summary); const previous = summary.narration;
+    summary.narration = { ...previous, status: "generating", inputFingerprint: input.narrationFingerprint, manuallyEdited: previous?.manuallyEdited ?? false, reviewRequired: false };
+    await this.save(slug, summary);
+    try {
+      const config = input.story.pipeline.narration, tts = input.story.pipeline.tts;
+      const result = await polishNarration(this.llms.forStage(config), config, summary.text, input.story.outputLanguage,
+        input.context, tts.provider, tts.model, input.story.narrationSettings.profanityMode, tts.deliveryIntensity,
+        input.story.narrationSettings.includeChapterTitle !== false, "summary");
+      const text = stripDeliveryCues(result.text, tts.provider, tts.model).trim();
+      if (!text || text.length > 1_000_000) throw new Error("The narration model returned empty or oversized summary text");
+      summary.narration = { status: "current", inputFingerprint: input.narrationFingerprint, outputFingerprint: fingerprint(text), text, ttsText: result.text,
+        sourceFingerprint: input.sourceFingerprint, namingFingerprint: input.namingFingerprint, configurationFingerprint: input.configurationFingerprint,
+        manuallyEdited: false, reviewRequired: false, provider: config.provider, model: config.model, generatedAt: new Date().toISOString() };
+      if (summary.tts) summary.tts.status = "stale"; if (summary.audio) summary.audio.status = "stale";
+      return await this.save(slug, summary);
+    } catch (error) {
+      summary.narration = { ...summary.narration, ...previous, status: "failed", error: error instanceof Error ? error.message : String(error) };
+      await this.save(slug, summary); throw error;
+    }
+  }
+
+  async editNarration(slug: string, id: string, raw: unknown) {
+    const patch = summaryNarrationEditSchema.parse(raw); const summary = await this.get(slug, id); const input = await this.inputs(slug, summary);
+    const text = "text" in patch ? patch.text : summary.narration?.text;
+    if (!text?.trim()) throw new Error("No narration exists to retain");
+    summary.narration = { ...summary.narration, text, ttsText: "text" in patch ? text : summary.narration?.ttsText ?? text,
+      sourceFingerprint: input.sourceFingerprint, namingFingerprint: input.namingFingerprint, configurationFingerprint: input.configurationFingerprint, editedAt: new Date().toISOString(),
+      status: "current", inputFingerprint: input.narrationFingerprint, outputFingerprint: fingerprint(text), manuallyEdited: "text" in patch || summary.narration?.manuallyEdited === true, reviewRequired: false, error: undefined };
+    if (summary.tts) summary.tts.status = "stale"; if (summary.audio) summary.audio.status = "stale";
+    return this.save(slug, summary);
+  }
+
+  async audio(slug: string, id: string, raw: unknown = {}, progress?: (event: { phase: string; completed: number; total: number }) => void) {
+    const { force } = summaryMediaInputSchema.parse(raw); let summary = await this.get(slug, id);
+    if (summary.narration?.status !== "current") summary = await this.narration(slug, id);
+    const input = await this.inputs(slug, summary), paths = summaryMediaPaths(this.root, slug, id);
+    if (!force && summary.audio?.status === "current") return summary;
+    await mkdir(paths.directory, { recursive: true });
+    try {
+      if (force || summary.tts?.status !== "current") {
+        progress?.({ phase: "tts", completed: 0, total: 2 });
+        summary.tts = { status: "generating", inputFingerprint: input.ttsFingerprint, manuallyEdited: false, reviewRequired: false };
+        await this.save(slug, summary);
+        const config = input.story.pipeline.tts;
+        const result = await this.censor.synthesize(input.provider, { ...config, referenceId: input.referenceId,
+          text: summary.narration!.ttsText ?? summary.narration!.text!, bleepStrongProfanity: input.story.narrationSettings.bleepStrongProfanity });
+        if (!result.audio.length) throw new Error("TTS returned empty summary audio");
+        await atomicWrite(paths.raw, result.audio);
+        await rm(paths.segments, { recursive: true, force: true });
+        if (!result.assembled && result.segments.length) {
+          await mkdir(paths.segments, { recursive: true });
+          await Promise.all(result.segments.map((segment, index) => atomicWrite(join(paths.segments, `${String(index + 1).padStart(4, "0")}.mp3`), segment)));
+        }
+        const segmentFingerprints = await inputFingerprints(await masteringInputs(paths.segments, paths.raw));
+        summary.tts = { status: "current", inputFingerprint: input.ttsFingerprint, outputFingerprint: (await fileFingerprint(paths.raw))!,
+          manuallyEdited: false, reviewRequired: false, provider: config.provider, model: config.model, voice: input.referenceId,
+          generatedAt: new Date().toISOString(), bytes: result.audio.length, segmentFingerprints, censoredSegments: result.censor?.segments, censorDurationSeconds: result.censor?.durationSeconds };
+        if (summary.audio) summary.audio.status = "stale";
+        await this.save(slug, summary);
+      }
+      progress?.({ phase: "mastering", completed: 1, total: 2 });
+      const inputs = await masteringInputs(paths.segments, paths.raw);
+      const audioFingerprint = audioMasteringFingerprint(summary.tts!.outputFingerprint, input.story.audio, this.mastering.version, await inputFingerprints(inputs));
+      summary.audio = { ...summary.audio, status: "generating", inputFingerprint: audioFingerprint, manuallyEdited: false, reviewRequired: false };
+      await this.save(slug, summary);
+      const temporary = join(paths.directory, `.${randomUUID()}.mp3`);
+      try {
+        const probe = await this.mastering.master(inputs, temporary, input.story.audio);
+        await rename(temporary, paths.audio);
+        summary.audio = { status: "current", inputFingerprint: audioFingerprint, outputFingerprint: (await fileFingerprint(paths.audio))!,
+          manuallyEdited: false, reviewRequired: false, provider: summary.tts!.provider, model: summary.tts!.model, voice: summary.tts!.voice,
+          generatedAt: new Date().toISOString(), durationSeconds: probe.durationSeconds, bytes: (await stat(paths.audio)).size };
+      } finally { await rm(temporary, { force: true }); }
+      progress?.({ phase: "complete", completed: 2, total: 2 }); return await this.save(slug, summary);
+    } catch (error) {
+      const stage = summary.tts?.status === "generating" ? "tts" : "audio";
+      summary[stage] = { ...summary[stage]!, status: "failed", error: error instanceof Error ? error.message : String(error) };
+      await this.save(slug, summary); throw error;
+    }
+  }
+
+  async export(slug: string, id: string, rawType: unknown) {
+    const type = summaryExportTypeSchema.parse(rawType), summary = await this.get(slug, id), paths = summaryMediaPaths(this.root, slug, id);
+    const path = type === "summary" ? paths.canonical : type === "narration" ? paths.narration : paths.audio;
+    if (type === "audio") { if (!summary.audio?.outputFingerprint || await fileFingerprint(path) !== summary.audio.outputFingerprint) throw new Error("Summary audio was not found. Generate audio first."); }
+    else {
+      const text = type === "summary" ? summary.text : summary.narration?.text;
+      if (!text?.trim()) throw new Error(`${type} text was not found. Generate it first.`);
+      await mkdir(dirname(path), { recursive: true }); await atomicWrite(path, text);
+    }
+    return { path, name: summaryDownloadName(summary, type), contentType: type === "audio" ? "audio/mpeg" : "text/plain; charset=utf-8" };
+  }
+}

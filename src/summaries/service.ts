@@ -47,6 +47,7 @@ export class SummaryService {
     const id = existingId ? summaryIdSchema.parse(existingId) : `sum_${randomUUID()}`; const previous = existingId ? await this.get(storySlug, id) : undefined;
     const model: StageModelConfig = input.model ?? story.pipeline.narration; const now = new Date().toISOString();
     let record = summarySchema.parse({ id, storyId: story.id, title: input.title, chapters, chapterRange: contiguousRange(chapters), summaryType: input.summaryType, sourceMode: input.sourceMode, targetLength: { words: input.targetWords }, focus: input.focus, instructions: input.instructions, text: previous?.text ?? "", status: "generating", origin: "generated", manuallyEdited: false, contextEligible: input.contextEligible, createdAt: previous?.createdAt ?? now, updatedAt: now, provenance: { model, promptVersion: SUMMARY_PROMPT_VERSION, chapterSources: [], levels: [] } });
+    if (previous) record = summarySchema.parse({ ...record, origin: previous.origin, manuallyEdited: previous.manuallyEdited, narration: previous.narration, tts: previous.tts, audio: previous.audio });
     await atomicWriteJson(summaryPath(this.root, storySlug, id), record);
     try {
       progress?.({ phase: "preparing", completed: 0, total: chapters.length });
@@ -72,16 +73,16 @@ export class SummaryService {
         record.provenance.levels.push({ level, batches: groups.map((group, index) => ({ batch: index + 1, chapters: group.flatMap((item) => item.chapters), inputCharacters: group.reduce((sum, item) => sum + item.inputCharacters, 0) })) });
         segments = combined; level++;
       }
-      record = summarySchema.parse({ ...record, text: segments[0]!.text, status: "complete", error: undefined, updatedAt: new Date().toISOString() }); await atomicWriteJson(summaryPath(this.root, storySlug, id), record);
+      record = summarySchema.parse({ ...record, ...staleSummaryDerivatives(previous), text: segments[0]!.text, status: "complete", origin: "generated", manuallyEdited: false, error: undefined, updatedAt: new Date().toISOString() }); await atomicWriteJson(summaryPath(this.root, storySlug, id), record);
       progress?.({ phase: "complete", completed: chapters.length, total: chapters.length }); return record;
     } catch (error) {
-      record = summarySchema.parse({ ...record, status: "failed", error: error instanceof Error ? error.message : String(error), updatedAt: new Date().toISOString() }); await atomicWriteJson(summaryPath(this.root, storySlug, id), record); throw error;
+      record = summarySchema.parse({ ...record, ...(previous ?? {}), status: "failed", error: error instanceof Error ? error.message : String(error), updatedAt: new Date().toISOString() }); await atomicWriteJson(summaryPath(this.root, storySlug, id), record); throw error;
     }
   }
 
   async update(story: string, id: string, raw: unknown) {
     const patch = updateSchema.parse(raw); const current = await this.get(story, id); const textChanged = patch.text !== undefined && patch.text !== current.text;
-    const updated = summarySchema.parse({ ...current, ...patch, origin: textChanged ? "manual" : current.origin, manuallyEdited: current.manuallyEdited || textChanged, updatedAt: new Date().toISOString() });
+    const updated = summarySchema.parse({ ...current, ...(textChanged ? staleSummaryDerivatives(current) : {}), ...patch, origin: textChanged ? "manual" : current.origin, manuallyEdited: current.manuallyEdited || textChanged, updatedAt: new Date().toISOString() });
     await atomicWriteJson(summaryPath(this.root, story, id), updated); return updated;
   }
 
@@ -90,7 +91,7 @@ export class SummaryService {
     return this.generate(story, { title: patch.title ?? current.title, chapters: current.chapters, summaryType: patch.summaryType ?? current.summaryType, sourceMode: patch.sourceMode ?? current.sourceMode, targetWords: patch.targetWords ?? current.targetLength.words, instructions: patch.instructions ?? current.instructions, focus: patch.focus ?? current.focus, model: patch.model ?? current.provenance.model, chunkSize: patch.chunkSize ?? 25, contextEligible: patch.contextEligible ?? current.contextEligible }, progress, id);
   }
 
-  async delete(story: string, id: string) { await this.get(story, id); await rm(summaryPath(this.root, story, id)); return { id, deleted: true }; }
+  async delete(story: string, id: string) { await this.get(story, id); const path = summaryPath(this.root, story, id); await rm(path.slice(0, -5), { recursive: true, force: true }); await rm(path); return { id, deleted: true }; }
 
   private async loadSources(story: string, chapters: number[], mode: SummaryGenerationInput["sourceMode"]): Promise<SourceChapter[]> {
     const bibleRaw = mode === "chapter-summaries" ? await readJsonIfExists(storyPaths(this.root, story, 1).bible) : undefined;
@@ -145,7 +146,13 @@ export async function loadEligibleSummaryContext(root: string, story: string, ch
 }
 
 function summaryDirectory(root: string, story: string) { return join(root, "stories", story, "summaries"); }
-function summaryPath(root: string, story: string, id: string) { return join(summaryDirectory(root, story), `${summaryIdSchema.parse(id)}.json`); }
+export function summaryPath(root: string, story: string, id: string) {
+  if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(story)) throw new ConfigurationError("Invalid story slug");
+  return join(summaryDirectory(root, story), `${summaryIdSchema.parse(id)}.json`);
+}
+export function staleSummaryDerivatives(summary?: StorySummary) {
+  return Object.fromEntries((["narration", "tts", "audio"] as const).map((stage) => [stage, summary?.[stage] ? { ...summary[stage], status: "stale", reviewRequired: stage === "narration" && summary[stage]?.manuallyEdited } : undefined]));
+}
 function chunk<T>(items: T[], size: number): T[][] { const result: T[][] = []; for (let index = 0; index < items.length; index += size) result.push(items.slice(index, index + size)); return result; }
 function chunkTarget(target: number, chunks: number) { return Math.max(150, Math.min(1_200, Math.ceil(target / Math.max(1, chunks) * 1.5))); }
 export function coverage(chapters: number[]) { const range = contiguousRange(chapters); return range ? `${range.from}–${range.to}` : chapters.join(", "); }
