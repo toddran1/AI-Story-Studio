@@ -1,6 +1,6 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import { App, chapterPageSize, QaDetail, shouldRefreshAfterJob } from "../apps/web/src/App.js";
+import { App, chapterPageSize, EntityStatusField, QaDetail, shouldRefreshAfterJob } from "../apps/web/src/App.js";
 import { pretty } from "../apps/web/src/format.js";
 import { ChapterImportPage, savedStorySourceUrl } from "../apps/web/src/ChapterImportPage.js";
 import { SummariesPage } from "../apps/web/src/SummariesPage.js";
@@ -18,6 +18,14 @@ describe("web UI", () => {
   });
   it("uses 50 chapters per page by default and permits the supported page sizes", () => {
     expect(chapterPageSize("")).toBe(50); expect(chapterPageSize("?pageSize=10")).toBe(10); expect(chapterPageSize("?pageSize=100")).toBe(100); expect(chapterPageSize("?pageSize=75")).toBe(50);
+  });
+  it("renders standardized statuses and preserves legacy values through the custom field", () => {
+    const standard = renderToStaticMarkup(<EntityStatusField type="character" value="Alive" onChange={() => undefined} />);
+    expect(standard).toContain('value="alive" selected=""'); expect(standard).toContain("Spirit / Ghost");
+    const legacy = renderToStaticMarkup(<EntityStatusField type="character" value="Trapped in temporal stasis" onChange={() => undefined} />);
+    expect(legacy).toContain("Custom…"); expect(legacy).toContain('value="Trapped in temporal stasis"');
+    const location = renderToStaticMarkup(<EntityStatusField type="location" value="under-siege" onChange={() => undefined} />);
+    expect(location).toContain("Occupied by enemy"); expect(location).not.toContain("Spirit / Ghost");
   });
   it("shows QA severity and the manual dismissal action", () => {
     const html = renderToStaticMarkup(<QaDetail busy={false} onAddress={() => undefined} onDismiss={() => undefined} onRepair={() => undefined} onRerun={() => undefined} qa={{
