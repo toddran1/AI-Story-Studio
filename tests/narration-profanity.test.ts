@@ -32,6 +32,16 @@ describe("narration profanity preference", () => {
     expect(qa).toMatch(/source and translation are not covered/i);
   });
 
+  it("separates frozen dialogue facts from polishable delivery", () => {
+    const narration = narrationInstructions("English", "fish", "s2.1-pro", "preserve");
+    expect(narration).toMatch(/Frozen:.*plot fact.*who speaks each line.*meaning of every line of dialogue/s);
+    expect(narration).toMatch(/Polishable:.*phrasing.*rhythm.*punctuation.*sentence splitting/s);
+    expect(narration).toMatch(/lightly polished.*never re-authored/s);
+    expect(narration).toMatch(/only sanctioned content substitutions/i);
+    expect(narration).toMatch(/in disguise.*false name.*plot-relevant/s);
+    expect(narration).toMatch(/flashbacks.*do not "fix" them/s);
+  });
+
   it("applies a deterministic final check without changing the input translation", async () => {
     let request: any;
     const provider: LLMProvider = {

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { activeQaIssues, dismissQaIssues, normalizeQaResult, qaResultSchema } from "../src/domain/qa.js";
 import { emptyStoryBible, storyBibleSchema } from "../src/domain/story-bible.js";
-import { QA_PROMPT_VERSION, authorizedNarrationNaming } from "../src/qa/prompts.js";
+import { QA_PROMPT_VERSION, authorizedNarrationNaming, qaInstructions, qaInstructionsFor } from "../src/qa/prompts.js";
 import { validateChapterQuality } from "../src/qa/validator.js";
 import { MockLLM } from "./helpers.js";
 
@@ -94,6 +94,23 @@ describe("QA authorized narration naming", () => {
   });
 
   it("records the bumped prompt version", () => {
-    expect(QA_PROMPT_VERSION).toBe("4");
+    expect(QA_PROMPT_VERSION).toBe("5");
+  });
+
+  it("documents the output contract, severity rubric, and repair-routing phrasing", () => {
+    for (const category of ["completeness", "names", "numbers", "terminology", "dialogue", "storyConsistency", "narrationFidelity"]) expect(qaInstructions).toContain(category);
+    expect(qaInstructions).toContain("1.0 means no issues");
+    expect(qaInstructions).toContain("block publication");
+    expect(qaInstructions).toContain("dropped or merged dialogue");
+    expect(qaInstructions).toContain("TRANSLATION or the NARRATION");
+    expect(qaInstructions).toContain("both the translation and narration");
+    expect(qaInstructions).toContain("both the translation and the narration");
+    expect(qaInstructions).toMatch(/length tolerance/i);
+  });
+
+  it("partitions profanity with the same strong/mild lists as the narration prompt", () => {
+    const qa = qaInstructionsFor("soften-strong");
+    expect(qa).toMatch(/fuck.*bitch.*shit.*cunt/i);
+    expect(qa).toMatch(/ass.*hell.*damn/i);
   });
 });

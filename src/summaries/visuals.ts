@@ -53,7 +53,7 @@ export class SummaryVisualService {
     const refs = await loadCharacterVisualReferences(this.root, slug, [...scene.characters, ...entities.map((entity) => entity.canonicalName)]);
     const canonical = entities.map((entity) => ({ name: entity.canonicalName, description: [entity.description, entity.notes].filter(Boolean).join(". ") }));
     const visualScene = { ...scene, characters: entities.length ? entities.map((entity) => entity.canonicalName) : scene.characters };
-    const prompt = artworkPrompt(visualScene, [...canonical, ...refs], context.story.artwork.stylePrompt);
+    const prompt = artworkPrompt(visualScene, [...canonical, ...refs], context.story.artwork.stylePrompt, context.story.artwork.size);
     return { ...context, prompt, entityIds: entities.map((entity) => entity.id), inputFingerprint: fingerprint({ version: "source-artwork-v1", prompt, refs: refs.map((ref) => ref.fingerprint), settings: context.story.artwork, providerVersion: context.provider.version }) };
   }
   private videoFingerprint(summary: StorySummary, settings: unknown) { return fingerprint({ version: "summary-video-v1", audio: summary.audio?.outputFingerprint, scenes: summary.scenePlan?.scenes.filter((scene) => !scene.disabled).map((scene) => ({ id: scene.id, start: scene.startSeconds, end: scene.endSeconds, image: scene.artwork.imageFingerprint, review: scene.artwork.review })), settings, alignment: summary.alignment?.inputFingerprint, renderer: this.renderer.version }); }

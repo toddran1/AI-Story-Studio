@@ -1,6 +1,20 @@
 import { describe, expect, it } from "vitest";
 import { emptyStoryBible, storyBibleUpdateSchema } from "../src/domain/story-bible.js";
+import { STORY_BIBLE_PROMPT_VERSION, storyBibleInstructions } from "../src/story-bible/prompts.js";
 import { contextBeforeChapter, mergeStoryBible, normalizeStoryBibleUpdate } from "../src/story-bible/updater.js";
+
+describe("Story Bible extraction prompt", () => {
+  it("covers every schema bucket, relationships, translation terms, and narration-input caveats", () => {
+    expect(STORY_BIBLE_PROMPT_VERSION).toBe("4");
+    for (const bucket of ["characters", "locations", "factions", "abilities", "items", "classes", "ranks", "creatures", "systemTerms"]) expect(storyBibleInstructions).toContain(bucket);
+    expect(storyBibleInstructions).toContain("relationships");
+    expect(storyBibleInstructions).toContain("translationTerms");
+    expect(storyBibleInstructions).not.toContain("important concepts");
+    expect(storyBibleInstructions).toMatch(/POLISHED narration/i);
+    expect(storyBibleInstructions).toMatch(/soften strong profanity/i);
+    expect(storyBibleInstructions).toMatch(/gender and pronouns unset/i);
+  });
+});
 
 describe("Story Bible", () => {
   it("validates structured responses", () => {

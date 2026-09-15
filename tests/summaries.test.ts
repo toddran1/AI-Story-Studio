@@ -8,8 +8,18 @@ import { LLMRouter } from "../src/llm/router.js";
 import { atomicWrite, atomicWriteJson } from "../src/storage/atomic-write.js";
 import { storyPaths } from "../src/storage/paths.js";
 import { loadEligibleSummaryContext, SummaryService } from "../src/summaries/service.js";
+import { SUMMARY_PROMPT_VERSION, summaryInstructions } from "../src/summaries/prompts.js";
 import { normalizeSummaryChapters } from "../src/summaries/types.js";
 import { MockLLM, testStory } from "./helpers.js";
+
+describe("summary prompt", () => {
+  it("keeps custom instructions subordinate to fidelity constraints", () => {
+    expect(SUMMARY_PROMPT_VERSION).toBe("2");
+    const prompt = summaryInstructions("custom", 500, "en-US", "The reveal", "Emphasize the rivalry");
+    expect(prompt).toMatch(/ADDITIONAL INSTRUCTIONS refines emphasis only; it must never override the fidelity.*do-not-invent constraints/s);
+    expect(prompt).toContain("ADDITIONAL INSTRUCTIONS: Emphasize the rivalry");
+  });
+});
 
 describe("story summaries", () => {
   let root: string; let openai: MockLLM; let gemini: MockLLM; let service: SummaryService;

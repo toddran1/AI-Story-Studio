@@ -1,10 +1,12 @@
 import { QaResult } from "../domain/qa.js";
+import { storyBibleSchema } from "../domain/story-bible.js";
 import { StageModelConfig } from "../domain/provider.js";
 import { LLMProvider } from "../llm/provider.js";
 import { assertUsableTranslation } from "../translation/translator.js";
 import type { NarrationProfanityMode } from "../domain/story.js";
 import { softenStrongProfanity } from "../narration/profanity.js";
 import { removeLeadingChapterTitle } from "../narration/narration-editor.js";
+import { authorizedNarrationNaming } from "./prompts.js";
 
 export function selectRepairStage(qa: QaResult): "translation" | "narration" {
   const translationCategories = new Set(["completeness", "names", "numbers", "terminology", "dialogue"]);
@@ -33,14 +35,21 @@ export async function repairQaText(provider: LLMProvider, config: StageModelConf
 }) {
   const current = input.target === "translation" ? input.translation : input.narration;
   if (!current.trim()) throw new Error(`Chapter ${input.chapter} has no ${input.target} to repair`);
+  const contextBible = storyBibleSchema.safeParse(input.context ?? {});
+  const hasNamingOverrides = contextBible.success && contextBible.data.canonicalEntities.some((entity) => entity.localizedNaming || entity.preferredNarrationName || entity.aliasNarrationRules.length);
   const instructions = [
     `You are repairing a complete chapter ${input.target} after a quality review.`,
     "Return only the complete corrected text, with no preface, explanation, markdown fence, or change log.",
     "Preserve every unaffected detail, paragraph, event, number, proper name, and line of dialogue.",
     "Make the smallest changes necessary to resolve every supplied QA finding. Never shorten the chapter into a summary.",
+    "If a supplied finding is wrong, already resolved, or contradicts the source, make no change for that finding rather than inventing changes.",
+    "System panels, status windows, stat blocks, and game interfaces must remain verbatim, character for character; never fill in, estimate, round, or normalize numeric values.",
     input.target === "translation"
       ? `Keep the result faithful to the ${input.sourceLanguage} source and natural in ${input.outputLanguage}.`
       : `Keep the narration faithful to the approved ${input.outputLanguage} translation; do not introduce new story information.`,
+    hasNamingOverrides
+      ? `${authorizedNarrationNaming(contextBible.data)} Repairs must never revert an authorized narration-name substitution back to the canonical name.`
+      : "",
     input.target === "narration" && input.profanityMode === "soften-strong"
       ? "Honor the story's narration-only preference: replace strong profanity with natural milder wording while preserving hostility, emotion, intent, and meaning. Ass, hell, and damn are allowed."
       : "",

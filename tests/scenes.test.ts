@@ -8,6 +8,7 @@ import { ImageProvider } from "../src/artwork/provider.js";
 import { chapterSchema } from "../src/domain/chapter.js";
 import { LLMProvider } from "../src/llm/provider.js";
 import { planStoredScenes, scenePlanningFingerprint, updateStoredSceneManifest } from "../src/scenes/manifest.js";
+import { SCENE_PLANNER_PROMPT_VERSION, scenePlannerInstructions } from "../src/scenes/prompts.js";
 import { normalizeSceneTiming, validateSceneCoverage } from "../src/scenes/timing.js";
 import { SceneManifest, sceneManifestSchema } from "../src/scenes/types.js";
 import { atomicWrite, atomicWriteJson } from "../src/storage/atomic-write.js";
@@ -30,6 +31,12 @@ describe("scene planning", () => {
   it("uses canonical Story Bible context and reuses its planning fingerprint", async () => { const { root, story } = await fixture(); const provider = new SceneLLM(); const first = await planStoredScenes({ root, story, chapter: 1, provider }); const second = await planStoredScenes({ root, story, chapter: 1, provider }); expect(first.reused).toBe(false); expect(second.reused).toBe(true); expect(provider.calls).toHaveLength(1); expect(provider.calls[0].input).toContain("CANONICAL STORY BIBLE"); expect(scenePlanningFingerprint("n", "b", story.scenes, "openai", "one")).not.toBe(scenePlanningFingerprint("n", "b", story.scenes, "openai", "two")); });
   it("retries a transient scene-planner failure", async () => { const { root, story } = await fixture(); const provider = new SceneLLM(); const generate = provider.generateStructured.bind(provider); let attempts = 0; provider.generateStructured = async (request: any) => { if (++attempts === 1) throw Object.assign(new Error("temporarily unavailable"), { status: 503, headers: { "retry-after": "0" } }); return generate(request); }; await expect(planStoredScenes({ root, story, chapter: 1, provider })).resolves.toMatchObject({ reused: false }); expect(attempts).toBe(2); });
   it("keeps manual edits as the image-generation source of truth", async () => { const { root, story } = await fixture(); const result = await planStoredScenes({ root, story, chapter: 1, provider: new SceneLLM() }); const scenes = structuredClone(result.manifest.scenes); scenes[0]!.visualPrompt = "A manually art-directed brass observatory"; const updated = await updateStoredSceneManifest({ root, story, chapter: 1, scenes }); expect(updated.manuallyEdited).toBe(true); expect(updated.manualRevision).toBe(1); expect(updated.scenes[0]!.visualPrompt).toContain("manually art-directed"); expect(updated.scenes[0]!.artwork.status).toBe("pending"); });
+  it("documents per-scene fields, the importance rubric, and subtitle timing usage", () => {
+    expect(SCENE_PLANNER_PROMPT_VERSION).toBe("scene-planner-v2");
+    expect(scenePlannerInstructions).toMatch(/summary.*characters.*location/s);
+    expect(scenePlannerInstructions).toMatch(/major for a pivotal set-piece.*standard for a normal story beat.*transition for connective/s);
+    expect(scenePlannerInstructions).toMatch(/OPTIONAL SUBTITLE TIMING is provided, use it/i);
+  });
 });
 
 describe("artwork generation", () => {
@@ -43,6 +50,12 @@ describe("artwork generation", () => {
     await generateStoredArtwork({ root, story, chapter: 1, provider: images, sceneId: "scene-001" }); expect(images.calls).toHaveLength(2); expect((await readFile(paths.scenesManifest, "utf8"))).toContain("imageFingerprint");
   });
   it("retries a transient image-provider failure", async () => { const { root, story } = await fixture(); await planStoredScenes({ root, story, chapter: 1, provider: new SceneLLM() }); const images = new FakeImages(); const generate = images.generate.bind(images); let attempts = 0; images.generate = async (request: any) => { if (++attempts === 1) throw Object.assign(new Error("temporarily unavailable"), { status: 503, headers: { "retry-after": "0" } }); return generate(request); }; await expect(generateStoredArtwork({ root, story, chapter: 1, provider: images, sceneId: "scene-001" })).resolves.toMatchObject({ generated: 1 }); expect(attempts).toBe(2); });
+  it("derives composition orientation from the configured artwork size", async () => {
+    const { root, story } = await fixture(); await planStoredScenes({ root, story, chapter: 1, provider: new SceneLLM() });
+    const landscapeImages = new FakeImages(); await generateStoredArtwork({ root, story, chapter: 1, provider: landscapeImages, sceneId: "scene-001" }); expect(landscapeImages.calls[0].prompt).toContain("landscape-safe composition");
+    const portraitStory = { ...story, artwork: { ...story.artwork, size: "1024x1536" as const } }; const portraitImages = new FakeImages(); await generateStoredArtwork({ root, story: portraitStory, chapter: 1, provider: portraitImages, sceneId: "scene-002" }); expect(portraitImages.calls[0].prompt).toContain("portrait-safe composition");
+    expect(landscapeImages.calls[0].prompt).not.toContain("16:9-safe");
+  });
 });
 
 describe("scene artwork video selection", () => {

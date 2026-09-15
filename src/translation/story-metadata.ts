@@ -28,7 +28,7 @@ export async function translateStoryMetadata(provider: LLMProvider, config: Stag
     model: config.model,
     schemaName: "story_metadata_translation",
     schema: translatedStoryMetadataSchema,
-    instructions: `Translate reader-facing story metadata from ${source.language} to ${story.outputLanguage}. Preserve proper names and established terms unless a conventional ${story.outputLanguage} rendering is clearly appropriate. Keep the author name unchanged unless transliteration is necessary. Translate the title, description, and tags faithfully; do not invent plot details, accolades, or marketing claims. Return only the requested structured fields.`,
+    instructions: `Translate reader-facing story metadata from ${source.language} to ${story.outputLanguage}. Preserve proper names and established terms unless a conventional ${story.outputLanguage} rendering is clearly appropriate. Keep the author name unchanged unless transliteration is necessary. Translate the title, description, and tags faithfully; do not invent plot details, accolades, or marketing claims. Translate tags one-to-one: return exactly one translated tag for each source tag, in the same order, with none added, dropped, merged, or split. Return only the requested structured fields.`,
     input: JSON.stringify({ title: source.title, author: source.author, description: source.description, tags: source.tags }, null, 2),
   });
   return { source, translated: result.value, usage: result.usage };

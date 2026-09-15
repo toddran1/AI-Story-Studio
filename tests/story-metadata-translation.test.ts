@@ -23,6 +23,7 @@ describe("story metadata translation", () => {
     expect(result.translated.title).toBe("The Undead Calamity");
     expect(provider.request).toMatchObject({ model: story.pipeline.translation.model, schemaName: "story_metadata_translation" });
     expect(provider.request?.instructions).toContain("zh-CN to en-US");
+    expect(provider.request?.instructions).toMatch(/tags one-to-one.*exactly one translated tag for each source tag/s);
   });
 
   it("reuses the preserved original metadata for later output-language changes", () => {
