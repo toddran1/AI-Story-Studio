@@ -3,7 +3,7 @@ import { generatedQaResultSchema, QaResult, normalizeQaResult } from "../domain/
 import { StoryBible } from "../domain/story-bible.js";
 import { LLMProvider } from "../llm/provider.js";
 import type { NarrationProfanityMode } from "../domain/story.js";
-import { qaInstructionsFor } from "./prompts.js";
+import { authorizedNarrationNaming, qaInstructionsFor } from "./prompts.js";
 
 export async function validateChapterQuality(
   provider: LLMProvider,
@@ -18,6 +18,7 @@ export async function validateChapterQuality(
       `SOURCE LANGUAGE: ${input.sourceLanguage}`,
       `OUTPUT LANGUAGE: ${input.outputLanguage}`,
       `ESTABLISHED STORY BIBLE:\n${JSON.stringify(input.context, null, 2)}`,
+      authorizedNarrationNaming(input.context),
       `SOURCE CHAPTER:\n${input.source}`,
       `TRANSLATION:\n${input.translation}`,
       `NARRATION:\n${input.narration}`,

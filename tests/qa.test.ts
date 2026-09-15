@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { activeQaIssues, dismissQaIssues, normalizeQaResult, qaResultSchema } from "../src/domain/qa.js";
+import { emptyStoryBible, storyBibleSchema } from "../src/domain/story-bible.js";
+import { QA_PROMPT_VERSION, authorizedNarrationNaming } from "../src/qa/prompts.js";
+import { validateChapterQuality } from "../src/qa/validator.js";
+import { MockLLM } from "./helpers.js";
 
 const checks = { completeness: "pass", names: "pass", numbers: "pass", terminology: "pass", dialogue: "pass", storyConsistency: "pass", narrationFidelity: "pass" } as const;
 describe("QA result", () => {
@@ -29,5 +33,67 @@ describe("QA result", () => {
     expect(result.status).toBe("pass");
     expect(result.checks.dialogue).toBe("pass");
     expect(activeQaIssues(result)).toEqual([]);
+  });
+});
+
+const namingBible = () => storyBibleSchema.parse({
+  ...emptyStoryBible(),
+  canonicalEntities: [{
+    id: "ent_aaaaaaaaaaaaaaaaaaaaaaaa", type: "character", canonicalName: "Su Ming", originalName: "苏明", aliases: ["Ming"],
+    preferredNarrationName: "Asher",
+    aliasNarrationRules: [{ alias: "Ming", behavior: "custom", replacement: "Ash" }],
+    localizedNaming: { locale: "en-US", fullName: "Asher Voss", shortName: "Asher", usageMode: "ai_contextual" },
+    canonicalNameLocked: true,
+    firstAppearance: 1, lastKnownAppearance: 3, status: "alive",
+  }],
+});
+
+const qaCall = (llm: MockLLM) => llm.calls.find((call) => "schemaName" in call && call.schemaName === "chapter_qa")!;
+
+describe("QA authorized narration naming", () => {
+  it("passes explicit authorized mappings to the model and accepts no finding for authorized replacement in dialogue", async () => {
+    const llm = new MockLLM();
+    const result = await validateChapterQuality(llm, { provider: "openai", model: "qa-model" }, {
+      chapter: 3, sourceLanguage: "zh-CN", outputLanguage: "en-US",
+      source: "苏明说：“我们走。”", translation: `Su Ming said, "Let's go."`,
+      narration: `"Let's go," Asher said. Asher Voss had made up his mind.`,
+      context: namingBible(),
+    });
+    expect(result.value.status).toBe("pass");
+    expect(result.value.checks.names).toBe("pass");
+    const call = qaCall(llm) as { input: string; instructions: string };
+    expect(call.input).toContain("AUTHORIZED NARRATION NAMING MAPPINGS");
+    expect(call.input).toContain('canonical "Su Ming"');
+    expect(call.input).toContain('original "苏明"');
+    expect(call.input).toContain('fullName "Asher Voss"');
+    expect(call.input).toContain('shortName "Asher"');
+    expect(call.input).toContain('usageMode "ai_contextual"');
+    expect(call.input).toContain('the alias "Ming" is rendered as the custom phrase "Ash"');
+    expect(call.input).toContain('canonical name is locked');
+    expect(call.input).toContain("including inside dialogue");
+    expect(call.instructions).toContain("including inside spoken dialogue");
+  });
+
+  it("still surfaces a names finding for an unauthorized substitution", async () => {
+    const llm = new MockLLM("openai", undefined, {
+      status: "warn", score: 0.7,
+      issues: [{ category: "names", severity: "warn", message: "Narration renames Su Ming to 'Marcus', which matches neither the translation nor an authorized mapping.", evidence: `"Let's go," Marcus said.` }],
+      checks: { completeness: "pass", names: "warn", numbers: "pass", terminology: "pass", dialogue: "pass", storyConsistency: "pass", narrationFidelity: "pass" },
+    });
+    const result = await validateChapterQuality(llm, { provider: "openai", model: "qa-model" }, {
+      chapter: 3, sourceLanguage: "zh-CN", outputLanguage: "en-US",
+      source: "苏明", translation: `Su Ming said, "Let's go."`, narration: `"Let's go," Marcus said.`,
+      context: namingBible(),
+    });
+    expect(result.value.checks.names).toBe("warn");
+    expect(activeQaIssues(result.value).map((issue) => issue.category)).toEqual(["names"]);
+  });
+
+  it("states that no overrides exist when the bible has no naming preferences", () => {
+    expect(authorizedNarrationNaming(emptyStoryBible())).toContain("None.");
+  });
+
+  it("records the bumped prompt version", () => {
+    expect(QA_PROMPT_VERSION).toBe("4");
   });
 });
