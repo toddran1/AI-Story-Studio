@@ -47,7 +47,7 @@ export class SummaryService {
     const id = existingId ? summaryIdSchema.parse(existingId) : `sum_${randomUUID()}`; const previous = existingId ? await this.get(storySlug, id) : undefined;
     const model: StageModelConfig = input.model ?? story.pipeline.narration; const now = new Date().toISOString();
     let record = summarySchema.parse({ id, storyId: story.id, title: input.title, chapters, chapterRange: contiguousRange(chapters), summaryType: input.summaryType, sourceMode: input.sourceMode, targetLength: { words: input.targetWords }, focus: input.focus, instructions: input.instructions, text: previous?.text ?? "", status: "generating", origin: "generated", manuallyEdited: false, contextEligible: input.contextEligible, createdAt: previous?.createdAt ?? now, updatedAt: now, provenance: { model, promptVersion: SUMMARY_PROMPT_VERSION, chapterSources: [], levels: [] } });
-    if (previous) record = summarySchema.parse({ ...record, origin: previous.origin, manuallyEdited: previous.manuallyEdited, narration: previous.narration, tts: previous.tts, audio: previous.audio });
+    if (previous) record = summarySchema.parse({ ...record, origin: previous.origin, manuallyEdited: previous.manuallyEdited, narration: previous.narration, tts: previous.tts, audio: previous.audio, scenes: previous.scenes, scenePlan: previous.scenePlan, scenePacing: previous.scenePacing, artwork: previous.artwork, video: previous.video, alignment: previous.alignment });
     await atomicWriteJson(summaryPath(this.root, storySlug, id), record);
     try {
       progress?.({ phase: "preparing", completed: 0, total: chapters.length });
@@ -151,7 +151,7 @@ export function summaryPath(root: string, story: string, id: string) {
   return join(summaryDirectory(root, story), `${summaryIdSchema.parse(id)}.json`);
 }
 export function staleSummaryDerivatives(summary?: StorySummary) {
-  return Object.fromEntries((["narration", "tts", "audio"] as const).map((stage) => [stage, summary?.[stage] ? { ...summary[stage], status: "stale", reviewRequired: stage === "narration" && summary[stage]?.manuallyEdited } : undefined]));
+  return Object.fromEntries((["narration", "tts", "audio", "scenes", "video"] as const).map((stage) => [stage, summary?.[stage] ? { ...summary[stage], status: "stale", reviewRequired: stage === "narration" && summary[stage]?.manuallyEdited } : undefined]));
 }
 function chunk<T>(items: T[], size: number): T[][] { const result: T[][] = []; for (let index = 0; index < items.length; index += size) result.push(items.slice(index, index + size)); return result; }
 function chunkTarget(target: number, chunks: number) { return Math.max(150, Math.min(1_200, Math.ceil(target / Math.max(1, chunks) * 1.5))); }

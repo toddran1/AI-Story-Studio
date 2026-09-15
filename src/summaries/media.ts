@@ -22,8 +22,15 @@ import { fileFingerprint } from "../utils/file-fingerprint.js";
 import { fingerprint } from "../utils/hash.js";
 import { SummaryService, summaryPath } from "./service.js";
 import { summarySchema, type StorySummary } from "./types.js";
+import { planVisualScenes } from "../scenes/planner.js";
+import { normalizeProductionSceneTiming } from "../scenes/timing.js";
+import { scenePacingSchema, estimateScenePacing } from "../scenes/pacing.js";
+import { resolveVisualEntities } from "../scenes/identity.js";
+import { bindNarrationSpans } from "../scenes/narration-spans.js";
+import { productionSceneFingerprint } from "../scenes/manifest.js";
 
 export const summaryMediaInputSchema = z.object({ force: z.boolean().default(false) }).strict();
+export const summaryScenesInputSchema = scenePacingSchema.safeExtend({ force: z.boolean().default(false) });
 export const summaryNarrationEditSchema = z.union([
   z.object({ text: z.string().trim().min(1).max(1_000_000) }).strict(),
   z.object({ acceptCurrent: z.literal(true) }).strict(),
@@ -84,12 +91,84 @@ export class SummaryMediaService {
     }
     if (summary.tts?.status === "current" && (summary.narration?.status !== "current" || summary.tts.inputFingerprint !== input.ttsFingerprint || await fileFingerprint(paths.raw) !== summary.tts.outputFingerprint)) summary.tts.status = "stale";
     if (summary.audio?.status === "current" && (summary.tts?.status !== "current" || summary.audio.inputFingerprint !== input.audioFingerprint || await fileFingerprint(paths.audio) !== summary.audio.outputFingerprint)) summary.audio.status = "stale";
+    if (summary.scenes?.status === "current" && (summary.narration?.status !== "current" ||
+      summary.scenes.sourceFingerprint !== fingerprint(summary.narration.text) ||
+      summary.scenes.configurationFingerprint !== fingerprint({ config: input.story.pipeline.scenePlanner, settings: input.story.scenes }) ||
+      summary.scenes.outputFingerprint !== productionSceneFingerprint(summary.scenePlan) ||
+      (summary.audio?.status === "current" && summary.audio.durationSeconds !== summary.scenePlan?.durationSeconds))) summary.scenes.status = "stale";
     return summary;
   }
 
   private async save(slug: string, summary: StorySummary) {
     const record = summarySchema.parse({ ...summary, updatedAt: new Date().toISOString() });
     await atomicWriteJson(summaryPath(this.root, slug, record.id), record); return record;
+  }
+
+  async scenes(slug: string, id: string, raw: unknown = {}) {
+    const options = summaryScenesInputSchema.parse(raw);
+    const summary = await this.get(slug, id);
+    if (summary.narration?.status !== "current" || !summary.narration.text?.trim())
+      throw new Error("Generate or review summary narration before planning scenes");
+    const input = await this.inputs(slug, summary);
+    const { force, ...pacing } = options;
+    summary.scenePacing = pacing;
+    const estimate = estimateScenePacing(summary.narration.text, pacing, summary.audio?.status === "current" ? summary.audio.durationSeconds : undefined);
+    const identities = input.context.canonicalEntities.map((entity) => ({ entityId: entity.id, canonicalName: entity.canonicalName,
+      originalName: entity.originalName, narrationNames: [entity.localizedNaming?.fullName, entity.localizedNaming?.shortName, entity.preferredNarrationName].filter((value): value is string => Boolean(value)) }));
+    const inputFingerprint = fingerprint({ version: "summary-scenes-v1", narration: summary.narration.text, context: input.context,
+      identities, estimate, pacing, config: input.story.pipeline.scenePlanner, settings: input.story.scenes });
+    if (!force && summary.scenes?.status === "current" && summary.scenes.inputFingerprint === inputFingerprint && summary.scenePlan) return summary;
+    if (!force && summary.scenePlan?.manuallyEdited) throw new Error("Manual scenes require explicit regeneration to replace them");
+    const previous = summary.scenes; const previousScenePlan = summary.scenePlan;
+    summary.scenes = { ...previous, status: "generating", inputFingerprint, manuallyEdited: false, reviewRequired: false };
+    await this.save(slug, summary);
+    try {
+      const config = input.story.pipeline.scenePlanner;
+      const planned = await planVisualScenes(this.llms.forStage(config), config, { sourceType: "summary", sourceId: id,
+        sourceLabel: `SUMMARY: ${summary.title}`, sourceChapters: summary.chapters, canonicalSummary: summary.text,
+        narration: summary.narration.text, durationSeconds: estimate.durationSeconds, targetSceneCount: estimate.sceneCount,
+        bible: input.context, settings: input.story.scenes, namingIdentities: identities });
+      const now = new Date().toISOString();
+      summary.scenePlan = { version: 1, sourceType: "summary", sourceId: id, sourceChapters: summary.chapters,
+        durationSeconds: estimate.durationSeconds, timingMethod: "estimated", planningFingerprint: inputFingerprint,
+        planner: { provider: config.provider, model: config.model, promptVersion: "summary-scenes-v1" },
+        manualRevision: 0, manuallyEdited: false, createdAt: summary.scenePlan?.createdAt ?? now, updatedAt: now,
+        scenes: bindNarrationSpans(normalizeProductionSceneTiming(planned.value.scenes, estimate.durationSeconds), summary.narration.text).map((scene) => ({ ...scene,
+          visualType: "image", entityIds: resolveVisualEntities(scene.characters, input.context.canonicalEntities).map((entity) => entity.id) })) };
+      // Retain image provenance atomically with the new plan. A restart between
+      // planning and artwork must never discard protected/approved image metadata.
+      for (const scene of summary.scenePlan.scenes) {
+        const before = previousScenePlan?.scenes.find((item) => item.id === scene.id);
+        if (before) scene.artwork = before.artwork;
+      }
+      summary.scenes = { status: "current", inputFingerprint, outputFingerprint: productionSceneFingerprint(summary.scenePlan),
+        sourceFingerprint: fingerprint(summary.narration.text), configurationFingerprint: fingerprint({ config, settings: input.story.scenes }),
+        durationSeconds: estimate.durationSeconds, generatedAt: now, provider: config.provider, model: config.model,
+        manuallyEdited: false, reviewRequired: false };
+      return this.save(slug, summary);
+    } catch (error) {
+      summary.scenes = { ...summary.scenes, status: "failed", error: error instanceof Error ? error.message : String(error) };
+      await this.save(slug, summary); throw error;
+    }
+  }
+
+  async regenerateScene(slug: string, id: string, sceneId: string) {
+    const summary = await this.get(slug, id); const scene = summary.scenePlan?.scenes.find((item) => item.id === sceneId);
+    if (!scene || summary.narration?.status !== "current") throw new Error("A current narration and existing scene are required");
+    const input = await this.inputs(slug, summary); const config = input.story.pipeline.scenePlanner;
+    const planned = await planVisualScenes(this.llms.forStage(config), config, { sourceType: "summary", sourceId: id,
+      sourceLabel: `SUMMARY: ${summary.title} — regenerate ${sceneId} only`, narration: scene.narrationText ?? scene.summary,
+      durationSeconds: scene.endSeconds - scene.startSeconds, targetSceneCount: 1, bible: input.context, settings: input.story.scenes,
+      canonicalSummary: summary.text, sourceChapters: summary.chapters,
+      namingIdentities: input.context.canonicalEntities.map((entity) => ({ entityId: entity.id, canonicalName: entity.canonicalName, originalName: entity.originalName, narrationNames: [entity.localizedNaming?.fullName, entity.localizedNaming?.shortName, entity.preferredNarrationName].filter((value): value is string => Boolean(value)) })) });
+    if (planned.value.scenes.length !== 1) throw new Error("Individual scene regeneration must return exactly one scene");
+    const next = planned.value.scenes[0]!;
+    Object.assign(scene, { summary: next.summary, characters: next.characters, location: next.location, visualPrompt: next.visualPrompt, importance: next.importance,
+      entityIds: resolveVisualEntities(next.characters, input.context.canonicalEntities).map((entity) => entity.id) });
+    summary.scenePlan!.manuallyEdited = true; summary.scenePlan!.manualRevision++;
+    summary.scenes = { ...summary.scenes!, status: "current", manuallyEdited: true, outputFingerprint: productionSceneFingerprint(summary.scenePlan) };
+    if (summary.video) summary.video.status = "stale";
+    return this.save(slug, summary);
   }
 
   async narration(slug: string, id: string, raw: unknown = {}) {

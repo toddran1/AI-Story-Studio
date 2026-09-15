@@ -5,7 +5,10 @@ import { createPipelineRuntime } from "../../src/pipeline/create-pipeline.js";
 import { SummaryService, coverage } from "../../src/summaries/service.js";
 import { summaryIdSchema, summarySourceModeSchema, summaryTypeSchema, SUMMARY_WORDS_PER_MINUTE } from "../../src/summaries/types.js";
 import { withStoryLock } from "../../src/storage/story-lock.js";
-import { SummaryMediaService, summaryExportTypeSchema } from "../../src/summaries/media.js";
+import { SummaryMediaService, summaryExportTypeSchema, summaryScenesInputSchema } from "../../src/summaries/media.js";
+import { SummaryVisualService, summaryVisualInputSchema, summaryProduceInputSchema } from "../../src/summaries/visuals.js";
+import { FfmpegVideoProcessor } from "../../src/video/renderer.js";
+import { alignmentConfig, createAlignmentEngine } from "../../src/alignment/config.js";
 
 export type SummaryCommand =
   | { action: "list"; story: string }
@@ -13,19 +16,36 @@ export type SummaryCommand =
   | { action: "regenerate"; story: string; id: string; overrides: Record<string, unknown> }
   | { action: "generate"; story: string; input: Record<string, unknown> }
   | { action: "narration" | "audio"; story: string; id: string; force: boolean }
-  | { action: "export"; story: string; id: string; type: "summary" | "narration" | "audio" };
+  | { action: "scenes" | "artwork" | "video" | "produce"; story: string; id: string; input: Record<string, unknown> }
+  | { action: "export"; story: string; id: string; type: "summary" | "narration" | "audio" | "video" };
 
 export function parseSummaryArgs(values: string[]): SummaryCommand {
   const [action, story, positionalId, ...rest] = values;
-  if (!action || !story || !["generate", "list", "show", "regenerate", "delete", "narration", "audio", "export"].includes(action)) usage();
+  if (!action || !story || !["generate", "list", "show", "regenerate", "delete", "narration", "audio", "scenes", "artwork", "video", "produce", "export"].includes(action)) usage();
   validateStory(story);
+  if (action === "scenes" || action === "artwork" || action === "video" || action === "produce") {
+    if (!positionalId) usage("Scenes requires a summary ID");
+    const input: Record<string, unknown> = {};
+    for (let index = 0; index < rest.length; index++) {
+      const key = rest[index];
+      if (key === "--force") { input.force = true; continue; }
+      if (key === "--missing-only") { input.missingOnly = true; continue; }
+      const value = rest[++index]; if (!value) usage(`Missing value for ${key}`);
+      if (key === "--pacing") input.pacing = value;
+      else if (key === "--scene-count") input.sceneCount = Number(value);
+      else if (key === "--seconds-per-scene") input.secondsPerScene = Number(value);
+      else if (key === "--scene") input.scenes = value.split(",");
+      else usage(`Unknown scenes option: ${key}`);
+    }
+    return { action, story, id: summaryIdSchema.parse(positionalId), input: action === "scenes" ? summaryScenesInputSchema.parse(input) : action === "produce" ? summaryProduceInputSchema.parse(input) : summaryVisualInputSchema.parse(input) };
+  }
   if (action === "narration" || action === "audio") {
     if (!positionalId || (rest.length && (rest.length !== 1 || rest[0] !== "--force"))) usage(`${action} requires an ID and optionally --force`);
     return { action, story, id: summaryIdSchema.parse(positionalId), force: rest[0] === "--force" };
   }
   if (action === "export") {
     if (!positionalId || rest.length !== 2 || rest[0] !== "--type") usage("Export requires an ID and --type summary|narration|audio");
-    return { action, story, id: summaryIdSchema.parse(positionalId), type: summaryExportTypeSchema.parse(rest[1]) };
+    return { action, story, id: summaryIdSchema.parse(positionalId), type: rest[1] === "video" ? "video" : summaryExportTypeSchema.parse(rest[1]) };
   }
   if (action === "list") { if (positionalId || rest.length) usage("List does not accept additional arguments"); return { action, story }; }
   if (action === "show" || action === "delete") { if (!positionalId || rest.length) usage(`${action} requires one summary ID`); return { action, story, id: summaryIdSchema.parse(positionalId) }; }
@@ -47,21 +67,32 @@ async function main() {
   const command = parseSummaryArgs(process.argv.slice(2));
   const env = loadEnvironment(); const root = resolveStudioRoot(env); const runtime = createPipelineRuntime(env); const service = new SummaryService(root, runtime.router);
   const media = new SummaryMediaService(root, runtime.router, runtime.tts, runtime.censor, runtime.audio);
-  await runSummaryCommand(command, { root, service, media, stdout: (text) => process.stdout.write(text), stderr: (text) => process.stderr.write(text) });
+  const config = alignmentConfig(env, root); const visuals = new SummaryVisualService(root, media, runtime.images, new FfmpegVideoProcessor(), config, createAlignmentEngine(config));
+  await runSummaryCommand(command, { root, service, media, visuals, stdout: (text) => process.stdout.write(text), stderr: (text) => process.stderr.write(text) });
 }
 
-export async function runSummaryCommand(command: SummaryCommand, dependencies: { root: string; service: SummaryService; media?: SummaryMediaService; stdout: (text: string) => unknown; stderr: (text: string) => unknown }) {
+export async function runSummaryCommand(command: SummaryCommand, dependencies: { root: string; service: SummaryService; media?: SummaryMediaService; visuals?: SummaryVisualService; stdout: (text: string) => unknown; stderr: (text: string) => unknown }) {
   const { root, service, stdout, stderr } = dependencies;
   if (command.action === "list") {
     const records = await service.list(command.story);
     stdout(records.length ? records.map((item) => `${item.id}\t${item.status}\t${coverage(item.chapters)}\t${item.summaryType}\t${item.title}`).join("\n") + "\n" : "No summaries found.\n");
     return;
   }
-  if (command.action === "show") { stdout(`${JSON.stringify(await (dependencies.media ?? service).get(command.story, command.id), null, 2)}\n`); return; }
+  if (command.action === "show") { stdout(`${JSON.stringify(await (dependencies.visuals ?? dependencies.media ?? service).get(command.story, command.id), null, 2)}\n`); return; }
+  if (command.action === "artwork" || command.action === "video" || command.action === "produce" || (command.action === "export" && command.type === "video")) {
+    const visuals = dependencies.visuals; if (!visuals) throw new Error("Summary visual services are not configured");
+    const result = await withStoryLock<unknown>(root, command.story, `summary ${command.action}`, () => command.action === "export" ? visuals.export(command.story, command.id, "video") : visuals[command.action](command.story, command.id, command.input, (event) => { stderr(`${event.type}${event.scene ? ` ${event.scene}` : ""}\n`); }));
+    stdout(`${JSON.stringify(result, null, 2)}\n`); return;
+  }
+  if (command.action === "scenes") {
+    if (!dependencies.media) throw new Error("Summary media services are not configured");
+    const result = await withStoryLock(root, command.story, "summary scenes", () => (dependencies.visuals ?? dependencies.media!).scenes(command.story, command.id, command.input));
+    stdout(`${JSON.stringify(result, null, 2)}\n`); return;
+  }
   if (command.action === "narration" || command.action === "audio" || command.action === "export") {
     const media = dependencies.media; if (!media) throw new Error("Summary media services are not configured");
     const result = await withStoryLock<unknown>(root, command.story, `summary ${command.action}`, () => command.action === "export"
-      ? media.export(command.story, command.id, command.type)
+      ? media.export(command.story, command.id, summaryExportTypeSchema.parse(command.type))
       : media[command.action](command.story, command.id, { force: command.force }));
     stdout(`${JSON.stringify(result, null, 2)}\n`); return;
   }
@@ -102,6 +133,6 @@ function parseOptions(values: string[], selectionAllowed: boolean) {
 
 function integer(value: string, min: number, max: number, label: string) { const number = Number(value); if (!Number.isSafeInteger(number) || number < min || number > max) usage(`${label} must be an integer from ${min} to ${max}`); return number; }
 function validateStory(story: string) { if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(story)) usage("Invalid story slug"); }
-function usage(message = "Invalid summary command"): never { throw new Error(`${message}\nUsage:\n  npm run story:summary -- generate <story> (--from N --to N | --chapters N,N) [--title text] [--type brief|detailed|mini-chapter|arc|character-focused|custom] [--source original|translated|chapter-summaries] [--target-length words] [--model provider:model] [--context]\n  npm run story:summary -- list <story>\n  npm run story:summary -- show <story> <summary-id>\n  npm run story:summary -- regenerate <story> <summary-id> [generation options]\n  npm run story:summary -- delete <story> <summary-id>\n  npm run story:summary -- narration <story> <summary-id> [--force]\n  npm run story:summary -- audio <story> <summary-id> [--force]\n  npm run story:summary -- export <story> <summary-id> --type summary|narration|audio\n  Generation also accepts --target-minutes N (150 words/minute).`); }
+function usage(message = "Invalid summary command"): never { throw new Error(`${message}\nUsage:\n  npm run story:summary -- generate <story> (--from N --to N | --chapters N,N) [--title text] [--type brief|detailed|mini-chapter|arc|character-focused|custom] [--source original|translated|chapter-summaries] [--target-length words] [--model provider:model] [--context]\n  npm run story:summary -- list <story>\n  npm run story:summary -- show <story> <summary-id>\n  npm run story:summary -- regenerate <story> <summary-id> [generation options]\n  npm run story:summary -- delete <story> <summary-id>\n  npm run story:summary -- narration <story> <summary-id> [--force]\n  npm run story:summary -- audio <story> <summary-id> [--force]\n  npm run story:summary -- export <story> <summary-id> --type summary|narration|audio|video\n  npm run story:summary -- scenes <story> <summary-id> [--pacing automatic|slow|balanced|fast|custom] [--scene-count N | --seconds-per-scene N] [--force]\n  npm run story:summary -- artwork <story> <summary-id> [--missing-only] [--scene scene-001,scene-002] [--force]\n  npm run story:summary -- video <story> <summary-id> [--force]\n  npm run story:summary -- produce <story> <summary-id> [pacing options] [--missing-only]\n  Generation also accepts --target-minutes N (150 words/minute).`); }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) main().catch((error: unknown) => { process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`); process.exitCode = 1; });

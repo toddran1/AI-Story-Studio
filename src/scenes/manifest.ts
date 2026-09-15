@@ -45,6 +45,10 @@ export async function updateStoredSceneManifest(options: { root: string; story: 
 }
 
 export function scenePlanningFingerprint(narration: string, bible: string, settings: Story["scenes"], provider: string, model: string) { return fingerprint({ narration, bible, settings, provider, model, promptVersion: SCENE_PLANNER_PROMPT_VERSION }); }
+export function productionSceneFingerprint(plan: { scenes: Scene[]; [key: string]: unknown } | undefined) {
+  if (!plan) return fingerprint(undefined);
+  return fingerprint({ ...plan, updatedAt: undefined, scenes: plan.scenes.map(({ artwork, ...scene }) => scene) });
+}
 export function sceneContentFingerprint(scene: Pick<Scene, "summary" | "startSeconds" | "endSeconds" | "characters" | "location" | "visualPrompt" | "importance">) { return fingerprint({ summary: scene.summary, startSeconds: scene.startSeconds, endSeconds: scene.endSeconds, characters: scene.characters, location: scene.location, visualPrompt: scene.visualPrompt, importance: scene.importance }); }
 async function invalidateAfterSceneEdit(path: string, manifest: SceneManifest) { const raw = await readJsonIfExists<Chapter>(path); if (!raw) return; const chapter = chapterSchema.parse(raw); chapter.scenes = { total: manifest.scenes.length, generated: manifest.scenes.filter((scene) => scene.artwork.status === "complete").length, approved: manifest.scenes.filter((scene) => scene.artwork.review === "approved").length }; chapter.stages.artwork = { status: "pending" }; chapter.stages.video = { status: "pending" }; chapter.video = undefined; await persistChapter(path, chapter); }
 async function fileFingerprint(path: string) { const data = await readFile(path); return fingerprint(data.toString("base64")); }

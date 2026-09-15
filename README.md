@@ -642,3 +642,53 @@ Generated stories, private text, audio, `.env`, logs, dependencies, and build ou
 - [OpenAI Responses API](https://developers.openai.com/api/reference/typescript/resources/responses/methods/create)
 - [Gemini Interactions API](https://ai.google.dev/gemini-api/docs/interactions-overview)
 - [Fish Audio text-to-speech endpoint](https://docs.fish.audio/api-reference/endpoint/openapi-v1/text-to-speech)
+## Summary scenes, artwork and video production
+
+Completed summary narration can be planned into visual beats in the Summary
+Library's Scenes tab or through the same service from the CLI:
+
+```sh
+npm run story:summary -- scenes demo-story <summary-id> --pacing balanced
+npm run story:summary -- scenes demo-story <summary-id> --pacing custom --scene-count 14
+npm run story:summary -- artwork demo-story <summary-id> --missing-only
+npm run story:summary -- artwork demo-story <summary-id> --scene scene-001 --force
+npm run story:summary -- video demo-story <summary-id>
+npm run story:summary -- produce demo-story <summary-id> --pacing balanced
+npm run story:summary -- export demo-story <summary-id> --type video
+```
+
+Pacing accepts `automatic`, `slow`, `balanced`, `fast`, or `custom`. Custom
+pacing requires `--scene-count` or `--seconds-per-scene`, not both. `--force`
+explicitly regenerates the plan. Current matching plans are reused.
+
+The planner uses narration as its visual source, bounded canonical Story Bible
+context, localization identity guidance, and source-chapter provenance. Measured
+current summary audio determines duration where available; otherwise the estimate
+uses 150 words per minute. With current audio, the existing local alignment engine
+maps narration spans to measured timestamps. Unavailable, failed or low-quality
+alignment falls back to deterministic timing, explicitly labeled **estimated**.
+All semantic beats are retained, including the ending. Narration/settings changes
+mark the plan stale without deleting it. Jobs use existing durable summary-job
+storage and interrupted jobs require an explicit retry.
+
+The library exposes Summary, Narration, Audio, Scenes, Artwork and Video tabs.
+Scenes support editing, individual regeneration, reordering, disabling and deletion.
+Manual timelines remain authoritative while their narration and audio stay current.
+Artwork uses the same image provider, visual-reference storage and generation
+engine as chapters. Missing, selected and all-image actions are available; approved
+or manually accepted images are protected unless explicitly forced. Changed visual
+directions require regeneration or deliberate approval for the new context.
+
+Produce summary video runs narration, TTS/mastering, scenes, artwork and MP4
+rendering through shared services. Each completed stage is saved and fingerprinted;
+retrying an interrupted job reuses matching work. Timing changes do not regenerate
+unchanged images, and artwork changes do not regenerate narration or audio.
+Durable summary jobs pause on interruption and require an explicit retry.
+
+Video uses enabled still-image scenes, existing style/subtitle settings and the
+mastered summary audio. Intro duration is zero so the video timeline matches the
+audio. The source-aware scene model reserves a visual type for future video clips;
+this milestone generates still-image scenes. MP4 playback/download and individual
+PNG downloads are available in the library. CLI actions use the same services and
+validation as the API. `produce --force` replans scenes; force artwork replacement
+separately with the artwork command when intentionally replacing protected images.

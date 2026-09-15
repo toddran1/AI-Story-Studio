@@ -111,12 +111,18 @@ export function createApiHandler(operations: StudioOperations) {
       if (summaryMatch && request.method === "DELETE") { await jsonBody(request); return send(response, 200, await operations.deleteSummary(summaryMatch[1]!, summaryMatch[2]!)); }
       const summaryRegenerateMatch = /^\/api\/stories\/([a-z0-9-]+)\/summaries\/(sum_[a-f0-9-]{36})\/regenerate$/.exec(url.pathname);
       if (summaryRegenerateMatch && request.method === "POST") return send(response, 202, operations.regenerateSummary(summaryRegenerateMatch[1]!, summaryRegenerateMatch[2]!, await jsonBody(request)));
-      const summaryMediaMatch = /^\/api\/stories\/([a-z0-9-]+)\/summaries\/(sum_[a-f0-9-]{36})\/(narration|audio)$/.exec(url.pathname);
-      if (summaryMediaMatch && request.method === "POST") return send(response, 202, await operations.startSummaryMedia(summaryMediaMatch[1]!, summaryMediaMatch[2]!, summaryMediaMatch[3]! as "narration" | "audio", await jsonBody(request)));
+      const summaryMediaMatch = /^\/api\/stories\/([a-z0-9-]+)\/summaries\/(sum_[a-f0-9-]{36})\/(narration|audio|scenes|artwork|video|produce)$/.exec(url.pathname);
+      if (summaryMediaMatch && request.method === "POST") return send(response, 202, await operations.startSummaryMedia(summaryMediaMatch[1]!, summaryMediaMatch[2]!, summaryMediaMatch[3]! as Parameters<StudioOperations["startSummaryMedia"]>[2], await jsonBody(request)));
       if (summaryMediaMatch && summaryMediaMatch[3] === "narration" && request.method === "PUT") return send(response, 200, { summary: await operations.editSummaryNarration(summaryMediaMatch[1]!, summaryMediaMatch[2]!, await jsonBody(request)) });
-      const summaryExportMatch = /^\/api\/stories\/([a-z0-9-]+)\/summaries\/(sum_[a-f0-9-]{36})\/export\/(summary|narration|audio)$/.exec(url.pathname);
+      if (summaryMediaMatch && summaryMediaMatch[3] === "scenes" && request.method === "PUT") return send(response, 200, { summary: await operations.editSummaryScenes(summaryMediaMatch[1]!, summaryMediaMatch[2]!, await jsonBody(request)) });
+      const summarySceneRegenerateMatch = /^\/api\/stories\/([a-z0-9-]+)\/summaries\/(sum_[a-f0-9-]{36})\/scenes\/(scene-\d{3})\/regenerate$/.exec(url.pathname);
+      if (summarySceneRegenerateMatch && request.method === "POST") { z.object({}).strict().parse(await jsonBody(request)); return send(response, 202, await operations.regenerateSummaryScene(summarySceneRegenerateMatch[1]!, summarySceneRegenerateMatch[2]!, summarySceneRegenerateMatch[3]!)); }
+      const summaryImageMatch = /^\/api\/stories\/([a-z0-9-]+)\/summaries\/(sum_[a-f0-9-]{36})\/artwork\/(scene-\d{3})$/.exec(url.pathname);
+      if (summaryImageMatch && request.method === "PUT") { const input = z.object({ review: z.enum(["unreviewed", "approved", "rejected", "needs-regeneration"]) }).strict().parse(await jsonBody(request)); return send(response, 200, { summary: await operations.reviewSummaryArtwork(summaryImageMatch[1]!, summaryImageMatch[2]!, summaryImageMatch[3]!, input.review) }); }
+      if (summaryImageMatch && request.method === "GET") { const artifact = await operations.summaryVisuals().export(summaryImageMatch[1]!, summaryImageMatch[2]!, "artwork", summaryImageMatch[3]!); if (url.searchParams.get("download") === "1") response.setHeader("content-disposition", `attachment; filename="${artifact.name}"`); return sendFile(request, response, artifact.path, artifact.contentType); }
+      const summaryExportMatch = /^\/api\/stories\/([a-z0-9-]+)\/summaries\/(sum_[a-f0-9-]{36})\/export\/(summary|narration|audio|video)$/.exec(url.pathname);
       if (summaryExportMatch && request.method === "GET") {
-        const artifact = await operations.summaryMedia().export(summaryExportMatch[1]!, summaryExportMatch[2]!, summaryExportMatch[3]!);
+        const artifact = summaryExportMatch[3] === "video" ? await operations.summaryVisuals().export(summaryExportMatch[1]!, summaryExportMatch[2]!, "video") : await operations.summaryMedia().export(summaryExportMatch[1]!, summaryExportMatch[2]!, summaryExportMatch[3]!);
         if (url.searchParams.get("download") === "1") response.setHeader("content-disposition", `attachment; filename="${artifact.name}"`);
         return sendFile(request, response, artifact.path, artifact.contentType);
       }

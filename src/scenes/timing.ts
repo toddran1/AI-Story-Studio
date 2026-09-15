@@ -48,3 +48,21 @@ function boundedDurations(weights: number[], totalDuration: number, minimum: num
   return durations;
 }
 const round = (value: number) => Math.round(value * 1000) / 1000;
+
+/** Recaps retain every semantic beat. Pacing is guidance, never a reason to
+ * truncate the story's ending. Provider timings are estimates, not alignment. */
+export function normalizeProductionSceneTiming(raw: Array<Omit<Scene, "id" | "artwork">>, durationSeconds: number): Scene[] {
+  if (!Number.isFinite(durationSeconds) || durationSeconds <= 0 || raw.length === 0 || raw.length > 100)
+    throw new SceneError("Visual production requires a positive duration and 1–100 scenes");
+  const weights = raw.map((scene) => Math.max(.1, scene.endSeconds - scene.startSeconds));
+  const total = weights.reduce((sum, value) => sum + value, 0);
+  let cursor = 0;
+  const scenes = raw.map((scene, index) => {
+    const end = index === raw.length - 1 ? durationSeconds : cursor + durationSeconds * weights[index]! / total;
+    const result: Scene = { ...scene, id: `scene-${String(index + 1).padStart(3, "0")}`, startSeconds: cursor, endSeconds: end,
+      artwork: { status: "pending", review: "unreviewed" } };
+    cursor = end; return result;
+  });
+  validateSceneCoverage(scenes, durationSeconds);
+  return scenes;
+}

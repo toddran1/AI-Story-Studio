@@ -73,7 +73,8 @@ import { LLMRouter } from "../../src/llm/router.js";
 import { validateChapterQuality } from "../../src/qa/validator.js";
 import { emptyStoryBible, storyBibleSchema } from "../../src/domain/story-bible.js";
 import { SummaryService } from "../../src/summaries/service.js";
-import { SummaryMediaService, summaryMediaInputSchema, summaryNarrationEditSchema } from "../../src/summaries/media.js";
+import { SummaryMediaService, summaryMediaInputSchema, summaryNarrationEditSchema, summaryScenesInputSchema } from "../../src/summaries/media.js";
+import { SummaryVisualService, summaryVisualInputSchema, summaryProduceInputSchema } from "../../src/summaries/visuals.js";
 import { generateLocalizedNameSuggestions, localizationSuggestionRequestSchema } from "../../src/story-bible/localization.js";
 import { inspectStagesForCurrent, markCurrentInputSchema, markStagesCurrent } from "../../src/studio/stage-acceptance.js";
 
@@ -104,6 +105,7 @@ export class StudioOperations {
   private readonly llm: LLMRouter;
   private readonly scenePlanner?: LLMProvider; private readonly image: ImageProvider; private readonly tts: TTSProviderRouter; private readonly censor: CensorAudioService; private readonly runtime: ReturnType<typeof createPipelineRuntime>;
   private readonly alignConfig; private readonly aligner?: AlignmentEngine;
+  private readonly summaryImages: ReturnType<typeof createPipelineRuntime>["images"] | ImageProvider;
   private readonly inspectionTimer: NodeJS.Timeout; private inspectionBytes = 0;
   readonly queue?: ProductionQueueService; readonly usage?: PostgresUsageRepository;
   constructor(public readonly root: string, private readonly env: Environment, public readonly jobs = new JobManager(), dependencies: OperationsDependencies = {}) {
@@ -111,7 +113,7 @@ export class StudioOperations {
     this.registry = dependencies.registry ?? new SourceProviderRegistry(undefined, createWebHttpClient(root, env));
     this.audio = dependencies.audio ?? runtime.audio ?? new FfmpegMasteringProcessor(); this.audiobook = dependencies.audiobook ?? new FfmpegAudiobookProcessor();
     this.video = dependencies.video ?? new FfmpegVideoProcessor(); this.videoExport = dependencies.videoExport ?? new FfmpegVideoExportProcessor();
-    this.scenePlanner = dependencies.scenePlanner; this.image = dependencies.image ?? runtime.images.forName("openai"); this.tts = dependencies.tts instanceof TTSProviderRouter ? dependencies.tts : dependencies.tts ? new TTSProviderRouter(dependencies.tts) : runtime.tts;
+    this.scenePlanner = dependencies.scenePlanner; this.image = dependencies.image ?? runtime.images.forName("openai"); this.summaryImages = dependencies.image ?? runtime.images; this.tts = dependencies.tts instanceof TTSProviderRouter ? dependencies.tts : dependencies.tts ? new TTSProviderRouter(dependencies.tts) : runtime.tts;
     this.queue = dependencies.queue; this.alignConfig = alignmentConfig(env, root); this.aligner = dependencies.alignment ?? createAlignmentEngine(this.alignConfig);
     this.inspectionTimer = setInterval(() => this.expireInspections(), 60_000); this.inspectionTimer.unref();
   }
@@ -315,14 +317,19 @@ export class StudioOperations {
   listSummaries(slug: string, options?: Parameters<SummaryService["list"]>[1]) { slugSchema.parse(slug); return new SummaryService(this.root, this.llm).list(slug, options); }
   summaryMedia() { return new SummaryMediaService(this.root, this.llm, this.tts, this.censor, this.audio); }
   summaryJobsDirectory() { return join(this.root, ".data", "summary-jobs"); }
-  getSummary(slug: string, id: string) { slugSchema.parse(slug); return this.summaryMedia().get(slug, id); }
-  startSummaryMedia(slug: string, id: string, stage: "narration" | "audio", raw: unknown) {
-    slugSchema.parse(slug); const input = summaryMediaInputSchema.parse(raw);
-    return this.jobs.createDurable(this.summaryJobsDirectory(), slug, async (control) => withStoryLock(this.root, slug, `summary ${stage}`, () =>
-      withUsageScope({ story: slug, stage: stage === "audio" ? "tts" : "narration" }, () => stage === "narration"
-        ? this.summaryMedia().narration(slug, id, input)
-        : this.summaryMedia().audio(slug, id, input, (event) => control.update(event)))));
+  summaryVisuals() { return new SummaryVisualService(this.root, this.summaryMedia(), this.summaryImages, this.video, this.alignConfig, this.aligner); }
+  getSummary(slug: string, id: string) { slugSchema.parse(slug); return this.summaryVisuals().get(slug, id); }
+  startSummaryMedia(slug: string, id: string, stage: "narration" | "audio" | "scenes" | "artwork" | "video" | "produce", raw: unknown) {
+    slugSchema.parse(slug); const input = stage === "produce" ? summaryProduceInputSchema.parse(raw) : stage === "scenes" ? summaryScenesInputSchema.parse(raw) : ["artwork", "video"].includes(stage) ? summaryVisualInputSchema.parse(raw) : summaryMediaInputSchema.parse(raw);
+    return this.jobs.createDurable(this.summaryJobsDirectory(), slug, async (control) => withStoryLock(this.root, slug, `summary ${stage}`, async () => {
+      const shutdown = new ShutdownController(); control.setPause(() => shutdown.request()); const progress = (event: unknown) => control.update(event);
+      const result = await withUsageScope({ story: slug, stage: stage === "audio" ? "tts" : stage === "scenes" ? "scenePlanning" : stage === "artwork" ? "artwork" : stage === "video" ? "video" : "narration" }, () => stage === "narration" ? this.summaryMedia().narration(slug, id, input) : stage === "audio" ? this.summaryMedia().audio(slug, id, input, progress) : stage === "produce" ? this.summaryVisuals().produce(slug, id, input, progress, () => shutdown.isRequested) : stage === "artwork" ? this.summaryVisuals().artwork(slug, id, input, progress, () => shutdown.isRequested) : this.summaryVisuals()[stage](slug, id, input, progress));
+      return shutdown.isRequested ? { status: "paused", summary: result } : result;
+    }));
   }
+  editSummaryScenes(slug: string, id: string, raw: unknown) { slugSchema.parse(slug); return withStoryLock(this.root, slug, "summary scene edits", () => this.summaryVisuals().editScenes(slug, id, raw)); }
+  regenerateSummaryScene(slug: string, id: string, scene: string) { slugSchema.parse(slug); z.string().regex(/^scene-\d{3}$/).parse(scene); return this.jobs.createDurable(this.summaryJobsDirectory(), slug, () => withStoryLock(this.root, slug, "summary individual scene regeneration", () => withUsageScope({ story: slug, stage: "scenePlanning" }, () => this.summaryMedia().regenerateScene(slug, id, scene)))); }
+  reviewSummaryArtwork(slug: string, id: string, scene: string, review: unknown) { slugSchema.parse(slug); return withStoryLock(this.root, slug, "summary artwork review", () => this.summaryVisuals().reviewArtwork(slug, id, scene, review)); }
   editSummaryNarration(slug: string, id: string, raw: unknown) {
     slugSchema.parse(slug); summaryNarrationEditSchema.parse(raw);
     return withStoryLock(this.root, slug, "summary narration edit", () => this.summaryMedia().editNarration(slug, id, raw));

@@ -1,4 +1,7 @@
 import { z } from "zod";
+import { productionSceneManifestSchema } from "../scenes/types.js";
+import { alignmentArtifactSchema } from "../alignment/types.js";
+import { scenePacingSchema } from "../scenes/pacing.js";
 import { stageModelConfigSchema } from "../domain/provider.js";
 
 export const summaryTypeSchema = z.enum(["brief", "detailed", "mini-chapter", "arc", "character-focused", "custom"]);
@@ -22,6 +25,7 @@ export const summaryDerivativeSchema = z.object({
   durationSeconds: z.number().nonnegative().optional(), bytes: z.number().int().nonnegative().optional(),
   censoredSegments: z.number().int().nonnegative().optional(), censorDurationSeconds: z.number().nonnegative().optional(),
   segmentFingerprints: z.array(z.string()).optional(),
+  width: z.number().int().positive().optional(), height: z.number().int().positive().optional(), sceneCount: z.number().int().positive().optional(),
 });
 export type SummaryDerivative = z.infer<typeof summaryDerivativeSchema>;
 
@@ -72,6 +76,11 @@ export const summarySchema = z.object({
   narration: summaryDerivativeSchema.optional(),
   tts: summaryDerivativeSchema.optional(),
   audio: summaryDerivativeSchema.optional(),
+  scenes: summaryDerivativeSchema.optional(),
+  artwork: summaryDerivativeSchema.optional(), video: summaryDerivativeSchema.optional(),
+  scenePacing: scenePacingSchema.optional(),
+  alignment: alignmentArtifactSchema.omit({ chapter: true }).extend({ sourceType: z.literal("summary"), sourceId: summaryIdSchema }).optional(),
+  scenePlan: productionSceneManifestSchema.extend({ sourceType: z.literal("summary") }).optional(),
   provenance: z.object({
     model: stageModelConfigSchema,
     promptVersion: z.string(),

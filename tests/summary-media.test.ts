@@ -36,6 +36,28 @@ describe("summary narration and audio", () => {
   afterEach(async () => { await rm(root, { recursive: true, force: true }); });
   const create = () => summaries.generate("demo-story", { title: "Arc", chapters: [1] });
 
+  it("plans recap scenes through the shared provider and reuses current artifacts", async () => {
+    const canonical = await create(); await media.audio("demo-story", canonical.id);
+    const plan = vi.spyOn(llm, "generateStructured").mockImplementation(async (request) => ({ value: request.schema.parse({ scenes: [
+      { summary: "Arrival", startSeconds: 0, endSeconds: 5, characters: [], visualPrompt: "A necromancer enters the horde", importance: "standard" },
+      { summary: "The final confrontation", startSeconds: 5, endSeconds: 10, characters: [], visualPrompt: "The horde turns toward him", importance: "major" },
+    ] }) }));
+    const result = await media.scenes("demo-story", canonical.id, { pacing: "custom", sceneCount: 2 });
+    expect(result.scenePlan).toMatchObject({ sourceType: "summary", sourceId: canonical.id, sourceChapters: [1], durationSeconds: 10, timingMethod: "estimated" });
+    expect(result.scenePlan?.scenes).toHaveLength(2);
+    expect(result.scenePlan?.scenes.at(-1)?.endSeconds).toBe(10);
+    expect(plan.mock.calls[0]![0].input).toContain(result.narration!.text!);
+    await media.scenes("demo-story", canonical.id, { pacing: "custom", sceneCount: 2 });
+    expect(plan).toHaveBeenCalledTimes(1);
+    expect(parseSummaryArgs(["scenes", "demo-story", canonical.id, "--pacing", "custom", "--scene-count", "2"])).toMatchObject({ action: "scenes", input: { sceneCount: 2 } });
+    let output = "";
+    await runSummaryCommand({ action: "scenes", story: "demo-story", id: canonical.id, input: { pacing: "custom", sceneCount: 2 } }, { root, service: summaries, media, stdout: (text) => { output += text; }, stderr: () => {} });
+    expect(JSON.parse(output).scenes.status).toBe("current"); expect(plan).toHaveBeenCalledTimes(1);
+    await summaries.update("demo-story", canonical.id, { text: "A different recap" });
+    const stale = await media.get("demo-story", canonical.id);
+    expect(stale.scenes?.status).toBe("stale"); expect(stale.scenePlan?.scenes).toHaveLength(2);
+  });
+
   it("keeps canonical text isolated and passes contextual localization to the narration model", async () => {
     const bible = mergeStoryBible(emptyStoryBible(), storyBibleUpdateSchema.parse({ chapterSummary: "Battle", characters: [{ canonicalEnglishName: "Su Ming", originalName: "苏铭", aliases: ["Student Su"], firstSeenChapter: 1, lastSeenChapter: 1 }] }), 1);
     bible.canonicalEntities[0]!.localizedNaming = { locale: "en-US", fullName: "Malakai Sterling", shortName: "Malakai", usageMode: "ai_contextual" };
