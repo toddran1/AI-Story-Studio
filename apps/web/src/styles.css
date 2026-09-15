@@ -26,6 +26,12 @@
 /* Retained derived artifacts remain visible after a source/config invalidation. */
 .stage.stale{color:var(--warn)}
 .stage.stale i{background:var(--warn)}
+.artifact-status-notice{border:1px solid rgba(223,166,75,.3);background:rgba(223,166,75,.08);color:#e7c387;border-radius:6px;padding:10px 12px;display:flex;align-items:flex-start;gap:10px;font-size:10px;line-height:1.5}
+.artifact-status-notice .stage{flex:none;margin-top:1px}
+.artifact-status-notice p{margin:0}
+.artifact-status-notice small{display:block;color:var(--muted);margin-top:3px;font-size:9px}
+.artifact-status-notice .artifact-status-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
+.artifact-status-notice.failed{border-color:rgba(219,93,104,.3);background:rgba(219,93,104,.08);color:#e99aa1}
 
 /* Batch continuation is a deliberate production policy, not a hidden option. */
 .processing-panel{grid-template-columns:1.25fr repeat(3,minmax(95px,.45fr)) minmax(190px,.8fr) auto}

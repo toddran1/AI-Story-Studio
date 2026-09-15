@@ -11,7 +11,7 @@ import { exportPaths, sceneImagePath, storyPaths, videoExportPaths } from "../..
 import { exists, readJsonIfExists, readTextIfExists } from "../../src/storage/story-files.js";
 import { withStoryLock } from "../../src/storage/story-lock.js";
 import { loadStory } from "../../src/config/load-config.js";
-import { rebuildStoryBibleBeforeChapter } from "../../src/story-bible/rebuild.js";
+import { rebuildStoryBibleBeforeChapter, computeStaleExtractionChapters } from "../../src/story-bible/rebuild.js";
 import { exportManifestSchema } from "../../src/audio/audiobook.js";
 import { videoExportManifestSchema } from "../../src/video/video-export.js";
 import { SceneManifest, artworkSettingsSchema, sceneManifestSchema, sceneSettingsSchema } from "../../src/scenes/types.js";
@@ -37,7 +37,7 @@ export function invalidateCatalogCache(root: string, slug: string) { const key =
 
 export type ChapterSummary = {
   chapter: number; originalTitle?: string; translation: string; narration: string; qa?: QaResult["status"];
-  qaScore?: number; qaIssues?: QaResult["issues"]; qaStale: boolean; tts: string; audioMastering: string; continuity: string; alignment: string; subtitles: string; scenePlanning: string; artwork: string; video: string; audioAvailable: boolean; audioStale: boolean; videoAvailable: boolean; durationSeconds?: number;
+  qaScore?: number; qaIssues?: QaResult["issues"]; qaStale: boolean; tts: string; audioMastering: string; continuity: string; alignment: string; subtitles: string; scenePlanning: string; artwork: string; video: string; audioAvailable: boolean; audioStale: boolean; videoAvailable: boolean; videoStale: boolean; durationSeconds?: number;
 };
 
 export async function listStories(root: string, warnings: string[] = []) {
@@ -107,22 +107,31 @@ export async function getChapter(root: string, slug: string, chapter: number) {
   };
   const fresh = isCurrent(metadata, index.manifestByChapter.get(chapter), Boolean(index.manifest));
   const qaRaw = await readJsonIfExists<QaResult>(paths.qa);
-  const alignmentRaw = fresh && metadata?.stages.alignment.status === "complete" ? await readJsonIfExists<AlignmentArtifact>(paths.alignment) : undefined;
+  // Stale artifacts stay visible: they are loaded whenever the file exists and
+  // parsed successfully, and flagged stale instead of being withheld.
+  const alignmentRaw = await readJsonIfExists<AlignmentArtifact>(paths.alignment);
   const alignment = alignmentRaw ? alignmentArtifactSchema.safeParse(alignmentRaw) : undefined;
-  const subtitleRaw = fresh && metadata?.stages.subtitles.status === "complete" ? await readJsonIfExists<SubtitleDocument>(paths.subtitlesDocument) : undefined;
+  const subtitleRaw = await readJsonIfExists<SubtitleDocument>(paths.subtitlesDocument);
   const subtitleDocument = subtitleRaw ? subtitleDocumentSchema.safeParse(subtitleRaw) : undefined;
-  // A source replacement makes derived audio stale, but it must remain
+  const storyContext = await readJsonIfExists(paths.storyContext);
+  const subtitlesText = await readTextIfExists(paths.subtitlesVtt);
+  // A source replacement makes derived audio/video stale, but it must remain
   // playable and recoverable until the user explicitly regenerates it.
   const audioAvailable = await exists(paths.audio);
   const audioStale = audioAvailable && (!fresh || metadata?.stages.audioMastering.status !== "complete");
+  const videoAvailable = await exists(paths.video);
+  const videoStale = videoAvailable && (!fresh || metadata?.stages.video.status !== "complete");
   return {
     chapter, navigation, metadata, stale: !fresh || metadata?.stages.ingestion.status !== "complete", original: await readTextIfExists(paths.original),
     translation: await readTextIfExists(paths.english), narration: await readTextIfExists(paths.narration),
-    qa: qaRaw ? qaResultSchema.parse(qaRaw) : undefined, qaStale: Boolean(qaRaw) && (!fresh || metadata?.stages.qa.status !== "complete"), storyContext: fresh ? await readJsonIfExists(paths.storyContext) : undefined, audioAvailable, audioStale, alignment: alignment?.success ? alignment.data : undefined, subtitleDocument: subtitleDocument?.success ? subtitleDocument.data : undefined,
+    qa: qaRaw ? qaResultSchema.parse(qaRaw) : undefined, qaStale: Boolean(qaRaw) && (!fresh || metadata?.stages.qa.status !== "complete"), storyContext, storyContextStale: storyContext !== undefined && !fresh, audioAvailable, audioStale,
+    alignment: alignment?.success ? alignment.data : undefined, alignmentStale: Boolean(alignment?.success) && (!fresh || metadata?.stages.alignment.status !== "complete"),
+    subtitleDocument: subtitleDocument?.success ? subtitleDocument.data : undefined,
     audioUrl: audioAvailable ? `/api/stories/${slug}/chapters/${chapter}/audio` : undefined,
-    subtitles: fresh && metadata?.stages.subtitles.status === "complete" ? await readTextIfExists(paths.subtitlesVtt) : undefined,
-    subtitlesUrl: fresh && metadata?.stages.subtitles.status === "complete" ? `/api/stories/${slug}/chapters/${chapter}/subtitles.vtt` : undefined,
-    videoUrl: fresh && metadata?.stages.video.status === "complete" && await exists(paths.video) ? `/api/stories/${slug}/chapters/${chapter}/video` : undefined,
+    subtitles: subtitlesText ?? undefined,
+    subtitlesStale: subtitlesText !== undefined && (!fresh || metadata?.stages.subtitles.status !== "complete"),
+    subtitlesUrl: subtitlesText !== undefined ? `/api/stories/${slug}/chapters/${chapter}/subtitles.vtt` : undefined,
+    videoUrl: videoAvailable ? `/api/stories/${slug}/chapters/${chapter}/video` : undefined, videoStale,
   };
 }
 
@@ -148,7 +157,7 @@ export async function getStoryBible(root: string, slug: string, options: { inclu
   return options.includeCanonicalOverlay === false ? bible : (await applyCanonicalOverlay(root, slug, bible)).bible;
 }
 
-export async function getStoryBibleView(root: string, slug: string) { const bible = await getStoryBible(root, slug); return applyManualBibleOverlay(root, slug, bible); }
+export async function getStoryBibleView(root: string, slug: string) { const bible = await getStoryBible(root, slug); const view = await applyManualBibleOverlay(root, slug, bible); return { ...view, staleExtractionChapters: await computeStaleExtractionChapters(root, slug) }; }
 
 export async function getCanonicalEntitiesPage(root: string, slug: string, options: { page: number; pageSize: number; type?: string; query?: string; sort?: string }) { const bible = await getStoryBible(root, slug); let entities = bible.canonicalEntities; const query = options.query?.trim().toLocaleLowerCase(); if (options.type && options.type !== "all") entities = entities.filter((item) => item.type === options.type); if (query) entities = entities.filter((item) => [item.canonicalName, item.originalName, item.preferredNarrationName ?? "", item.localizedNaming?.fullName ?? "", item.localizedNaming?.shortName ?? "", item.localizedNaming?.notes ?? "", item.description, item.notes, ...item.aliases, ...item.aliasNarrationRules.flatMap((rule) => [rule.alias, rule.replacement ?? ""])].some((value) => value.toLocaleLowerCase().includes(query))); const direction = options.sort === "last" ? (a: typeof entities[number], b: typeof entities[number]) => b.lastKnownAppearance - a.lastKnownAppearance : options.sort === "first" ? (a: typeof entities[number], b: typeof entities[number]) => a.firstAppearance - b.firstAppearance : (a: typeof entities[number], b: typeof entities[number]) => a.canonicalName.localeCompare(b.canonicalName); entities = [...entities].sort(direction); const pageSize = Math.min(100, Math.max(1, Math.floor(options.pageSize))); const pages = Math.max(1, Math.ceil(entities.length / pageSize)); const page = Math.min(pages, Math.max(1, Math.floor(options.page))); const reviewRaw = await readJsonIfExists(storyPaths(root, slug, 1).continuityReview); const review = reviewRaw ? continuityReviewSchema.safeParse(reviewRaw) : undefined; const openCounts = new Map<string, number>(); if (review?.success) for (const finding of review.data.findings.filter((item) => item.status === "open")) for (const id of finding.entityIds) openCounts.set(id, (openCounts.get(id) ?? 0) + 1); return { items: entities.slice((page - 1) * pageSize, page * pageSize).map((item) => ({ ...item, conflictCount: openCounts.get(item.id) ?? 0 })), page, pageSize, pages, total: entities.length, counts: Object.fromEntries(["character", "location", "organization", "ability", "item", "concept"].map((type) => [type, bible.canonicalEntities.filter((item) => item.type === type).length])), duplicateSuggestions: page === 1 && !query ? findDuplicateSuggestions(bible.canonicalEntities).slice(0, 50) : [] }; }
 
@@ -230,14 +239,14 @@ async function loadSummaries(root: string, slug: string, numbers: number[], inde
     const qaRaw = await readJsonIfExists<QaResult>(chapterPaths.qa);
     const qa = qaRaw ? qaResultSchema.safeParse(qaRaw) : undefined; const tts = fresh ? metadata?.stages.tts.status ?? "pending" : "pending";
     const audioMastering = fresh ? metadata?.stages.audioMastering.status ?? "pending" : "pending"; const continuity = fresh ? metadata?.stages.continuity.status ?? "pending" : "pending"; const alignment = fresh ? metadata?.stages.alignment.status ?? "pending" : "pending"; const subtitles = fresh ? metadata?.stages.subtitles.status ?? "pending" : "pending"; const scenePlanning = fresh ? metadata?.stages.scenePlanning.status ?? "pending" : "pending"; const artwork = fresh ? metadata?.stages.artwork.status ?? "pending" : "pending"; const video = fresh ? metadata?.stages.video.status ?? "pending" : "pending";
-    const [audioFileExists, translationFileExists, narrationFileExists] = await Promise.all([exists(chapterPaths.audio), exists(chapterPaths.english), exists(chapterPaths.narration)]); const audioStale = audioFileExists && audioMastering !== "complete";
+    const [audioFileExists, translationFileExists, narrationFileExists, videoFileExists] = await Promise.all([exists(chapterPaths.audio), exists(chapterPaths.english), exists(chapterPaths.narration), exists(chapterPaths.video)]); const audioStale = audioFileExists && audioMastering !== "complete"; const videoStale = videoFileExists && video !== "complete";
     const translationStatus = fresh && metadata?.stages.translation.status === "complete" ? "complete" : translationFileExists ? "stale" : "pending";
     const narrationStatus = fresh && metadata?.stages.narration.status === "complete" ? "complete" : narrationFileExists ? "stale" : "pending";
     return { chapter, originalTitle: metadata?.originalTitle ?? index.titles.get(chapter), translation: translationStatus,
       narration: narrationStatus, qa: qa?.success ? qa.data.status : undefined,
       qaScore: qa?.success ? qa.data.score : undefined, qaIssues: qa?.success ? qa.data.issues : undefined, qaStale: Boolean(qa?.success) && (!fresh || metadata?.stages.qa.status !== "complete"), tts, audioMastering, continuity, alignment, subtitles, scenePlanning, artwork, video,
       durationSeconds: audioFileExists ? metadata?.audio?.durationSeconds : undefined,
-      audioAvailable: audioFileExists, audioStale, videoAvailable: video === "complete" && await exists(chapterPaths.video) };
+      audioAvailable: audioFileExists, audioStale, videoAvailable: videoFileExists, videoStale };
   });
 }
 

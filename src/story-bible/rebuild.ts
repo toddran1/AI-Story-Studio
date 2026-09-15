@@ -23,9 +23,34 @@ export async function rebuildStoryBibleBeforeChapter(root: string, slug: string,
   for (const number of numbers) {
     const metadata = await readJsonIfExists<Chapter>(storyPaths(root, slug, number).chapterMeta);
     if (metadata && metadata.stages?.storyBible?.status !== "complete") continue;
-    if (currentSources && metadata?.source?.fingerprint !== currentSources.get(number)) continue;
+    // A source fingerprint mismatch marks the extraction stale, not absent:
+    // the completed update is still valid canon and remains part of the rebuild.
     const raw = await readJsonIfExists<StoryBibleUpdate>(storyPaths(root, slug, number).bibleUpdate);
     if (raw) bible = mergeStoryBible(bible, normalizeStoryBibleUpdate(storyBibleUpdateSchema.parse(raw), number), number);
   }
   return (await applyManualBibleOverlay(root, slug, bible, { includeCanonical: options.includeCanonicalOverlay !== false })).bible;
+}
+
+/**
+ * Chapters whose Story Bible extraction is complete but no longer matches the
+ * current source (fingerprint drift or an explicit staleReason). Their updates
+ * still contribute canon; callers surface them as stale evidence.
+ */
+export async function computeStaleExtractionChapters(root: string, slug: string): Promise<number[]> {
+  const paths = storyPaths(root, slug, 1); const chaptersDir = join(paths.story, "chapters");
+  const manifestRaw = await readJsonIfExists<SourceManifest>(paths.sourceManifest);
+  const manifest = manifestRaw ? sourceManifestSchema.safeParse(manifestRaw) : undefined;
+  const currentSources = manifest?.success ? new Map(manifest.data.chapters.map((item) => [item.chapter, item.fingerprint])) : undefined;
+  let numbers: number[] = [];
+  try {
+    numbers = (await readdir(chaptersDir, { withFileTypes: true })).filter((entry) => entry.isDirectory() && /^\d+$/.test(entry.name))
+      .map((entry) => Number(entry.name)).filter((number) => Number.isSafeInteger(number) && number > 0);
+  } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+  const stale: number[] = [];
+  for (const number of numbers) {
+    const metadata = await readJsonIfExists<Chapter>(storyPaths(root, slug, number).chapterMeta);
+    if (!metadata || metadata.stages?.storyBible?.status !== "complete") continue;
+    if (metadata.stages.storyBible.staleReason || (currentSources && metadata.source?.fingerprint !== currentSources.get(number))) stale.push(number);
+  }
+  return stale.sort((a, b) => a - b);
 }
