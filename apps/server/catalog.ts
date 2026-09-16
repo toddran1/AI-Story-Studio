@@ -2,7 +2,8 @@ import { readFile, readdir, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { z } from "zod";
 import { Chapter, chapterSchema } from "../../src/domain/chapter.js";
-import { isQaIssueActive, QaResult, qaResultSchema } from "../../src/domain/qa.js";
+import { isQaIssueActive, QaResult, qaResultSchema, qaStateSchema } from "../../src/domain/qa.js";
+import { migrateQaState, openFindings } from "../../src/qa/findings.js";
 import { Story, storySchema } from "../../src/domain/story.js";
 import { StoryBible, emptyStoryBible, storyBibleSchema } from "../../src/domain/story-bible.js";
 import { SourceManifest, sourceManifestSchema } from "../../src/source/types.js";
@@ -184,6 +185,7 @@ async function outputItem(path: string, value: Record<string, unknown>) { try { 
 export const settingsUpdateSchema = z.object({
   title: z.string().trim().min(1), author: z.string().trim().optional(), description: z.string().max(10_000).default(""), tags: z.array(z.string()).max(30).default([]), notes: z.string().max(20_000).default(""), sourceLanguage: z.string().trim().min(2), outputLanguage: z.string().trim().min(2),
   recentChapterSummaries: z.number().int().min(0).max(100),
+  qaMode: z.enum(["production", "thorough"]).optional(),
   narrationSettings: z.object({ profanityMode: z.enum(["preserve", "soften-strong"]), bleepStrongProfanity: z.boolean().default(false), includeChapterTitle: z.boolean().optional(), speechNormalization: z.enum(["automatic", "enabled", "disabled"]).default("automatic"), timeSpeechMode: z.enum(["natural_12h", "natural_24h", "preserve"]).default("natural_12h"), speechAbbreviations: z.record(z.string().trim().regex(/^[A-Za-z][A-Za-z0-9-]{0,29}$/), z.string().trim().min(1).max(120)).default({}) }).optional(),
   translation: z.object({ provider: z.enum(["openai", "gemini", "kimi"]), model: z.string().trim().min(1) }),
   narration: z.object({ provider: z.enum(["openai", "gemini", "kimi"]), model: z.string().trim().min(1) }),
@@ -204,6 +206,7 @@ export async function updateStorySettings(root: string, slug: string, input: unk
     const current = await loadStory(paths.storyConfig);
     const story = storySchema.parse({ ...current, title: update.title, author: update.author || undefined, description: update.description, tags: update.tags, notes: update.notes, sourceLanguage: update.sourceLanguage, outputLanguage: update.outputLanguage,
       context: { ...current.context, recentChapterSummaries: update.recentChapterSummaries },
+      qaMode: update.qaMode ?? current.qaMode,
       narrationSettings: update.narrationSettings ?? current.narrationSettings,
       audio: { ...current.audio, ...update.audio }, subtitles: { ...current.subtitles, ...update.subtitles }, video: { ...current.video, ...update.video }, scenes: { ...current.scenes, ...update.scenes }, artwork: { ...current.artwork, ...update.artwork }, pipeline: { ...current.pipeline, translation: update.translation, narration: update.narration, qa: update.qa, scenePlanner: update.scenePlanner ?? current.pipeline.scenePlanner,
         tts: { ...current.pipeline.tts, provider: update.tts.provider ?? current.pipeline.tts.provider, model: update.tts.model ?? current.pipeline.tts.model, referenceId: update.tts.referenceId || undefined,
@@ -240,14 +243,19 @@ async function loadSummaries(root: string, slug: string, numbers: number[], inde
     const chapterPaths = storyPaths(root, slug, chapter); const raw = await readJsonIfExists<Chapter>(chapterPaths.chapterMeta); const parsed = raw ? chapterSchema.safeParse(raw) : undefined;
     const metadata = parsed?.success ? parsed.data : undefined; const fresh = isCurrent(metadata, index.manifestByChapter.get(chapter), Boolean(index.manifest));
     const qaRaw = await readJsonIfExists<QaResult>(chapterPaths.qa);
-    const qa = qaRaw ? qaResultSchema.safeParse(qaRaw) : undefined; const tts = fresh ? metadata?.stages.tts.status ?? "pending" : "pending";
+    const qaParsed = qaRaw ? qaStateSchema.safeParse(qaRaw) : undefined;
+    const qa = qaParsed?.success ? migrateQaState(qaParsed.data, { chapter }) : undefined;
+    // Issue lists are open findings only: resolved (fixed/dismissed) and
+    // obsolete findings keep their evidence in qa.json but never count here.
+    const qaIssues: QaResult["issues"] | undefined = qa ? openFindings(qa).map(({ category, severity, message, evidence }) => ({ category, severity, message, evidence })) : undefined;
+    const tts = fresh ? metadata?.stages.tts.status ?? "pending" : "pending";
     const audioMastering = fresh ? metadata?.stages.audioMastering.status ?? "pending" : "pending"; const continuity = fresh ? metadata?.stages.continuity.status ?? "pending" : "pending"; const alignment = fresh ? metadata?.stages.alignment.status ?? "pending" : "pending"; const subtitles = fresh ? metadata?.stages.subtitles.status ?? "pending" : "pending"; const scenePlanning = fresh ? metadata?.stages.scenePlanning.status ?? "pending" : "pending"; const artwork = fresh ? metadata?.stages.artwork.status ?? "pending" : "pending"; const video = fresh ? metadata?.stages.video.status ?? "pending" : "pending";
     const [audioFileExists, translationFileExists, narrationFileExists, videoFileExists] = await Promise.all([exists(chapterPaths.audio), exists(chapterPaths.english), exists(chapterPaths.narration), exists(chapterPaths.video)]); const audioStale = audioFileExists && audioMastering !== "complete"; const videoStale = videoFileExists && video !== "complete";
     const translationStatus = fresh && metadata?.stages.translation.status === "complete" ? "complete" : translationFileExists ? "stale" : "pending";
     const narrationStatus = fresh && metadata?.stages.narration.status === "complete" ? "complete" : narrationFileExists ? "stale" : "pending";
     return { chapter, originalTitle: metadata?.originalTitle ?? index.titles.get(chapter), translation: translationStatus,
-      narration: narrationStatus, qa: qa?.success ? qa.data.status : undefined,
-      qaScore: qa?.success ? qa.data.score : undefined, qaIssues: qa?.success ? qa.data.issues : undefined, qaStale: Boolean(qa?.success) && (!fresh || metadata?.stages.qa.status !== "complete"), tts, audioMastering, continuity, alignment, subtitles, scenePlanning, artwork, video,
+      narration: narrationStatus, qa: qa?.status,
+      qaScore: qa?.score, qaIssues, qaStale: Boolean(qa) && (!fresh || metadata?.stages.qa.status !== "complete"), tts, audioMastering, continuity, alignment, subtitles, scenePlanning, artwork, video,
       durationSeconds: audioFileExists ? metadata?.audio?.durationSeconds : undefined,
       audioAvailable: audioFileExists, audioStale, videoAvailable: videoFileExists, videoStale };
   });

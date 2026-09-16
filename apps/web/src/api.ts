@@ -32,6 +32,7 @@ export type StoryConfig = {
   metadataTranslationSource?: { title: string; author?: string; description?: string; tags?: string[]; language: string }; metadataTranslatedAt?: string;
   sources: Array<{ provider: string; bookId: string; url: string; title?: string; author?: string; addedAt: string; lastInspectedAt?: string; priority: number; enabled: boolean }>;
   context: { recentChapterSummaries: number };
+  qaMode: "production" | "thorough";
   narrationSettings: { profanityMode: "preserve" | "soften-strong"; bleepStrongProfanity: boolean; includeChapterTitle?: boolean };
   audio: AudioSettings;
   subtitles: SubtitleSettings; video: VideoSettings; scenes: SceneSettings; artwork: ArtworkSettings;
@@ -55,6 +56,20 @@ export type StoryCard = { slug: string; title: string; author?: string; descript
 export type Counts = { pass: number; warn: number; fail: number };
 export type ChapterRow = { chapter: number; originalTitle?: string; translation: string; narration: string; qa?: "pass" | "warn" | "fail"; qaScore?: number; qaStale?: boolean; tts: string; audioMastering: string; alignment: string; subtitles: string; durationSeconds?: number; audioAvailable: boolean };
 export type QaResult = { status: "pass" | "warn" | "fail"; score: number; originalScore?: number; issues: Array<{ category: string; severity: "warn" | "fail"; message: string; evidence: string; review?: { disposition: "dismissed" | "manually_fixed"; reviewedAt: string } }>; checks: Record<string, "pass" | "warn" | "fail"> };
+export type QaFindingStatus = "open" | "fixed_manual" | "fixed_ai" | "dismissed" | "obsolete";
+export type QaFinding = {
+  id: string; category: string; severity: "warn" | "fail"; message: string; evidence: string; suggestedFix?: string;
+  status: QaFindingStatus; resolution?: { action: "manual_fix" | "ai_fix" | "dismiss" | "obsolete"; reason?: string; resolvedAt: string };
+  reopenedAt?: string; firstDetectedAt?: string; lastVerifiedAt?: string;
+  provenance?: { chapter?: number; stage?: string; entityIds?: string[]; excerptKey?: string; continuityIds?: string[] };
+  origin: "llm" | "deterministic"; safeToFix?: boolean; confidence?: number;
+};
+export type QaState = QaResult & { findings: QaFinding[]; mode?: "production" | "thorough" };
+export type QaCounts = { open: number; resolved: number; safeFixesAvailable: number };
+export type ChapterQaDetail = { chapter: number; state: QaState; counts: QaCounts; qaStale: boolean };
+export type QaRecheckSummary = QaCounts & { verified: number; respected: number; reopened: number; newFindings: number; obsoleted: number; mode: "changed" | "full"; fellBackToFull: boolean };
+export type QaExceptionMatchKind = "terminology" | "entity" | "rule" | "other";
+export type QaException = { id: string; category: string; matchKind: QaExceptionMatchKind; value: string; reason?: string; createdAt: string };
 export type ChapterDetail = {
   original?: string; translation?: string; narration?: string;
   storyContext?: unknown; storyContextStale?: boolean;

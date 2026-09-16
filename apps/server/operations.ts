@@ -12,7 +12,7 @@ import { retryConfigSchema } from "../../src/batch/types.js";
 import { selectChapterRange } from "../../src/batch/range.js";
 import { Environment } from "../../src/config/env.js";
 import { defaultStory, loadStory } from "../../src/config/load-config.js";
-import { storySchema } from "../../src/domain/story.js";
+import { Story, storySchema } from "../../src/domain/story.js";
 import { createPipelineRuntime } from "../../src/pipeline/create-pipeline.js";
 import { ConfigurationError } from "../../src/pipeline/errors.js";
 import { applyPreviewProfile } from "../../src/preview/profile.js";
@@ -71,7 +71,12 @@ import { Chapter, chapterSchema, StageName } from "../../src/domain/chapter.js";
 import { fingerprint } from "../../src/utils/hash.js";
 import { fileFingerprint } from "../../src/utils/file-fingerprint.js";
 import { NovelProviderId, novelProviderIdSchema, storyNovelSourceSchema } from "../../src/source/novel-provider.js";
-import { activeQaIssues, qaResultSchema, resolveQaIssues } from "../../src/domain/qa.js";
+import { activeQaIssues, qaExceptionSchema, qaResultSchema, type QaFinding } from "../../src/domain/qa.js";
+import { migrateQaState, openFindings, qaCounts } from "../../src/qa/findings.js";
+import { resolveQaFindingsByIndex, recheckChapterQa, transitionQaFinding, type QaFindingTransition } from "../../src/qa/review.js";
+import { addQaException, listQaExceptions, removeQaException } from "../../src/qa/exceptions.js";
+import { applyNarrationNamingPreferences } from "../../src/narration/naming-preferences.js";
+import { loadNarrationNamingEntities } from "../../src/story-bible/narration-names.js";
 import { issueRepairTargets, repairQaText, repairTargets } from "../../src/qa/repair.js";
 import { LLMRouter } from "../../src/llm/router.js";
 import { validateChapterQuality } from "../../src/qa/validator.js";
@@ -87,6 +92,18 @@ const slugSchema = z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/);
 const batchInputSchema = z.object({ from: z.number().int().positive().optional(), to: z.number().int().positive().optional(), force: z.enum(["translation", "narration", "qa", "story-bible", "continuity", "tts", "audio", "all"]).optional(), stage: z.enum(["ingestion", "translation", "narration", "qa", "storyBible", "continuity", "tts", "audioMastering", "alignment", "subtitles", "scenePlanning", "artwork", "video"]).optional(), mode: stageExecutionModeSchema.default("selected"), continueOnError: z.boolean().default(false) }).strict().refine((value) => !(value.stage && value.force), { message: "Choose either a manual stage or the legacy force stage, not both" });
 const qaRepairInputSchema = z.object({ issueIndexes: z.array(z.number().int().nonnegative()).min(1).max(100) }).strict();
 const qaDismissInputSchema = z.object({ issueIndexes: z.array(z.number().int().nonnegative()).min(1).max(100), disposition: z.enum(["dismissed", "manually_fixed"]).default("dismissed") }).strict();
+const qaFindingIdSchema = z.string().regex(/^qaf_[a-f0-9]{24}$/);
+const qaExceptionIdSchema = z.string().regex(/^qax_[a-f0-9]{24}$/);
+const qaRecheckInputSchema = z.object({ mode: z.enum(["changed", "full"]).default("full") }).strict();
+const qaResolveManualInputSchema = z.object({ finalText: z.string().max(500_000).optional() }).strict();
+const qaFindingDismissInputSchema = z.object({
+  reason: z.string().max(1_000).optional(),
+  remember: z.object({ matchKind: qaExceptionSchema.shape.matchKind, value: z.string().trim().min(1).max(300) }).strict().optional(),
+}).strict();
+const qaExceptionInputSchema = z.object({
+  category: qaExceptionSchema.shape.category, matchKind: qaExceptionSchema.shape.matchKind,
+  value: z.string().trim().min(1).max(300), reason: z.string().max(1_000).optional(),
+}).strict();
 const previewInputSchema = z.object({ chapter: z.number().int().positive(), audioPreview: z.boolean().default(false), presets: z.object({ a: previewPresetSchema, b: previewPresetSchema }) }).strict();
 const audioInputSchema = z.object({ from: z.number().int().positive().optional(), to: z.number().int().positive().optional(), force: z.boolean().default(false) }).strict();
 const audiobookInputSchema = z.object({ from: z.number().int().positive(), to: z.number().int().positive(), format: z.enum(["mp3", "m4b"]), force: z.boolean().default(false) }).strict();
@@ -394,7 +411,7 @@ export class StudioOperations {
       if (!qaRaw || !chapterRaw) throw new Error(`Chapter ${chapter} does not have a QA result`);
       const metadata = chapterSchema.parse(chapterRaw);
       const uniqueIndexes = [...new Set(input.issueIndexes)];
-      const qa = resolveQaIssues(qaRaw, uniqueIndexes, input.disposition);
+      const qa = resolveQaFindingsByIndex(qaRaw, uniqueIndexes, input.disposition, undefined, chapter);
       const activeIssues = activeQaIssues(qa);
       await atomicWriteJson(paths.qa, qa);
       metadata.quality = { status: qa.status, score: qa.score, issueCategories: [...new Set(activeIssues.map((issue) => issue.category))] };
@@ -430,35 +447,198 @@ export class StudioOperations {
       return { chapter, repaired, issueIndexes: uniqueIndexes, requiresQaRecheck: true };
     }));
   }
-  startQaRecheck(slug: string, chapter: number) {
+  startQaRecheck(slug: string, chapter: number, raw?: unknown) {
     slugSchema.parse(slug); if (!Number.isSafeInteger(chapter) || chapter < 1) throw new ConfigurationError("Chapter must be a positive integer");
+    const input = qaRecheckInputSchema.parse(raw ?? {});
     return this.jobs.create("qaRecheck", slug, async (control) => withStoryLock(this.root, slug, "QA-only recheck", async () => {
       const paths = storyPaths(this.root, slug, chapter); const story = await loadStory(paths.storyConfig);
-      const [rawChapter, source, translation, narration, contextRaw] = await Promise.all([
-        readJsonIfExists<Chapter>(paths.chapterMeta), readFile(paths.original, "utf8"), readFile(paths.english, "utf8"), readFile(paths.narration, "utf8"), readJsonIfExists(paths.storyContext),
-      ]);
-      if (!rawChapter) throw new Error(`Chapter ${chapter} has no production metadata`);
-      if (!translation.trim() || !narration.trim()) throw new Error(`Chapter ${chapter} needs a retained translation and narration before it can be rechecked`);
-      const metadata = chapterSchema.parse(rawChapter);
-      // A prior context snapshot is an optimization for the normal pipeline, not
-      // a prerequisite for QA. Older imported chapters may not have one yet.
-      const context = contextRaw ? storyBibleSchema.parse(contextRaw) : emptyStoryBible();
-      control.update({ type: "qa.recheck.started", chapter, stage: "qa" });
-      const config = story.pipeline.qa; const result = await withUsageScope({ story: slug, chapter, stage: "qa" }, () => validateChapterQuality(this.llm.forStage(config), config, {
-        chapter, sourceLanguage: story.sourceLanguage, outputLanguage: story.outputLanguage, source, translation, narration, context, profanityMode: story.narrationSettings.profanityMode, includeChapterTitle: story.narrationSettings.includeChapterTitle !== false,
-      }));
-      await atomicWriteJson(paths.qa, result.value);
-      metadata.quality = { status: result.value.status, score: result.value.score, issueCategories: [...new Set(result.value.issues.map((issue) => issue.category))] };
-      const outputFingerprint = await fileFingerprint(paths.qa);
-      if (!outputFingerprint) throw new Error(`Chapter ${chapter} QA result could not be persisted`);
-      metadata.stages.qa = { status: "complete", fingerprint: fingerprint({ source, translation, narration, config,
-        narrationSettings: { profanityMode: story.narrationSettings.profanityMode, includeChapterTitle: story.narrationSettings.includeChapterTitle } }),
-        outputFingerprint, provider: config.provider, model: config.model, promptVersion: "qa-only-v1", completedAt: new Date().toISOString(), usage: result.usage };
-      metadata.updatedAt = new Date().toISOString(); await atomicWriteJson(paths.chapterMeta, metadata);
-      control.update({ type: "qa.recheck.completed", chapter, stage: "qa", status: result.value.status });
+      control.update({ type: "qa.recheck.started", chapter, stage: "qa", mode: input.mode });
+      const result = await withUsageScope({ story: slug, chapter, stage: "qa" }, () => recheckChapterQa({ root: this.root, story, chapter, provider: this.llm.forStage(story.pipeline.qa), mode: input.mode }));
+      control.update({ type: "qa.recheck.completed", chapter, stage: "qa", status: result.state.status });
       invalidateCatalogCache(this.root, slug); await recordActivity(this.root, slug, "chapter.qa_rechecked", `Rechecked Chapter ${chapter} using its retained translation and narration`);
-      return { chapter, qa: result.value.status, qaOnly: true };
+      return { chapter, qa: result.state.status, qaOnly: true, summary: result.summary };
     }));
+  }
+
+  async getChapterQa(slug: string, chapter: number) {
+    slugSchema.parse(slug); if (!Number.isSafeInteger(chapter) || chapter < 1) throw new ConfigurationError("Chapter must be a positive integer");
+    const paths = storyPaths(this.root, slug, chapter);
+    const [qaRaw, chapterRaw] = await Promise.all([readJsonIfExists(paths.qa), readJsonIfExists<Chapter>(paths.chapterMeta)]);
+    if (!qaRaw) throw new Error(`Chapter ${chapter} does not have a QA result`);
+    const state = migrateQaState(qaRaw, { chapter });
+    const metadata = chapterRaw ? chapterSchema.parse(chapterRaw) : undefined;
+    return { chapter, state, counts: qaCounts(state), qaStale: metadata?.stages.qa.status !== "complete" };
+  }
+
+  /** Persist a single-finding transition and only the QA artifacts it affects. Caller holds the story lock. */
+  private async mutateQaFindingState(slug: string, chapter: number, id: string, action: QaFindingTransition, options: { reason?: string; finalTextFingerprint?: string } = {}) {
+    const paths = storyPaths(this.root, slug, chapter);
+    const [qaRaw, chapterRaw] = await Promise.all([readJsonIfExists(paths.qa), readJsonIfExists<Chapter>(paths.chapterMeta)]);
+    if (!qaRaw || !chapterRaw) throw new Error(`Chapter ${chapter} does not have a QA result`);
+    const metadata = chapterSchema.parse(chapterRaw);
+    const state = transitionQaFinding(migrateQaState(qaRaw, { chapter }), id, action, options);
+    await atomicWriteJson(paths.qa, state);
+    // QA-state-only mutation: update the summary and the persisted output
+    // fingerprint. Stage input fingerprints and downstream stages stay untouched.
+    metadata.quality = { status: state.status, score: state.score, issueCategories: [...new Set(openFindings(state).map((finding) => finding.category))] };
+    const outputFingerprint = await fileFingerprint(paths.qa);
+    if (!outputFingerprint) throw new Error(`Chapter ${chapter} QA review could not be persisted`);
+    metadata.stages.qa = { ...metadata.stages.qa, outputFingerprint };
+    metadata.updatedAt = new Date().toISOString();
+    await atomicWriteJson(paths.chapterMeta, metadata);
+    invalidateCatalogCache(this.root, slug);
+    return { state, finding: state.findings.find((finding) => finding.id === id)! };
+  }
+
+  async resolveQaFindingManually(slug: string, chapter: number, id: string, raw: unknown) {
+    slugSchema.parse(slug); if (!Number.isSafeInteger(chapter) || chapter < 1) throw new ConfigurationError("Chapter must be a positive integer");
+    qaFindingIdSchema.parse(id); const input = qaResolveManualInputSchema.parse(raw);
+    return withStoryLock(this.root, slug, "QA finding manual resolution", async () => {
+      const finalTextFingerprint = input.finalText?.trim() ? fingerprint(input.finalText) : undefined;
+      const { finding, state } = await this.mutateQaFindingState(slug, chapter, id, "manual_fix", { finalTextFingerprint });
+      await recordActivity(this.root, slug, "chapter.qa_manually_fixed", `Marked QA finding ${id} for Chapter ${chapter} manually fixed`);
+      return { chapter, finding, qa: state };
+    });
+  }
+
+  async dismissQaFinding(slug: string, chapter: number, id: string, raw: unknown) {
+    slugSchema.parse(slug); if (!Number.isSafeInteger(chapter) || chapter < 1) throw new ConfigurationError("Chapter must be a positive integer");
+    qaFindingIdSchema.parse(id); const input = qaFindingDismissInputSchema.parse(raw);
+    return withStoryLock(this.root, slug, "QA finding dismissal", async () => {
+      const { finding, state } = await this.mutateQaFindingState(slug, chapter, id, "dismiss", { reason: input.reason });
+      let exception;
+      if (input.remember) {
+        exception = (await addQaException(this.root, slug, { category: finding.category, matchKind: input.remember.matchKind, value: input.remember.value, reason: input.reason })).exception;
+        invalidateCatalogCache(this.root, slug);
+      }
+      await recordActivity(this.root, slug, "chapter.qa_dismissed", `Dismissed QA finding ${id} for Chapter ${chapter}${exception ? " and remembered the decision" : ""}`);
+      return { chapter, finding, qa: state, exception };
+    });
+  }
+
+  async reopenQaFinding(slug: string, chapter: number, id: string) {
+    slugSchema.parse(slug); if (!Number.isSafeInteger(chapter) || chapter < 1) throw new ConfigurationError("Chapter must be a positive integer");
+    qaFindingIdSchema.parse(id);
+    return withStoryLock(this.root, slug, "QA finding reopen", async () => {
+      const { finding, state } = await this.mutateQaFindingState(slug, chapter, id, "reopen");
+      await recordActivity(this.root, slug, "chapter.qa_reopened", `Reopened QA finding ${id} for Chapter ${chapter}`);
+      return { chapter, finding, qa: state };
+    });
+  }
+
+  /** Repair one finding's target text(s). Caller holds the story lock. Returns the repaired targets. */
+  private async repairFindingTargets(slug: string, story: Story, chapter: number, finding: { id: string; category: QaFinding["category"]; severity: QaFinding["severity"]; message: string; evidence: string }, texts: { source: string; translation: string; narration: string; context: unknown }, control?: { update: (event: unknown) => void }) {
+    const issue = { category: finding.category, severity: finding.severity, message: finding.message, evidence: finding.evidence };
+    const repaired: string[] = [];
+    let currentTranslation = texts.translation; let currentNarration = texts.narration;
+    for (const target of repairTargets([issue])) {
+      control?.update({ type: "qa.repair.started", chapter, target, findingId: finding.id });
+      const config = story.pipeline[target]; const provider = this.llm.forStage(config);
+      const result = await withUsageScope({ story: slug, chapter, stage: `qaRepair.${target}` }, () => repairQaText(provider, config, {
+        target, chapter, sourceLanguage: story.sourceLanguage, outputLanguage: story.outputLanguage, source: texts.source,
+        translation: currentTranslation, narration: currentNarration, issues: [issue], context: texts.context,
+        profanityMode: story.narrationSettings.profanityMode, includeChapterTitle: story.narrationSettings.includeChapterTitle !== false,
+      }));
+      await saveChapterTextEdit(this.root, slug, chapter, { field: target, text: result.text });
+      if (target === "translation") currentTranslation = result.text; else currentNarration = result.text;
+      repaired.push(target);
+      control?.update({ type: "qa.repair.completed", chapter, target, findingId: finding.id });
+    }
+    return { repaired, translation: currentTranslation, narration: currentNarration };
+  }
+
+  startQaFindingFix(slug: string, chapter: number, id: string) {
+    slugSchema.parse(slug); if (!Number.isSafeInteger(chapter) || chapter < 1) throw new ConfigurationError("Chapter must be a positive integer");
+    qaFindingIdSchema.parse(id);
+    return this.jobs.create("qaRepair", slug, async (control) => withStoryLock(this.root, slug, "QA finding AI fix", async () => {
+      const paths = storyPaths(this.root, slug, chapter); const story = await loadStory(paths.storyConfig);
+      const [qaRaw, source, translation, narration, context] = await Promise.all([
+        readJsonIfExists(paths.qa), readFile(paths.original, "utf8"), readFile(paths.english, "utf8"), readFile(paths.narration, "utf8"), readJsonIfExists(paths.storyContext),
+      ]);
+      if (!qaRaw) throw new Error(`Chapter ${chapter} does not have a QA result`);
+      const state = migrateQaState(qaRaw, { chapter });
+      const finding = state.findings.find((candidate) => candidate.id === id);
+      if (!finding) throw new Error("QA finding was not found. Reload the chapter and try again.");
+      if (finding.status !== "open") throw new Error("QA finding is not open. Reload the chapter and select an open finding.");
+      const { repaired, translation: repairedTranslation, narration: repairedNarration } = await this.repairFindingTargets(slug, story, chapter, finding, { source, translation, narration, context }, control);
+      // Mark fixed before the verification recheck: reconciliation reopens the
+      // finding (history preserved) only if the problem genuinely persists.
+      await this.mutateQaFindingState(slug, chapter, id, "ai_fix", { finalTextFingerprint: fingerprint({ translation: repairedTranslation, narration: repairedNarration }) });
+      const recheck = await withUsageScope({ story: slug, chapter, stage: "qa" }, () => recheckChapterQa({ root: this.root, story, chapter, provider: this.llm.forStage(story.pipeline.qa), mode: "full" }));
+      const finalFinding = recheck.state.findings.find((candidate) => candidate.id === id);
+      invalidateCatalogCache(this.root, slug); await recordActivity(this.root, slug, "chapter.qa_repaired", `AI repaired Chapter ${chapter} ${repaired.join(" and ")} for QA finding ${id}`);
+      return { chapter, findingId: id, repaired, fixed: finalFinding?.status === "fixed_ai", finding: finalFinding, summary: recheck.summary };
+    }));
+  }
+
+  /** Core of the safe-fixes flow, shared by the web job and the CLI. Caller holds the story lock. */
+  async applyQaSafeFixes(slug: string, chapter: number, control?: { update: (event: unknown) => void }) {
+    slugSchema.parse(slug); if (!Number.isSafeInteger(chapter) || chapter < 1) throw new ConfigurationError("Chapter must be a positive integer");
+    const paths = storyPaths(this.root, slug, chapter); const story = await loadStory(paths.storyConfig);
+    const [qaRaw, source, translation, narration, context] = await Promise.all([
+      readJsonIfExists(paths.qa), readFile(paths.original, "utf8"), readFile(paths.english, "utf8"), readFile(paths.narration, "utf8"), readJsonIfExists(paths.storyContext),
+    ]);
+    if (!qaRaw) throw new Error(`Chapter ${chapter} does not have a QA result`);
+    const state = migrateQaState(qaRaw, { chapter });
+    // The backend alone decides what is safe: open + explicitly marked safeToFix.
+    const safe = state.findings.filter((finding) => finding.status === "open" && finding.safeToFix === true);
+    const fixed: string[] = []; const failed: { id: string; message: string }[] = [];
+    let summary;
+    if (safe.length) {
+      const namingEntities = await loadNarrationNamingEntities(this.root, slug);
+      let currentTranslation = translation; let currentNarration = narration;
+      for (const finding of safe) {
+        try {
+          control?.update({ type: "qa.safefix.started", chapter, findingId: finding.id });
+          const namingEntity = finding.origin === "deterministic" && finding.category === "names"
+            ? namingEntities.find((entity) => finding.provenance?.entityIds?.includes(entity.id) && entity.preferredNarrationName)
+            : undefined;
+          if (namingEntity) {
+            const rewritten = applyNarrationNamingPreferences(currentNarration, { canonicalEntities: [namingEntity] });
+            if (rewritten === currentNarration) throw new Error("Mechanical name substitution produced no change");
+            await saveChapterTextEdit(this.root, slug, chapter, { field: "narration", text: rewritten });
+            currentNarration = rewritten;
+          } else {
+            const repaired = await this.repairFindingTargets(slug, story, chapter, finding, { source, translation: currentTranslation, narration: currentNarration, context }, control);
+            currentTranslation = repaired.translation; currentNarration = repaired.narration;
+          }
+          await this.mutateQaFindingState(slug, chapter, finding.id, "ai_fix", {});
+          fixed.push(finding.id);
+        } catch (error) {
+          failed.push({ id: finding.id, message: error instanceof Error ? error.message : String(error) });
+        }
+      }
+      if (fixed.length) {
+        const recheck = await withUsageScope({ story: slug, chapter, stage: "qa" }, () => recheckChapterQa({ root: this.root, story, chapter, provider: this.llm.forStage(story.pipeline.qa), mode: "full" }));
+        summary = recheck.summary;
+      }
+    }
+    invalidateCatalogCache(this.root, slug); await recordActivity(this.root, slug, "chapter.qa_repaired", `Applied ${fixed.length} safe QA fix(es) for Chapter ${chapter}${failed.length ? `; ${failed.length} failed` : ""}`);
+    return { chapter, fixed, failed, summary };
+  }
+
+  startQaSafeFixes(slug: string, chapter: number) {
+    slugSchema.parse(slug); if (!Number.isSafeInteger(chapter) || chapter < 1) throw new ConfigurationError("Chapter must be a positive integer");
+    return this.jobs.create("qaRepair", slug, async (control) => withStoryLock(this.root, slug, "QA safe fixes", () => this.applyQaSafeFixes(slug, chapter, control)));
+  }
+
+  async listQaExceptions(slug: string) { slugSchema.parse(slug); return { exceptions: await listQaExceptions(this.root, slug) }; }
+  async addQaException(slug: string, raw: unknown) {
+    slugSchema.parse(slug); const input = qaExceptionInputSchema.parse(raw);
+    return withStoryLock(this.root, slug, "QA exception add", async () => {
+      const result = await addQaException(this.root, slug, input);
+      invalidateCatalogCache(this.root, slug); await recordActivity(this.root, slug, "chapter.qa_dismissed", `${result.created ? "Added" : "Kept"} QA exception "${input.value}"`);
+      return result;
+    });
+  }
+  async removeQaException(slug: string, id: string) {
+    slugSchema.parse(slug); qaExceptionIdSchema.parse(id);
+    return withStoryLock(this.root, slug, "QA exception remove", async () => {
+      const result = await removeQaException(this.root, slug, id);
+      if (!result.removed) throw new Error("QA exception was not found");
+      invalidateCatalogCache(this.root, slug); await recordActivity(this.root, slug, "chapter.qa_dismissed", `Removed QA exception ${id}`);
+      return result;
+    });
   }
   async addBibleEntry(slug: string, raw: unknown) { slugSchema.parse(slug); const input = z.object({ category: bibleCategorySchema, value: z.record(z.string(), z.unknown()), replacementKey: z.string().optional() }).strict().parse(raw); return withStoryLock(this.root, slug, "manual Story Bible add", async () => { const base = await getStoryBible(this.root, slug); const id = await addManualBibleEntry(this.root, slug, base, input.category, input.value, input.replacementKey); await recordActivity(this.root, slug, "bible.edited", `Added or corrected ${input.category} entry`); return { id }; }); }
   async updateBibleEntry(slug: string, id: string, raw: unknown) { slugSchema.parse(slug); const input = z.object({ value: z.record(z.string(), z.unknown()) }).strict().parse(raw); return withStoryLock(this.root, slug, "manual Story Bible edit", async () => { const base = await getStoryBible(this.root, slug); await updateManualBibleEntry(this.root, slug, base, id, input.value); await recordActivity(this.root, slug, "bible.edited", "Updated a Story Bible entry"); return { status: "updated" }; }); }

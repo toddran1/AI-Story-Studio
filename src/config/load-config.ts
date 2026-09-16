@@ -7,7 +7,7 @@ export function defaultStory(slug: string, env: Environment): Story {
   const title = slug.split("-").map((part) => part[0]?.toUpperCase() + part.slice(1)).join(" ");
   return storySchema.parse({
     id: slug, slug, title, description: "", tags: [], notes: "", defaultProductionProfile: "audiobook", sourceLanguage: "zh-CN", outputLanguage: "en-US",
-    source: { type: "text" }, context: { recentChapterSummaries: 5 }, narrationSettings: { profanityMode: "preserve" },
+    source: { type: "text" }, context: { recentChapterSummaries: 5 }, narrationSettings: { profanityMode: "preserve" }, qaMode: "production",
     audio: { loudnessTarget: -17, truePeak: -1.5, segmentGapSeconds: 0.35, chapterGapSeconds: 1.5, format: "mp3", bitrate: "128k", sampleRate: 44100 },
     subtitles: { maxCharactersPerLine: 42, maxLines: 2, minimumDurationSeconds: 1.2, maximumDurationSeconds: 6 },
     video: { width: 1920, height: 1080, fps: 30, codec: "libx264", quality: 20, subtitleMode: "burn", subtitleStyle: "default", backgroundMode: "cover", introDurationSeconds: 3 },

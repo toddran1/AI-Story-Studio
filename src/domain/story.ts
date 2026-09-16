@@ -48,6 +48,7 @@ const rawStorySchema = z.object({
     recentChapterSummaries: z.number().int().min(0).max(100).default(5),
   }).default({ recentChapterSummaries: 5 }),
   narrationSettings: narrationSettingsSchema,
+  qaMode: z.enum(["production", "thorough"]).default("production"),
   audio: audioSettingsSchema,
   subtitles: subtitleSettingsSchema,
   video: videoSettingsSchema,

@@ -24,6 +24,10 @@ import { STORY_BIBLE_PROMPT_VERSION } from "../story-bible/prompts.js";
 import { extractStoryBible } from "../story-bible/extractor.js";
 import { QA_PROMPT_VERSION } from "../qa/prompts.js";
 import { validateChapterQuality } from "../qa/validator.js";
+import { buildQaState } from "../qa/review.js";
+import { migrateQaState } from "../qa/findings.js";
+import { runDeterministicQaChecks } from "../qa/deterministic.js";
+import { exceptionsPromptSection, filterExceptedFindings, listQaExceptions } from "../qa/exceptions.js";
 import { mergeStoryBible, normalizeStoryBibleUpdate } from "../story-bible/updater.js";
 import { backfillCanonicalSnapshots } from "../story-bible/canonical.js";
 import { rebuildStoryBibleBeforeChapter } from "../story-bible/rebuild.js";
@@ -188,18 +192,33 @@ export class ChapterPipeline {
     const qaConfig = options.story.pipeline.qa;
     const qaFp = fingerprint({
       source: ingestionFp, translation: fingerprint(english), narration: fingerprint(narration),
-      context: priorContext, config: qaConfig, narrationSettings: narrationBehavior, prompt: QA_PROMPT_VERSION,
+      context: priorContext, config: qaConfig, narrationSettings: narrationBehavior, prompt: QA_PROMPT_VERSION, mode: options.story.qaMode,
     });
     const qaResult = await runStage("qa", qaFp, paths.qa, {
       provider: qaConfig.provider, model: qaConfig.model, promptVersion: QA_PROMPT_VERSION,
     }, async () => {
+      const [deterministic, exceptions] = await Promise.all([
+        runDeterministicQaChecks({ root: options.root, story: options.story, chapter: options.chapter, source, translation: english, narration }),
+        listQaExceptions(options.root, options.story.slug),
+      ]);
       const result = await validateChapterQuality(this.llms.forStage(qaConfig), qaConfig, {
         chapter: options.chapter, sourceLanguage: options.story.sourceLanguage, outputLanguage: options.story.outputLanguage,
         source, translation: english, narration, context: priorContext, profanityMode: options.story.narrationSettings.profanityMode, includeChapterTitle: options.story.narrationSettings.includeChapterTitle !== false,
+        exceptionsContext: exceptionsPromptSection(exceptions), mode: options.story.qaMode,
       });
-      await atomicWriteJson(paths.qa, result.value);
+      // Reconcile fresh pipeline detections with any prior QA state so reruns
+      // preserve dismissal/fix resolution memory before persisting.
+      const priorQaRaw = await readJsonIfExists(paths.qa);
+      const previous = priorQaRaw ? migrateQaState(priorQaRaw, { chapter: options.chapter }) : undefined;
+      const { state } = buildQaState(previous, filterExceptedFindings([...deterministic.detections, ...result.value.issues], exceptions), {
+        chapter: options.chapter, canonicalEntities: priorContext.canonicalEntities, translation: english, narration,
+        baseScore: { score: result.value.score, originalScore: result.value.originalScore },
+        mode: options.story.qaMode,
+        acceptedContinuity: deterministic.acceptedContinuity,
+      });
+      await atomicWriteJson(paths.qa, state);
       chapter.stages.qa.usage = result.usage;
-      return result.value;
+      return state;
     });
     if (shouldRun("qa")) {
       const quality = qaResult ?? qaResultSchema.parse(await readJsonIfExists<QaResult>(paths.qa));

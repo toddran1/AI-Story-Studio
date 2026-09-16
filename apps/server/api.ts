@@ -159,6 +159,19 @@ export function createApiHandler(operations: StudioOperations) {
       if (chapterQaRepairMatch && request.method === "POST") return send(response, 202, operations.startQaRepair(chapterQaRepairMatch[1]!, chapterParam(chapterQaRepairMatch[2]!), await jsonBody(request)));
       const chapterQaDismissMatch = /^\/api\/stories\/([a-z0-9-]+)\/chapters\/(\d+)\/qa\/dismiss$/.exec(url.pathname);
       if (chapterQaDismissMatch && request.method === "PUT") return send(response, 200, await operations.dismissQaFindings(chapterQaDismissMatch[1]!, chapterParam(chapterQaDismissMatch[2]!), await jsonBody(request)));
+      const chapterQaStateMatch = /^\/api\/stories\/([a-z0-9-]+)\/chapters\/(\d+)\/qa$/.exec(url.pathname);
+      if (chapterQaStateMatch && request.method === "GET") return send(response, 200, await operations.getChapterQa(chapterQaStateMatch[1]!, chapterParam(chapterQaStateMatch[2]!)));
+      const qaSafeFixesMatch = /^\/api\/stories\/([a-z0-9-]+)\/chapters\/(\d+)\/qa\/safe-fixes$/.exec(url.pathname);
+      if (qaSafeFixesMatch && request.method === "POST") return send(response, 202, operations.startQaSafeFixes(qaSafeFixesMatch[1]!, chapterParam(qaSafeFixesMatch[2]!)));
+      const qaFindingMatch = /^\/api\/stories\/([a-z0-9-]+)\/chapters\/(\d+)\/qa\/findings\/(qaf_[a-f0-9]{24})\/(fix-ai|resolve-manual|dismiss|reopen)$/.exec(url.pathname);
+      if (qaFindingMatch && request.method === "POST") {
+        const slug = qaFindingMatch[1]!; const chapter = chapterParam(qaFindingMatch[2]!); const id = qaFindingMatch[3]!;
+        const action = qaFindingMatch[4]!;
+        if (action === "fix-ai") return send(response, 202, operations.startQaFindingFix(slug, chapter, id));
+        if (action === "resolve-manual") return send(response, 200, await operations.resolveQaFindingManually(slug, chapter, id, await jsonBody(request)));
+        if (action === "dismiss") return send(response, 200, await operations.dismissQaFinding(slug, chapter, id, await jsonBody(request)));
+        return send(response, 200, await operations.reopenQaFinding(slug, chapter, id));
+      }
       const audioMatch = /^\/api\/stories\/([a-z0-9-]+)\/chapters\/(\d+)\/audio$/.exec(url.pathname);
       if (audioMatch && request.method === "GET") {
         const chapterNumber = chapterParam(audioMatch[2]!); const chapter = await getChapter(operations.root, audioMatch[1]!, chapterNumber);
@@ -177,6 +190,11 @@ export function createApiHandler(operations: StudioOperations) {
       if (sceneImageMatch && request.method === "GET") { const chapterNumber = chapterParam(sceneImageMatch[2]!); const raw = await readJsonIfExists<SceneManifest>(storyPaths(operations.root, sceneImageMatch[1]!, chapterNumber).scenesManifest); const manifest = raw ? sceneManifestSchema.safeParse(raw) : undefined; const scene = manifest?.success ? manifest.data.scenes.find((item) => item.id === sceneImageMatch[3]) : undefined; if (!scene || scene.artwork.status !== "complete") return send(response, 404, { error: "Scene artwork was not found" }); return sendFile(request, response, sceneImagePath(operations.root, sceneImageMatch[1]!, chapterNumber, sceneImageMatch[3]!), "image/png"); }
       const qaMatch = /^\/api\/stories\/([a-z0-9-]+)\/qa$/.exec(url.pathname);
       if (qaMatch && request.method === "GET") return send(response, 200, await getQaDashboard(operations.root, qaMatch[1]!));
+      const qaExceptionsMatch = /^\/api\/stories\/([a-z0-9-]+)\/qa-exceptions$/.exec(url.pathname);
+      if (qaExceptionsMatch && request.method === "GET") return send(response, 200, await operations.listQaExceptions(qaExceptionsMatch[1]!));
+      if (qaExceptionsMatch && request.method === "POST") return send(response, 201, await operations.addQaException(qaExceptionsMatch[1]!, await jsonBody(request)));
+      const qaExceptionMatch = /^\/api\/stories\/([a-z0-9-]+)\/qa-exceptions\/(qax_[a-f0-9]{24})$/.exec(url.pathname);
+      if (qaExceptionMatch && request.method === "DELETE") return send(response, 200, await operations.removeQaException(qaExceptionMatch[1]!, qaExceptionMatch[2]!));
       const audioDashboardMatch = /^\/api\/stories\/([a-z0-9-]+)\/audio$/.exec(url.pathname);
       if (audioDashboardMatch && request.method === "GET") return send(response, 200, await getAudioDashboard(operations.root, audioDashboardMatch[1]!));
       const videoDashboardMatch = /^\/api\/stories\/([a-z0-9-]+)\/video$/.exec(url.pathname);
@@ -259,7 +277,7 @@ export function createApiHandler(operations: StudioOperations) {
       const batchMatch = /^\/api\/stories\/([a-z0-9-]+)\/jobs\/batch$/.exec(url.pathname);
       if (batchMatch && request.method === "POST") return send(response, 202, operations.startBatch(batchMatch[1]!, await jsonBody(request)));
       const qaRecheckMatch = /^\/api\/stories\/([a-z0-9-]+)\/chapters\/(\d+)\/qa\/recheck$/.exec(url.pathname);
-      if (qaRecheckMatch && request.method === "POST") { await jsonBody(request); return send(response, 202, operations.startQaRecheck(qaRecheckMatch[1]!, chapterParam(qaRecheckMatch[2]!))); }
+      if (qaRecheckMatch && request.method === "POST") return send(response, 202, operations.startQaRecheck(qaRecheckMatch[1]!, chapterParam(qaRecheckMatch[2]!), await jsonBody(request)));
       const previewMatch = /^\/api\/stories\/([a-z0-9-]+)\/jobs\/preview$/.exec(url.pathname);
       if (previewMatch && request.method === "POST") return send(response, 202, operations.startPreview(previewMatch[1]!, await jsonBody(request)));
       const audioJobMatch = /^\/api\/stories\/([a-z0-9-]+)\/jobs\/audio$/.exec(url.pathname);

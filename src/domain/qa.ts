@@ -47,6 +47,64 @@ export type QaStatus = z.infer<typeof qaStatusSchema>;
 export type QaCategory = z.infer<typeof qaCategorySchema>;
 export type QaResult = z.infer<typeof qaResultSchema>;
 
+export const qaFindingStatusSchema = z.enum(["open", "fixed_manual", "fixed_ai", "dismissed", "obsolete"]);
+export const qaFindingResolutionSchema = z.object({
+  action: z.enum(["manual_fix", "ai_fix", "dismiss", "obsolete"]),
+  reason: z.string().optional(),
+  finalTextFingerprint: z.string().optional(),
+  resolvedAt: z.string().datetime(),
+});
+export const qaFindingSchema = z.object({
+  id: z.string().regex(/^qaf_[a-f0-9]{24}$/),
+  category: qaCategorySchema,
+  severity: qaIssueSchema.shape.severity,
+  message: z.string().min(1),
+  evidence: z.string().min(1),
+  suggestedFix: z.string().optional(),
+  status: qaFindingStatusSchema,
+  resolution: qaFindingResolutionSchema.optional(),
+  reopenedAt: z.string().datetime().optional(),
+  fingerprint: z.string(),
+  firstDetectedAt: z.string().datetime().optional(),
+  lastVerifiedAt: z.string().datetime().optional(),
+  provenance: z.object({
+    chapter: z.number().int().positive().optional(),
+    stage: z.string().optional(),
+    entityIds: z.array(z.string()).optional(),
+    excerptKey: z.string().optional(),
+    continuityIds: z.array(z.string()).optional(),
+  }).optional(),
+  origin: z.enum(["llm", "deterministic"]),
+  safeToFix: z.boolean().optional(),
+  confidence: z.number().min(0).max(1).optional(),
+});
+export const qaContentSpansSchema = z.object({
+  paragraphFingerprints: z.array(z.string()),
+  textFingerprint: z.string(),
+});
+/** Persisted chapter QA state: the legacy summary shape plus persistent, reconcilable findings. */
+export const qaStateSchema = qaResultSchema.extend({
+  findings: z.array(qaFindingSchema).default([]),
+  contentSpans: qaContentSpansSchema.optional(),
+  mode: z.enum(["production", "thorough"]).optional(),
+});
+export type QaFinding = z.infer<typeof qaFindingSchema>;
+export type QaState = z.infer<typeof qaStateSchema>;
+
+export const qaExceptionSchema = z.object({
+  id: z.string().regex(/^qax_[a-f0-9]{24}$/),
+  category: qaCategorySchema,
+  matchKind: z.enum(["terminology", "entity", "rule", "other"]),
+  value: z.string().min(1).max(300),
+  reason: z.string().optional(),
+  createdAt: z.string().datetime(),
+});
+export const qaExceptionsFileSchema = z.object({
+  version: z.literal(1).default(1),
+  exceptions: z.array(qaExceptionSchema).default([]),
+});
+export type QaException = z.infer<typeof qaExceptionSchema>;
+
 const severityRank: Record<QaStatus, number> = { pass: 0, warn: 1, fail: 2 };
 
 /** Never trust a model's top-level status when a check or issue is more severe. */

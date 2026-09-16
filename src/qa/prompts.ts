@@ -1,7 +1,22 @@
 import type { NarrationProfanityMode } from "../domain/story.js";
 import type { StoryBible } from "../domain/story-bible.js";
 
-export const QA_PROMPT_VERSION = "6";
+export const QA_PROMPT_VERSION = "8";
+
+export const qaProductionModeInstructions = `PRODUCTION MODE: Focus on correctness and fidelity only. Do not report purely stylistic wording preferences, optional prose improvements, flow polish, or minor grammar that does not affect meaning.`;
+
+export const qaThoroughModeInstructions = `THOROUGH MODE: In addition to correctness and fidelity, review the narration's prose quality: awkward phrasing, stilted flow or readability problems, stylistic inconsistency with the established voice, and minor grammar slips. Report these as warn-severity findings with concrete evidence and never as fail; they must not block publication on their own. Optional prose improvements belong here only when the current wording is genuinely weaker, not merely different.`;
+
+export const qaModeInstructionsFor = (mode: "production" | "thorough" = "production") => mode === "thorough" ? qaThoroughModeInstructions : qaProductionModeInstructions;
+
+export const qaRecheckInstructions = `RECHECK MODE: This chapter was reviewed before. The PREVIOUS QA FINDINGS section lists each earlier finding with its current status and resolution decision. Verify every previous finding against the current text. Do not re-report a resolved or dismissed finding unless its problem genuinely remains, has returned, or has materially changed; when it has, report it as a normal issue for its category. Report genuinely new issues normally. A finding you do not re-report is treated as verified (for fixed findings) or respected (for dismissed findings).`;
+
+export const qaChangedContentInstructions = `CHANGED-CONTENT RECHECK: Only the paragraphs that changed since the previous review (plus one neighboring paragraph on each side) are shown in the CHANGED CONTENT section, labeled with translation (T) and narration (N) paragraph numbers. Chapter-wide concerns — duplication, missing sections, whole-chapter consistency — are covered by your verification of the previous findings and by separate deterministic checks, so focus new-issue detection on the shown paragraphs. The SOURCE CHAPTER is provided in full so you can verify evidence.`;
+
+/** Renders the previous-findings block the recheck instructions refer to. */
+export function previousQaFindingsSection(compactFindings: string): string {
+  return `PREVIOUS QA FINDINGS (status and decision from the last review of this chapter):\n${compactFindings}`;
+}
 
 export const qaInstructions = `Act as a strict bilingual fiction quality-control editor. Compare the complete source, translation, and narration against the established Story Bible context. Detect substantial omissions or shortening; inconsistent names, places, abilities, factions, classes, ranks, items, and system terms; changed numeric facts; dropped dialogue or merged speaker turns; terminology drift; contradictions with established facts; and narration edits that alter plot, facts, relationships, point of view, or dialogue meaning. Judge omissions against a length tolerance: light condensation of a few percent is normal narration polish; report omissions only when whole sentences, lines of dialogue, events, or facts are missing, or when the narration loses materially more content than the translation (for example more than roughly ten percent).
 
