@@ -46,7 +46,9 @@ export async function assembleAudiobook(options: { root: string; story: Story; f
   const cover = await findCover(options.root, options.story.slug); const coverFingerprint = cover ? await fileFingerprint(cover) : undefined;
   const fp = fingerprint({ story: options.story.slug, title: options.story.title, author: options.story.author, format: options.format, settings: options.story.audio,
     processor: options.processor.version, cover: cover ? { name: cover.split(/[\\/]/).at(-1), fingerprint: coverFingerprint } : undefined, chapters: chapters.map((chapter) => ({ chapter: chapter.chapter, fingerprint: chapter.fingerprint, title: chapter.title })) });
-  const cachedRaw = await readJsonIfExists(paths.manifest); const cached = cachedRaw ? exportManifestSchema.safeParse(cachedRaw) : undefined;
+  // A partial/interrupted manifest is only a cache miss. Rebuild the export and
+  // atomically replace it instead of making the range permanently unexportable.
+  const cachedRaw = await readJsonIfExists(paths.manifest).catch(() => undefined); const cached = cachedRaw ? exportManifestSchema.safeParse(cachedRaw) : undefined;
   if (!options.force && cached?.success && cached.data.fingerprint === fp && await fileFingerprint(paths.output) === cached.data.outputFingerprint) return { manifest: cached.data, reused: true };
   await mkdir(paths.directory, { recursive: true }); const staged = `${paths.output}.stage-${randomUUID()}.${options.format}`;
   options.onProgress?.({ type: "audiobook.started", total: chapters.length });

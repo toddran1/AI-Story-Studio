@@ -256,8 +256,21 @@ async function loadSummaries(root: string, slug: string, numbers: number[], inde
 export async function getAudioDashboard(root: string, slug: string) {
   slugSchema.parse(slug); const story = await loadStory(storyPaths(root, slug, 1).storyConfig); const chapters = await loadChapterSummaries(root, slug);
   const exportsDirectory = join(storyPaths(root, slug, 1).story, "exports"); let names: string[] = [];
-  try { names = (await readdir(exportsDirectory)).filter((name) => name.endsWith(".json")); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
-  const exports = (await mapLimit(names, 8, async (name) => { const raw = await readJsonIfExists(join(exportsDirectory, name)); const parsed = raw ? exportManifestSchema.safeParse(raw) : undefined; if (!parsed?.success || parsed.data.story !== slug || !(await currentAudioExport(root, slug, parsed.data))) return undefined; const { output: _output, ...manifest } = parsed.data; return { ...manifest, downloadUrl: `/api/stories/${slug}/exports/${parsed.data.from}-${parsed.data.to}.${parsed.data.format}` }; }))
+  try { names = (await readdir(exportsDirectory)).filter((name) => isVisibleManifest(name, ".json")); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+  const exports = (await mapLimit(names, 8, async (name) => {
+    const path = join(exportsDirectory, name);
+    // An interrupted external tool or a manually copied media file can leave a
+    // binary/non-JSON file with a manifest extension. One bad export must not
+    // prevent the Audio workspace from listing every healthy chapter and export.
+    const raw = await readJsonIfExists(path).catch((error) => {
+      logger.warn({ event: "audio.export_manifest_ignored", story: slug, manifest: name, error: error instanceof Error ? error.message : String(error) }, "Ignoring unreadable audiobook export manifest");
+      return undefined;
+    });
+    const parsed = raw ? exportManifestSchema.safeParse(raw) : undefined;
+    if (!parsed?.success || parsed.data.story !== slug || !(await currentAudioExport(root, slug, parsed.data))) return undefined;
+    const { output: _output, ...manifest } = parsed.data;
+    return { ...manifest, downloadUrl: `/api/stories/${slug}/exports/${parsed.data.from}-${parsed.data.to}.${parsed.data.format}` };
+  }))
     .filter((item): item is NonNullable<typeof item> => Boolean(item)).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   const mastered = chapters.filter((item) => item.audioMastering === "complete" && item.durationSeconds);
   return { settings: story.audio, chapters: chapters.map(({ chapter, originalTitle, audioMastering, durationSeconds, audioAvailable, audioStale }) => ({ chapter, title: originalTitle, status: audioStale ? "stale" : audioMastering, durationSeconds, audioAvailable, audioStale })),
@@ -268,8 +281,8 @@ export async function getAudioDashboard(root: string, slug: string) {
 export async function getVideoDashboard(root: string, slug: string) {
   slugSchema.parse(slug); const story = await loadStory(storyPaths(root, slug, 1).storyConfig); const chapters = await loadChapterSummaries(root, slug); const storyRoot = storyPaths(root, slug, 1).story;
   const cover = (await Promise.all(["cover.jpg", "cover.jpeg", "cover.png"].map(async (name) => await exists(join(storyRoot, name)) ? name : undefined))).find(Boolean); let names: string[] = [];
-  try { names = (await readdir(join(storyRoot, "exports"))).filter((name) => name.endsWith(".mp4.json")); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
-  const exports = (await mapLimit(names, 8, async (name) => { const raw = await readJsonIfExists(join(storyRoot, "exports", name)); const parsed = raw ? videoExportManifestSchema.safeParse(raw) : undefined; if (!parsed?.success || parsed.data.story !== slug || !(await currentVideoExport(root, slug, parsed.data))) return undefined; const { output: _output, ...manifest } = parsed.data; return { ...manifest, downloadUrl: `/api/stories/${slug}/video-exports/${parsed.data.from}-${parsed.data.to}.mp4` }; })).filter((item): item is NonNullable<typeof item> => Boolean(item)).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  try { names = (await readdir(join(storyRoot, "exports"))).filter((name) => isVisibleManifest(name, ".mp4.json")); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+  const exports = (await mapLimit(names, 8, async (name) => { const raw = await readJsonIfExists(join(storyRoot, "exports", name)).catch((error) => { logger.warn({ event: "video.export_manifest_ignored", story: slug, manifest: name, error: error instanceof Error ? error.message : String(error) }, "Ignoring unreadable video export manifest"); return undefined; }); const parsed = raw ? videoExportManifestSchema.safeParse(raw) : undefined; if (!parsed?.success || parsed.data.story !== slug || !(await currentVideoExport(root, slug, parsed.data))) return undefined; const { output: _output, ...manifest } = parsed.data; return { ...manifest, downloadUrl: `/api/stories/${slug}/video-exports/${parsed.data.from}-${parsed.data.to}.mp4` }; })).filter((item): item is NonNullable<typeof item> => Boolean(item)).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   return { settings: story.video, subtitleSettings: story.subtitles, background: { coverAvailable: Boolean(cover), coverName: cover, effectiveMode: story.video.backgroundMode === "gradient" || !cover ? "fallback" : story.video.backgroundMode }, counts: { total: chapters.length, mastered: chapters.filter((item) => item.audioMastering === "complete").length, subtitles: chapters.filter((item) => item.subtitles === "complete").length, videos: chapters.filter((item) => item.video === "complete").length }, chapters: chapters.map((item) => ({ chapter: item.chapter, title: item.originalTitle, durationSeconds: item.durationSeconds, subtitleStatus: item.subtitles, videoStatus: item.video, videoAvailable: item.videoAvailable })), exports };
 }
 
@@ -307,8 +320,8 @@ async function cachedStorageUsage(root: string, slug: string) {
 
 async function currentExportBadges(root: string, slug: string, names: string[], chapters: ChapterSummary[]) {
   const byChapter = new Map(chapters.map((chapter) => [chapter.chapter, chapter])); let audio = false; let video = false; const directory = join(storyPaths(root, slug, 1).story, "exports");
-  for (const name of names.filter((item) => item.endsWith(".json"))) {
-    const raw = await readJsonIfExists(join(directory, name)); const audioManifest = raw ? exportManifestSchema.safeParse(raw) : undefined;
+  for (const name of names.filter((item) => isVisibleManifest(item, ".json"))) {
+    const raw = await readJsonIfExists(join(directory, name)).catch((error) => { logger.warn({ event: "library.export_manifest_ignored", story: slug, manifest: name, error: error instanceof Error ? error.message : String(error) }, "Ignoring unreadable export manifest while building the story card"); return undefined; }); const audioManifest = raw ? exportManifestSchema.safeParse(raw) : undefined;
     if (audioManifest?.success && audioManifest.data.story === slug && audioManifest.data.chapters.every((item) => byChapter.get(item.chapter)?.audioMastering === "complete") && await exists(exportPaths(root, slug, audioManifest.data.from, audioManifest.data.to, audioManifest.data.format).output)) audio = true;
     const videoManifest = raw ? videoExportManifestSchema.safeParse(raw) : undefined;
     if (videoManifest?.success && videoManifest.data.story === slug && videoManifest.data.chapters.every((item) => byChapter.get(item.chapter)?.video === "complete") && await exists(videoExportPaths(root, slug, videoManifest.data.from, videoManifest.data.to).output)) video = true;
@@ -316,6 +329,11 @@ async function currentExportBadges(root: string, slug: string, names: string[], 
   }
   return { audio, video };
 }
+
+// macOS writes AppleDouble resource-fork sidecars (._name) on non-Apple
+// volumes. They mirror the real filename but contain binary Finder metadata,
+// so they must never participate in application manifest discovery.
+function isVisibleManifest(name: string, suffix: string) { return !name.startsWith(".") && name.endsWith(suffix); }
 
 function isCurrent(metadata: Chapter | undefined, source: SourceManifest["chapters"][number] | undefined, hasManifest: boolean) {
   return !hasManifest || Boolean(metadata?.source?.fingerprint && source && metadata.source.fingerprint === source.fingerprint);
