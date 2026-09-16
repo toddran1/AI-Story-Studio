@@ -11,6 +11,8 @@ const envSchema = z.object({
   OPENAI_DEFAULT_MODEL: z.string().default("gpt-5.6-terra"),
   GEMINI_API_KEY: optionalSecret,
   GEMINI_DEFAULT_MODEL: z.string().default("gemini-3.8-flash"),
+  KIMI_API_KEY: optionalSecret,
+  KIMI_DEFAULT_MODEL: z.string().default("kimi-k2-0905-preview"),
   FISH_AUDIO_API_KEY: optionalSecret,
   // An explicit FISH_AUDIO_MODEL value selects the provider model. This is
   // only the fallback when no saved story/app setting or env value exists.
@@ -57,8 +59,8 @@ export function resolveStudioRoot(env: Environment, workingDirectory = process.c
   return resolve(workingDirectory, env.STUDIO_DATA_ROOT ?? ".");
 }
 
-export function requireProviderKey(env: Environment, provider: "openai" | "gemini" | "fish"): string {
-  const key = provider === "openai" ? env.OPENAI_API_KEY : provider === "gemini" ? env.GEMINI_API_KEY : env.FISH_AUDIO_API_KEY;
+export function requireProviderKey(env: Environment, provider: "openai" | "gemini" | "kimi" | "fish"): string {
+  const key = provider === "openai" ? env.OPENAI_API_KEY : provider === "gemini" ? env.GEMINI_API_KEY : provider === "kimi" ? env.KIMI_API_KEY : env.FISH_AUDIO_API_KEY;
   if (!key) throw new ConfigurationError(`Missing required ${provider} credential (${provider === "fish" ? "FISH_AUDIO_API_KEY" : `${provider.toUpperCase()}_API_KEY`}). Add it to .env.`);
   return key;
 }

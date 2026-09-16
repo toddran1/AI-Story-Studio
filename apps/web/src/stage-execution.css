@@ -1,0 +1,187 @@
+/* The batch controls are a control room: choose the work, then read a compact execution ledger. */
+.processing-panel {
+  grid-template-columns: minmax(205px, .78fr) minmax(0, 2.7fr);
+  align-items: start;
+  gap: 18px;
+  padding: 17px;
+}
+
+.processing-intro {
+  padding: 2px 0;
+}
+
+.processing-intro .eyebrow {
+  color: var(--violet-soft);
+}
+
+.processing-intro p {
+  max-width: 29ch;
+}
+
+.processing-controls {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(76px, .48fr)) minmax(138px, 1fr) minmax(152px, 1.12fr) minmax(168px, 1.1fr) auto;
+  align-items: end;
+  gap: 9px;
+  min-width: 0;
+}
+
+.processing-controls .field {
+  min-width: 0;
+}
+
+.processing-controls .button {
+  min-height: 38px;
+  white-space: nowrap;
+}
+
+.processing-controls .batch-continue {
+  grid-column: auto;
+  align-self: end;
+}
+
+.stage-plan-preview {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: 9px;
+  padding-top: 14px;
+  border-top: 1px solid rgba(255, 255, 255, .08);
+}
+
+.stage-plan-preview > header {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 18px;
+}
+
+.stage-plan-preview > header > div {
+  display: grid;
+  gap: 4px;
+}
+
+.stage-plan-preview .eyebrow {
+  color: #a9a5ff;
+}
+
+.stage-plan-preview b {
+  font: 600 13px var(--sans);
+  color: var(--ink);
+}
+
+.stage-plan-preview > header > small,
+.stage-plan-preview > footer {
+  color: #898793;
+  font-size: 9px;
+  line-height: 1.45;
+}
+
+.stage-plan-preview > header > small {
+  max-width: 42ch;
+  text-align: right;
+}
+
+.stage-plan-ledger {
+  overflow: hidden;
+  border: 1px solid rgba(169, 165, 255, .2);
+  border-radius: 7px;
+  background: linear-gradient(110deg, rgba(119, 114, 232, .075), rgba(17, 17, 23, .92) 38%);
+}
+
+.stage-plan-ledger article {
+  display: grid;
+  grid-template-columns: 76px minmax(230px, 1.5fr) minmax(180px, .8fr);
+  align-items: center;
+  gap: 13px;
+  min-height: 45px;
+  padding: 8px 12px;
+}
+
+.stage-plan-ledger article + article {
+  border-top: 1px solid rgba(255, 255, 255, .07);
+}
+
+.stage-plan-ledger article > strong {
+  color: #d7d5df;
+  font: 600 10px var(--mono);
+}
+
+.stage-plan-trail {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
+  min-width: 0;
+}
+
+.stage-plan-trail span {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border: 1px solid rgba(255, 255, 255, .09);
+  border-radius: 3px;
+  background: rgba(15, 15, 20, .74);
+  color: #c3c1cb;
+  padding: 3px 5px;
+  font: 8px var(--mono);
+  white-space: nowrap;
+}
+
+.stage-plan-trail span.rebuild {
+  border-color: rgba(224, 171, 80, .38);
+  color: #efc476;
+  background: rgba(111, 72, 16, .17);
+}
+
+.stage-plan-trail i {
+  color: #747180;
+  font: 11px var(--sans);
+  font-style: normal;
+}
+
+.stage-plan-reason {
+  color: #9794a0;
+  font-size: 8px;
+  line-height: 1.45;
+}
+
+@media (max-width: 1280px) {
+  .processing-panel {
+    grid-template-columns: 1fr;
+  }
+
+  .processing-intro p {
+    max-width: 62ch;
+  }
+
+  .processing-controls {
+    grid-template-columns: repeat(3, minmax(130px, 1fr));
+  }
+}
+
+@media (max-width: 760px) {
+  .processing-controls {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .processing-controls .batch-continue,
+  .processing-controls .button {
+    grid-column: 1 / -1;
+  }
+
+  .stage-plan-preview > header {
+    align-items: start;
+    flex-direction: column;
+    gap: 5px;
+  }
+
+  .stage-plan-preview > header > small {
+    max-width: none;
+    text-align: left;
+  }
+
+  .stage-plan-ledger article {
+    grid-template-columns: 1fr;
+    gap: 6px;
+  }
+}

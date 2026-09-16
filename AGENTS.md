@@ -11,7 +11,7 @@ Key architectural facts:
 - **Language/runtime**: TypeScript (ES modules, `"type": "module"`), Node.js >= 22. No compile step for the backend — everything runs through `tsx`.
 - **Apps** live in `apps/`: `apps/cli/` (one entry file per command, run via npm scripts), `apps/server/` (localhost-only API + job manager for the browser studio), `apps/web/` (React 19 SPA built with Vite, root `apps/web`, output `dist/web`).
 - **Core logic** lives in `src/`, one directory per domain: `pipeline`, `translation`, `narration`, `story-bible`, `qa`, `tts`, `audio`, `subtitles`, `alignment`, `video`, `scenes`, `artwork`, `production`, `batch`, `queue`, `source` (ingestion: TXT/EPUB/DOCX + Fanqie web adapter), `studio`, `config`, `cost`, `llm`, `preview`, `errors`, `storage`, `utils`.
-- **Vendor isolation**: provider-specific code exists *only* in `src/llm/openai` (Responses API, JSON Schema structured output), `src/llm/gemini` (Interactions API), and `src/tts/fish`. Everything else talks to generic LLM/TTS contracts. Remote transport/caching is in `src/source/web`; Fanqie specifics in `src/source/fanqie`.
+- **Vendor isolation**: provider-specific code exists *only* in `src/llm/openai` (Responses API, JSON Schema structured output), `src/llm/gemini` (Interactions API), `src/llm/kimi` (Moonshot OpenAI-compatible Chat Completions), and `src/tts/fish`. Everything else talks to generic LLM/TTS contracts. Remote transport/caching is in `src/source/web`; Fanqie specifics in `src/source/fanqie`.
 - **Storage is filesystem-authoritative.** Stories live under `stories/<slug>/` (and durable data under `STUDIO_DATA_ROOT`). `chapter.json` records status, fingerprints, provider/model, timings, errors, prompt versions, and usage per stage. Stage reuse verifies recorded output fingerprints rather than metadata alone. Postgres (via `pg`, migrations in `migrations/`, applied with `npm run db:migrate`) is used **only** for durable production-queue coordination, never for content.
 - Production orchestration: `src/production` with resumable manifests under `stories/<story>/production-runs/`; batch runs under `stories/<story>/batches/`.
 
@@ -35,7 +35,7 @@ npm run story:produce -- --story undead-disaster --from 1 --to 25 --profile audi
 
 ## Configuration and secrets
 
-- Copy `.env.example` to `.env` (loaded with `dotenv`). Contains API keys (`OPENAI_API_KEY`, `GEMINI_API_KEY`, `FISH_AUDIO_API_KEY`), model defaults, `STUDIO_DATA_ROOT`, `DATABASE_URL`, provider timeouts, alignment (whisper.cpp) settings, and `WEB_*`/`QUEUE_*` tuning. **Never commit `.env` or read it into agent output.** Secrets stay server-side and are never returned to the browser.
+- Copy `.env.example` to `.env` (loaded with `dotenv`). Contains API keys (`OPENAI_API_KEY`, `GEMINI_API_KEY`, `KIMI_API_KEY`, `FISH_AUDIO_API_KEY`), model defaults, `STUDIO_DATA_ROOT`, `DATABASE_URL`, provider timeouts, alignment (whisper.cpp) settings, and `WEB_*`/`QUEUE_*` tuning. **Never commit `.env` or read it into agent output.** Secrets stay server-side and are never returned to the browser.
 - Per-story configuration lives in `stories/<slug>/story.json` (Zod-validated): provider/model choices per stage, audio mastering settings, scene/artwork settings, `productionProfiles`. Application defaults for *new* stories are in `.ai-story-studio/settings.json`; existing stories are never rewritten.
 - Model IDs are configuration, not code — change them in `story.json`/`.env` without editing source.
 

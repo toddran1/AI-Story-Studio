@@ -41,11 +41,11 @@ function applyOverrides(base: PreviewPreset, translation: string | undefined, na
 function parseModel(value: string | undefined, fallback: StageModelConfig, env: Environment): StageModelConfig {
   if (!value) return fallback;
   const [provider, ...modelParts] = value.split(":");
-  if (provider !== "openai" && provider !== "gemini") throw new Error(`Invalid provider '${provider}'. Expected openai or gemini.`);
+  if (provider !== "openai" && provider !== "gemini" && provider !== "kimi") throw new Error(`Invalid provider '${provider}'. Expected openai, gemini, or kimi.`);
   const model = modelParts.join(":") || (provider === fallback.provider ? fallback.model : defaultModel(provider, env));
   return { provider, model };
 }
-function defaultModel(provider: "openai" | "gemini", env: Environment) { return provider === "openai" ? env.OPENAI_DEFAULT_MODEL : env.GEMINI_DEFAULT_MODEL; }
+function defaultModel(provider: "openai" | "gemini" | "kimi", env: Environment) { return provider === "openai" ? env.OPENAI_DEFAULT_MODEL : provider === "gemini" ? env.GEMINI_DEFAULT_MODEL : env.KIMI_DEFAULT_MODEL; }
 function parseArgs(values: string[]): Args {
   const result: Args = { story: "", chapter: 0, audioPreview: false, values: {} };
   const mapping: Record<string, keyof Args["values"]> = { "--translation-a": "translationA", "--translation-b": "translationB", "--narration-a": "narrationA", "--narration-b": "narrationB", "--qa-a": "qaA", "--qa-b": "qaB" };

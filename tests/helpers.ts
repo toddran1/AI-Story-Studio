@@ -8,10 +8,10 @@ import { TTSRequest } from "../src/tts/types.js";
 import { defaultProductionProfiles } from "../src/production/types.js";
 
 export class MockLLM implements LLMProvider {
-  readonly name: "openai" | "gemini";
+  readonly name: "openai" | "gemini" | "kimi";
   calls: Array<LLMRequest & { structured?: boolean }> = [];
   constructor(
-    name: "openai" | "gemini" = "gemini",
+    name: "openai" | "gemini" | "kimi" = "gemini",
     private readonly responses = ["Faithful English translation", "Polished English narration"],
     private readonly qaResponse: unknown = { status: "pass", score: 1, issues: [], checks: {
       completeness: "pass", names: "pass", numbers: "pass", terminology: "pass", dialogue: "pass", storyConsistency: "pass", narrationFidelity: "pass",

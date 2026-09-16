@@ -1,5 +1,6 @@
 import { Environment } from "../config/env.js";
 import { GeminiProvider } from "../llm/gemini/gemini.provider.js";
+import { KimiProvider } from "../llm/kimi/kimi.provider.js";
 import { OpenAIProvider } from "../llm/openai/openai.provider.js";
 import { LLMRouter } from "../llm/router.js";
 import { FishAudioProvider } from "../tts/fish/fish-audio.provider.js";
@@ -22,6 +23,7 @@ export function createPipelineRuntime(env: Environment, usage?: UsageSink) {
   const router = new LLMRouter(new Map<string, LLMProvider>([
       ["openai", trackLlm(new OpenAIProvider(env.OPENAI_API_KEY, env.PROVIDER_TIMEOUT_MS))],
       ["gemini", trackLlm(new GeminiProvider(env.GEMINI_API_KEY, env.PROVIDER_TIMEOUT_MS))],
+      ["kimi", trackLlm(new KimiProvider(env.KIMI_API_KEY, env.PROVIDER_TIMEOUT_MS))],
     ]));
   const rawTts = new FishAudioProvider(env.FISH_AUDIO_API_KEY, fetch, env.PROVIDER_TIMEOUT_MS, env.FISH_AUDIO_REFERENCE_ID);
   const trackedTts = usage ? new TrackedTTSProvider(rawTts, usage) : rawTts;

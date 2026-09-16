@@ -40,7 +40,7 @@ export function createApiHandler(operations: StudioOperations) {
     const url = new URL(request.url ?? "/", "http://localhost"); if (!url.pathname.startsWith("/api/")) return false;
     try {
       validateLocalRequest(request);
-      if (request.method === "GET" && url.pathname === "/api/health") return send(response, 200, { status: "ready", binding: "localhost", credentials: { openai: "server-only", gemini: "server-only", fish: "server-only" } });
+      if (request.method === "GET" && url.pathname === "/api/health") return send(response, 200, { status: "ready", binding: "localhost", credentials: { openai: "server-only", gemini: "server-only", kimi: "server-only", fish: "server-only" } });
       if (request.method === "GET" && url.pathname === "/api/stories") { const warnings: string[] = []; const stories = await listStories(operations.root, warnings); return send(response, 200, { stories, warnings }); }
       if (request.method === "GET" && url.pathname === "/api/novel/providers") return send(response, 200, { providers: operations.novelProviders() });
       if (request.method === "POST" && url.pathname === "/api/novel/search") return send(response, 200, await operations.searchNovelSources(await jsonBody(request)));

@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const llmProviderNameSchema = z.enum(["openai", "gemini"]);
+export const llmProviderNameSchema = z.enum(["openai", "gemini", "kimi"]);
 export const ttsProviderNameSchema = z.enum(["fish"]);
 
 export type LLMProviderName = z.infer<typeof llmProviderNameSchema>;
