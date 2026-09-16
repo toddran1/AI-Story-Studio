@@ -96,6 +96,14 @@ describe("summary narration and audio", () => {
     await media.audio("demo-story", canonical.id); expect(tts.calls).toBe(1); expect(master.master).toHaveBeenCalledTimes(2);
   });
 
+  it("uses the shared normalized spoken form for summary audio without editing narration", async () => {
+    const canonical = await create(); const written = 'It activates its "Worry-Free EXP" feature.';
+    await media.editNarration("demo-story", canonical.id, { text: written });
+    const speech = await media.speech("demo-story", canonical.id); await media.audio("demo-story", canonical.id);
+    expect(speech).toMatchObject({ narrationText: written, spokenText: "It activates its Worry-Free E-X-P feature." });
+    expect(tts.requests[0]?.text).toBe("It activates its Worry-Free E-X-P feature.");
+  });
+
   it("applies legacy preferred names and contextual alias rules through the shared narration context", async () => {
     const bible = mergeStoryBible(emptyStoryBible(), storyBibleUpdateSchema.parse({ chapterSummary: "Battle", characters: [{ canonicalEnglishName: "Su Ming", originalName: "苏铭", aliases: ["Student Su"], firstSeenChapter: 1, lastSeenChapter: 1 }] }), 1);
     bible.canonicalEntities[0]!.preferredNarrationName = "Shi Wang";

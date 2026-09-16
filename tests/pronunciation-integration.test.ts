@@ -67,6 +67,17 @@ describe("pronunciation persistence and production boundary", () => {
     expect(tts.calls).toBe(2); expect(tts.requests[1]?.pronunciation?.[0]?.pronunciation.customPronunciation).toBe("Second hint");
     expect([...gemini.calls, ...openai.calls].filter(request => !request.structured).length).toBe(textCalls);
   });
+  it("applies the same normalized speech to chapter TTS that summaries use", async () => {
+    const { root, story, bible, entity } = await fixture(); const input = join(root, "source.txt"); await atomicWrite(input, "江月走进门。");
+    const gemini = new MockLLM("gemini", ["Jiang Yue entered."]), openai = new MockLLM("openai", ['Jiang Yue activates its "Worry-Free EXP" feature.']);
+    const original = gemini.generateStructured.bind(gemini);
+    gemini.generateStructured = async request => request.schemaName === "story_bible_update" ? { value: request.schema.parse(update) } : original(request);
+    const tts = new MockTTS(), pipeline = new ChapterPipeline(new LLMRouter(new Map([["gemini", gemini], ["openai", openai]])), tts, new CopyingAudioProcessor());
+    await updateCanonicalEntity(root, story.slug, bible, entity.id, { pronunciation: { mode: "custom", customPronunciation: "Jyang Yweh", source: "manual" } });
+    await pipeline.run({ root, story, chapter: 1, inputPath: input });
+    expect(tts.requests[0]?.text).toContain("Jiang Yue activates its Worry-Free E-X-P feature.");
+    expect(tts.requests[0]?.pronunciation?.[0]?.surfaceText).toBe("Jiang Yue");
+  });
   it("preserves manual/locked pronunciation through stale reconstruction and identity reconciliation", async () => {
     const { root, story, bible, entity, paths } = await fixture();
     const pronunciation = { mode: "custom", customPronunciation: "Jyang Yweh", locked: true, source: "manual" };

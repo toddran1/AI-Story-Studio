@@ -2,6 +2,7 @@ import { loadPronunciationEntities, enrichStoryPronunciations, clearPronunciatio
 import { pronunciationProvider, pronunciationFingerprint, resolvePronunciations } from "../../src/tts/pronunciation.js";
 import { randomUUID } from "node:crypto";
 import { censorToneConfig } from "../../src/tts/censor-audio.js";
+import { speechNormalizationFingerprint } from "../../src/tts/speech-normalization.js";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
 import { z } from "zod";
@@ -350,6 +351,7 @@ export class StudioOperations {
   summaryJobsDirectory() { return join(this.root, ".data", "summary-jobs"); }
   summaryVisuals() { return new SummaryVisualService(this.root, this.summaryMedia(), this.summaryImages, this.video, this.alignConfig, this.aligner); }
   getSummary(slug: string, id: string) { slugSchema.parse(slug); return this.summaryVisuals().get(slug, id); }
+  summarySpeech(slug: string, id: string) { slugSchema.parse(slug); return this.summaryMedia().speech(slug, id); }
   startSummaryMedia(slug: string, id: string, stage: "narration" | "audio" | "scenes" | "artwork" | "video" | "produce", raw: unknown) {
     slugSchema.parse(slug); const input = stage === "produce" ? summaryProduceInputSchema.parse(raw) : stage === "scenes" ? summaryScenesInputSchema.parse(raw) : ["artwork", "video"].includes(stage) ? summaryVisualInputSchema.parse(raw) : summaryMediaInputSchema.parse(raw);
     return this.jobs.createDurable(this.summaryJobsDirectory(), slug, async (control) => withStoryLock(this.root, slug, `summary ${stage}`, async () => {
@@ -495,14 +497,14 @@ export class StudioOperations {
       const entity = entities.find(item => item.id === id); if (!entity) throw new Error("Canonical entity was not found");
       const name = entity.localizedNaming?.fullName ?? entity.preferredNarrationName ?? entity.canonicalName;
       const text = entity.type === "location" ? `They finally arrived in ${name}.` : `${name} followed them through the gate.`;
-      const config = story.pipeline.tts; const provider = pronunciationProvider(this.tts.forName(config.provider), entities);
-      const key = fingerprint({ text, config, reference: provider.resolveReferenceId?.(config.referenceId), pronunciation: pronunciationFingerprint(resolvePronunciations(text, entities)), normalization: provider.inputNormalizationVersion, censor: { version: this.censor.version, config: censorToneConfig }, bleep: story.narrationSettings.bleepStrongProfanity });
+      const config = story.pipeline.tts; const provider = pronunciationProvider(this.tts.forName(config.provider), entities); const speech = speechNormalizationFingerprint(text, story.outputLanguage, story.narrationSettings);
+      const key = fingerprint({ text, speech: speech.fingerprint, config, reference: provider.resolveReferenceId?.(config.referenceId), pronunciation: pronunciationFingerprint(resolvePronunciations(speech.normalized.text, entities)), normalization: provider.inputNormalizationVersion, censor: { version: this.censor.version, config: censorToneConfig }, bleep: story.narrationSettings.bleepStrongProfanity });
       const cachePath = join(storyPaths(this.root, slug, 1).story, "pronunciation-previews", `${key}.json`);
       const cachedRaw = await readJsonIfExists(cachePath);
       const cacheResult = z.object({ id: z.string().uuid(), audioUrl: z.string(), bytes: z.number().positive() }).safeParse(cachedRaw);
       const cached = cacheResult.success ? cacheResult.data : undefined;
       if (cached && (await readFile(join(storyPaths(this.root, slug, 1).story, "voice-previews", `${cached.id}.mp3`)).catch(() => undefined))) return { ...cached, cached: true };
-      const result = await withUsageScope({ story: slug, stage: "pronunciationPreview" }, () => this.censor.synthesize(provider, { ...config, text, bleepStrongProfanity: story.narrationSettings.bleepStrongProfanity }));
+      const result = await withUsageScope({ story: slug, stage: "pronunciationPreview" }, () => this.censor.synthesize(provider, { ...config, text: speech.normalized.text, bleepStrongProfanity: story.narrationSettings.bleepStrongProfanity }));
       const saved = await saveVoicePreview(this.root, slug, result.audio, { text });
       await atomicWriteJson(cachePath, saved); return saved;
     });
@@ -547,7 +549,7 @@ export class StudioOperations {
     });
   }
 
-  startVoicePreview(slug: string, raw: unknown) { slugSchema.parse(slug); const input = voicePreviewSchema.parse(raw); return this.jobs.create("voicePreview", slug, async () => { const story = await loadStory(storyPaths(this.root, slug, 1).storyConfig); const config = story.pipeline.tts; const request = { ...input, provider: input.provider ?? config.provider, model: input.model ?? config.model, referenceId: input.referenceId ?? config.referenceId, speed: input.speed ?? config.speed }; const result = await withUsageScope({story:slug,stage:"voicePreview"},async ()=>this.censor.synthesize(pronunciationProvider(this.tts.forName(request.provider), await loadPronunciationEntities(this.root, slug)), { text: request.text, model: request.model, referenceId: request.referenceId,
+  startVoicePreview(slug: string, raw: unknown) { slugSchema.parse(slug); const input = voicePreviewSchema.parse(raw); return this.jobs.create("voicePreview", slug, async () => { const story = await loadStory(storyPaths(this.root, slug, 1).storyConfig); const config = story.pipeline.tts; const request = { ...input, provider: input.provider ?? config.provider, model: input.model ?? config.model, referenceId: input.referenceId ?? config.referenceId, speed: input.speed ?? config.speed }; const speech = speechNormalizationFingerprint(request.text, story.outputLanguage, story.narrationSettings); const result = await withUsageScope({story:slug,stage:"voicePreview"},async ()=>this.censor.synthesize(pronunciationProvider(this.tts.forName(request.provider), await loadPronunciationEntities(this.root, slug)), { text: speech.normalized.text, model: request.model, referenceId: request.referenceId,
     secondaryReferenceId: config.secondaryReferenceId, voiceMode: config.voiceMode, deliveryIntensity: config.deliveryIntensity, qualityGuard: config.qualityGuard,
     bleepStrongProfanity: story.narrationSettings.bleepStrongProfanity,
     speed: request.speed, format: config.format, sampleRate: 44100, bitrate: 192, normalize: true, maxCharsPerRequest: config.maxCharsPerRequest })); const saved = await saveVoicePreview(this.root, slug, result.audio, request); await recordActivity(this.root, slug, "voice.preview", "Generated a voice preview"); return saved; }); }

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { canonicalEntitySchema, pronunciationSchema } from "../src/domain/story-bible.js";
 import { adaptPronunciationText, enrichPronunciation, pronunciationFingerprint, resolvePronunciations } from "../src/tts/pronunciation.js";
+import { normalizeSpeechText } from "../src/tts/speech-normalization.js";
 import type { LLMProvider } from "../src/llm/provider.js";
 
 const entity = canonicalEntitySchema.parse({ id: "ent_123456789012345678901234", type: "character", canonicalName: "Jiang Yue", originalName: "江月", aliases: ["Mr. Jiang"], firstAppearance: 1, lastKnownAppearance: 2,
@@ -25,6 +26,14 @@ describe("provider-neutral pronunciation foundation", () => {
     expect(adaptPronunciationText(text, occurrences, { phoneticText: true })).toBe("Jyang Yweh’s sword. Mr. Jyang replied. NotJiang Yue.");
     expect(text).toContain("Jiang Yue’s");
     expect(adaptPronunciationText(text, occurrences, {})).toBe(text);
+  });
+  it("receives normalized speech before provider-specific pronunciation adaptation", () => {
+    const written = 'Jiang Yue activates its "Worry-Free EXP" feature.';
+    const spoken = normalizeSpeechText(written, "en-US").text;
+    const occurrences = resolvePronunciations(spoken, [entity]);
+    expect(spoken).toBe("Jiang Yue activates its Worry-Free E-X-P feature.");
+    expect(adaptPronunciationText(spoken, occurrences, { phoneticText: true })).toBe("Jyang Yweh activates its Worry-Free E-X-P feature.");
+    expect(written).toContain('"Worry-Free EXP"');
   });
   it.each(["character", "location", "organization", "ability", "item", "concept"] as const)("supports %s identities", type => {
     expect(resolvePronunciations("Jiang Yue", [{ ...entity, type }])[0]?.pronunciation.sourceLanguage).toBe("zh-CN");

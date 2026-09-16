@@ -24,6 +24,7 @@ import { fileFingerprint } from "../../src/utils/file-fingerprint.js";
 import { logger } from "../../src/utils/logger.js";
 import { AlignmentArtifact, alignmentArtifactSchema } from "../../src/alignment/types.js";
 import { SubtitleDocument, subtitleDocumentSchema } from "../../src/subtitles/types.js";
+import { normalizeSpeechText } from "../../src/tts/speech-normalization.js";
 import { continuityReviewSchema } from "../../src/story-bible/continuity.js";
 import { applyCanonicalOverlay, findDuplicateSuggestions } from "../../src/story-bible/canonical.js";
 import { ttsProviderNameSchema } from "../../src/domain/provider.js";
@@ -97,7 +98,7 @@ export async function getChapterPage(root: string, slug: string, options: { page
 
 export async function getChapter(root: string, slug: string, chapter: number) {
   slugSchema.parse(slug); if (!Number.isSafeInteger(chapter) || chapter < 1) throw new Error("Chapter must be a positive integer");
-  const paths = storyPaths(root, slug, chapter); const metadataRaw = await readJsonIfExists<Chapter>(paths.chapterMeta);
+  const paths = storyPaths(root, slug, chapter); const story = await loadStory(paths.storyConfig).catch(() => undefined); const metadataRaw = await readJsonIfExists<Chapter>(paths.chapterMeta);
   const metadata = metadataRaw ? chapterSchema.parse(metadataRaw) : undefined; const index = await loadChapterIndex(root, slug);
   if (index.manifest && !index.manifestByChapter.has(chapter)) throw new Error(`Chapter ${chapter} was not found`);
   const position = index.numbers.indexOf(chapter);
@@ -121,9 +122,11 @@ export async function getChapter(root: string, slug: string, chapter: number) {
   const audioStale = audioAvailable && (!fresh || metadata?.stages.audioMastering.status !== "complete");
   const videoAvailable = await exists(paths.video);
   const videoStale = videoAvailable && (!fresh || metadata?.stages.video.status !== "complete");
+  const narration = await readTextIfExists(paths.narration); const ttsScript = (await readTextIfExists(paths.narrationTts)) ?? narration;
+  const speech = ttsScript && story ? normalizeSpeechText(ttsScript, story.outputLanguage, story.narrationSettings) : undefined;
   return {
     chapter, navigation, metadata, stale: !fresh || metadata?.stages.ingestion.status !== "complete", original: await readTextIfExists(paths.original),
-    translation: await readTextIfExists(paths.english), narration: await readTextIfExists(paths.narration),
+    translation: await readTextIfExists(paths.english), narration, spokenText: speech?.text, speechTransformations: speech?.transformations ?? [],
     qa: qaRaw ? qaResultSchema.parse(qaRaw) : undefined, qaStale: Boolean(qaRaw) && (!fresh || metadata?.stages.qa.status !== "complete"), storyContext, storyContextStale: storyContext !== undefined && !fresh, audioAvailable, audioStale,
     alignment: alignment?.success ? alignment.data : undefined, alignmentStale: Boolean(alignment?.success) && (!fresh || metadata?.stages.alignment.status !== "complete"),
     subtitleDocument: subtitleDocument?.success ? subtitleDocument.data : undefined,
@@ -181,7 +184,7 @@ async function outputItem(path: string, value: Record<string, unknown>) { try { 
 export const settingsUpdateSchema = z.object({
   title: z.string().trim().min(1), author: z.string().trim().optional(), description: z.string().max(10_000).default(""), tags: z.array(z.string()).max(30).default([]), notes: z.string().max(20_000).default(""), sourceLanguage: z.string().trim().min(2), outputLanguage: z.string().trim().min(2),
   recentChapterSummaries: z.number().int().min(0).max(100),
-  narrationSettings: z.object({ profanityMode: z.enum(["preserve", "soften-strong"]), bleepStrongProfanity: z.boolean().default(false), includeChapterTitle: z.boolean().optional() }).optional(),
+  narrationSettings: z.object({ profanityMode: z.enum(["preserve", "soften-strong"]), bleepStrongProfanity: z.boolean().default(false), includeChapterTitle: z.boolean().optional(), speechNormalization: z.enum(["automatic", "enabled", "disabled"]).default("automatic"), timeSpeechMode: z.enum(["natural_12h", "natural_24h", "preserve"]).default("natural_12h"), speechAbbreviations: z.record(z.string().trim().regex(/^[A-Za-z][A-Za-z0-9-]{0,29}$/), z.string().trim().min(1).max(120)).default({}) }).optional(),
   translation: z.object({ provider: z.enum(["openai", "gemini", "kimi"]), model: z.string().trim().min(1) }),
   narration: z.object({ provider: z.enum(["openai", "gemini", "kimi"]), model: z.string().trim().min(1) }),
   qa: z.object({ provider: z.enum(["openai", "gemini", "kimi"]), model: z.string().trim().min(1) }),

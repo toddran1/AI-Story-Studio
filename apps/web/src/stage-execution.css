@@ -185,3 +185,31 @@
     gap: 6px;
   }
 }
+
+.spoken-text-preview {
+  margin-top: 12px;
+  border: 1px solid rgba(169, 165, 255, .22);
+  border-radius: 6px;
+  background: rgba(119, 114, 232, .055);
+  padding: 10px 12px;
+}
+
+.spoken-text-preview summary {
+  cursor: pointer;
+  color: #c9c6ff;
+  font: 600 10px var(--sans);
+}
+
+.spoken-text-preview p {
+  color: #9794a0;
+  font-size: 9px;
+  line-height: 1.5;
+  margin: 8px 0;
+}
+
+.spoken-text-preview pre {
+  margin: 0;
+  white-space: pre-wrap;
+  color: #e3e1e9;
+  font: 11px/1.7 var(--serif);
+}

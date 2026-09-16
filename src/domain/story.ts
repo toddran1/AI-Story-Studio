@@ -11,7 +11,10 @@ export const narrationSettingsSchema = z.object({
   profanityMode: z.enum(["preserve", "soften-strong"]).default("preserve"),
   bleepStrongProfanity: z.boolean().default(false),
   includeChapterTitle: z.boolean().optional(),
-}).default({ profanityMode: "preserve", bleepStrongProfanity: false });
+  speechNormalization: z.enum(["automatic", "enabled", "disabled"]).default("automatic"),
+  timeSpeechMode: z.enum(["natural_12h", "natural_24h", "preserve"]).default("natural_12h"),
+  speechAbbreviations: z.record(z.string().trim().regex(/^[A-Za-z][A-Za-z0-9-]{0,29}$/), z.string().trim().min(1).max(120)).default({}),
+}).default({ profanityMode: "preserve", bleepStrongProfanity: false, speechNormalization: "automatic", timeSpeechMode: "natural_12h", speechAbbreviations: {} });
 export type NarrationProfanityMode = z.infer<typeof narrationSettingsSchema>["profanityMode"];
 
 const rawStorySchema = z.object({

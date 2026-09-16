@@ -15,6 +15,7 @@ import { narrationDeliveryProfile, stripDeliveryCues } from "../narration/tts-di
 import type { LLMRouter } from "../llm/router.js";
 import type { TTSProviderRouter } from "../tts/router.js";
 import { censorToneConfig, type CensorAudioService } from "../tts/censor-audio.js";
+import { speechNormalizationFingerprint } from "../tts/speech-normalization.js";
 import type { AudioMasteringProcessor } from "../audio/mastering.js";
 import { audioMasteringFingerprint, masteringInputs, inputFingerprints } from "../audio/chapter-audio.js";
 import { atomicWrite, atomicWriteJson } from "../storage/atomic-write.js";
@@ -72,15 +73,16 @@ export class SummaryMediaService {
       model: story.pipeline.narration, language: story.outputLanguage, profanity: story.narrationSettings.profanityMode,
       includeTitle: story.narrationSettings.includeChapterTitle !== false, intensity: config.deliveryIntensity, delivery,
       promptVersion: NARRATION_PROMPT_VERSION, naming: context.canonicalEntities.map(({ id, canonicalName, originalName, aliases, localizedNaming, preferredNarrationName, aliasNarrationRules }) => ({ id, canonicalName, originalName, aliases, localizedNaming, preferredNarrationName, aliasNarrationRules })) });
+    const spoken = speechNormalizationFingerprint(summary.narration?.ttsText ?? summary.narration?.text ?? "", story.outputLanguage, story.narrationSettings);
     const pronunciationEntities = await loadPronunciationEntities(this.root, slug);
     const provider = pronunciationProvider(this.ttsRouter.forName(config.provider), pronunciationEntities);
-    const pronunciationFp = pronunciationFingerprint(resolvePronunciations(summary.narration?.ttsText ?? summary.narration?.text ?? "", pronunciationEntities));
+    const pronunciationFp = pronunciationFingerprint(resolvePronunciations(spoken.normalized.text, pronunciationEntities));
     const referenceId = provider.resolveReferenceId?.(config.referenceId) ?? config.referenceId;
-    const ttsFingerprint = fingerprint({ version: "summary-tts-v1", text: summary.narration?.ttsText ?? summary.narration?.text,
+    const ttsFingerprint = fingerprint({ version: "summary-tts-v1", text: summary.narration?.ttsText ?? summary.narration?.text, speech: spoken.fingerprint,
       config: { ...config, referenceId }, normalization: provider.inputNormalizationVersion,
       ...(pronunciationFp ? { pronunciation: pronunciationFp } : {}),
       bleep: story.narrationSettings.bleepStrongProfanity, censor: { version: this.censor.version, config: censorToneConfig } });
-    return { story, context, provider, referenceId, sourceFingerprint, namingFingerprint, configurationFingerprint, narrationFingerprint, ttsFingerprint,
+    return { story, context, provider, referenceId, spokenText: spoken.normalized.text, speechTransformations: spoken.normalized.transformations, sourceFingerprint, namingFingerprint, configurationFingerprint, narrationFingerprint, ttsFingerprint,
       audioFingerprint: audioMasteringFingerprint(summary.tts?.outputFingerprint, story.audio, this.mastering.version, summary.tts?.segmentFingerprints ?? []) };
   }
 
@@ -106,6 +108,11 @@ export class SummaryMediaService {
       summary.scenes.outputFingerprint !== productionSceneFingerprint(summary.scenePlan) ||
       (summary.audio?.status === "current" && summary.audio.durationSeconds !== summary.scenePlan?.durationSeconds))) summary.scenes.status = "stale";
     return summary;
+  }
+
+  async speech(slug: string, id: string) {
+    const summary = await this.get(slug, id); const input = await this.inputs(slug, summary);
+    return { narrationText: summary.narration?.ttsText ?? summary.narration?.text ?? "", spokenText: input.spokenText, transformations: input.speechTransformations };
   }
 
   private async save(slug: string, summary: StorySummary) {
@@ -239,7 +246,7 @@ export class SummaryMediaService {
         await this.save(slug, summary);
         const config = input.story.pipeline.tts;
         const result = await this.censor.synthesize(input.provider, { ...config, referenceId: input.referenceId,
-          text: summary.narration!.ttsText ?? summary.narration!.text!, bleepStrongProfanity: input.story.narrationSettings.bleepStrongProfanity });
+          text: input.spokenText, bleepStrongProfanity: input.story.narrationSettings.bleepStrongProfanity });
         if (!result.audio.length) throw new Error("TTS returned empty summary audio");
         await atomicWrite(paths.raw, result.audio);
         await rm(paths.segments, { recursive: true, force: true });

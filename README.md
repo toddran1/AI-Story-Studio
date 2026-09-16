@@ -20,6 +20,7 @@ npm run story:pronunciation -- enrich undead-disaster ent_1234567890123456789012
 npm run story:pronunciation -- test undead-disaster ent_123456789012345678901234
 npm run story:pronunciation -- set undead-disaster ent_123456789012345678901234 '{"mode":"custom","sourceLanguage":"zh-CN","customPronunciation":"Jyang Yweh","locked":true}'
 npm run story:pronunciation -- clear undead-disaster ent_123456789012345678901234
+npm run story:speech -- normalize undead-disaster 4
 ```
 
 The CLI reuses the web operations and canonical overlays. JSON output includes entity IDs and pronunciation records. Invalid arguments and missing entities/stories exit nonzero. API: `GET /api/stories/:slug/pronunciation`, `GET/PUT /api/stories/:slug/pronunciation/:entityId`, and `POST .../:entityId/enrich` or `.../:entityId/test`; posting `{}` to the list endpoint enriches missing records. A PUT body is a pronunciation object or `null` to return to automatic enrichment. Jobs use the existing job-status endpoint.

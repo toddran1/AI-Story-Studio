@@ -112,6 +112,8 @@ export function createApiHandler(operations: StudioOperations) {
       if (summaryMatch && request.method === "GET") return send(response, 200, { summary: await operations.getSummary(summaryMatch[1]!, summaryMatch[2]!) });
       if (summaryMatch && request.method === "PUT") return send(response, 200, { summary: await operations.updateSummary(summaryMatch[1]!, summaryMatch[2]!, await jsonBody(request)) });
       if (summaryMatch && request.method === "DELETE") { await jsonBody(request); return send(response, 200, await operations.deleteSummary(summaryMatch[1]!, summaryMatch[2]!)); }
+      const summarySpeechMatch = /^\/api\/stories\/([a-z0-9-]+)\/summaries\/(sum_[a-f0-9-]{36})\/spoken-text$/.exec(url.pathname);
+      if (summarySpeechMatch && request.method === "GET") return send(response, 200, await operations.summarySpeech(summarySpeechMatch[1]!, summarySpeechMatch[2]!));
       const summaryRegenerateMatch = /^\/api\/stories\/([a-z0-9-]+)\/summaries\/(sum_[a-f0-9-]{36})\/regenerate$/.exec(url.pathname);
       if (summaryRegenerateMatch && request.method === "POST") return send(response, 202, operations.regenerateSummary(summaryRegenerateMatch[1]!, summaryRegenerateMatch[2]!, await jsonBody(request)));
       const summaryMediaMatch = /^\/api\/stories\/([a-z0-9-]+)\/summaries\/(sum_[a-f0-9-]{36})\/(narration|audio|scenes|artwork|video|produce)$/.exec(url.pathname);

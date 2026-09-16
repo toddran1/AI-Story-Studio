@@ -18,6 +18,7 @@ import { PreviewManifest, PreviewPreset, previewManifestSchema } from "./types.j
 import { loadNarrationNamingEntities } from "../story-bible/narration-names.js";
 import { loadEligibleSummaryContext } from "../summaries/service.js";
 import { CensorAudioService, FfmpegCensorAudioService } from "../tts/censor-audio.js";
+import { normalizeSpeechText } from "../tts/speech-normalization.js";
 
 export class PreviewRunner {
   private readonly tts: TTSProviderRouter;
@@ -51,7 +52,7 @@ export class PreviewRunner {
       await atomicWriteJson(choice === "a" ? paths.qaA : paths.qaB, qa);
       let audioGenerated = false;
       if (options.audioPreview && qa.status !== "fail") {
-        const sample = audioSample(narrationScript);
+        const sample = normalizeSpeechText(audioSample(narrationScript), options.story.outputLanguage, options.story.narrationSettings).text;
         const result = await this.censor.synthesize(this.tts.forName(preset.tts.provider), { text: sample, model: preset.tts.model, referenceId: preset.tts.referenceId, secondaryReferenceId: preset.tts.secondaryReferenceId,
           voiceMode: preset.tts.voiceMode, deliveryIntensity: preset.tts.deliveryIntensity, qualityGuard: preset.tts.qualityGuard,
           bleepStrongProfanity: options.story.narrationSettings.bleepStrongProfanity,

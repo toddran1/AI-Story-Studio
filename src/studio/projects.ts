@@ -103,6 +103,7 @@ export async function invalidateStoryForConfigChange(root: string, slug: string,
   const narrationBehavior = (story: Story) => ({ profanityMode: story.narrationSettings.profanityMode, includeChapterTitle: story.narrationSettings.includeChapterTitle });
   if (changed(before.pipeline.narration, after.pipeline.narration) || changed(narrationBehavior(before), narrationBehavior(after))) add("narration", "qa", "storyBible", "continuity", "tts", "audioMastering", "alignment", "subtitles", "scenePlanning", "artwork", "video");
   if (before.narrationSettings.bleepStrongProfanity !== after.narrationSettings.bleepStrongProfanity) add("tts", "audioMastering", "alignment", "subtitles", "scenePlanning", "artwork", "video");
+  if (before.narrationSettings.speechNormalization !== after.narrationSettings.speechNormalization || before.narrationSettings.timeSpeechMode !== after.narrationSettings.timeSpeechMode || changed(before.narrationSettings.speechAbbreviations, after.narrationSettings.speechAbbreviations)) add("tts", "audioMastering", "alignment", "subtitles", "scenePlanning", "artwork", "video");
   if (changed(before.pipeline.qa, after.pipeline.qa)) add("qa");
   if (changed(before.pipeline.storyBible, after.pipeline.storyBible)) add("storyBible", "continuity");
   if (before.pipeline.tts.deliveryIntensity !== after.pipeline.tts.deliveryIntensity) add("narration", "qa", "storyBible", "continuity");
