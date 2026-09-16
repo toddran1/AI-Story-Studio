@@ -94,14 +94,14 @@ describe("QA authorized narration naming", () => {
   });
 
   it("records the bumped prompt version", () => {
-    expect(QA_PROMPT_VERSION).toBe("5");
+    expect(QA_PROMPT_VERSION).toBe("6");
   });
 
   it("documents the output contract, severity rubric, and repair-routing phrasing", () => {
     for (const category of ["completeness", "names", "numbers", "terminology", "dialogue", "storyConsistency", "narrationFidelity"]) expect(qaInstructions).toContain(category);
     expect(qaInstructions).toContain("1.0 means no issues");
     expect(qaInstructions).toContain("block publication");
-    expect(qaInstructions).toContain("dropped or merged dialogue");
+    expect(qaInstructions).toContain("dropped dialogue or merged speaker turns");
     expect(qaInstructions).toContain("TRANSLATION or the NARRATION");
     expect(qaInstructions).toContain("both the translation and narration");
     expect(qaInstructions).toContain("both the translation and the narration");
@@ -112,5 +112,17 @@ describe("QA authorized narration naming", () => {
     const qa = qaInstructionsFor("soften-strong");
     expect(qa).toMatch(/fuck.*bitch.*shit.*cunt/i);
     expect(qa).toMatch(/ass.*hell.*damn/i);
+  });
+
+  it("accepts cosmetic regrouping while protecting substantive dialogue and formatting boundaries", () => {
+    const instructions = qaInstructionsFor();
+    expect(instructions).toContain("do not label them warn or fail");
+    expect(instructions).toContain("same speaker's separate quotations");
+    expect(instructions).toContain("Cut the crap! The earlier we leave, the earlier we finish!");
+    expect(instructions).toContain("Are you messing with me?");
+    for (const defect of ["merged speaker turns that misattribute", "reordered exchanges", "narration/action swallowed into dialogue", "unbalanced quotation marks", "missing meaningful interruptions or pauses", "punctuation damage that changes meaning"]) {
+      expect(instructions).toContain(defect);
+    }
+    expect(instructions).not.toContain("for example dropped or merged dialogue");
   });
 });
