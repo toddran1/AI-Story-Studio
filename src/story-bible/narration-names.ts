@@ -25,13 +25,19 @@ export async function invalidateNarrationNamingChange(root: string, slug: string
   const entries = await readdir(chapterRoot, { withFileTypes: true }).catch((error: NodeJS.ErrnoException) => { if (error.code === "ENOENT") return []; throw error; });
   const available = entries.filter((entry) => entry.isDirectory() && /^\d+$/.test(entry.name)).map((entry) => Number(entry.name)).filter(Number.isSafeInteger).sort((a, b) => a - b);
   const affected = new Set([...before.provenance, ...after.provenance].map((item) => item.chapter));
-  const names = [...new Set([before.canonicalName, before.originalName, ...before.aliases, after.canonicalName, after.originalName, ...after.aliases].map((value) => value.trim().toLocaleLowerCase()).filter(Boolean))];
+  const names = [...new Set([
+    before.canonicalName, before.originalName, before.preferredNarrationName, ...before.aliases, before.localizedNaming?.fullName, before.localizedNaming?.shortName,
+    after.canonicalName, after.originalName, after.preferredNarrationName, ...after.aliases, after.localizedNaming?.fullName, after.localizedNaming?.shortName,
+  ].filter((value): value is string => Boolean(value)).map((value) => value.trim().toLocaleLowerCase()).filter(Boolean))];
 
   const matches = await mapBounded(available, 16, async (chapter) => {
     const paths = storyPaths(root, slug, chapter);
-    const artifacts = await Promise.all([paths.original, paths.english, paths.storyContext].map((path) => readFile(path, "utf8").catch((error: NodeJS.ErrnoException) => { if (error.code === "ENOENT") return ""; throw error; })));
+    // Story context can contain a broad slice of the canonical Bible, including
+    // entities that never appear in this chapter. Scan only chapter-authored
+    // text so a naming edit does not invalidate unrelated narration and audio.
+    const artifacts = await Promise.all([paths.original, paths.english, paths.narration].map((path) => readFile(path, "utf8").catch((error: NodeJS.ErrnoException) => { if (error.code === "ENOENT") return ""; throw error; })));
     const text = artifacts.join("\n").toLocaleLowerCase();
-    return text.includes(before.id.toLocaleLowerCase()) || names.some((name) => text.includes(name)) ? chapter : undefined;
+    return names.some((name) => containsName(text, name)) ? chapter : undefined;
   });
   for (const chapter of matches) if (chapter !== undefined) affected.add(chapter);
   if (!affected.size && available.length) for (const chapter of available) if (chapter >= Math.min(before.firstAppearance, after.firstAppearance) && chapter <= Math.max(before.lastKnownAppearance, after.lastKnownAppearance)) affected.add(chapter);
@@ -65,6 +71,12 @@ export async function invalidateNarrationNamingChange(root: string, slug: string
   const exportCleanupWarnings: string[] = [];
   await Promise.all(exportNames.filter((name) => name.endsWith(".json")).map(async (name) => { try { await rm(join(exportsDirectory, name), { force: true }); } catch { exportCleanupWarnings.push(name); } }));
   return { affectedChapters: prepared.map((item) => item.chapter.chapter), manualNarrationChapters: manualNarrationChapters.sort((a, b) => a - b), exportCleanupWarnings: exportCleanupWarnings.sort() };
+}
+
+function containsName(text: string, name: string) {
+  if (!/^[a-z0-9][a-z0-9 .'-]*$/i.test(name)) return text.includes(name);
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`(?<![a-z0-9])${escaped}(?![a-z0-9])`, "i").test(text);
 }
 
 async function mapBounded<T, U>(items: T[], concurrency: number, work: (item: T) => Promise<U>): Promise<U[]> {

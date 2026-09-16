@@ -125,7 +125,7 @@ describe("web service layer", () => {
     const result = await operations.dismissQaFindings(story.slug, 1, { issueIndexes: [0] });
     expect(result.qa.status).toBe("pass"); expect(result.qa.issues[0]).toMatchObject({ message: "A threat is softened", review: { disposition: "dismissed" } });
     const detail = await getChapter(root, story.slug, 1); const dashboard = await getQaDashboard(root, story.slug);
-    expect(detail.qa?.issues[0]?.review?.disposition).toBe("dismissed"); expect(detail.metadata?.quality).toEqual({ status: "pass", score: .86, issueCategories: [] });
+    expect(detail.qa?.issues[0]?.review?.disposition).toBe("dismissed"); expect(detail.qa?.originalScore).toBe(.86); expect(detail.metadata?.quality).toEqual({ status: "pass", score: 1, issueCategories: [] });
     expect(detail.metadata?.stages.qa.status).toBe("pending"); expect(detail.qaStale).toBe(true);
     expect(detail.metadata?.stages.qa.outputFingerprint).toBe(await fileFingerprint(paths.qa));
     expect(dashboard.counts.pass).toBe(1); expect(dashboard.chapters[0]?.issues).toEqual([]);
@@ -216,7 +216,7 @@ describe("web service layer", () => {
   it("runs mastering and audiobook exports through web jobs", async () => {
     const root = await mkdtemp(join(tmpdir(), "story-web-audio-")); const jobs = new JobManager(); const operations = new StudioOperations(root, env, jobs, { audio: webAudio, audiobook: webBook, video: webVideo, videoExport: webVideoExport, scenePlanner: webScenePlanner, image: webImages });
     const inspection = await operations.inspectSource({ filename: "chapter.txt", file: Buffer.from("A chapter."), chapter: 1 }); const imported = await operations.importInspection("audio-story", inspection.id); const paths = storyPaths(root, imported.story.slug, 1); const manifest = sourceManifestSchema.parse(JSON.parse(await readFile(paths.sourceManifest, "utf8"))); const now = new Date().toISOString(); const complete = { status: "complete" as const, fingerprint: "input", outputFingerprint: "output" };
-    await atomicWriteJson(paths.chapterMeta, chapterSchema.parse({ chapter: 1, originalTitle: "Opening", source: { type: manifest.chapters[0]!.ref.sourceType, sourceId: manifest.chapters[0]!.ref.sourceId, fingerprint: manifest.chapters[0]!.fingerprint, metadata: manifest.chapters[0]!.ref.metadata }, sourceLanguage: imported.story.sourceLanguage, outputLanguage: imported.story.outputLanguage, counts: { originalCharacters: 10, englishWords: 2, narrationWords: 2 }, createdAt: now, updatedAt: now,
+    await atomicWriteJson(paths.chapterMeta, chapterSchema.parse({ chapter: 1, originalTitle: "Opening", source: { type: manifest.chapters[0]!.ref.sourceType, sourceId: manifest.chapters[0]!.ref.sourceId, fingerprint: manifest.chapters[0]!.contentFingerprint!, metadata: manifest.chapters[0]!.ref.metadata }, sourceLanguage: imported.story.sourceLanguage, outputLanguage: imported.story.outputLanguage, counts: { originalCharacters: 10, englishWords: 2, narrationWords: 2 }, createdAt: now, updatedAt: now,
       stages: { ingestion: complete, translation: complete, narration: complete, qa: complete, storyBible: complete, tts: complete, audioMastering: pending() } })); await atomicWrite(paths.narration, "The chapter opens. The lantern burns brightly."); await atomicWrite(paths.audioRaw, Buffer.from("raw"));
     const mastering = await waitForJob(jobs, operations.startAudio(imported.story.slug, { from: 1, to: 1 }).id); expect(mastering.status).toBe("completed"); expect((await getAudioDashboard(root, imported.story.slug)).counts.mastered).toBe(1);
     const exportJob = await waitForJob(jobs, operations.startAudiobook(imported.story.slug, { from: 1, to: 1, format: "m4b" }).id); expect(exportJob.status).toBe("completed"); const dashboard = await getAudioDashboard(root, imported.story.slug); expect(dashboard.exports[0]).toMatchObject({ format: "m4b", from: 1, to: 1, downloadUrl: "/api/stories/audio-story/exports/1-1.m4b" }); expect(dashboard.exports[0]).not.toHaveProperty("output"); expect(JSON.stringify(dashboard)).not.toContain(root);
@@ -230,6 +230,11 @@ describe("web service layer", () => {
     expect((await getAudioDashboard(root, imported.story.slug)).exports).toHaveLength(1);
     expect((await waitForJob(jobs, operations.startSubtitles(imported.story.slug, { from: 1, to: 1 }).id)).status).toBe("completed"); expect((await waitForJob(jobs, operations.startVideo(imported.story.slug, { from: 1, to: 1 }).id)).status).toBe("completed"); expect((await waitForJob(jobs, operations.startVideoExport(imported.story.slug, { from: 1, to: 1 }).id)).status).toBe("completed"); const videoDashboard = await getVideoDashboard(root, imported.story.slug); expect(videoDashboard.counts).toMatchObject({ subtitles: 1, videos: 1 }); expect(videoDashboard.exports[0]?.downloadUrl).toBe("/api/stories/audio-story/video-exports/1-1.mp4");
     expect((await waitForJob(jobs, operations.startScenes(imported.story.slug, { from: 1, to: 1 }).id)).status).toBe("completed"); const estimate = await waitForJob(jobs, operations.startArtwork(imported.story.slug, { from: 1, to: 1, dryRun: true }).id); expect(estimate.result).toMatchObject({ dryRun: true, imageCountEstimate: 1 }); expect((await waitForJob(jobs, operations.startArtwork(imported.story.slug, { from: 1, to: 1 }).id)).status).toBe("completed"); const scenes = await getScenesDashboard(root, imported.story.slug, 1); expect(scenes.manifest?.scenes[0]).toMatchObject({ summary: "The lantern wakes.", imageUrl: "/api/stories/audio-story/chapters/1/scenes/scene-001.png" });
+    const staleMetadata = chapterSchema.parse(JSON.parse(await readFile(paths.chapterMeta, "utf8")));
+    staleMetadata.stages.audioMastering = { status: "pending", staleReason: "Narration settings changed" }; await atomicWriteJson(paths.chapterMeta, staleMetadata);
+    const staleDashboard = await getAudioDashboard(root, imported.story.slug);
+    expect(staleDashboard.counts).toMatchObject({ mastered: 1, current: 0, stale: 1 }); expect(staleDashboard.exports).toHaveLength(1);
+    expect((await waitForJob(jobs, operations.startAudiobook(imported.story.slug, { from: 1, to: 1, format: "m4b" }).id)).status).toBe("completed");
     await operations.close();
   });
 
@@ -263,11 +268,13 @@ describe("web service layer", () => {
     await operations.importInspection("stale-story", inspection.id);
     const paths = storyPaths(root, "stale-story", 101); const manifest = sourceManifestSchema.parse(JSON.parse(await readFile(paths.sourceManifest, "utf8")));
     const now = new Date().toISOString(); const complete = { status: "complete" as const, fingerprint: "input", outputFingerprint: "output" };
-    const metadata = chapterSchema.parse({ chapter: 101, source: { type: "text", sourceId: "chapter.txt", fingerprint: manifest.chapters[0]!.fingerprint, metadata: {} },
+    const metadata = chapterSchema.parse({ chapter: 101, source: { type: "text", sourceId: "chapter.txt", fingerprint: manifest.chapters[0]!.contentFingerprint!, metadata: {} },
       sourceLanguage: "zh-CN", outputLanguage: "en-US", counts: { originalCharacters: 8, englishWords: 1, narrationWords: 1 }, createdAt: now, updatedAt: now,
       stages: { ingestion: complete, translation: complete, narration: complete, qa: complete, storyBible: complete, tts: complete, audioMastering: complete } });
     await atomicWriteJson(paths.chapterMeta, metadata); await writeFile(paths.audio, Buffer.from("audio"));
     expect(await getStoryOverview(root, "stale-story")).toMatchObject({ counts: { minChapter: 101, maxChapter: 101, complete: 1 } });
+    expect(await getChapter(root, "stale-story", 101)).toMatchObject({ stale: false, audioAvailable: true, audioStale: false });
+    expect((await getChapterPage(root, "stale-story", { page: 1, pageSize: 50, filter: "all" })).items[0]).toMatchObject({ translation: "complete", narration: "complete" });
     inspection = await operations.inspectSource({ filename: "chapter.txt", file: Buffer.from("Changed"), chapter: 101 });
     await expect(operations.importInspection("stale-story", inspection.id)).rejects.toThrow(/explicitly confirm replacement/);
     await operations.importInspection("stale-story", inspection.id, false, true);

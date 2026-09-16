@@ -4,6 +4,7 @@ import { loadStory } from "../../src/config/load-config.js";
 import { loadImportedChapters } from "../../src/source/importer.js";
 import { selectChapterRange } from "../../src/batch/range.js";
 import { storyPaths } from "../../src/storage/paths.js";
+import { exists } from "../../src/storage/story-files.js";
 import { withStoryLock } from "../../src/storage/story-lock.js";
 import { FfmpegMasteringProcessor } from "../../src/audio/mastering.js";
 import { masterStoredChapter } from "../../src/audio/chapter-audio.js";
@@ -14,7 +15,7 @@ async function main() {
   await withStoryLock(root, args.story, "audiobook assembly", async () => {
     const story = await loadStory(storyPaths(root, args.story, 1).storyConfig); const imported = await loadImportedChapters(root, args.story);
     const selected = selectChapterRange(imported.chapters, args.from, args.to); const mastering = new FfmpegMasteringProcessor();
-    for (let index = 0; index < selected.length; index++) { const item = selected[index]!; const result = await masterStoredChapter({ root, story, chapter: item.chapter, processor: mastering }); process.stdout.write(`[master ${index + 1}/${selected.length}] Chapter ${item.chapter}: ${result.reused ? "reused" : "mastered"}\n`); }
+    for (let index = 0; index < selected.length; index++) { const item = selected[index]!; const retained = await exists(storyPaths(root, story.slug, item.chapter).audio); if (retained) { process.stdout.write(`[master ${index + 1}/${selected.length}] Chapter ${item.chapter}: retained audio reused\n`); continue; } const result = await masterStoredChapter({ root, story, chapter: item.chapter, processor: mastering }); process.stdout.write(`[master ${index + 1}/${selected.length}] Chapter ${item.chapter}: ${result.reused ? "reused" : "mastered"}\n`); }
     const from = selected[0]!.chapter; const to = selected.at(-1)!.chapter; const result = await assembleAudiobook({ root, story, from, to, format: args.format, processor: new FfmpegAudiobookProcessor(), force: args.force });
     process.stdout.write(`${result.reused ? "Reused" : "Built"} ${result.manifest.output}\nDuration: ${result.manifest.durationSeconds.toFixed(1)}s\n`);
   });

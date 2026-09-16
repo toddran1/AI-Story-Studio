@@ -71,7 +71,7 @@ import { Chapter, chapterSchema, StageName } from "../../src/domain/chapter.js";
 import { fingerprint } from "../../src/utils/hash.js";
 import { fileFingerprint } from "../../src/utils/file-fingerprint.js";
 import { NovelProviderId, novelProviderIdSchema, storyNovelSourceSchema } from "../../src/source/novel-provider.js";
-import { activeQaIssues, dismissQaIssues, qaResultSchema } from "../../src/domain/qa.js";
+import { activeQaIssues, qaResultSchema, resolveQaIssues } from "../../src/domain/qa.js";
 import { issueRepairTargets, repairQaText, repairTargets } from "../../src/qa/repair.js";
 import { LLMRouter } from "../../src/llm/router.js";
 import { validateChapterQuality } from "../../src/qa/validator.js";
@@ -86,7 +86,7 @@ import { executeStagePlan, planStageExecution, stageExecutionInputSchema, stageE
 const slugSchema = z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/);
 const batchInputSchema = z.object({ from: z.number().int().positive().optional(), to: z.number().int().positive().optional(), force: z.enum(["translation", "narration", "qa", "story-bible", "continuity", "tts", "audio", "all"]).optional(), stage: z.enum(["ingestion", "translation", "narration", "qa", "storyBible", "continuity", "tts", "audioMastering", "alignment", "subtitles", "scenePlanning", "artwork", "video"]).optional(), mode: stageExecutionModeSchema.default("selected"), continueOnError: z.boolean().default(false) }).strict().refine((value) => !(value.stage && value.force), { message: "Choose either a manual stage or the legacy force stage, not both" });
 const qaRepairInputSchema = z.object({ issueIndexes: z.array(z.number().int().nonnegative()).min(1).max(100) }).strict();
-const qaDismissInputSchema = z.object({ issueIndexes: z.array(z.number().int().nonnegative()).min(1).max(100) }).strict();
+const qaDismissInputSchema = z.object({ issueIndexes: z.array(z.number().int().nonnegative()).min(1).max(100), disposition: z.enum(["dismissed", "manually_fixed"]).default("dismissed") }).strict();
 const previewInputSchema = z.object({ chapter: z.number().int().positive(), audioPreview: z.boolean().default(false), presets: z.object({ a: previewPresetSchema, b: previewPresetSchema }) }).strict();
 const audioInputSchema = z.object({ from: z.number().int().positive().optional(), to: z.number().int().positive().optional(), force: z.boolean().default(false) }).strict();
 const audiobookInputSchema = z.object({ from: z.number().int().positive(), to: z.number().int().positive(), format: z.enum(["mp3", "m4b"]), force: z.boolean().default(false) }).strict();
@@ -394,7 +394,7 @@ export class StudioOperations {
       if (!qaRaw || !chapterRaw) throw new Error(`Chapter ${chapter} does not have a QA result`);
       const metadata = chapterSchema.parse(chapterRaw);
       const uniqueIndexes = [...new Set(input.issueIndexes)];
-      const qa = dismissQaIssues(qaRaw, uniqueIndexes);
+      const qa = resolveQaIssues(qaRaw, uniqueIndexes, input.disposition);
       const activeIssues = activeQaIssues(qa);
       await atomicWriteJson(paths.qa, qa);
       metadata.quality = { status: qa.status, score: qa.score, issueCategories: [...new Set(activeIssues.map((issue) => issue.category))] };
@@ -404,8 +404,9 @@ export class StudioOperations {
       metadata.updatedAt = new Date().toISOString();
       await atomicWriteJson(paths.chapterMeta, metadata);
       invalidateCatalogCache(this.root, slug);
-      await recordActivity(this.root, slug, "chapter.qa_dismissed", `Dismissed ${uniqueIndexes.length} QA finding(s) for Chapter ${chapter}`);
-      return { chapter, dismissed: uniqueIndexes.length, qa };
+      const action = input.disposition === "manually_fixed" ? "Marked manually fixed" : "Dismissed";
+      await recordActivity(this.root, slug, input.disposition === "manually_fixed" ? "chapter.qa_manually_fixed" : "chapter.qa_dismissed", `${action} ${uniqueIndexes.length} QA finding(s) for Chapter ${chapter}`);
+      return { chapter, resolved: uniqueIndexes.length, disposition: input.disposition, qa };
     });
   }
   startQaRepair(slug: string, chapter: number, raw: unknown) {
@@ -589,6 +590,11 @@ export class StudioOperations {
       for (let index = 0; index < selected.length; index++) {
         if (shutdown.isRequested) return { status: "paused", total: selected.length };
         const chapter = selected[index]!.chapter; control.update({ type: "audio.chapter.started", chapter, index: index + 1, total: selected.length });
+        const retainedAudio = await exists(storyPaths(this.root, slug, chapter).audio);
+        if (retainedAudio) {
+          control.update({ type: "audio.chapter.completed", chapter, index: index + 1, total: selected.length, reused: true, retained: true });
+          continue;
+        }
         const result = await masterStoredChapter({ root: this.root, story, chapter, processor: this.audio });
         control.update({ type: "audio.chapter.completed", chapter, index: index + 1, total: selected.length, reused: result.reused });
       }

@@ -267,15 +267,16 @@ export async function getAudioDashboard(root: string, slug: string) {
       return undefined;
     });
     const parsed = raw ? exportManifestSchema.safeParse(raw) : undefined;
-    if (!parsed?.success || parsed.data.story !== slug || !(await currentAudioExport(root, slug, parsed.data))) return undefined;
+    if (!parsed?.success || parsed.data.story !== slug || !(await intactAudioExport(root, slug, parsed.data))) return undefined;
     const { output: _output, ...manifest } = parsed.data;
     return { ...manifest, downloadUrl: `/api/stories/${slug}/exports/${parsed.data.from}-${parsed.data.to}.${parsed.data.format}` };
   }))
     .filter((item): item is NonNullable<typeof item> => Boolean(item)).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-  const mastered = chapters.filter((item) => item.audioMastering === "complete" && item.durationSeconds);
+  const available = chapters.filter((item) => item.audioAvailable && item.durationSeconds);
+  const current = available.filter((item) => !item.audioStale);
   return { settings: story.audio, chapters: chapters.map(({ chapter, originalTitle, audioMastering, durationSeconds, audioAvailable, audioStale }) => ({ chapter, title: originalTitle, status: audioStale ? "stale" : audioMastering, durationSeconds, audioAvailable, audioStale })),
-    counts: { total: chapters.length, mastered: mastered.length },
-    totalDurationSeconds: mastered.reduce((sum, item) => sum + (item.durationSeconds ?? 0), 0) + story.audio.chapterGapSeconds * Math.max(0, mastered.length - 1), exports };
+    counts: { total: chapters.length, mastered: available.length, current: current.length, stale: available.length - current.length },
+    totalDurationSeconds: available.reduce((sum, item) => sum + (item.durationSeconds ?? 0), 0) + story.audio.chapterGapSeconds * Math.max(0, available.length - 1), exports };
 }
 
 export async function getVideoDashboard(root: string, slug: string) {
@@ -301,10 +302,10 @@ export function publicProductionManifest(manifest: ProductionManifest, slug: str
   return { ...manifest, summary: { ...manifest.summary, exports } };
 }
 
-async function currentAudioExport(root: string, slug: string, manifest: z.infer<typeof exportManifestSchema>) {
-  if (await fileFingerprint(exportPaths(root, slug, manifest.from, manifest.to, manifest.format).output) !== manifest.outputFingerprint) return false;
-  for (const chapter of manifest.chapters) { const paths = storyPaths(root, slug, chapter.chapter); const raw = await readJsonIfExists<Chapter>(paths.chapterMeta); const parsed = raw ? chapterSchema.safeParse(raw) : undefined; if (!parsed?.success || parsed.data.stages.audioMastering.status !== "complete" || await fileFingerprint(paths.audio) !== chapter.fingerprint) return false; }
-  return true;
+async function intactAudioExport(root: string, slug: string, manifest: z.infer<typeof exportManifestSchema>) {
+  // An audiobook is a standalone retained artifact. Source chapters becoming
+  // stale should invite a rebuild, but must not hide an intact existing export.
+  return await fileFingerprint(exportPaths(root, slug, manifest.from, manifest.to, manifest.format).output) === manifest.outputFingerprint;
 }
 
 async function currentVideoExport(root: string, slug: string, manifest: z.infer<typeof videoExportManifestSchema>) {
@@ -322,7 +323,7 @@ async function currentExportBadges(root: string, slug: string, names: string[], 
   const byChapter = new Map(chapters.map((chapter) => [chapter.chapter, chapter])); let audio = false; let video = false; const directory = join(storyPaths(root, slug, 1).story, "exports");
   for (const name of names.filter((item) => isVisibleManifest(item, ".json"))) {
     const raw = await readJsonIfExists(join(directory, name)).catch((error) => { logger.warn({ event: "library.export_manifest_ignored", story: slug, manifest: name, error: error instanceof Error ? error.message : String(error) }, "Ignoring unreadable export manifest while building the story card"); return undefined; }); const audioManifest = raw ? exportManifestSchema.safeParse(raw) : undefined;
-    if (audioManifest?.success && audioManifest.data.story === slug && audioManifest.data.chapters.every((item) => byChapter.get(item.chapter)?.audioMastering === "complete") && await exists(exportPaths(root, slug, audioManifest.data.from, audioManifest.data.to, audioManifest.data.format).output)) audio = true;
+    if (audioManifest?.success && audioManifest.data.story === slug && await intactAudioExport(root, slug, audioManifest.data)) audio = true;
     const videoManifest = raw ? videoExportManifestSchema.safeParse(raw) : undefined;
     if (videoManifest?.success && videoManifest.data.story === slug && videoManifest.data.chapters.every((item) => byChapter.get(item.chapter)?.video === "complete") && await exists(videoExportPaths(root, slug, videoManifest.data.from, videoManifest.data.to).output)) video = true;
     if (audio && video) break;
@@ -336,7 +337,12 @@ async function currentExportBadges(root: string, slug: string, names: string[], 
 function isVisibleManifest(name: string, suffix: string) { return !name.startsWith(".") && name.endsWith(suffix); }
 
 function isCurrent(metadata: Chapter | undefined, source: SourceManifest["chapters"][number] | undefined, hasManifest: boolean) {
-  return !hasManifest || Boolean(metadata?.source?.fingerprint && source && metadata.source.fingerprint === source.fingerprint);
+  // Pipeline metadata records the materialized text fingerprint supplied by
+  // loadImportedChapters. The manifest's broader fingerprint also contains
+  // mutable source-reference metadata, so comparing against it makes a freshly
+  // processed chapter look stale even when its text is exactly current.
+  const sourceFingerprint = source?.contentFingerprint ?? source?.fingerprint;
+  return !hasManifest || Boolean(metadata?.source?.fingerprint && sourceFingerprint && metadata.source.fingerprint === sourceFingerprint);
 }
 
 async function mapLimit<T, R>(values: T[], concurrency: number, mapper: (value: T) => Promise<R>): Promise<R[]> {

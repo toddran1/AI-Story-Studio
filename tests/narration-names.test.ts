@@ -45,6 +45,14 @@ describe("preferred narration names", () => {
     expect(manual.stages.narration).toMatchObject({ status: "complete", provider: "manual", manualReviewRequired: true }); expect(await readFile(storyPaths(root, "demo-story", 2).narration, "utf8")).toBe("Existing narration");
   });
 
+  it("does not invalidate an unrelated chapter merely because its saved context contains the entity", async () => {
+    const root = await mkdtemp(join(tmpdir(), "narration-context-invalidation-")); const base = mergeStoryBible(emptyStoryBible(), update(), 1); const before = base.canonicalEntities[0]!; const after = { ...before, preferredNarrationName: "Big Mike" };
+    for (const number of [1, 2]) { const paths = storyPaths(root, "demo-story", number); await mkdir(paths.chapterDir, { recursive: true }); await writeFile(paths.original, number === 1 ? "米高走进了房间。" : "另一名学生走进了房间。"); await writeFile(paths.english, number === 1 ? "Michael entered the room." : "Another student entered the room."); await writeFile(paths.narration, number === 1 ? "Michael entered the room." : "Another student entered the room."); await writeFile(paths.storyContext, JSON.stringify({ canonicalEntities: [{ id: before.id, canonicalName: before.canonicalName }] })); await atomicWriteJson(paths.chapterMeta, chapterSchema.parse({ chapter: number, sourceLanguage: "zh-CN", outputLanguage: "en-US", counts: { originalCharacters: 10, englishWords: 4, narrationWords: 4 }, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), stages: { ingestion: { status: "complete" }, translation: { status: "complete" }, narration: { status: "complete", provider: "openai" }, qa: { status: "complete" }, storyBible: { status: "complete" }, tts: { status: "complete" }, audioMastering: { status: "complete" } } })); }
+    const result = await invalidateNarrationNamingChange(root, "demo-story", before, after);
+    expect(result.affectedChapters).toEqual([1]);
+    expect(chapterSchema.parse(JSON.parse(await readFile(storyPaths(root, "demo-story", 2).chapterMeta, "utf8"))).stages.audioMastering.status).toBe("complete");
+  });
+
   it("instructs the model to preserve grammar and contextual references instead of blind replacement", () => {
     const prompt = narrationInstructions("English"); expect(prompt).toMatch(/default narration-facing name in place of the canonical\/original name/i); expect(prompt).toMatch(/never perform blind literal replacement/i); expect(prompt).toMatch(/possessives/); expect(prompt).toMatch(/dialogue-specific nicknames and vocatives/); expect(prompt).toMatch(/formal titles/); expect(prompt).toMatch(/pronouns/);
     expect(prompt).toMatch(/canonical identity and localized naming are different/i); expect(prompt).toMatch(/ai_contextual/); expect(prompt).toMatch(/familiar dialogue/i);

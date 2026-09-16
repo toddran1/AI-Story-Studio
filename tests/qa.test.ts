@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { activeQaIssues, dismissQaIssues, normalizeQaResult, qaResultSchema } from "../src/domain/qa.js";
+import { activeQaIssues, dismissQaIssues, normalizeQaResult, qaResultSchema, resolveQaIssues } from "../src/domain/qa.js";
 import { emptyStoryBible, storyBibleSchema } from "../src/domain/story-bible.js";
 import { QA_PROMPT_VERSION, authorizedNarrationNaming, qaInstructions, qaInstructionsFor } from "../src/qa/prompts.js";
 import { validateChapterQuality } from "../src/qa/validator.js";
@@ -24,7 +24,8 @@ describe("QA result", () => {
     expect(result.checks.dialogue).toBe("pass");
     expect(result.issues[0]?.review).toEqual({ disposition: "dismissed", reviewedAt: "2026-09-14T18:00:00.000Z" });
     expect(activeQaIssues(result).map((issue) => issue.category)).toEqual(["numbers"]);
-    expect(result.score).toBe(0.86);
+    expect(result.originalScore).toBe(0.86);
+    expect(result.score).toBeCloseTo(0.93);
   });
   it("marks the chapter pass when its only warning is dismissed", () => {
     const result = dismissQaIssues({ status: "warn", score: 0.9, issues: [
@@ -32,6 +33,18 @@ describe("QA result", () => {
     ], checks: { ...checks, dialogue: "warn" } }, [0]);
     expect(result.status).toBe("pass");
     expect(result.checks.dialogue).toBe("pass");
+    expect(activeQaIssues(result)).toEqual([]);
+    expect(result.originalScore).toBe(0.9);
+    expect(result.score).toBe(1);
+  });
+  it("records manually fixed findings as resolved and excludes them from the reviewed score", () => {
+    const result = resolveQaIssues({ status: "fail", score: 0.72, issues: [
+      { category: "numbers", severity: "fail", message: "A number changed", evidence: "The editor restored the original quantity." },
+    ], checks: { ...checks, numbers: "fail" } }, [0], "manually_fixed", "2026-09-16T14:00:00.000Z");
+    expect(result.status).toBe("pass");
+    expect(result.score).toBe(1);
+    expect(result.originalScore).toBe(0.72);
+    expect(result.issues[0]?.review).toEqual({ disposition: "manually_fixed", reviewedAt: "2026-09-16T14:00:00.000Z" });
     expect(activeQaIssues(result)).toEqual([]);
   });
 });

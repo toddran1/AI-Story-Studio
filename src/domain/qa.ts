@@ -14,7 +14,7 @@ export const qaIssueSchema = z.object({
 
 const reviewedQaIssueSchema = qaIssueSchema.extend({
   review: z.object({
-    disposition: z.literal("dismissed"),
+    disposition: z.enum(["dismissed", "manually_fixed"]),
     reviewedAt: z.string().datetime(),
   }).optional(),
 });
@@ -39,6 +39,7 @@ export const generatedQaResultSchema = z.object({
 
 /** Persisted QA can additionally retain explicit human review decisions. */
 export const qaResultSchema = generatedQaResultSchema.extend({
+  originalScore: z.number().min(0).max(1).optional(),
   issues: z.array(reviewedQaIssueSchema),
 });
 
@@ -65,26 +66,40 @@ export function activeQaIssues(result: QaResult) {
 }
 
 export function isQaIssueActive(issue: QaResult["issues"][number]) {
-  return issue.review?.disposition !== "dismissed";
+  return issue.review === undefined;
 }
 
-/** Preserve dismissed evidence while removing it from the active QA decision. */
-export function dismissQaIssues(value: unknown, issueIndexes: number[], reviewedAt = new Date().toISOString()): QaResult {
+export type QaReviewDisposition = "dismissed" | "manually_fixed";
+
+/** Preserve reviewed evidence while removing it from the active QA decision. */
+export function resolveQaIssues(value: unknown, issueIndexes: number[], disposition: QaReviewDisposition, reviewedAt = new Date().toISOString()): QaResult {
   const parsed = qaResultSchema.parse(value);
   const indexes = [...new Set(issueIndexes)];
   if (!indexes.length || indexes.some((index) => !Number.isSafeInteger(index) || index < 0 || index >= parsed.issues.length)) {
     throw new Error("One or more selected QA findings no longer exist. Reload the chapter and select them again.");
   }
+  if (indexes.some((index) => parsed.issues[index]!.review !== undefined)) {
+    throw new Error("One or more selected QA findings have already been resolved. Reload the chapter and select active findings.");
+  }
   const selected = new Set(indexes);
   const affectedCategories = new Set(indexes.map((index) => parsed.issues[index]!.category));
   const issues = parsed.issues.map((issue, index) => selected.has(index)
-    ? { ...issue, review: { disposition: "dismissed" as const, reviewedAt } }
+    ? { ...issue, review: { disposition, reviewedAt } }
     : issue);
   const checks = { ...parsed.checks };
   for (const category of affectedCategories) {
-    const remaining = issues.filter((issue) => issue.category === category && issue.review?.disposition !== "dismissed");
+    const remaining = issues.filter((issue) => issue.category === category && isQaIssueActive(issue));
     checks[category] = remaining.reduce<QaStatus>((worst, issue) => severityRank[issue.severity] > severityRank[worst] ? issue.severity : worst, "pass");
   }
   const status = Object.values(checks).reduce<QaStatus>((worst, current) => severityRank[current] > severityRank[worst] ? current : worst, "pass");
-  return qaResultSchema.parse({ ...parsed, issues, checks, status });
+  const originalScore = parsed.originalScore ?? parsed.score;
+  const weight = (issue: QaResult["issues"][number]) => issue.severity === "fail" ? 2 : 1;
+  const totalWeight = issues.reduce((sum, issue) => sum + weight(issue), 0);
+  const activeWeight = issues.filter(isQaIssueActive).reduce((sum, issue) => sum + weight(issue), 0);
+  const score = totalWeight ? Math.min(1, Math.max(originalScore, 1 - (1 - originalScore) * activeWeight / totalWeight)) : originalScore;
+  return qaResultSchema.parse({ ...parsed, originalScore, score, issues, checks, status });
+}
+
+export function dismissQaIssues(value: unknown, issueIndexes: number[], reviewedAt = new Date().toISOString()): QaResult {
+  return resolveQaIssues(value, issueIndexes, "dismissed", reviewedAt);
 }

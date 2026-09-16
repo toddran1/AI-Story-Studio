@@ -72,8 +72,13 @@ export async function selectExportChapters(root: string, story: Story, from: num
   const chapters: AudiobookChapter[] = [];
   for (const chapter of chapterNumbers) {
     const paths = storyPaths(root, story.slug, chapter); const raw = await readJsonIfExists<Chapter>(paths.chapterMeta); if (!raw) throw new AudioError(`Chapter ${chapter} has not been processed`);
-    const metadata = chapterSchema.parse(raw); const stage = metadata.stages.audioMastering; const actualFingerprint = await fileFingerprint(paths.audio);
-    if (stage.status !== "complete" || !stage.outputFingerprint || stage.outputFingerprint !== actualFingerprint || !metadata.audio) throw new AudioError(`Chapter ${chapter} is not mastered or its audio changed after mastering`);
+    const metadata = chapterSchema.parse(raw); const actualFingerprint = await fileFingerprint(paths.audio);
+    // Freshness controls whether a chapter should be regenerated, not whether a
+    // retained, intact master can be exported. The actual file fingerprint is
+    // included in the audiobook fingerprint below, so stale masters remain safe
+    // to cache and any later replacement still invalidates the edition.
+    if (!actualFingerprint) throw new AudioError(`Chapter ${chapter} has no retained audio master to export`);
+    if (!metadata.audio) throw new AudioError(`Chapter ${chapter} audio timing metadata is unavailable`);
     chapters.push({ chapter, title: metadata.translatedTitle ?? metadata.originalTitle ?? `Chapter ${chapter}`, path: paths.audio, durationSeconds: metadata.audio.durationSeconds, fingerprint: actualFingerprint });
   }
   return chapters;

@@ -162,7 +162,7 @@ export function createApiHandler(operations: StudioOperations) {
       const audioMatch = /^\/api\/stories\/([a-z0-9-]+)\/chapters\/(\d+)\/audio$/.exec(url.pathname);
       if (audioMatch && request.method === "GET") {
         const chapterNumber = chapterParam(audioMatch[2]!); const chapter = await getChapter(operations.root, audioMatch[1]!, chapterNumber);
-        if (!chapter.audioAvailable) return send(response, 404, { error: "Current chapter audio was not found" });
+        if (!chapter.audioAvailable) return send(response, 404, { error: "Chapter audio was not found" });
         return sendFile(request, response, storyPaths(operations.root, audioMatch[1]!, chapterNumber).audio, "audio/mpeg");
       }
       const subtitleFileMatch = /^\/api\/stories\/([a-z0-9-]+)\/chapters\/(\d+)\/subtitles\.(srt|vtt)$/.exec(url.pathname);

@@ -54,7 +54,7 @@ async function writeArtifacts(paths: ReturnType<typeof storyPaths>) {
 async function makeManifestStale(root: string, slug: string) {
   const paths = storyPaths(root, slug, 1);
   const manifest = sourceManifestSchema.parse(JSON.parse(await readFile(paths.sourceManifest, "utf8")));
-  manifest.chapters[0]!.fingerprint = "f".repeat(64);
+  manifest.chapters[0]!.contentFingerprint = "f".repeat(64);
   await atomicWriteJson(paths.sourceManifest, manifest);
 }
 
@@ -62,7 +62,7 @@ describe("stale artifact visibility", () => {
   it("returns stale artifacts with stale flags after the source fingerprint changes", async () => {
     const root = await mkdtemp(join(tmpdir(), "stale-visible-")); const slug = "story";
     const { paths, manifest } = await importChapter(root, slug, "Original");
-    await atomicWriteJson(paths.chapterMeta, chapterMetadata(1, manifest.chapters[0]!.fingerprint));
+    await atomicWriteJson(paths.chapterMeta, chapterMetadata(1, manifest.chapters[0]!.contentFingerprint!));
     await writeArtifacts(paths);
 
     const fresh = await getChapter(root, slug, 1);
@@ -86,7 +86,7 @@ describe("stale artifact visibility", () => {
   it("keeps truly missing artifacts undefined rather than stale", async () => {
     const root = await mkdtemp(join(tmpdir(), "stale-missing-")); const slug = "story";
     const { paths, manifest } = await importChapter(root, slug, "Original");
-    await atomicWriteJson(paths.chapterMeta, chapterMetadata(1, manifest.chapters[0]!.fingerprint));
+    await atomicWriteJson(paths.chapterMeta, chapterMetadata(1, manifest.chapters[0]!.contentFingerprint!));
     const detail = await getChapter(root, slug, 1);
     expect(detail.storyContext).toBeUndefined(); expect(detail.storyContextStale).toBe(false);
     expect(detail.alignment).toBeUndefined(); expect(detail.alignmentStale).toBe(false);
@@ -97,7 +97,7 @@ describe("stale artifact visibility", () => {
   it("treats artifact files deleted after completion as unavailable, not stale", async () => {
     const root = await mkdtemp(join(tmpdir(), "stale-deleted-")); const slug = "story";
     const { paths, manifest } = await importChapter(root, slug, "Original");
-    await atomicWriteJson(paths.chapterMeta, chapterMetadata(1, manifest.chapters[0]!.fingerprint));
+    await atomicWriteJson(paths.chapterMeta, chapterMetadata(1, manifest.chapters[0]!.contentFingerprint!));
     await writeArtifacts(paths); await makeManifestStale(root, slug);
     await rm(paths.subtitlesVtt); await rm(paths.video);
     const detail = await getChapter(root, slug, 1);
@@ -111,7 +111,7 @@ describe("stale artifact visibility", () => {
     const root = await mkdtemp(join(tmpdir(), "stale-failed-")); const slug = "story";
     const { paths, manifest } = await importChapter(root, slug, "Original");
     const failed = { status: "failed" as const, fingerprint: "input", error: { message: "provider exploded" } };
-    await atomicWriteJson(paths.chapterMeta, chapterMetadata(1, manifest.chapters[0]!.fingerprint, { subtitles: failed, video: failed }));
+    await atomicWriteJson(paths.chapterMeta, chapterMetadata(1, manifest.chapters[0]!.contentFingerprint!, { subtitles: failed, video: failed }));
     await writeArtifacts(paths);
     const detail = await getChapter(root, slug, 1);
     expect(detail.metadata?.stages.subtitles.status).toBe("failed");
@@ -127,7 +127,7 @@ describe("stale artifact visibility", () => {
       chapterSummary: "Found a lamp",
     });
     await atomicWriteJson(paths.bibleUpdate, update);
-    await atomicWriteJson(paths.chapterMeta, chapterMetadata(1, manifest.chapters[0]!.fingerprint));
+    await atomicWriteJson(paths.chapterMeta, chapterMetadata(1, manifest.chapters[0]!.contentFingerprint!));
 
     const freshBible = await rebuildStoryBibleBeforeChapter(root, slug, 2);
     expect(freshBible.chapterSummaries).toEqual({ "1": "Found a lamp" });
@@ -154,7 +154,7 @@ describe("stale artifact visibility", () => {
     const root = await mkdtemp(join(tmpdir(), "stale-pending-")); const slug = "story";
     const { paths, manifest } = await importChapter(root, slug, "Original");
     await atomicWriteJson(paths.bibleUpdate, storyBibleUpdateSchema.parse({ chapterSummary: "Unfinished" }));
-    await atomicWriteJson(paths.chapterMeta, chapterMetadata(1, manifest.chapters[0]!.fingerprint, { storyBible: { status: "failed", error: { message: "boom" } } }));
+    await atomicWriteJson(paths.chapterMeta, chapterMetadata(1, manifest.chapters[0]!.contentFingerprint!, { storyBible: { status: "failed", error: { message: "boom" } } }));
     expect((await rebuildStoryBibleBeforeChapter(root, slug, 2)).chapterSummaries).toEqual({});
     expect(await computeStaleExtractionChapters(root, slug)).toEqual([]);
   });
@@ -162,7 +162,7 @@ describe("stale artifact visibility", () => {
   it("still refuses to master audio when the upstream narration/TTS chain is stale", async () => {
     const root = await mkdtemp(join(tmpdir(), "stale-guard-")); const story = testStory();
     const { paths, manifest } = await importChapter(root, story.slug, "Original");
-    await atomicWriteJson(paths.chapterMeta, chapterMetadata(1, manifest.chapters[0]!.fingerprint, { narration: { status: "pending", staleReason: "naming changed" }, tts: { status: "pending" } }));
+    await atomicWriteJson(paths.chapterMeta, chapterMetadata(1, manifest.chapters[0]!.contentFingerprint!, { narration: { status: "pending", staleReason: "naming changed" }, tts: { status: "pending" } }));
     const processor: AudioMasteringProcessor = { version: "guard-v1", master: async () => { throw new Error("must not run"); } };
     await expect(masterStoredChapter({ root, story, chapter: 1, processor })).rejects.toThrow("TTS is not complete");
   });
@@ -170,7 +170,7 @@ describe("stale artifact visibility", () => {
   it("preserves manual canonical naming and localization settings across a stale regeneration", async () => {
     const root = await mkdtemp(join(tmpdir(), "stale-canonical-")); const slug = "story";
     const { paths, manifest } = await importChapter(root, slug, "Original");
-    const firstFingerprint = manifest.chapters[0]!.fingerprint;
+    const firstFingerprint = manifest.chapters[0]!.contentFingerprint!;
     await atomicWriteJson(paths.bibleUpdate, storyBibleUpdateSchema.parse({
       characters: [{ canonicalEnglishName: "Su Ming", originalName: "苏明", aliases: ["Ming"], description: "A quiet apprentice", status: "alive", firstSeenChapter: 1, lastSeenChapter: 1 }],
       chapterSummary: "Su Ming finds the lamp",

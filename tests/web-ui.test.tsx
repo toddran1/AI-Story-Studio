@@ -34,19 +34,26 @@ describe("web UI", () => {
     const location = renderToStaticMarkup(<EntityStatusField type="location" value="under-siege" onChange={() => undefined} />);
     expect(location).toContain("Occupied by enemy"); expect(location).not.toContain("Spirit / Ghost");
   });
-  it("shows QA severity and the manual dismissal action", () => {
-    const html = renderToStaticMarkup(<QaDetail busy={false} onAddress={() => undefined} onDismiss={() => undefined} onRepair={() => undefined} onRerun={() => undefined} qa={{
+  it("shows QA severity and both human resolution actions", () => {
+    const html = renderToStaticMarkup(<QaDetail busy={false} onAddress={() => undefined} onDismiss={() => undefined} onManualFix={() => undefined} onRepair={() => undefined} onRerun={() => undefined} qa={{
       status: "warn", score: .86, issues: [{ category: "dialogue", severity: "warn", message: "A threat is softened", evidence: "The intent remains intact." }],
       checks: { completeness: "pass", names: "pass", numbers: "pass", terminology: "pass", dialogue: "warn", storyConsistency: "pass", narrationFidelity: "pass" },
     }} />);
-    expect(html).toContain("Dismiss selected"); expect(html).toContain("Warn severity"); expect(html).toContain("Dialogue");
+    expect(html).toContain("Mark manually fixed"); expect(html).toContain("Dismiss selected"); expect(html).toContain("Warn severity"); expect(html).toContain("Dialogue");
   });
   it("keeps dismissed QA findings visible without a selectable checkbox", () => {
-    const html = renderToStaticMarkup(<QaDetail busy={false} onAddress={() => undefined} onDismiss={() => undefined} onRepair={() => undefined} onRerun={() => undefined} qa={{
-      status: "warn", score: .86, issues: [{ category: "dialogue", severity: "warn", message: "A threat is softened", evidence: "The intent remains intact.", review: { disposition: "dismissed" } }],
+    const html = renderToStaticMarkup(<QaDetail busy={false} onAddress={() => undefined} onDismiss={() => undefined} onManualFix={() => undefined} onRepair={() => undefined} onRerun={() => undefined} qa={{
+      status: "pass", score: 1, originalScore: .86, issues: [{ category: "dialogue", severity: "warn", message: "A threat is softened", evidence: "The intent remains intact.", review: { disposition: "dismissed", reviewedAt: "2026-09-16T14:00:00.000Z" } }],
       checks: { completeness: "pass", names: "pass", numbers: "pass", terminology: "pass", dialogue: "warn", storyConsistency: "pass", narrationFidelity: "pass" },
     }} />);
-    expect(html).toContain("Dismissed · no action"); expect(html).not.toContain('type="checkbox"');
+    expect(html).toContain("Dismissed · no action"); expect(html).toContain("reviewed score · original 86"); expect(html).not.toContain('type="checkbox"');
+  });
+  it("keeps manually fixed QA findings as a non-selectable audit record", () => {
+    const html = renderToStaticMarkup(<QaDetail busy={false} onAddress={() => undefined} onDismiss={() => undefined} onManualFix={() => undefined} onRepair={() => undefined} onRerun={() => undefined} qa={{
+      status: "pass", score: 1, originalScore: .72, issues: [{ category: "numbers", severity: "fail", message: "A number changed", evidence: "The editor restored it.", review: { disposition: "manually_fixed", reviewedAt: "2026-09-16T14:00:00.000Z" } }],
+      checks: { completeness: "pass", names: "pass", numbers: "pass", terminology: "pass", dialogue: "pass", storyConsistency: "pass", narrationFidelity: "pass" },
+    }} />);
+    expect(html).toContain("Manually fixed · resolved"); expect(html).not.toContain('type="checkbox"');
   });
   it("refreshes the current workspace once when a web job becomes terminal", () => {
     const running = { id: "job-1", type: "batch", story: "demo", status: "running" } as any;

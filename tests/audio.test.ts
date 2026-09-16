@@ -74,6 +74,19 @@ describe("audiobook assembly", () => {
     expect(chapters.map((item) => item.chapter)).toEqual([1, 3]); expect(chapters.map((item) => item.title)).toEqual(["Translated 1", "Translated 3"]);
   });
 
+  it("exports an intact retained master even when its mastering stage is stale", async () => {
+    const { root, story } = await masteredFixture(); const paths = storyPaths(root, story.slug, 1);
+    const metadata = chapterSchema.parse(JSON.parse(await readFile(paths.chapterMeta, "utf8")));
+    metadata.stages.audioMastering = { status: "pending", staleReason: "Narration settings changed" };
+    await atomicWriteJson(paths.chapterMeta, metadata);
+
+    const selected = await selectExportChapters(root, story, 1, 1);
+    expect(selected).toEqual([expect.objectContaining({ chapter: 1, durationSeconds: 11 })]);
+    const processor = new RecordingBook();
+    await expect(assembleAudiobook({ root, story, from: 1, to: 1, format: "m4b", processor })).resolves.toMatchObject({ reused: false });
+    expect(processor.calls).toBe(1);
+  });
+
   it("generates M4B chapter metadata and maps it into the container", () => {
     const story = testStory(); story.author = "R. Writer"; const chapters: AudiobookChapter[] = [{ chapter: 1, title: "A=Start", path: "one.mp3", durationSeconds: 10, fingerprint: "a" }, { chapter: 2, title: "Return", path: "two.mp3", durationSeconds: 20, fingerprint: "b" }];
     const metadata = audiobookMetadata(story, chapters); expect(metadata.chapters).toEqual([{ chapter: 1, title: "A=Start", startMs: 0, endMs: 10000 }, { chapter: 2, title: "Return", startMs: 11500, endMs: 31500 }]);

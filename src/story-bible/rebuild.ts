@@ -14,7 +14,6 @@ export async function rebuildStoryBibleBeforeChapter(root: string, slug: string,
   const paths = storyPaths(root, slug, chapter); const chaptersDir = join(paths.story, "chapters");
   const manifestRaw = await readJsonIfExists<SourceManifest>(paths.sourceManifest);
   const manifest = manifestRaw ? sourceManifestSchema.safeParse(manifestRaw) : undefined;
-  const currentSources = manifest?.success ? new Map(manifest.data.chapters.map((item) => [item.chapter, item.fingerprint])) : undefined;
   let numbers: number[] = [];
   try {
     numbers = (await readdir(chaptersDir, { withFileTypes: true })).filter((entry) => entry.isDirectory() && /^\d+$/.test(entry.name))
@@ -42,7 +41,7 @@ export async function computeStaleExtractionChapters(root: string, slug: string)
   const paths = storyPaths(root, slug, 1); const chaptersDir = join(paths.story, "chapters");
   const manifestRaw = await readJsonIfExists<SourceManifest>(paths.sourceManifest);
   const manifest = manifestRaw ? sourceManifestSchema.safeParse(manifestRaw) : undefined;
-  const currentSources = manifest?.success ? new Map(manifest.data.chapters.map((item) => [item.chapter, item.fingerprint])) : undefined;
+  const currentSources = manifest?.success ? new Map(manifest.data.chapters.map((item) => [item.chapter, item.contentFingerprint ?? item.fingerprint])) : undefined;
   let numbers: number[] = [];
   try {
     numbers = (await readdir(chaptersDir, { withFileTypes: true })).filter((entry) => entry.isDirectory() && /^\d+$/.test(entry.name))
