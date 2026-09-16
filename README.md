@@ -2,7 +2,7 @@
 
 ## Milestone 20 — Entity pronunciation
 
-Pronunciation is separate from canonical identity, localization, and visible narration. The Story Bible editor includes source language, original text, romanization, automatic/original-language/custom modes, advanced IPA and phonetic hints, and a pronunciation lock. The collapsible **Pronunciation desk** on the Story Bible page supports search, entity-type filters, missing/low-confidence/manual/locked filters, bulk enrichment, and tests using the book's configured voice.
+Pronunciation is separate from canonical identity, localization, and visible narration. The Story Bible editor includes source language, original text, romanization, automatic/original-language/custom modes, advanced IPA and phonetic hints, and a pronunciation lock. **Generate pronunciation with AI** uses bounded original-novel excerpts from the entity's provenance and chapter appearances; it does not guess source characters from an English transliteration. Generated values remain editable and can be tested with the book's configured voice before locking. The collapsible **Pronunciation desk** supports search plus missing/AI/high-medium-low confidence/needs-review/manual/locked/unresolved filters and bulk enrichment.
 
 Automatic enrichment caches both generated records and ordinary-English/no-pronunciation outcomes by canonical identity and source information. Manual, custom, and locked records are protected through rebuilds and extraction regeneration. Save **Return to automatic enrichment** before regenerating a manual record. Enrichment and uncached tests use configured providers and may incur charges; replaying an unchanged pronunciation test uses its saved preview.
 
@@ -15,8 +15,9 @@ Only referenced pronunciation records enter TTS fingerprints. Pronunciation edit
 ```sh
 npm run story:pronunciation -- list undead-disaster
 npm run story:pronunciation -- show undead-disaster ent_123456789012345678901234
-npm run story:pronunciation -- enrich undead-disaster
-npm run story:pronunciation -- enrich undead-disaster ent_123456789012345678901234
+npm run story:pronunciation -- enrich undead-disaster --missing
+npm run story:pronunciation -- enrich undead-disaster --entity ent_123456789012345678901234 --force
+npm run story:pronunciation -- enrich undead-disaster --missing --dry-run
 npm run story:pronunciation -- test undead-disaster ent_123456789012345678901234
 npm run story:pronunciation -- set undead-disaster ent_123456789012345678901234 '{"mode":"custom","sourceLanguage":"zh-CN","customPronunciation":"Jyang Yweh","locked":true}'
 npm run story:pronunciation -- clear undead-disaster ent_123456789012345678901234

@@ -32,6 +32,8 @@ export const pronunciationSchema = z.object({
   mode: z.enum(["automatic", "original_language", "custom"]),
   customPronunciation: z.string().trim().min(1).max(500).regex(/^[^<>\[\]]+$/, "Use spoken sounds, not provider control tags").optional(),
   locked: z.boolean().optional(), confidence: z.number().min(0).max(1).optional(),
+  needsReview: z.boolean().optional(),
+  evidence: z.array(z.object({ chapter: z.number().int().positive(), sourceText: z.string().trim().min(1).max(1_000), reason: z.string().trim().min(1).max(500) })).max(8).optional(),
   source: z.enum(["ai", "manual", "imported"]).optional(), updatedAt: z.string().datetime().optional(),
 }).strict().superRefine((value, context) => {
   if (value.mode === "custom" && !value.customPronunciation) context.addIssue({ code: "custom", path: ["customPronunciation"], message: "Custom pronunciation requires a spoken form" });

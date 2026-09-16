@@ -6,6 +6,7 @@ import { fingerprint } from "../utils/hash.js";
 import type { TTSProvider } from "./provider.js";
 
 export const PRONUNCIATION_VERSION = "pronunciation-v1";
+export type PronunciationSourceEvidence = { chapter: number; sourceText: string; reason: string };
 export type PronunciationOccurrence = {
   entityId: string; surfaceText: string; start: number; end: number;
   canonicalName?: string;
@@ -93,10 +94,20 @@ export function adaptPronunciationText(text: string, occurrences: readonly Pronu
   return result;
 }
 
-export async function enrichPronunciation(provider: LLMProvider, config: StageModelConfig, entity: CanonicalEntity, sourceLanguage: string) {
+export async function enrichPronunciation(provider: LLMProvider, config: StageModelConfig, entity: CanonicalEntity, sourceLanguage: string, evidence: PronunciationSourceEvidence[] = []) {
   if (entity.pronunciation?.locked || entity.pronunciation?.source === "manual" || (entity.pronunciation && entity.pronunciation.mode !== "automatic")) return { pronunciation: entity.pronunciation };
   const result = await provider.generateStructured({ model: config.model, schemaName: "entity_pronunciation", schema: z.object({ pronunciation: pronunciationSchema.nullable() }),
-    instructions: "Enrich one foreign story entity for pronunciation inside English narration. Return null for ordinary translated English terms. Infer the actual source language from script, original name and context; do not assume all names are Mandarin. Provide romanization and a practical English-readable phoneticHint when confident; otherwise omit guessed hints and report low confidence. Keep identity and localized display names unchanged. Use automatic mode and ai source. Never put provider-specific control tags in metadata.",
-    input: JSON.stringify({ entity, storySourceLanguage: sourceLanguage }) });
+    instructions: "Enrich one foreign story entity for pronunciation inside English narration. Source evidence is authoritative: identify original-language spelling only when the supplied novel evidence establishes it; never guess characters from a romanized name. Return null for ordinary translated English terms. For uncertain identity, return automatic mode with low confidence, needsReview true, and omit originalText/romanization/phoneticHint rather than inventing data. For Mandarin use tone-marked Hanyu Pinyin. Infer the actual source language from script and evidence; do not assume all names are Mandarin. Provide a practical English-readable phoneticHint only when confident. Use original_language mode for a confident source-language identity, otherwise automatic mode. Keep identity and localized display names unchanged. Use ai source. Never put provider-specific control tags in metadata.",
+    input: JSON.stringify({ entity, storySourceLanguage: sourceLanguage, sourceEvidence: evidence }) });
   return { pronunciation: result.value.pronunciation ?? undefined, usage: result.usage };
+}
+
+/** Batch compatible automatic entities to reduce provider calls while retaining per-entity evidence. */
+export async function enrichPronunciationBatch(provider: LLMProvider, config: StageModelConfig, entities: Array<{ entity: CanonicalEntity; evidence: PronunciationSourceEvidence[] }>, sourceLanguage: string) {
+  const schema = z.object({ results: z.array(z.object({ entityId: z.string(), pronunciation: pronunciationSchema.nullable() })).max(entities.length) });
+  const result = await provider.generateStructured({ model: config.model, schemaName: "entity_pronunciation_batch", schema,
+    instructions: "Enrich these foreign story entities for English narration. Each entity has evidence from its own source novel. Never infer original script from an English transliteration alone. For each item, use original-language spelling only when its supplied evidence establishes it. Return null for ordinary English terms. For unresolved identity, return automatic mode, low confidence, needsReview true, and no guessed originalText, romanization, or phoneticHint. Mandarin romanization must use tone-marked Hanyu Pinyin. Use original_language mode for a confident source-language identity. Keep each entity ID exactly as supplied; do not return an item for a different ID.",
+    input: JSON.stringify({ storySourceLanguage: sourceLanguage, entities }) });
+  const allowed = new Set(entities.map(item => item.entity.id));
+  return { pronunciations: new Map(result.value.results.filter(item => allowed.has(item.entityId)).map(item => [item.entityId, item.pronunciation ?? undefined])), usage: result.usage };
 }

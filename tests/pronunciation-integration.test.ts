@@ -45,6 +45,7 @@ describe("pronunciation persistence and production boundary", () => {
       await runPronunciation(["set", story.slug, entity.id, '{"mode":"custom","customPronunciation":"Manual sounds"}'], root, ops, stdout); expect(JSON.parse(output.pop()!).entity.pronunciation.source).toBe("manual");
       await runPronunciation(["enrich", story.slug], root, ops, stdout); expect(llm.generateStructured).not.toHaveBeenCalled();
       await runPronunciation(["clear", story.slug, entity.id], root, ops, stdout); expect(JSON.parse(output.pop()!).entity.pronunciation).toBeUndefined();
+      await runPronunciation(["enrich", story.slug, "--missing", "--dry-run"], root, ops, stdout); expect(JSON.parse(output.pop()!).dryRun).toBe(true); expect(llm.generateStructured).not.toHaveBeenCalled();
       await runPronunciation(["enrich", story.slug], root, ops, stdout); expect(JSON.parse(output.pop()!).enriched).toContain(entity.id);
       await runPronunciation(["test", story.slug, entity.id], root, ops, stdout); expect(JSON.parse(output.pop()!).audioUrl).toContain("voice-previews");
       await expect(runPronunciation(["show", "missing-story", entity.id], root, ops, stdout)).rejects.toThrow();
@@ -105,6 +106,36 @@ describe("pronunciation persistence and production boundary", () => {
     await enrichStoryPronunciations(root, story.slug, english, llm, story.pipeline.storyBible, story.sourceLanguage);
     await enrichStoryPronunciations(root, story.slug, english, llm, story.pipeline.storyBible, story.sourceLanguage);
     expect(generate).toHaveBeenCalledTimes(2);
+  });
+  it("uses original chapter evidence for AI enrichment and records a reviewable unresolved result when identity is not established", async () => {
+    const { root, story, bible, entity, paths } = await fixture(); const llm = new MockLLM();
+    await atomicWrite(paths.original, "江月抬头，看见远处的山门。");
+    const generate = vi.spyOn(llm, "generateStructured").mockImplementation(async request => ({ value: request.schema.parse({ pronunciation: { mode: "automatic", sourceLanguage: "zh-CN", originalText: "江月", romanization: "Jiāng Yuè", phoneticHint: "Jyang Yweh", confidence: .96, evidence: [{ chapter: 1, sourceText: "江月抬头", reason: "Source name appears in Chapter 1" }] } }) }));
+    await enrichStoryPronunciations(root, story.slug, bible, llm, story.pipeline.storyBible, story.sourceLanguage, [entity.id]);
+    expect(String(generate.mock.calls[0]?.[0].input)).toContain("江月抬头");
+    expect((await loadPronunciationEntities(root, story.slug))[0]?.pronunciation).toMatchObject({ originalText: "江月", romanization: "Jiāng Yuè", source: "ai" });
+    await updateCanonicalEntity(root, story.slug, bible, entity.id, { pronunciation: null });
+    await atomicWrite(paths.original, "这段来源没有提供能够确认该实体身份的名字。");
+    generate.mockImplementation(async request => ({ value: request.schema.parse({ pronunciation: null }) }));
+    const result = await enrichStoryPronunciations(root, story.slug, bible, llm, story.pipeline.storyBible, story.sourceLanguage, [entity.id]);
+    expect(result.unresolved).toContain(entity.id);
+    expect((await loadPronunciationEntities(root, story.slug))[0]?.pronunciation).toMatchObject({ needsReview: true, confidence: 0 });
+  });
+  it("batches eligible entities, skips protected records, and never calls a provider during a dry run", async () => {
+    const { root, story, bible, entity, paths } = await fixture(); const second = structuredClone(entity), third = structuredClone(entity);
+    second.id = "ent_222222222222222222222222"; second.canonicalName = "Lin Yao"; second.originalName = "林遥"; second.aliases = ["Yao"];
+    third.id = "ent_333333333333333333333333"; third.canonicalName = "Mo Xie"; third.originalName = "莫邪"; third.aliases = ["Mo"];
+    const base = { ...bible, canonicalEntities: [entity, second, third] }; const llm = new MockLLM();
+    await atomicWrite(paths.original, "江月与林遥、莫邪一起走进山门。");
+    const generate = vi.spyOn(llm, "generateStructured").mockImplementation(async request => ({ value: request.schema.parse({ results: [
+      { entityId: second.id, pronunciation: { mode: "automatic", sourceLanguage: "zh-CN", originalText: "林遥", romanization: "Lín Yáo", confidence: .92 } },
+      { entityId: third.id, pronunciation: { mode: "automatic", sourceLanguage: "zh-CN", originalText: "莫邪", romanization: "Mò Xié", confidence: .92 } },
+    ] }) }));
+    const dryRun = await enrichStoryPronunciations(root, story.slug, base, llm, story.pipeline.storyBible, story.sourceLanguage, undefined, false, true);
+    expect(dryRun.summary.eligible).toBe(3); expect(generate).not.toHaveBeenCalled();
+    await updateCanonicalEntity(root, story.slug, base, entity.id, { pronunciation: { mode: "custom", customPronunciation: "Manual", source: "manual", locked: true } });
+    const result = await enrichStoryPronunciations(root, story.slug, base, llm, story.pipeline.storyBible, story.sourceLanguage);
+    expect(generate).toHaveBeenCalledTimes(1); expect(result.summary.protected).toBe(1); expect(result.enriched).toEqual([second.id, third.id]);
   });
   it("marks only referenced sound-dependent stages stale and retains playable files", async () => {
     const { root, story, entity } = await fixture(); const now = new Date().toISOString();

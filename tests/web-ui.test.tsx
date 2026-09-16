@@ -13,7 +13,7 @@ describe("web UI", () => {
     const html = renderToStaticMarkup(<PronunciationFields value={{ mode: "custom", customPronunciation: "Jyang Yweh", sourceLanguage: "zh-CN", locked: true }} onChange={() => undefined} />);
     expect(html).toContain("Original-language pronunciation"); expect(html).toContain("Custom spoken form"); expect(html).toContain("Lock pronunciation"); expect(html).toContain("Chinese · Simplified"); expect(html).toContain("Advanced pronunciation");
     const desk = renderToStaticMarkup(<PronunciationPanel slug="demo-story" />);
-    expect(desk).toContain("Needs pronunciation"); expect(desk).toContain("Enrich missing pronunciations"); expect(desk).toContain("Low confidence");
+    expect(desk).toContain("Missing"); expect(desk).toContain("✨ Enrich missing pronunciations"); expect(desk).toContain("Low confidence"); expect(desk).toContain("Needs review");
   });
   it("uses readable labels for pipeline identifiers", () => {
     expect(pretty("storyBible")).toBe("Story Bible"); expect(pretty("narrationFidelity")).toBe("Narration Fidelity"); expect(pretty("qa")).toBe("QA"); expect(pretty("tts")).toBe("TTS");

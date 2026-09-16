@@ -480,12 +480,12 @@ export class StudioOperations {
   }); }
   startPronunciationEnrichment(slug: string, raw: unknown) {
     slugSchema.parse(slug);
-    const input = z.object({ entityId: z.string().regex(/^ent_[a-f0-9]{24}$/).optional() }).strict().parse(raw);
+    const input = z.object({ entityId: z.string().regex(/^ent_[a-f0-9]{24}$/).optional(), force: z.boolean().default(false), dryRun: z.boolean().default(false) }).strict().parse(raw);
     return this.jobs.create("pronunciation", slug, async () => withStoryLock(this.root, slug, "pronunciation enrichment", async () => {
       const story = await loadStory(storyPaths(this.root, slug, 1).storyConfig);
       const base = await getStoryBible(this.root, slug);
       if (input.entityId && !base.canonicalEntities.some(entity => entity.id === input.entityId)) throw new Error("Canonical entity was not found");
-      const result = await withUsageScope({ story: slug, stage: "pronunciation" }, () => enrichStoryPronunciations(this.root, slug, base, this.llm.forStage(story.pipeline.storyBible), story.pipeline.storyBible, story.sourceLanguage, input.entityId ? [input.entityId] : undefined));
+      const result = await withUsageScope({ story: slug, stage: "pronunciation" }, () => enrichStoryPronunciations(this.root, slug, base, this.llm.forStage(story.pipeline.storyBible), story.pipeline.storyBible, story.sourceLanguage, input.entityId ? [input.entityId] : undefined, input.force || Boolean(input.entityId), input.dryRun));
       invalidateCatalogCache(this.root, slug);
       return result;
     }));
