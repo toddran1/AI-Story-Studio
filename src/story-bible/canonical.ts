@@ -39,7 +39,7 @@ export const canonicalOverlaySchema = z.object({
   parentAssignments: z.record(z.string(), z.string()).default({}),
 });
 export type CanonicalOverlay = z.infer<typeof canonicalOverlaySchema>;
-export type DuplicateSuggestion = { id: string; entityIds: [string, string]; entities: [{ id: string; name: string }, { id: string; name: string }]; confidence: number; reason: string; supportingChapters: number[] };
+export { DuplicateSuggestion, findDuplicateSuggestions, duplicateScore } from "./duplicate-detection.js";
 
 export async function applyCanonicalOverlay(root: string, slug: string, input: StoryBible) {
   const paths = storyPaths(root, slug, 1);
@@ -278,20 +278,6 @@ export async function backfillCanonicalSnapshots(root: string, slug: string, bas
   return count;
 }
 
-export function findDuplicateSuggestions(entities: CanonicalEntity[]): DuplicateSuggestion[] {
-  const positions = new Map(entities.map((entity, index) => [entity.id, index]));
-  const records = entities.flatMap((entity) => [entity.canonicalName, entity.originalName, ...entity.aliases].map(normalizeEntityName).filter(Boolean).map((name) => ({ name, entity }))).sort((a, b) => a.name.localeCompare(b.name));
-  const pairs = new Map<string, [CanonicalEntity, CanonicalEntity]>();
-  // Equal names are adjacent, and prefix/suffix candidates occur near each other in
-  // lexical order. A small window avoids the previous all-pairs O(n²) browser cost.
-  for (let left = 0; left < records.length; left++) for (let right = left + 1; right < Math.min(records.length, left + 9); right++) {
-    const a = records[left]!.entity, b = records[right]!.entity; if (a.id === b.id || a.type !== b.type) continue;
-    const ids = [a.id, b.id].sort(); pairs.set(`${ids[0]}:${ids[1]}`, (positions.get(a.id) ?? 0) <= (positions.get(b.id) ?? 0) ? [a, b] : [b, a]);
-  }
-  const output: DuplicateSuggestion[] = [];
-  for (const [id, [a, b]] of pairs) { const score = duplicateScore(a, b); if (score.confidence < .72) continue; output.push({ id, entityIds: [a.id, b.id], entities: [{ id: a.id, name: a.canonicalName }, { id: b.id, name: b.canonicalName }], confidence: score.confidence, reason: score.reason, supportingChapters: unique([...a.provenance, ...b.provenance].map((item) => String(item.chapter))).map(Number).sort((x, y) => x - y).slice(0, 20) }); }
-  return output.sort((a, b) => b.confidence - a.confidence);
-}
 function resolveMergeMap(merges: Array<z.infer<typeof manualMergeSchema>>) {
   const direct = new Map<string, string>();
   for (const merge of merges) for (const sourceId of merge.sourceEntityIds) {
@@ -312,7 +298,6 @@ function resolveMergeMap(merges: Array<z.infer<typeof manualMergeSchema>>) {
   }
   return resolved;
 }
-function duplicateScore(a: CanonicalEntity, b: CanonicalEntity) { const left = [a.canonicalName, a.originalName, ...a.aliases].map(normalizeEntityName).filter(Boolean); const right = [b.canonicalName, b.originalName, ...b.aliases].map(normalizeEntityName).filter(Boolean); if (left.some((value) => right.includes(value))) return { confidence: .99, reason: "Exact normalized canonical name or alias" }; if (left.some((x) => right.some((y) => Math.min(x.length, y.length) >= 2 && (x.endsWith(y) || y.endsWith(x) || x.startsWith(y) || y.startsWith(x))))) return { confidence: .82, reason: "Names share a normalized core after titles and punctuation are removed" }; return { confidence: 0, reason: "" }; }
 function deduplicateRelationships(values: StoryBible["canonicalRelationships"]) { const output: typeof values = []; for (const value of values) { const match = output.find((item) => item.sourceEntityId === value.sourceEntityId && item.targetEntityId === value.targetEntityId && normalizeEntityName(item.type) === normalizeEntityName(value.type)); if (!match) output.push(value); else { match.startChapter = Math.min(match.startChapter, value.startChapter); match.endChapter = match.endChapter === undefined || value.endChapter === undefined ? undefined : Math.max(match.endChapter, value.endChapter); match.state = match.state === "current" || value.state === "current" ? "current" : "historical"; match.confidence = Math.max(match.confidence ?? 0, value.confidence ?? 0) || undefined; match.locked ||= value.locked; if (value.origin === "manual") match.origin = "manual"; match.provenance = uniqueObjects([...match.provenance, ...value.provenance]); } } return output; }
 function unique(values: string[]) { const seen = new Set<string>(); return values.filter((value) => { const key = value.normalize("NFKD").toLocaleLowerCase().replace(/[^\p{L}\p{N}]/gu, ""); if (!key || seen.has(key)) return false; seen.add(key); return true; }); }
 function uniqueObjects<T>(values: T[]) { return [...new Map(values.map((value) => [JSON.stringify(value), value])).values()]; }

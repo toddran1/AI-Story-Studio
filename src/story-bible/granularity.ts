@@ -501,6 +501,7 @@ export interface BibleAnalysisRecommendation {
   targetEntityName?: string;
   confidence: number;
   reason: string;
+  supportingChapters?: number[];
   protected: boolean;
   protectedReasons: string[];
   safeToAutoApply: boolean;
@@ -545,19 +546,37 @@ export async function analyzeStoryBible(
   const overlayRaw = await readJsonIfExists(paths.bibleCanonicalManual);
   const overlay = overlayRaw ? canonicalOverlaySchema.safeParse(overlayRaw) : undefined;
   const manualOverrides = overlay?.success ? overlay.data.overrides : {};
-  const duplicateSuggestions = findDuplicateSuggestions(bible.canonicalEntities);
-  const duplicatePairs = new Map<string, { target: CanonicalEntity; confidence: number; reason: string }>();
+  const duplicateSuggestions = findDuplicateSuggestions(bible.canonicalEntities, { bible });
+  const duplicatePairs = new Map<
+    string,
+    {
+      target: CanonicalEntity;
+      confidence: number;
+      reason: string;
+      recommendation?: "merge" | "needs_review";
+      supportingChapters?: number[];
+    }
+  >();
 
   for (const suggestion of duplicateSuggestions) {
-    if (suggestion.confidence >= 0.8) {
+    if (suggestion.confidence >= 0.70) {
       const [firstId, secondId] = suggestion.entityIds;
       const first = bible.canonicalEntities.find((e) => e.id === firstId);
       const second = bible.canonicalEntities.find((e) => e.id === secondId);
       if (first && second) {
         // Target is the earlier or locked one
-        const target = (first.canonicalNameLocked || first.firstAppearance <= second.firstAppearance) ? first : second;
+        const target =
+          first.canonicalNameLocked || first.firstAppearance <= second.firstAppearance
+            ? first
+            : second;
         const duplicate = target === first ? second : first;
-        duplicatePairs.set(duplicate.id, { target, confidence: suggestion.confidence, reason: suggestion.reason });
+        duplicatePairs.set(duplicate.id, {
+          target,
+          confidence: suggestion.confidence,
+          reason: suggestion.reason,
+          recommendation: suggestion.recommendation,
+          supportingChapters: suggestion.supportingChapters,
+        });
       }
     }
   }
@@ -595,8 +614,13 @@ export async function analyzeStoryBible(
 
     // Check duplicate pair
     const duplicate = duplicatePairs.get(entity.id);
-    if (duplicate && duplicate.confidence >= 0.8) {
+    if (duplicate && duplicate.confidence >= 0.70) {
       const recId = `rec_${fingerprint({ entityId: entity.id, action: "merge", target: duplicate.target.id }).slice(0, 16)}`;
+      const isActionableMerge =
+        !isProtected &&
+        duplicate.confidence >= 0.85 &&
+        duplicate.recommendation === "merge";
+
       recommendations.push({
         id: recId,
         entityId: entity.id,
@@ -604,16 +628,19 @@ export async function analyzeStoryBible(
         originalName: entity.originalName,
         type: entity.type,
         appearances,
-        recommendation: isProtected ? "needs_review" : "merge",
+        recommendation: isProtected ? "needs_review" : (isActionableMerge ? "merge" : "needs_review"),
         targetEntityId: duplicate.target.id,
         targetEntityName: duplicate.target.canonicalName,
         confidence: duplicate.confidence,
         reason: isProtected
           ? `Possible duplicate of '${duplicate.target.canonicalName}', but entity has protected manual configuration.`
-          : `Duplicate of canonical entity '${duplicate.target.canonicalName}' (${duplicate.reason}).`,
+          : (isActionableMerge
+              ? `Duplicate of canonical entity '${duplicate.target.canonicalName}' (${duplicate.reason}).`
+              : `Possible duplicate of '${duplicate.target.canonicalName}' (${duplicate.reason}). Review required.`),
+        supportingChapters: duplicate.supportingChapters,
         protected: isProtected,
         protectedReasons,
-        safeToAutoApply: !isProtected && duplicate.confidence >= 0.9,
+        safeToAutoApply: !isProtected && duplicate.confidence >= 0.90 && duplicate.recommendation === "merge",
       });
       continue;
     }

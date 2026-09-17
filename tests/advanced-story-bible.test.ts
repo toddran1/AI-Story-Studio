@@ -80,7 +80,7 @@ describe("advanced Story Bible continuity", () => {
     expect(bible.canonicalEntities.find((item) => item.id === su.id)?.aliases).toContain("Doctor Su"); expect(bible.canonicalRelationships[0]?.provenance.map((item) => item.chapter)).toEqual([1, 2]);
   });
 
-  it("suggests deterministic duplicates but never merges them automatically", () => { const bible = mergeStoryBible(emptyStoryBible(), update(1, { characters: [named("Su Ming", 1), named("Doctor Su", 1)] }), 1); const suggestions = findDuplicateSuggestions(bible.canonicalEntities); expect(suggestions[0]).toMatchObject({ confidence: .82, entities: [{ name: "Su Ming" }, { name: "Doctor Su" }] }); expect(bible.canonicalEntities).toHaveLength(2); });
+  it("suggests deterministic duplicates but never merges them automatically", () => { const bible = mergeStoryBible(emptyStoryBible(), update(1, { characters: [named("Su Ming", 1), named("Doctor Su", 1)] }), 1); const suggestions = findDuplicateSuggestions(bible.canonicalEntities); expect(suggestions[0]).toMatchObject({ confidence: .78, entities: [{ name: "Su Ming" }, { name: "Doctor Su" }] }); expect(bible.canonicalEntities).toHaveLength(2); });
 
   it("detects status, location, relationship, identity, and ownership conflicts", () => {
     let bible = mergeStoryBible(emptyStoryBible(), update(12, { characters: [named("Su Ming", 12), named("Lin Yue", 12)], relationships: [{ subject: "Su Ming", object: "Lin Yue", relationship: "friend", firstSeenChapter: 12, lastSeenChapter: 12 }] }), 12);

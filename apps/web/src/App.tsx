@@ -334,7 +334,7 @@ function BiblePage({ slug, navigate }: { slug: string; navigate: (path: string) 
       <div className="recommendations-list" style={{ display: "grid", gap: "12px" }}>
         {analysis.recommendations?.map((rec: any) => <article key={rec.id} className="continuity-card" style={{ padding: "16px", borderRadius: "8px", background: "#141419", border: "1px solid var(--line)" }}>
           <header style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "8px" }}>
-            <span className="eyebrow">{pretty(rec.type)} · {pretty(rec.recommendation)}</span>
+            <span className="eyebrow">{pretty(rec.type)} · {rec.targetEntityId && rec.recommendation === "needs_review" ? "Possible duplicate · Review" : pretty(rec.recommendation)}</span>
             <span style={{ fontSize: "10px", fontFamily: "var(--mono)", color: rec.confidence >= 0.85 ? "var(--pass)" : "var(--warn)" }}>{Math.round(rec.confidence * 100)}% confidence</span>
           </header>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: "16px" }}>
@@ -342,12 +342,14 @@ function BiblePage({ slug, navigate }: { slug: string; navigate: (path: string) 
               <h3 style={{ margin: "0 0 4px", fontSize: "16px" }}>{rec.canonicalName}</h3>
               {rec.parentEntityName && <div style={{ fontSize: "11px", color: "var(--muted)", marginBottom: "4px" }}>Parent: <b>{rec.parentEntityName}</b></div>}
               {rec.targetEntityName && <div style={{ fontSize: "11px", color: "var(--muted)", marginBottom: "4px" }}>Target: <b>{rec.targetEntityName}</b></div>}
+              {rec.supportingChapters?.length > 0 && <div style={{ fontSize: "11px", color: "var(--muted)", marginBottom: "4px" }}>Supporting chapters: <b>Ch. {rec.supportingChapters.join(", ")}</b></div>}
               <p style={{ margin: "4px 0", fontSize: "12px", color: "#aaa9b3" }}>{rec.reason}</p>
               {rec.protected && rec.protectedReasons?.length > 0 && <div style={{ marginTop: "6px", display: "flex", gap: "6px", flexWrap: "wrap" }}>{rec.protectedReasons.map((r: string, idx: number) => <span key={idx} style={{ background: "rgba(223, 166, 75, 0.15)", color: "#dfa64b", fontSize: "9px", padding: "2px 6px", borderRadius: "4px" }}>🔒 {r}</span>)}</div>}
             </div>
             <div style={{ display: "flex", gap: "8px", flexShrink: 0 }}>
               {rec.recommendation === "minor_reference" && <button className="button" style={{ fontSize: "10px" }} onClick={async () => { try { setError(""); await post(`/stories/${slug}/story-bible/entities/${rec.entityId}/demote`, { parentEntityId: rec.parentEntityId, disposition: "minor_reference", reason: rec.reason }); setNotice(`Demoted "${rec.canonicalName}" to minor reference.`); await loadAnalysis(); await load(); } catch (e) { setError(message(e)); } }}>Demote to reference</button>}
               {rec.recommendation === "merge" && rec.targetEntityId && <button className="button" style={{ fontSize: "10px" }} onClick={async () => { try { setError(""); await post(`/stories/${slug}/story-bible/merges`, { targetEntityId: rec.targetEntityId, sourceEntityIds: [rec.entityId], reason: rec.reason }); setNotice(`Merged "${rec.canonicalName}" into "${rec.targetEntityName}".`); await loadAnalysis(); await load(); } catch (e) { setError(message(e)); } }}>Merge entity</button>}
+              {rec.recommendation === "needs_review" && rec.targetEntityId && <button className="button" style={{ fontSize: "10px" }} onClick={async () => { try { setError(""); await post(`/stories/${slug}/story-bible/merges`, { targetEntityId: rec.targetEntityId, sourceEntityIds: [rec.entityId], reason: rec.reason }); setNotice(`Merged "${rec.canonicalName}" into "${rec.targetEntityName}".`); await loadAnalysis(); await load(); } catch (e) { setError(message(e)); } }}>Review & merge</button>}
             </div>
           </div>
         </article>)}
