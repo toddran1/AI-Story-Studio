@@ -222,6 +222,16 @@ export function classifyEntityPersistenceSync(
     for (const entity of context.canonicalEntities) {
       if (context.demotedEntityIds.has(entity.id) && allCandidateNames.has(normalizeEntityName(entity.canonicalName))) {
   // 5. Matches established minor reference
+        return {
+          disposition: "minor_reference",
+          confidence: 1.0,
+          reason: `Previously demoted by manual configuration`,
+        };
+      }
+    }
+  }
+
+  // 3. Matches established minor reference
   if (context.minorReferences) {
     for (const ref of context.minorReferences) {
       const refNames = [ref.name, ref.originalName, ...(ref.aliases ?? [])].map(normalizeEntityName).filter(Boolean);
@@ -229,7 +239,6 @@ export function classifyEntityPersistenceSync(
         return {
           disposition: "minor_reference",
           confidence: 1.0,
-          reason: `Previously demoted by manual configuration`,
           parentEntityId: ref.parentEntityId,
           reason: `Matches established minor reference '${ref.name}'`,
         };
@@ -237,7 +246,18 @@ export function classifyEntityPersistenceSync(
     }
   }
 
-  // 3. Check if candidate was previously promoted
+  // 4. Check if candidate was previously promoted
+  if (context.promotions) {
+    for (const promo of context.promotions) {
+      if (allCandidateNames.has(normalizeEntityName(promo.name))) {
+        return {
+          disposition: "canonical",
+          confidence: 1.0,
+          reason: `Previously promoted by manual configuration: '${promo.name}'`,
+        };
+      }
+    }
+  }
   if (context.promotedReferenceIds) {
     for (const ref of context.minorReferences ?? []) {
       if (context.promotedReferenceIds.has(ref.id) && allCandidateNames.has(normalizeEntityName(ref.name))) {
@@ -248,7 +268,9 @@ export function classifyEntityPersistenceSync(
         };
       }
     }
-  // 6. Character / Title or Named Artifact protections before sub-location heuristics
+  }
+
+  // 5. Character / Title or Named Artifact protections before sub-location heuristics
   const candidateType = candidate.type ?? "concept";
   const isCharacterTitle = /\b(?:patriarch|matriarch|elder|master|ancestor|sect master|clan head|leader|chief|commander|general|captain)\b/i.test(candidate.name);
   if (isCharacterTitle && candidateType !== "location") {
@@ -259,9 +281,6 @@ export function classifyEntityPersistenceSync(
     };
   }
 
-  // 4. Semantic sub-location / facility parent containment detection
-  // Rule: Candidate is a location (or concept) representing a sub-space/facility of a known Organization or Location
-  const candidateType = candidate.type ?? "concept";
   const isNamedArtifact = /\b(?:ancestral sword|ancient cauldron|sacred bell|dragon seal|heavenly mirror|divine spear)\b/i.test(candidate.name);
   if (isNamedArtifact && candidateType !== "location") {
     return {
@@ -318,7 +337,6 @@ export function classifyEntityPersistenceSync(
   // 9. Entity Type heuristics
   if (candidateType === "character") {
     // Check if it's a generic descriptor vs an actual character
-    const isGenericRole = /^(?:guard|soldier|servant|waiter|passerby|patrol|disciple|elder|clerk)\s*#?\d*$/i.test(candidate.name.trim());
     const isGenericRole = /^(?:guard|soldier|servant|waiter|passerby|patrol|disciple|clerk)\s*#?\d*$/i.test(candidate.name.trim());
     if (isGenericRole && !candidate.originalName) {
       return {
@@ -331,7 +349,6 @@ export function classifyEntityPersistenceSync(
     return {
       disposition: "canonical",
       confidence: 0.92,
-      reason: "Recurring character entity with independent narrative actions and persistent role.",
       reason: hasPriorAppearances
         ? "Recurring character entity with independent narrative actions and persistent role."
         : "Character entity with independent narrative actions and persistent role.",
@@ -575,20 +592,12 @@ export async function analyzeStoryBible(
       lastKnown: entity.lastKnownAppearance,
       count: Math.max(1, entity.provenance.length),
     };
-      lastKnownAppearance: entity.lastKnownAppearance,
-      appearances: {
-        first: entity.firstAppearance,
-        lastKnown: entity.lastKnownAppearance,
-        count: Math.max(1, entity.provenance.length),
-      },
-    }.appearances;
 
     // Check duplicate pair
     const duplicate = duplicatePairs.get(entity.id);
     if (duplicate && duplicate.confidence >= 0.8) {
       const recId = `rec_${fingerprint({ entityId: entity.id, action: "merge", target: duplicate.target.id }).slice(0, 16)}`;
       recommendations.push({
-        id: `rec_${randomUUID().slice(0, 8)}`,
         id: recId,
         entityId: entity.id,
         canonicalName: entity.canonicalName,
@@ -632,7 +641,6 @@ export async function analyzeStoryBible(
       const parent = classification.parentEntityId ? entityMap.get(classification.parentEntityId) : undefined;
       const recId = `rec_${fingerprint({ entityId: entity.id, action: "minor_reference", parent: classification.parentEntityId }).slice(0, 16)}`;
       recommendations.push({
-        id: `rec_${randomUUID().slice(0, 8)}`,
         id: recId,
         entityId: entity.id,
         canonicalName: entity.canonicalName,
@@ -653,7 +661,6 @@ export async function analyzeStoryBible(
     } else if (classification.disposition === "needs_review") {
       const recId = `rec_${fingerprint({ entityId: entity.id, action: "needs_review" }).slice(0, 16)}`;
       recommendations.push({
-        id: `rec_${randomUUID().slice(0, 8)}`,
         id: recId,
         entityId: entity.id,
         canonicalName: entity.canonicalName,
@@ -670,7 +677,6 @@ export async function analyzeStoryBible(
     } else {
       const recId = `rec_${fingerprint({ entityId: entity.id, action: "keep_canonical" }).slice(0, 16)}`;
       recommendations.push({
-        id: `rec_${randomUUID().slice(0, 8)}`,
         id: recId,
         entityId: entity.id,
         canonicalName: entity.canonicalName,
@@ -730,7 +736,6 @@ export async function demoteCanonicalEntity(
 
     const refId = `ref_${entityId.startsWith("ent_") ? entityId.slice(4) : entityId}`;
     const entity = bible.canonicalEntities.find((e) => e.id === entityId);
-    if (!entity) throw new Error(`Canonical entity '${entityId}' was not found`);
 
     // Idempotency: if already demoted to minor references and not in canonicalEntities
     if (!entity) {
@@ -763,10 +768,6 @@ export async function demoteCanonicalEntity(
 
     // Check protection
     if (!options.force) {
-      if (entity.canonicalNameLocked) throw new Error(`Cannot demote '${entity.canonicalName}': canonical name is locked`);
-      if (entity.preferredNarrationName) throw new Error(`Cannot demote '${entity.canonicalName}': preferred narration name is set`);
-      if (entity.localizedNaming) throw new Error(`Cannot demote '${entity.canonicalName}': localized naming is configured`);
-      if (entity.pronunciation?.locked || entity.pronunciation?.source === "manual") throw new Error(`Cannot demote '${entity.canonicalName}': pronunciation is locked`);
       const protectedReasons: string[] = [];
       if (entity.canonicalNameLocked || override?.canonicalNameLocked) protectedReasons.push("canonical name is locked");
       if (entity.preferredNarrationName || override?.preferredNarrationName) protectedReasons.push("preferred narration name is set");
@@ -796,9 +797,7 @@ export async function demoteCanonicalEntity(
 
     const now = new Date().toISOString();
     const reason = options.reason || "Demoted to minor entity reference";
-    const refId = `ref_${entity.id.slice(4)}`;
 
-    // Add demotion record
     // Add or update demotion record in overlay
     const existingDemotion = overlay.demotions.find((d) => d.entityId === entityId);
     if (!existingDemotion) {
@@ -937,8 +936,6 @@ export async function promoteMinorReference(
     const bibleRaw = await readJsonIfExists(paths.bible);
     if (!bibleRaw) throw new Error("Story Bible not found");
     const bible = storyBibleSchema.parse(bibleRaw);
-    const ref = bible.minorReferences.find((r) => r.id === referenceId);
-    if (!ref) throw new Error(`Minor reference '${referenceId}' was not found`);
 
     const overlay = canonicalOverlaySchema.parse(
       (await readJsonIfExists(paths.bibleCanonicalManual)) ?? {
@@ -978,7 +975,6 @@ export async function promoteMinorReference(
 
     const now = new Date().toISOString();
     const reason = options.reason || "Promoted to canonical entity";
-    const entityId = ref.demotedFromEntityId || `ent_${randomUUID().replace(/-/g, "").slice(0, 24)}`;
     const entityId = ref.demotedFromEntityId || `ent_${fingerprint({ name: ref.name, type: ref.type, origin: ref.originalName }).slice(0, 24)}`;
 
     // Remove any demotion record matching this entity or reference
@@ -995,7 +991,6 @@ export async function promoteMinorReference(
       name: ref.name,
       promotedAt: now,
       reason,
-      source: options.source ?? "manual",
       source: promotionSource,
     });
 
@@ -1008,7 +1003,6 @@ export async function promoteMinorReference(
       type: (ref.type && ref.type !== "other" ? ref.type : "concept") as EntityType,
       canonicalName: ref.name,
       originalName: ref.originalName || "",
-      description: "",
       description: ref.contextNotes || "",
       aliases: ref.aliases,
       firstAppearance: ref.firstSeenChapter || 1,
@@ -1016,12 +1010,10 @@ export async function promoteMinorReference(
       status: "unknown",
       notes: "",
       canonicalNameLocked: false,
-      origin: "manual",
       origin: promotionOrigin,
       provenance: ref.sourceEvidence.map((e) => ({
         chapter: e.chapter,
         kind: "extraction" as const,
-        origin: "manual" as const,
         origin: promotionOrigin,
       })),
       aliasNarrationRules: [],
@@ -1045,10 +1037,8 @@ export async function promoteMinorReference(
           type: "part_of",
           startChapter: ref.firstSeenChapter || 1,
           state: "current",
-          provenance: [{ chapter: ref.firstSeenChapter || 1, kind: "relationship", origin: "manual" }],
           provenance: [{ chapter: ref.firstSeenChapter || 1, kind: "relationship", origin: promotionOrigin }],
           locked: false,
-          origin: "manual",
           origin: promotionOrigin,
         });
       }
@@ -1125,10 +1115,6 @@ export async function updateMinorReference(
     if (patch.contextNotes !== undefined) ref.contextNotes = patch.contextNotes ?? undefined;
 
     if (patch.parentEntityId !== undefined) {
-      ref.parentEntityId = patch.parentEntityId ?? undefined;
-      overlay.parentAssignments[referenceId] = patch.parentEntityId || "";
-      if (ref.demotedFromEntityId) {
-        overlay.parentAssignments[ref.demotedFromEntityId] = patch.parentEntityId || "";
       if (patch.parentEntityId) {
         if (patch.parentEntityId === referenceId || patch.parentEntityId === ref.demotedFromEntityId) {
           throw new Error(`Minor reference '${ref.name}' cannot be its own parent`);
@@ -1154,7 +1140,6 @@ export async function updateMinorReference(
 
     await atomicWriteJson(paths.bibleCanonicalManual, overlay);
     await atomicWriteJson(paths.bible, bible);
-    return { status: "updated", reference: ref };
     return { status: "updated" as const, reference: ref };
   });
 }
@@ -1190,7 +1175,6 @@ export async function applyCleanupRecommendations(
   slug: string,
   recommendationIdsOrOptions: string[] | { recommendationIds?: string[]; highConfidenceOnly?: boolean } = [],
   options: { highConfidenceOnly?: boolean } = {},
-) {
 ): Promise<BulkCleanupResult> {
   const ids = Array.isArray(recommendationIdsOrOptions)
     ? recommendationIdsOrOptions
@@ -1200,9 +1184,6 @@ export async function applyCleanupRecommendations(
     : (recommendationIdsOrOptions.highConfidenceOnly ?? options.highConfidenceOnly);
 
   const report = await analyzeStoryBible(root, slug);
-  const targetRecs = report.recommendations.filter(
-    (r) => ids.includes(r.id) || (highConfidenceOnly && r.safeToAutoApply),
-  );
   const targetRecs = report.recommendations.filter((r) => {
     if (ids.length > 0) return ids.includes(r.id);
     if (highConfidenceOnly) return r.safeToAutoApply;
@@ -1222,15 +1203,11 @@ export async function applyCleanupRecommendations(
 
     if (rec.recommendation === "minor_reference") {
       try {
-        await demoteCanonicalEntity(root, slug, rec.entityId, {
         const res = await demoteCanonicalEntity(root, slug, rec.entityId, {
           parentEntityId: rec.parentEntityId,
           reason: rec.reason,
           source: "analyzer",
         });
-        appliedDemotions.push(rec.canonicalName);
-      } catch {
-        // Skip on error
         if (res.status === "demoted") {
           appliedDemotions.push(rec.canonicalName);
         }
@@ -1250,8 +1227,6 @@ export async function applyCleanupRecommendations(
           await mergeCanonicalEntities(root, slug, storyBibleSchema.parse(base), rec.targetEntityId, [rec.entityId], rec.reason);
           appliedMerges.push(`${rec.canonicalName} → ${rec.targetEntityName}`);
         }
-      } catch {
-        // Skip on error
       } catch (err) {
         logger.warn({ entityId: rec.entityId, err }, "Failed to merge canonical entity during cleanup");
         failed.push({
@@ -1279,7 +1254,6 @@ export async function applyCleanupRecommendations(
     appliedDemotions,
     appliedMerges,
     skippedProtected,
-    bible: updatedBible ? storyBibleSchema.parse(updatedBible) : emptyStoryBible(),
     failed,
     bible,
   };

@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
-import { CanonicalEntity, StoryBible, canonicalEntitySchema, localizedNamingSchema, storyBibleSchema } from "../domain/story-bible.js";
+import { CanonicalEntity, EntityType, StoryBible, canonicalEntitySchema, localizedNamingSchema, storyBibleSchema } from "../domain/story-bible.js";
 import { atomicWriteJson } from "../storage/atomic-write.js";
 import { normalizeEntityStatus, statusKey } from "./entity-status.js";
 import { storyPaths } from "../storage/paths.js";
@@ -43,7 +43,16 @@ export type DuplicateSuggestion = { id: string; entityIds: [string, string]; ent
 
 export async function applyCanonicalOverlay(root: string, slug: string, input: StoryBible) {
   const paths = storyPaths(root, slug, 1);
-  const overlay = canonicalOverlaySchema.parse((await readJsonIfExists(paths.bibleCanonicalManual)) ?? { version: 1, overrides: {}, merges: [], demotions: [], promotions: [], parentAssignments: {} });
+  const overlay = canonicalOverlaySchema.parse(
+    (await readJsonIfExists(paths.bibleCanonicalManual)) ?? {
+      version: 1,
+      overrides: {},
+      merges: [],
+      demotions: [],
+      promotions: [],
+      parentAssignments: {},
+    },
+  );
   const bible = structuredClone(input);
   const demotedIds = new Set(overlay.demotions.map((item) => item.entityId));
   const demotedNames = new Set(overlay.demotions.map((item) => normalizeEntityName(item.name)).filter(Boolean));
@@ -53,12 +62,12 @@ export async function applyCanonicalOverlay(root: string, slug: string, input: S
     const value = overlay.overrides[entity.id];
     if (value) applyOverride(entity, value);
   }
+
   // Automatic extraction can be rebuilt from a shorter chapter range. A protected
   // record must not silently disappear in that case: its last validated snapshot
   // remains visible until a later extraction recognizes the identity again.
   // Demoted entities must never be resurrected by orphan snapshot recovery.
   for (const [id, value] of Object.entries(overlay.overrides)) {
-    if (!present.has(id) && !demotedIds.has(id) && value.snapshot) {
     const snapshotName = value.snapshot ? normalizeEntityName(value.snapshot.canonicalName) : "";
     if (!present.has(id) && !demotedIds.has(id) && !demotedNames.has(snapshotName) && value.snapshot) {
       bible.canonicalEntities.push(applyOverride(structuredClone(value.snapshot), value));
@@ -67,7 +76,6 @@ export async function applyCanonicalOverlay(root: string, slug: string, input: S
 
   // Apply demotions: remove from canonicalEntities and ensure recorded as minor reference
   for (const demotion of overlay.demotions) {
-    const existingIndex = bible.canonicalEntities.findIndex((item) => item.id === demotion.entityId);
     const normDemoName = normalizeEntityName(demotion.name);
     const existingIndex = bible.canonicalEntities.findIndex(
       (item) => item.id === demotion.entityId || normalizeEntityName(item.canonicalName) === normDemoName,
@@ -75,11 +83,12 @@ export async function applyCanonicalOverlay(root: string, slug: string, input: S
     if (existingIndex >= 0) {
       const entity = bible.canonicalEntities[existingIndex]!;
       bible.canonicalEntities.splice(existingIndex, 1);
-      const refId = `ref_${entity.id.slice(4)}`;
-      const existingRef = bible.minorReferences.find((item) => item.id === refId || item.demotedFromEntityId === entity.id || normalizeEntityName(item.name) === normalizeEntityName(entity.canonicalName));
       const refId = `ref_${entity.id.startsWith("ent_") ? entity.id.slice(4) : entity.id}`;
       const existingRef = bible.minorReferences.find(
-        (item) => item.id === refId || item.demotedFromEntityId === entity.id || normalizeEntityName(item.name) === normalizeEntityName(entity.canonicalName),
+        (item) =>
+          item.id === refId ||
+          item.demotedFromEntityId === entity.id ||
+          normalizeEntityName(item.name) === normalizeEntityName(entity.canonicalName),
       );
       const parentId = demotion.parentEntityId ?? overlay.parentAssignments[refId] ?? overlay.parentAssignments[entity.id];
       if (!existingRef) {
@@ -88,7 +97,6 @@ export async function applyCanonicalOverlay(root: string, slug: string, input: S
           name: entity.canonicalName,
           originalName: entity.originalName || undefined,
           type: entity.type as any,
-          parentEntityId: parentId,
           parentEntityId: parentId || undefined,
           aliases: entity.aliases,
           firstSeenChapter: entity.firstAppearance,
@@ -102,8 +110,6 @@ export async function applyCanonicalOverlay(root: string, slug: string, input: S
           createdAt: demotion.demotedAt,
           updatedAt: demotion.demotedAt,
         });
-      } else if (parentId && !existingRef.parentEntityId) {
-        existingRef.parentEntityId = parentId;
       } else {
         existingRef.status = "minor";
         existingRef.demotedFromEntityId = entity.id;
@@ -114,25 +120,89 @@ export async function applyCanonicalOverlay(root: string, slug: string, input: S
     }
   }
 
+  // Apply promotions: if a minor reference was promoted in overlay, promote it to canonicalEntities
+  for (const promo of overlay.promotions) {
+    const promoNorm = normalizeEntityName(promo.name);
+    const refIndex = bible.minorReferences.findIndex(
+      (r) => r.id === promo.referenceId || normalizeEntityName(r.name) === promoNorm,
+    );
+    const entityExists = bible.canonicalEntities.some(
+      (e) => normalizeEntityName(e.canonicalName) === promoNorm || (promo.referenceId.startsWith("ref_") && e.id === `ent_${promo.referenceId.slice(4)}`),
+    );
+    if (refIndex >= 0) {
+      const ref = bible.minorReferences[refIndex]!;
+      bible.minorReferences.splice(refIndex, 1);
+      if (!entityExists) {
+        const entityId = ref.demotedFromEntityId || (promo.referenceId.startsWith("ref_") ? `ent_${promo.referenceId.slice(4)}` : `ent_${ref.id.slice(4)}`);
+        bible.canonicalEntities.push({
+          id: entityId,
+          type: (ref.type && ref.type !== "other" ? ref.type : "concept") as EntityType,
+          canonicalName: ref.name,
+          originalName: ref.originalName || "",
+          description: ref.contextNotes || "",
+          aliases: ref.aliases,
+          firstAppearance: ref.firstSeenChapter || 1,
+          lastKnownAppearance: ref.lastSeenChapter || ref.firstSeenChapter || 1,
+          status: "unknown",
+          notes: "",
+          canonicalNameLocked: false,
+          origin: promo.source === "manual" ? "manual" : "automatic",
+          provenance: ref.sourceEvidence.map((e) => ({
+            chapter: e.chapter,
+            kind: "extraction" as const,
+            origin: promo.source === "manual" ? "manual" : "automatic",
+          })),
+          aliasNarrationRules: [],
+          mergedFromIds: [],
+        });
+      }
+    }
+  }
+
   // Apply parent assignments to minor references
   for (const ref of bible.minorReferences) {
-    const parentId = overlay.parentAssignments[ref.id] ?? (ref.demotedFromEntityId ? overlay.parentAssignments[ref.demotedFromEntityId] : undefined);
+    const parentId =
+      overlay.parentAssignments[ref.id] ??
+      (ref.demotedFromEntityId ? overlay.parentAssignments[ref.demotedFromEntityId] : undefined);
     if (parentId !== undefined) {
       ref.parentEntityId = parentId || undefined;
     }
   }
 
   const available = new Set(bible.canonicalEntities.map((entity) => entity.id));
-  const remap = new Map([...resolveMergeMap(overlay.merges.filter((item) => !item.undoneAt))].filter(([, target]) => available.has(target)));
+  const remap = new Map(
+    [...resolveMergeMap(overlay.merges.filter((item) => !item.undoneAt))].filter(([, target]) => available.has(target)),
+  );
   for (const [sourceId, targetId] of remap) {
-    const target = bible.canonicalEntities.find((item) => item.id === targetId); const source = bible.canonicalEntities.find((item) => item.id === sourceId);
+    const target = bible.canonicalEntities.find((item) => item.id === targetId);
+    const source = bible.canonicalEntities.find((item) => item.id === sourceId);
     if (!target || !source || source.id === target.id) continue;
-    target.aliases = unique([...target.aliases, source.canonicalName, ...source.aliases]); target.description = mergeText(target.description, source.description); target.notes = mergeText(target.notes, source.notes); if (target.status === "unknown" && source.status !== "unknown") target.status = source.status; target.canonicalNameLocked ||= source.canonicalNameLocked; target.preferredNarrationName ??= source.preferredNarrationName; target.localizedNaming ??= source.localizedNaming; target.aliasNarrationRules = uniqueRules([...source.aliasNarrationRules, ...target.aliasNarrationRules]); target.firstAppearance = Math.min(target.firstAppearance, source.firstAppearance); target.lastKnownAppearance = Math.max(target.lastKnownAppearance, source.lastKnownAppearance); target.provenance = uniqueObjects([...target.provenance, ...source.provenance]); target.mergedFromIds = unique([...target.mergedFromIds, source.id, ...source.mergedFromIds]); target.origin = "manual";
+    target.aliases = unique([...target.aliases, source.canonicalName, ...source.aliases]);
+    target.description = mergeText(target.description, source.description);
+    target.notes = mergeText(target.notes, source.notes);
+    if (target.status === "unknown" && source.status !== "unknown") target.status = source.status;
+    target.canonicalNameLocked ||= source.canonicalNameLocked;
+    target.preferredNarrationName ??= source.preferredNarrationName;
+    target.localizedNaming ??= source.localizedNaming;
+    target.aliasNarrationRules = uniqueRules([...source.aliasNarrationRules, ...target.aliasNarrationRules]);
+    target.firstAppearance = Math.min(target.firstAppearance, source.firstAppearance);
+    target.lastKnownAppearance = Math.max(target.lastKnownAppearance, source.lastKnownAppearance);
+    target.provenance = uniqueObjects([...target.provenance, ...source.provenance]);
+    target.mergedFromIds = unique([...target.mergedFromIds, source.id, ...source.mergedFromIds]);
+    target.origin = "manual";
   }
   bible.canonicalEntities = bible.canonicalEntities.filter((item) => !remap.has(item.id));
-  for (const relation of bible.canonicalRelationships) { relation.sourceEntityId = remap.get(relation.sourceEntityId) ?? relation.sourceEntityId; relation.targetEntityId = remap.get(relation.targetEntityId) ?? relation.targetEntityId; }
-  for (const event of bible.entityTimeline) { event.entityId = remap.get(event.entityId) ?? event.entityId; if (event.relatedEntityId) event.relatedEntityId = remap.get(event.relatedEntityId) ?? event.relatedEntityId; }
-  bible.canonicalRelationships = deduplicateRelationships(bible.canonicalRelationships); bible.entityTimeline = uniqueObjects(bible.entityTimeline); bible.merges = overlay.merges;
+  for (const relation of bible.canonicalRelationships) {
+    relation.sourceEntityId = remap.get(relation.sourceEntityId) ?? relation.sourceEntityId;
+    relation.targetEntityId = remap.get(relation.targetEntityId) ?? relation.targetEntityId;
+  }
+  for (const event of bible.entityTimeline) {
+    event.entityId = remap.get(event.entityId) ?? event.entityId;
+    if (event.relatedEntityId) event.relatedEntityId = remap.get(event.relatedEntityId) ?? event.relatedEntityId;
+  }
+  bible.canonicalRelationships = deduplicateRelationships(bible.canonicalRelationships);
+  bible.entityTimeline = uniqueObjects(bible.entityTimeline);
+  bible.merges = overlay.merges;
   return { bible: storyBibleSchema.parse(bible), overlay };
 }
 

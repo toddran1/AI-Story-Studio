@@ -24,7 +24,6 @@ function mergeNamed(existing: Named[], incoming: Named[]): Named[] {
   return output;
 }
 
-export function mergeStoryBible(existing: StoryBible, update: StoryBibleUpdate, chapter: number): StoryBible {
 export function mergeStoryBible(
   existing: StoryBible,
   update: StoryBibleUpdate,
@@ -37,7 +36,6 @@ export function mergeStoryBible(
   }
   result.relationships = mergeUnique(existing.relationships, update.relationships, (x) => `${x.subject}\0${x.relationship}\0${x.object}`);
   result.translationTerms = mergeTerms(existing.translationTerms, update.translationTerms);
-  const canonical = mergeCanonicalHistory(existing, update, chapter);
   const canonical = mergeCanonicalHistory(existing, update, chapter, options?.overlay);
   result.canonicalEntities = canonical.entities; result.canonicalRelationships = canonical.relationships; result.entityTimeline = canonical.timeline;
   result.minorReferences = canonical.minorReferences;
@@ -102,7 +100,6 @@ export function contextBeforeChapter(bible: StoryBible, chapter: number, recentS
 }
 
 const canonicalCategories: Array<[keyof StoryBibleUpdate, EntityType]> = [["characters", "character"], ["factions", "organization"], ["locations", "location"], ["abilities", "ability"], ["items", "item"], ["classes", "concept"], ["ranks", "concept"], ["creatures", "concept"], ["systemTerms", "concept"]];
-function mergeCanonicalHistory(existing: StoryBible, update: StoryBibleUpdate, chapter: number) {
 function mergeCanonicalHistory(existing: StoryBible, update: StoryBibleUpdate, chapter: number, overlay?: CanonicalOverlay) {
   const entities = structuredClone(existing.canonicalEntities);
   const relationships = structuredClone(existing.canonicalRelationships);
@@ -141,14 +138,18 @@ function mergeCanonicalHistory(existing: StoryBible, update: StoryBibleUpdate, c
         continue;
       }
 
-      const existingRef = minorReferences.find((ref) => keys.has(normalizeName(ref.name)) || (ref.originalName && keys.has(normalizeName(ref.originalName))) || ref.aliases.some((a) => keys.has(normalizeName(a))));
+      const isPromoted = overlay?.promotions?.some((p) => keys.has(normalizeName(p.name)));
+      if (isPromoted) {
+        const refIndex = minorReferences.findIndex((ref) => keys.has(normalizeName(ref.name)));
+        if (refIndex >= 0) minorReferences.splice(refIndex, 1);
+      }
+      const existingRef = !isPromoted ? minorReferences.find((ref) => keys.has(normalizeName(ref.name)) || (ref.originalName && keys.has(normalizeName(ref.originalName))) || ref.aliases.some((a) => keys.has(normalizeName(a)))) : undefined;
       if (existingRef) {
         existingRef.lastSeenChapter = Math.max(existingRef.lastSeenChapter ?? chapter, chapter);
         existingRef.occurrenceCount = (existingRef.occurrenceCount ?? 1) + 1;
         if (!existingRef.sourceEvidence.some((e) => e.chapter === chapter)) {
           existingRef.sourceEvidence.push({ chapter });
         }
-        if ((existingRef.occurrenceCount ?? 1) >= 5) {
         if ((existingRef.occurrenceCount ?? 1) >= 5 && !existingRef.parentEntityId) {
           existingRef.status = "promotion_candidate";
         }
