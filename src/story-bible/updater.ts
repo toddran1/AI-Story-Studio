@@ -104,7 +104,6 @@ function mergeCanonicalHistory(existing: StoryBible, update: StoryBibleUpdate, c
   const entities = structuredClone(existing.canonicalEntities);
   const relationships = structuredClone(existing.canonicalRelationships);
   const timeline = structuredClone(existing.entityTimeline);
-  const minorReferences = structuredClone(existing.minorReferences ?? []);
   let minorReferences = structuredClone(existing.minorReferences ?? []);
 
   const ensure = (name: string, type: EntityType = "concept", originalName = "", description = "", aliases: string[] = [], status = "unknown", confidence?: number) => {
@@ -206,16 +205,11 @@ function mergeCanonicalHistory(existing: StoryBible, update: StoryBibleUpdate, c
     }
   }
 
-  const resolveEntityOrParent = (name: string) => {
   const resolveEntityOrParent = (name: string): CanonicalEntity | undefined => {
     const norm = normalizeName(name);
     if (!norm) return undefined;
     const existing = entities.find((c) => [c.canonicalName, c.originalName, ...c.aliases].some((v) => normalizeName(v) === norm));
     if (existing) return existing;
-    const ref = minorReferences.find((r) => normalizeName(r.name) === norm || (r.originalName && normalizeName(r.originalName) === norm));
-    if (ref?.parentEntityId) {
-      const parent = entities.find((e) => e.id === ref.parentEntityId);
-      if (parent) return parent;
     const ref = minorReferences.find((r) => normalizeName(r.name) === norm || (r.originalName && normalizeName(r.originalName) === norm) || (r.aliases ?? []).some((a) => normalizeName(a) === norm));
     if (ref) {
       if (ref.parentEntityId) {
