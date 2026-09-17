@@ -2,27 +2,93 @@ import { CanonicalEntity, StoryBible, storyBibleSchema } from "../domain/story-b
 import { contextBeforeChapter, normalizeEntityName } from "./updater.js";
 
 export type StoryContextOptions = { recentSummaryCount?: number; maxEntities?: number; maxRelationships?: number; maxTimelineEvents?: number; maxCharacters?: number; narrationNamingEntities?: CanonicalEntity[] };
-export function retrieveRelevantContext(bible: StoryBible, chapterText: string, chapter: number, options: StoryContextOptions = {}) {
-  const prior = contextBeforeChapter(bible, chapter, options.recentSummaryCount ?? 5); const normalizedText = normalizeEntityName(chapterText); const maxEntities = options.maxEntities ?? 60;
+export function retrieveRelevantContext(
+  bible: StoryBible,
+  chapterText: string,
+  chapter: number,
+  options: StoryContextOptions = {},
+) {
+  const prior = contextBeforeChapter(bible, chapter, options.recentSummaryCount ?? 5);
+  const normalizedText = normalizeEntityName(chapterText);
+  const maxEntities = options.maxEntities ?? 60;
+
   for (const naming of options.narrationNamingEntities ?? []) {
-    if (naming.firstAppearance > chapter || (!naming.localizedNaming && !naming.preferredNarrationName && !naming.aliasNarrationRules.length)) continue;
-    const mentioned = [naming.canonicalName, naming.originalName, ...naming.aliases].some((name) => { const key = normalizeEntityName(name); return key.length >= 2 && normalizedText.includes(key); }); if (!mentioned) continue;
-    const existing = prior.canonicalEntities.find((item) => item.id === naming.id); if (existing) { existing.localizedNaming = naming.localizedNaming; existing.preferredNarrationName = naming.preferredNarrationName; existing.aliasNarrationRules = naming.aliasNarrationRules; existing.aliases = [...new Set([...existing.aliases, ...naming.aliases])]; }
-    else prior.canonicalEntities.push({ ...naming, description: "", notes: "", status: "unknown", lastKnownAppearance: Math.min(naming.lastKnownAppearance, chapter), provenance: naming.provenance.filter((item) => item.chapter <= chapter).slice(-1), mergedFromIds: [] });
-  }
-  const scored = prior.canonicalEntities.map((entity) => { const names = [entity.canonicalName, entity.originalName, ...entity.aliases].filter(Boolean); const mentioned = names.some((name) => { const key = normalizeEntityName(name); return key.length >= 2 && normalizedText.includes(key); }); const recent = entity.lastKnownAppearance >= chapter - 10; return { entity, score: mentioned ? 1000 : entity.canonicalNameLocked ? 500 : recent ? 100 : 0 }; }).filter((item) => item.score > 0).sort((a, b) => b.score - a.score || b.entity.lastKnownAppearance - a.entity.lastKnownAppearance).slice(0, maxEntities);
-  if (!scored.length) scored.push(...prior.canonicalEntities.slice().sort((a, b) => b.lastKnownAppearance - a.lastKnownAppearance).slice(0, Math.min(12, maxEntities)).map((entity) => ({ entity, score: 1 })));
-  const entities = scored.map((item) => item.entity); const ids = new Set(entities.map((item) => item.id)); const relations = prior.canonicalRelationships.filter((item) => ids.has(item.sourceEntityId) || ids.has(item.targetEntityId)).sort((a, b) => b.startChapter - a.startChapter).slice(0, options.maxRelationships ?? 100); for (const relation of relations) { ids.add(relation.sourceEntityId); ids.add(relation.targetEntityId); }
-  const selectedEntities = prior.canonicalEntities.filter((item) => ids.has(item.id)).slice(0, maxEntities); const selectedIds = new Set(selectedEntities.map((item) => item.id)); const names = new Set(selectedEntities.flatMap((item) => [item.canonicalName, item.originalName, ...item.aliases].map(normalizeEntityName)));
-  const result = structuredClone(prior); result.merges = []; result.granularityAudits = [];
-  result.minorReferences = (prior.minorReferences ?? []).filter((ref) => {
-    if (!ref.parentEntityId || !selectedIds.has(ref.parentEntityId)) return false;
-    const refNames = [ref.name, ref.originalName, ...ref.aliases].filter(Boolean);
-    return refNames.some((name) => {
-      const key = normalizeEntityName(name!);
-      return key.length >= 3 && normalizedText.includes(key);
+    if (
+      naming.firstAppearance > chapter ||
+      (!naming.localizedNaming && !naming.preferredNarrationName && !naming.aliasNarrationRules.length)
+    ) {
+      continue;
+    }
+    const mentioned = [naming.canonicalName, naming.originalName, ...naming.aliases].some((name) => {
+      const key = normalizeEntityName(name);
+      return key.length >= 2 && normalizedText.includes(key);
     });
-  }).slice(0, 10);
+    if (!mentioned) continue;
+    const existing = prior.canonicalEntities.find((item) => item.id === naming.id);
+    if (existing) {
+      existing.localizedNaming = naming.localizedNaming;
+      existing.preferredNarrationName = naming.preferredNarrationName;
+      existing.aliasNarrationRules = naming.aliasNarrationRules;
+      existing.aliases = [...new Set([...existing.aliases, ...naming.aliases])];
+    } else {
+      prior.canonicalEntities.push({
+        ...naming,
+        description: "",
+        notes: "",
+        status: "unknown",
+        lastKnownAppearance: Math.min(naming.lastKnownAppearance, chapter),
+        provenance: naming.provenance.filter((item) => item.chapter <= chapter).slice(-1),
+        mergedFromIds: [],
+      });
+    }
+  }
+
+  const scored = prior.canonicalEntities
+    .map((entity) => {
+      const names = [entity.canonicalName, entity.originalName, ...entity.aliases].filter(Boolean);
+      const mentioned = names.some((name) => {
+        const key = normalizeEntityName(name);
+        return key.length >= 2 && normalizedText.includes(key);
+      });
+      const recent = entity.lastKnownAppearance >= chapter - 10;
+      return { entity, score: mentioned ? 1000 : entity.canonicalNameLocked ? 500 : recent ? 100 : 0 };
+    })
+    .filter((item) => item.score > 0)
+    .sort((a, b) => b.score - a.score || b.entity.lastKnownAppearance - a.entity.lastKnownAppearance)
+    .slice(0, maxEntities);
+
+  if (!scored.length) {
+    scored.push(
+      ...prior.canonicalEntities
+        .slice()
+        .sort((a, b) => b.lastKnownAppearance - a.lastKnownAppearance)
+        .slice(0, Math.min(12, maxEntities))
+        .map((entity) => ({ entity, score: 1 })),
+    );
+  }
+
+  const entities = scored.map((item) => item.entity);
+  const ids = new Set(entities.map((item) => item.id));
+  const relations = prior.canonicalRelationships
+    .filter((item) => ids.has(item.sourceEntityId) || ids.has(item.targetEntityId))
+    .sort((a, b) => b.startChapter - a.startChapter)
+    .slice(0, options.maxRelationships ?? 100);
+  for (const relation of relations) {
+    ids.add(relation.sourceEntityId);
+    ids.add(relation.targetEntityId);
+  }
+
+  const selectedEntities = prior.canonicalEntities.filter((item) => ids.has(item.id)).slice(0, maxEntities);
+  const selectedIds = new Set(selectedEntities.map((item) => item.id));
+  const names = new Set(
+    selectedEntities.flatMap((item) => [item.canonicalName, item.originalName, ...item.aliases].map(normalizeEntityName)),
+  );
+
+  const result = structuredClone(prior);
+  result.merges = [];
+  result.granularityAudits = [];
+
+  // Minor-reference relevance selection (single authoritative pass)
   result.minorReferences = (prior.minorReferences ?? [])
     .filter((ref) => {
       const refNames = [ref.name, ref.originalName, ...(ref.aliases ?? [])].filter(Boolean);
@@ -35,28 +101,165 @@ export function retrieveRelevantContext(bible: StoryBible, chapterText: string, 
       return selectedIds.has(ref.parentEntityId);
     })
     .slice(0, 10);
-  result.canonicalEntities = selectedEntities.map((item) => ({ ...item, provenance: item.provenance.slice(-20) })); result.canonicalRelationships = relations.filter((item) => selectedIds.has(item.sourceEntityId) && selectedIds.has(item.targetEntityId)).map((item) => ({ ...item, provenance: item.provenance.slice(-20) })); result.entityTimeline = prior.entityTimeline.filter((item) => selectedIds.has(item.entityId)).sort((a, b) => b.chapter - a.chapter).slice(0, options.maxTimelineEvents ?? 120).sort((a, b) => a.chapter - b.chapter);
-  for (const key of ["characters", "locations", "factions", "abilities", "classes", "ranks", "items", "creatures", "systemTerms"] as const) result[key] = result[key].filter((item) => names.has(normalizeEntityName(item.canonicalEnglishName)) || names.has(normalizeEntityName(item.originalName))) as never;
-  result.relationships = result.relationships.filter((item) => names.has(normalizeEntityName(item.subject)) || names.has(normalizeEntityName(item.object))).slice(0, options.maxRelationships ?? 100);
-  result.translationTerms = result.translationTerms.filter((item) => item.locked || normalizedText.includes(normalizeEntityName(item.original)) || normalizedText.includes(normalizeEntityName(item.canonicalEnglish))).slice(0, 120);
-  for (const entity of result.canonicalEntities) delete entity.pronunciation;
+
+  result.canonicalEntities = selectedEntities.map((item) => ({ ...item, provenance: item.provenance.slice(-20) }));
+  result.canonicalRelationships = relations
+    .filter((item) => selectedIds.has(item.sourceEntityId) && selectedIds.has(item.targetEntityId))
+    .map((item) => ({ ...item, provenance: item.provenance.slice(-20) }));
+  result.entityTimeline = prior.entityTimeline
+    .filter((item) => selectedIds.has(item.entityId))
+    .sort((a, b) => b.chapter - a.chapter)
+    .slice(0, options.maxTimelineEvents ?? 120)
+    .sort((a, b) => a.chapter - b.chapter);
+
+  // Legacy / category filtering
+  for (const key of [
+    "characters",
+    "locations",
+    "factions",
+    "abilities",
+    "classes",
+    "ranks",
+    "items",
+    "creatures",
+    "systemTerms",
+  ] as const) {
+    result[key] = result[key].filter(
+      (item) =>
+        names.has(normalizeEntityName(item.canonicalEnglishName)) ||
+        names.has(normalizeEntityName(item.originalName)),
+    ) as never;
+  }
+  result.relationships = result.relationships
+    .filter((item) => names.has(normalizeEntityName(item.subject)) || names.has(normalizeEntityName(item.object)))
+    .slice(0, options.maxRelationships ?? 100);
+
+  // Translation-term filtering
+  result.translationTerms = result.translationTerms
+    .filter(
+      (item) =>
+        item.locked ||
+        normalizedText.includes(normalizeEntityName(item.original)) ||
+        normalizedText.includes(normalizeEntityName(item.canonicalEnglish)),
+    )
+    .slice(0, 120);
+
+  // Sound-only metadata removal
+  for (const entity of result.canonicalEntities) {
+    delete entity.pronunciation;
+  }
+
+  // Context-budget trimming
   const maxCharacters = options.maxCharacters ?? 32_000;
-  if (!Number.isSafeInteger(maxCharacters) || maxCharacters < 1) throw new Error("Story context maxCharacters must be a positive integer");
+  if (!Number.isSafeInteger(maxCharacters) || maxCharacters < 1) {
+    throw new Error("Story context maxCharacters must be a positive integer");
+  }
+
   const length = () => JSON.stringify(result).length;
-  while (length() > maxCharacters && result.entityTimeline.length) result.entityTimeline.shift();
-  while (length() > maxCharacters && result.canonicalRelationships.length) result.canonicalRelationships.pop();
-  while (length() > maxCharacters && result.minorReferences?.length) result.minorReferences.pop();
-  while (length() > maxCharacters && result.translationTerms.length) result.translationTerms.pop();
-  while (length() > maxCharacters && Object.keys(result.chapterSummaries).length) delete result.chapterSummaries[Object.keys(result.chapterSummaries)[0]!];
-  if (length() > maxCharacters) { for (const key of ["characters", "locations", "factions", "abilities", "classes", "ranks", "items", "creatures", "systemTerms"] as const) result[key] = [] as never; result.relationships = []; }
-  for (const entity of result.canonicalEntities) { entity.provenance = entity.provenance.slice(-1); entity.description = entity.description.slice(0, 240); entity.notes = entity.notes.slice(0, 240); entity.aliases = entity.aliases.slice(0, 12).map((value) => value.slice(0, 120)); entity.canonicalName = entity.canonicalName.slice(0, 120); entity.originalName = entity.originalName.slice(0, 120); entity.preferredNarrationName = entity.preferredNarrationName?.slice(0, 120); if (entity.localizedNaming) entity.localizedNaming = { ...entity.localizedNaming, fullName: entity.localizedNaming.fullName?.slice(0, 120), shortName: entity.localizedNaming.shortName?.slice(0, 120), notes: entity.localizedNaming.notes?.slice(0, 240) }; entity.aliasNarrationRules = entity.aliasNarrationRules.filter((rule) => entity.aliases.some((alias) => normalizeEntityName(alias) === normalizeEntityName(rule.alias))).slice(0, 12).map((rule) => ({ ...rule, alias: rule.alias.slice(0, 120), replacement: rule.replacement?.slice(0, 120) })); entity.status = entity.status.slice(0, 120); }
-  if (length() > maxCharacters) { for (const key of ["characters", "locations", "factions", "abilities", "classes", "ranks", "items", "creatures", "systemTerms"] as const) result[key] = [] as never; result.relationships = []; result.minorReferences = []; }
-  for (const entity of result.canonicalEntities) { entity.provenance = (entity.provenance ?? []).slice(-1); entity.description = (entity.description ?? "").slice(0, 240); entity.notes = (entity.notes ?? "").slice(0, 240); entity.aliases = (entity.aliases ?? []).slice(0, 12).map((value) => value.slice(0, 120)); entity.canonicalName = (entity.canonicalName ?? "").slice(0, 120); entity.originalName = (entity.originalName ?? "").slice(0, 120); entity.preferredNarrationName = entity.preferredNarrationName?.slice(0, 120); if (entity.localizedNaming) entity.localizedNaming = { ...entity.localizedNaming, fullName: entity.localizedNaming.fullName?.slice(0, 120), shortName: entity.localizedNaming.shortName?.slice(0, 120), notes: entity.localizedNaming.notes?.slice(0, 240) }; entity.aliasNarrationRules = (entity.aliasNarrationRules ?? []).filter((rule) => (entity.aliases ?? []).some((alias) => normalizeEntityName(alias) === normalizeEntityName(rule.alias))).slice(0, 12).map((rule) => ({ ...rule, alias: rule.alias.slice(0, 120), replacement: rule.replacement?.slice(0, 120) })); entity.status = (entity.status ?? "unknown").slice(0, 120); }
-  while (length() > maxCharacters && result.canonicalEntities.length) { const removed = result.canonicalEntities.pop()!; result.canonicalRelationships = result.canonicalRelationships.filter((item) => item.sourceEntityId !== removed.id && item.targetEntityId !== removed.id); result.entityTimeline = result.entityTimeline.filter((item) => item.entityId !== removed.id && item.relatedEntityId !== removed.id); }
-  if (length() > maxCharacters) { result.canonicalRelationships = []; result.entityTimeline = []; result.translationTerms = []; result.chapterSummaries = {}; }
-  if (length() > maxCharacters) { result.canonicalRelationships = []; result.entityTimeline = []; result.translationTerms = []; result.minorReferences = []; result.chapterSummaries = {}; }
-  // Sound-only metadata is excluded before budgeting as well as fingerprinting.
-  const parsed = storyBibleSchema.parse(result); const actual = JSON.stringify(parsed).length;
-  if (actual > maxCharacters) throw new Error(`Story context budget ${maxCharacters} is smaller than the minimum serializable context (${actual})`);
+
+  // 1. Remove old timeline events
+  while (length() > maxCharacters && result.entityTimeline.length) {
+    result.entityTimeline.shift();
+  }
+
+  // 2. Remove canonical relationships
+  while (length() > maxCharacters && result.canonicalRelationships.length) {
+    result.canonicalRelationships.pop();
+  }
+
+  // 3. Remove excess minor references
+  while (length() > maxCharacters && (result.minorReferences?.length ?? 0)) {
+    result.minorReferences!.pop();
+  }
+
+  // 4. Remove translation terms
+  while (length() > maxCharacters && result.translationTerms.length) {
+    result.translationTerms.pop();
+  }
+
+  // 5. Remove older chapter summaries
+  while (length() > maxCharacters && Object.keys(result.chapterSummaries).length) {
+    delete result.chapterSummaries[Object.keys(result.chapterSummaries)[0]!];
+  }
+
+  // 6. Remove legacy/category data when necessary
+  if (length() > maxCharacters) {
+    for (const key of [
+      "characters",
+      "locations",
+      "factions",
+      "abilities",
+      "classes",
+      "ranks",
+      "items",
+      "creatures",
+      "systemTerms",
+    ] as const) {
+      result[key] = [] as never;
+    }
+    result.relationships = [];
+    result.minorReferences = [];
+  }
+
+  // 7. Trim canonical entity payloads / canonical sanitization (single defensive pass)
+  for (const entity of result.canonicalEntities) {
+    entity.provenance = (entity.provenance ?? []).slice(-1);
+    entity.description = (entity.description ?? "").slice(0, 240);
+    entity.notes = (entity.notes ?? "").slice(0, 240);
+    entity.aliases = (entity.aliases ?? []).slice(0, 12).map((value) => value.slice(0, 120));
+    entity.canonicalName = (entity.canonicalName ?? "").slice(0, 120);
+    entity.originalName = (entity.originalName ?? "").slice(0, 120);
+    entity.preferredNarrationName = entity.preferredNarrationName?.slice(0, 120);
+    if (entity.localizedNaming) {
+      entity.localizedNaming = {
+        ...entity.localizedNaming,
+        fullName: entity.localizedNaming.fullName?.slice(0, 120),
+        shortName: entity.localizedNaming.shortName?.slice(0, 120),
+        notes: entity.localizedNaming.notes?.slice(0, 240),
+      };
+    }
+    entity.aliasNarrationRules = (entity.aliasNarrationRules ?? [])
+      .filter((rule) =>
+        (entity.aliases ?? []).some((alias) => normalizeEntityName(alias) === normalizeEntityName(rule.alias)),
+      )
+      .slice(0, 12)
+      .map((rule) => ({
+        ...rule,
+        alias: rule.alias.slice(0, 120),
+        replacement: rule.replacement?.slice(0, 120),
+      }));
+    entity.status = (entity.status ?? "unknown").slice(0, 120);
+  }
+
+  // 8. Remove lower-priority canonical entities if still required
+  while (length() > maxCharacters && result.canonicalEntities.length) {
+    const removed = result.canonicalEntities.pop()!;
+    result.canonicalRelationships = result.canonicalRelationships.filter(
+      (item) => item.sourceEntityId !== removed.id && item.targetEntityId !== removed.id,
+    );
+    result.entityTimeline = result.entityTimeline.filter(
+      (item) => item.entityId !== removed.id && item.relatedEntityId !== removed.id,
+    );
+    result.minorReferences = (result.minorReferences ?? []).filter(
+      (item) => !item.parentEntityId || item.parentEntityId !== removed.id,
+    );
+  }
+
+  // 9. Final fallback cleanup
+  if (length() > maxCharacters) {
+    result.canonicalRelationships = [];
+    result.entityTimeline = [];
+    result.translationTerms = [];
+    result.minorReferences = [];
+    result.chapterSummaries = {};
+  }
+
+  // 10. Final schema validation
+  const parsed = storyBibleSchema.parse(result);
+  const actual = JSON.stringify(parsed).length;
+  if (actual > maxCharacters) {
+    throw new Error(`Story context budget ${maxCharacters} is smaller than the minimum serializable context (${actual})`);
+  }
+
   return parsed;
 }

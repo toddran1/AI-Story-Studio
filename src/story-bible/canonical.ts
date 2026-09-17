@@ -117,6 +117,41 @@ export async function applyCanonicalOverlay(root: string, slug: string, input: S
           existingRef.parentEntityId = parentId;
         }
       }
+    } else {
+      const refId = `ref_${demotion.entityId.startsWith("ent_") ? demotion.entityId.slice(4) : demotion.entityId}`;
+      const existingRef = bible.minorReferences.find(
+        (item) =>
+          item.id === refId ||
+          item.demotedFromEntityId === demotion.entityId ||
+          normalizeEntityName(item.name) === normDemoName,
+      );
+      const parentId = demotion.parentEntityId ?? overlay.parentAssignments[refId] ?? overlay.parentAssignments[demotion.entityId];
+      if (!existingRef) {
+        bible.minorReferences.push({
+          id: refId,
+          name: demotion.name,
+          originalName: demotion.originalName || undefined,
+          type: (demotion.type as any) ?? "concept",
+          parentEntityId: parentId || undefined,
+          aliases: overlay.overrides[demotion.entityId]?.aliases ?? [],
+          firstSeenChapter: 1,
+          lastSeenChapter: 1,
+          occurrenceCount: 1,
+          sourceEvidence: [{ chapter: 1 }],
+          disposition: "minor_reference",
+          source: "manual_demotion",
+          status: "minor",
+          demotedFromEntityId: demotion.entityId,
+          createdAt: demotion.demotedAt,
+          updatedAt: demotion.demotedAt,
+        });
+      } else {
+        existingRef.status = "minor";
+        existingRef.demotedFromEntityId = demotion.entityId;
+        if (parentId && !existingRef.parentEntityId) {
+          existingRef.parentEntityId = parentId;
+        }
+      }
     }
   }
 

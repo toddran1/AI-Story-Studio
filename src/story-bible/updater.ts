@@ -28,7 +28,7 @@ export function mergeStoryBible(
   existing: StoryBible,
   update: StoryBibleUpdate,
   chapter: number,
-  options?: { overlay?: CanonicalOverlay },
+  options?: { overlay?: CanonicalOverlay } | CanonicalOverlay,
 ): StoryBible {
   const result = structuredClone(existing) as Record<string, unknown>;
   for (const key of ["characters", "locations", "factions", "abilities", "classes", "ranks", "items", "creatures", "systemTerms"] as const) {
@@ -36,7 +36,8 @@ export function mergeStoryBible(
   }
   result.relationships = mergeUnique(existing.relationships, update.relationships, (x) => `${x.subject}\0${x.relationship}\0${x.object}`);
   result.translationTerms = mergeTerms(existing.translationTerms, update.translationTerms);
-  const canonical = mergeCanonicalHistory(existing, update, chapter, options?.overlay);
+  const overlay = options && "version" in options ? options : options?.overlay;
+  const canonical = mergeCanonicalHistory(existing, update, chapter, overlay);
   result.canonicalEntities = canonical.entities; result.canonicalRelationships = canonical.relationships; result.entityTimeline = canonical.timeline;
   result.minorReferences = canonical.minorReferences;
   result.chapterSummaries = { ...existing.chapterSummaries, [String(chapter)]: update.chapterSummary };
@@ -218,7 +219,14 @@ function mergeCanonicalHistory(existing: StoryBible, update: StoryBibleUpdate, c
       }
       return undefined;
     }
-    const isDemoted = overlay?.demotions?.some((d) => normalizeName(d.name) === norm || d.entityId === norm);
+    const isDemoted = overlay?.demotions?.some((d) => {
+      const demotedNames = [
+        d.name,
+        d.originalName,
+        ...(overlay?.overrides?.[d.entityId]?.aliases ?? []),
+      ].filter(Boolean);
+      return demotedNames.some((n) => normalizeName(n!) === norm);
+    });
     if (isDemoted) return undefined;
 
     return ensure(name);

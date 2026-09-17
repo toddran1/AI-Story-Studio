@@ -5,9 +5,10 @@ import { describe, expect, it } from "vitest";
 import { getCanonicalEntitiesPage, getMinorReferencesPage, getStoryBibleAnalysis } from "../apps/server/catalog.js";
 import { StudioOperations } from "../apps/server/operations.js";
 import { loadEnvironment } from "../src/config/env.js";
-import { CanonicalEntity, emptyStoryBible, storyBibleUpdateSchema } from "../src/domain/story-bible.js";
+import { CanonicalEntity, StoryBible, emptyStoryBible, storyBibleSchema, storyBibleUpdateSchema } from "../src/domain/story-bible.js";
 import { atomicWriteJson } from "../src/storage/atomic-write.js";
 import { storyPaths } from "../src/storage/paths.js";
+import { readJsonIfExists } from "../src/storage/story-files.js";
 import { applyCanonicalOverlay, updateCanonicalEntity } from "../src/story-bible/canonical.js";
 import {
   analyzeStoryBible,
@@ -691,6 +692,281 @@ describe("Story Bible Entity Granularity & Intelligent Cleanup", () => {
       expect(tightContext.canonicalEntities.length).toBe(1);
       expect(tightContext.canonicalEntities[0]!.canonicalName).toBe("Su Ming");
     });
+
+    it("verifies all 7 context retrieval scenarios for minor references (unparented, parented, unmentioned, alias, originalName)", () => {
+      const bible = emptyStoryBible();
+      bible.canonicalEntities = [
+        {
+          id: "ent_111111111111111111111111",
+          canonicalName: "Su Ming",
+          originalName: "",
+          type: "character",
+          aliases: [],
+          aliasNarrationRules: [],
+          description: "Hero",
+          firstAppearance: 1,
+          lastKnownAppearance: 10,
+          provenance: [{ chapter: 10, kind: "extraction", origin: "automatic" }],
+          origin: "automatic",
+          mergedFromIds: [],
+          notes: "",
+          canonicalNameLocked: false,
+          status: "unknown",
+        },
+        {
+          id: "ent_222222222222222222222222",
+          canonicalName: "Ancient Clan",
+          originalName: "古族",
+          type: "organization",
+          aliases: [],
+          aliasNarrationRules: [],
+          description: "Ancient clan",
+          firstAppearance: 1,
+          lastKnownAppearance: 10,
+          provenance: [{ chapter: 10, kind: "extraction", origin: "automatic" }],
+          origin: "automatic",
+          mergedFromIds: [],
+          notes: "",
+          canonicalNameLocked: false,
+          status: "unknown",
+        },
+        {
+          id: "ent_333333333333333333333333",
+          canonicalName: "Distant Empire",
+          originalName: "",
+          type: "organization",
+          aliases: [],
+          aliasNarrationRules: [],
+          description: "Faraway empire",
+          firstAppearance: 1,
+          lastKnownAppearance: 1, // old appearance, won't be selected when maxEntities: 2
+          provenance: [{ chapter: 1, kind: "extraction", origin: "automatic" }],
+          origin: "automatic",
+          mergedFromIds: [],
+          notes: "",
+          canonicalNameLocked: false,
+          status: "unknown",
+        },
+      ];
+      bible.minorReferences = [
+        // 1. Unparented + mentioned
+        {
+          id: "ref_training_ground",
+          name: "Ancient Training Ground",
+          originalName: "古练武场",
+          type: "location",
+          disposition: "minor_reference",
+          confidence: 0.9,
+          parentEntityId: undefined,
+          aliases: ["Old Training Grounds"],
+          firstSeenChapter: 1,
+          lastSeenChapter: 1,
+          occurrenceCount: 1,
+          source: "automatic",
+          status: "minor",
+          sourceEvidence: [{ chapter: 1 }],
+        },
+        // 2. Unparented + unmentioned
+        {
+          id: "ref_unmentioned_altar",
+          name: "Broken Altar",
+          type: "location",
+          disposition: "minor_reference",
+          confidence: 0.9,
+          parentEntityId: undefined,
+          aliases: [],
+          firstSeenChapter: 1,
+          lastSeenChapter: 1,
+          occurrenceCount: 1,
+          source: "automatic",
+          status: "minor",
+          sourceEvidence: [{ chapter: 1 }],
+        },
+        // 3. Parented + mentioned + parent selected
+        {
+          id: "ref_clan_hall",
+          name: "Ancient Clan Great Hall",
+          type: "location",
+          disposition: "minor_reference",
+          confidence: 0.9,
+          parentEntityId: "ent_222222222222222222222222",
+          aliases: [],
+          firstSeenChapter: 1,
+          lastSeenChapter: 1,
+          occurrenceCount: 1,
+          source: "automatic",
+          status: "minor",
+          sourceEvidence: [{ chapter: 1 }],
+        },
+        // 4. Parented + mentioned + parent NOT selected
+        {
+          id: "ref_distant_palace",
+          name: "Distant Imperial Palace",
+          type: "location",
+          disposition: "minor_reference",
+          confidence: 0.9,
+          parentEntityId: "ent_333333333333333333333333",
+          aliases: [],
+          firstSeenChapter: 1,
+          lastSeenChapter: 1,
+          occurrenceCount: 1,
+          source: "automatic",
+          status: "minor",
+          sourceEvidence: [{ chapter: 1 }],
+        },
+        // 5. Parented + unmentioned + parent selected
+        {
+          id: "ref_clan_garden",
+          name: "Ancient Clan Secret Garden",
+          type: "location",
+          disposition: "minor_reference",
+          confidence: 0.9,
+          parentEntityId: "ent_222222222222222222222222",
+          aliases: [],
+          firstSeenChapter: 1,
+          lastSeenChapter: 1,
+          occurrenceCount: 1,
+          source: "automatic",
+          status: "minor",
+          sourceEvidence: [{ chapter: 1 }],
+        },
+      ];
+
+      // Scenario A: Mentions Ancient Training Ground, Ancient Clan Great Hall, Distant Imperial Palace, but limits maxEntities to 2 (Su Ming and Ancient Clan selected, Distant Empire excluded)
+      const textA = "Su Ming walked into the Ancient Clan Great Hall and remembered the Ancient Training Ground and Distant Imperial Palace.";
+      const contextA = retrieveRelevantContext(bible, textA, 10, { maxEntities: 2 });
+      const selectedEntityIds = new Set(contextA.canonicalEntities.map((e) => e.id));
+      expect(selectedEntityIds.has("ent_222222222222222222222222")).toBe(true);
+      expect(selectedEntityIds.has("ent_333333333333333333333333")).toBe(false);
+
+      const minorNamesA = new Set(contextA.minorReferences.map((r) => r.name));
+      // 1. Unparented + mentioned -> included
+      expect(minorNamesA.has("Ancient Training Ground")).toBe(true);
+      // 2. Unparented + unmentioned -> excluded
+      expect(minorNamesA.has("Broken Altar")).toBe(false);
+      // 3. Parented + mentioned + parent selected -> included
+      expect(minorNamesA.has("Ancient Clan Great Hall")).toBe(true);
+      // 4. Parented + mentioned + parent NOT selected -> excluded
+      expect(minorNamesA.has("Distant Imperial Palace")).toBe(false);
+      // 5. Parented + unmentioned + parent selected -> excluded
+      expect(minorNamesA.has("Ancient Clan Secret Garden")).toBe(false);
+
+      // Scenario B (6. Alias mention): Chapter mentions "Old Training Grounds"
+      const textB = "Su Ming visited the Old Training Grounds in the morning.";
+      const contextB = retrieveRelevantContext(bible, textB, 10);
+      expect(contextB.minorReferences.some((r) => r.name === "Ancient Training Ground")).toBe(true);
+
+      // Scenario C (7. Original-name mention): Chapter mentions "古练武场"
+      const textC = "Su Ming looked toward the 古练武场 from afar.";
+      const contextC = retrieveRelevantContext(bible, textC, 10);
+      expect(contextC.minorReferences.some((r) => r.name === "Ancient Training Ground")).toBe(true);
+    });
+
+    it("strictly trims context under character budget: sheds minor references, relationships, timeline, summaries, and validates schema", () => {
+      const bible = emptyStoryBible();
+      for (let i = 1; i <= 10; i++) {
+        bible.canonicalEntities.push({
+          id: `ent_${String(i).padStart(24, "0")}`,
+          canonicalName: `Cultivator Person Number ${i}`,
+          originalName: `修士${i}`,
+          type: "character",
+          aliases: [`Alias Alpha ${i}`, `Alias Beta ${i}`],
+          aliasNarrationRules: [],
+          description: `Extensive description detailing the background, spiritual roots, martial lineage, and cultivation history of Cultivator Person Number ${i}.`,
+          firstAppearance: 1,
+          lastKnownAppearance: 10,
+          provenance: [{ chapter: 10, kind: "extraction", origin: "automatic" }],
+          origin: "automatic",
+          mergedFromIds: [],
+          notes: `Detailed notes regarding techniques, loyalties, and combat readiness for character number ${i}.`,
+          canonicalNameLocked: false,
+          status: "active",
+        });
+      }
+
+      for (let i = 1; i <= 8; i++) {
+        bible.minorReferences.push({
+          id: `ref_${i}`,
+          name: `Ancient Relic Item ${i}`,
+          type: "item",
+          disposition: "minor_reference",
+          confidence: 0.9,
+          parentEntityId: i % 2 === 0 ? `ent_${String(i).padStart(24, "0")}` : undefined,
+          aliases: [`Relic Nickname ${i}`],
+          firstSeenChapter: 1,
+          lastSeenChapter: 10,
+          occurrenceCount: 1,
+          source: "automatic",
+          status: "minor",
+          sourceEvidence: [{ chapter: 1 }],
+        });
+      }
+
+      for (let i = 1; i < 10; i++) {
+        bible.canonicalRelationships.push({
+          id: `rel_${i}`,
+          sourceEntityId: `ent_${String(i).padStart(24, "0")}`,
+          targetEntityId: `ent_${String(i + 1).padStart(24, "0")}`,
+          type: "allied_with",
+          startChapter: 1,
+          state: "current",
+          provenance: [{ chapter: 1, kind: "relationship", origin: "automatic" }],
+          locked: false,
+          origin: "automatic",
+        });
+      }
+
+      for (let i = 1; i <= 10; i++) {
+        bible.entityTimeline.push({
+          id: `evt_${i}`,
+          entityId: `ent_${String(i).padStart(24, "0")}`,
+          chapter: i,
+          type: "appearance",
+          summary: `Appearance event for cultivator person number ${i}`,
+          origin: "automatic",
+          provenance: { chapter: i, kind: "event", origin: "automatic" },
+        });
+      }
+
+      for (let i = 1; i <= 5; i++) {
+        bible.chapterSummaries[i] = `Chapter ${i} summary describing pivotal events, confrontations, and breakthroughs across the martial realm.`;
+      }
+
+      for (let i = 1; i <= 10; i++) {
+        bible.translationTerms.push({
+          original: `术语${i}`,
+          canonicalEnglish: `Martial Technical Term ${i}`,
+          locked: false,
+          notes: "",
+          firstSeenChapter: 1,
+          lastSeenChapter: 1,
+        });
+      }
+
+      const chapterText = "Cultivator Person Number 1 and Cultivator Person Number 2 visited Ancient Relic Item 1 and Ancient Relic Item 2.";
+
+      const budgeted = retrieveRelevantContext(bible, chapterText, 10, { maxCharacters: 3500 });
+      const serializedLength = JSON.stringify(budgeted).length;
+      expect(serializedLength).toBeLessThanOrEqual(3500);
+
+      const remainingEntityIds = new Set(budgeted.canonicalEntities.map((e) => e.id));
+      for (const rel of budgeted.canonicalRelationships) {
+        expect(remainingEntityIds.has(rel.sourceEntityId)).toBe(true);
+        expect(remainingEntityIds.has(rel.targetEntityId)).toBe(true);
+      }
+      for (const evt of budgeted.entityTimeline) {
+        expect(remainingEntityIds.has(evt.entityId)).toBe(true);
+      }
+      for (const ref of budgeted.minorReferences) {
+        if (ref.parentEntityId) {
+          expect(remainingEntityIds.has(ref.parentEntityId)).toBe(true);
+        }
+      }
+
+      expect(() => retrieveRelevantContext(bible, chapterText, 10, { maxCharacters: 50 })).toThrow(
+        /Story context budget 50 is smaller than the minimum serializable context/,
+      );
+    });
   });
 
   describe("Canonicalization Bypass Prevention & Unparented Minor References", () => {
@@ -986,6 +1262,310 @@ describe("Story Bible Entity Granularity & Intelligent Cleanup", () => {
       for (const ref of rebuilt.minorReferences) {
         expect(canonicalNames.has(ref.name)).toBe(false);
       }
+    });
+
+    it("drops relationships between minor references that share the same canonical parent to prevent self-relationships", () => {
+      let bible = emptyStoryBible();
+      bible.canonicalEntities = [
+        {
+          id: "ent_000000000000000000000001",
+          canonicalName: "Nong Family",
+          originalName: "",
+          type: "organization",
+          aliases: [],
+          aliasNarrationRules: [],
+          description: "Main clan",
+          firstAppearance: 1,
+          lastKnownAppearance: 1,
+          provenance: [{ chapter: 1, kind: "extraction", origin: "automatic" }],
+          origin: "automatic",
+          mergedFromIds: [],
+          notes: "",
+          canonicalNameLocked: false,
+          status: "unknown",
+        },
+      ];
+      bible.minorReferences = [
+        {
+          id: "ref_hall",
+          name: "Nong Family Conference Hall",
+          type: "location",
+          disposition: "minor_reference",
+          confidence: 0.9,
+          parentEntityId: "ent_000000000000000000000001",
+          firstSeenChapter: 1,
+          lastSeenChapter: 1,
+          occurrenceCount: 1,
+          source: "automatic",
+          status: "minor",
+          aliases: [],
+          sourceEvidence: [{ chapter: 1 }],
+        },
+        {
+          id: "ref_garden",
+          name: "Nong Family Courtyard Garden",
+          type: "location",
+          disposition: "minor_reference",
+          confidence: 0.9,
+          parentEntityId: "ent_000000000000000000000001",
+          firstSeenChapter: 1,
+          lastSeenChapter: 1,
+          occurrenceCount: 1,
+          source: "automatic",
+          status: "minor",
+          aliases: [],
+          sourceEvidence: [{ chapter: 1 }],
+        },
+      ];
+
+      // Chapter 2 update: relationship between Conference Hall and Courtyard Garden
+      const ch2Update = update(2, {
+        relationships: [
+          {
+            subject: "Nong Family Conference Hall",
+            relationship: "adjacent_to",
+            object: "Nong Family Courtyard Garden",
+            firstSeenChapter: 2,
+            lastSeenChapter: 2,
+            confidence: 0.85,
+          },
+        ],
+      });
+
+      const updated = mergeStoryBible(bible, ch2Update, 2);
+
+      // Both resolved to Nong Family (ent_000000000000000000000001), source.id === target.id dropped it
+      expect(updated.canonicalRelationships.length).toBe(0);
+      expect(updated.canonicalEntities.length).toBe(1);
+    });
+
+    it("prevents demoted entities from being resurrected via relationships or timeline events", () => {
+      let bible = emptyStoryBible();
+      bible.canonicalEntities = [
+        {
+          id: "ent_000000000000000000000001",
+          canonicalName: "Su Ming",
+          originalName: "",
+          type: "character",
+          aliases: [],
+          aliasNarrationRules: [],
+          description: "Hero",
+          firstAppearance: 1,
+          lastKnownAppearance: 1,
+          provenance: [{ chapter: 1, kind: "extraction", origin: "automatic" }],
+          origin: "automatic",
+          mergedFromIds: [],
+          notes: "",
+          canonicalNameLocked: false,
+          status: "unknown",
+        },
+      ];
+      bible.minorReferences = [
+        {
+          id: "ref_demoted_hall",
+          name: "Demoted Hall of Shadows",
+          originalName: "暗影堂",
+          type: "location",
+          disposition: "minor_reference",
+          confidence: 0.9,
+          parentEntityId: undefined,
+          demotedFromEntityId: "ent_444444444444444444444444",
+          firstSeenChapter: 1,
+          lastSeenChapter: 1,
+          occurrenceCount: 1,
+          source: "manual_demotion",
+          status: "minor",
+          aliases: ["Old Hall of Shadows"],
+          sourceEvidence: [{ chapter: 1 }],
+        },
+      ];
+
+      const overlay = {
+        version: 1 as const,
+        overrides: {},
+        merges: [],
+        demotions: [
+          {
+            entityId: "ent_444444444444444444444444",
+            name: "Demoted Hall of Shadows",
+            originalName: "暗影堂",
+            reason: "User demoted to minor",
+            demotedAt: new Date().toISOString(),
+            source: "manual" as const,
+          },
+        ],
+        promotions: [],
+        parentAssignments: {},
+      };
+
+      const ch2Update = update(2, {
+        relationships: [
+          {
+            subject: "Demoted Hall of Shadows",
+            relationship: "visited_by",
+            object: "Su Ming",
+            firstSeenChapter: 2,
+            lastSeenChapter: 2,
+            confidence: 0.9,
+          },
+        ],
+        timelineEvents: [
+          {
+            entity: "Demoted Hall of Shadows",
+            type: "revelation",
+            summary: "Demoted Hall was sealed",
+            chapter: 2,
+            confidence: 0.9,
+          },
+        ],
+      });
+
+      const updated = mergeStoryBible(bible, ch2Update, 2, overlay);
+
+      // Must NOT recreate Demoted Hall of Shadows as canonical!
+      expect(updated.canonicalEntities.some((e) => e.canonicalName === "Demoted Hall of Shadows")).toBe(false);
+      expect(updated.canonicalEntities.length).toBe(1);
+      expect(updated.canonicalEntities[0]!.canonicalName).toBe("Su Ming");
+
+      // Relationships and timeline targeting demoted entity must not create canonical records
+      expect(updated.canonicalRelationships.length).toBe(0);
+      expect(updated.entityTimeline.length).toBe(0);
+    });
+
+    it("verifies the complete demotion, rebuild, extraction, and promotion lifecycle for Nong Family Conference Hall", async () => {
+      const root = await mkdtemp(join(tmpdir(), "granularity-lifecycle-"));
+      const slug = "conference-hall-lifecycle";
+
+      const pathsCh1 = storyPaths(root, slug, 1);
+      const pathsCh2 = storyPaths(root, slug, 2);
+      await atomicWriteJson(pathsCh1.storyConfig, {
+        slug,
+        title: "Lifecycle Test Story",
+        pipeline: { storyBible: { provider: "openai", model: "gpt-4o" } },
+      });
+
+      let bible = emptyStoryBible();
+      bible.canonicalEntities = [
+        {
+          id: "ent_111122223333444455556666",
+          canonicalName: "Nong Family",
+          originalName: "农家",
+          type: "organization",
+          aliases: [],
+          aliasNarrationRules: [],
+          description: "The main clan",
+          firstAppearance: 1,
+          lastKnownAppearance: 1,
+          provenance: [{ chapter: 1, kind: "extraction", origin: "automatic" }],
+          origin: "automatic",
+          mergedFromIds: [],
+          notes: "",
+          canonicalNameLocked: false,
+          status: "active",
+        },
+        {
+          id: "ent_777788889999000011112222",
+          canonicalName: "Nong Family Conference Hall",
+          originalName: "农家议事堂",
+          type: "location",
+          aliases: [],
+          aliasNarrationRules: [],
+          description: "Conference hall of the clan",
+          firstAppearance: 1,
+          lastKnownAppearance: 1,
+          provenance: [{ chapter: 1, kind: "extraction", origin: "automatic" }],
+          origin: "automatic",
+          mergedFromIds: [],
+          notes: "",
+          canonicalNameLocked: false,
+          status: "unknown",
+        },
+      ];
+      await atomicWriteJson(pathsCh1.bible, bible);
+
+      // Step 1: Demotion -> Nong Family Conference Hall canonical -> demoted -> minor under Nong Family
+      const demoteRes = await demoteCanonicalEntity(root, slug, "ent_777788889999000011112222", {
+        parentEntityId: "ent_111122223333444455556666",
+        reason: "Sub-location under Nong Family",
+      });
+      expect(demoteRes.status).toBe("demoted");
+
+      // Verify only minor representation remains active
+      const bibleAfterDemote = await readJsonIfExists<StoryBible>(pathsCh1.bible);
+      expect(bibleAfterDemote?.canonicalEntities.some((e) => e.canonicalName === "Nong Family Conference Hall")).toBe(false);
+      const minorRef = bibleAfterDemote?.minorReferences.find((r) => r.name === "Nong Family Conference Hall");
+      expect(minorRef).toBeDefined();
+      expect(minorRef?.parentEntityId).toBe("ent_111122223333444455556666");
+
+      // Step 2: Rebuild Story Bible
+      const ch1Update = update(1, {
+        chapterSummary: "Chapter 1 overview",
+        locations: [
+          named("Nong Family Conference Hall", 1, {
+            originalName: "农家议事堂",
+            description: "Conference hall of the clan",
+            confidence: 0.95,
+          }),
+        ],
+        factions: [
+          named("Nong Family", 1, {
+            originalName: "农家",
+            description: "The main clan",
+            confidence: 0.95,
+          }),
+        ],
+      });
+      await atomicWriteJson(pathsCh1.bibleUpdate, ch1Update);
+      await atomicWriteJson(pathsCh1.chapterMeta, { chapter: 1, stages: { storyBible: { status: "complete" } } });
+
+      const { rebuildStoryBibleBeforeChapter } = await import("../src/story-bible/rebuild.js");
+      const rebuiltBeforeCh2 = await rebuildStoryBibleBeforeChapter(root, slug, 2);
+      expect(rebuiltBeforeCh2.canonicalEntities.some((e) => e.canonicalName === "Nong Family Conference Hall")).toBe(false);
+      expect(rebuiltBeforeCh2.minorReferences.some((r) => r.name === "Nong Family Conference Hall")).toBe(true);
+
+      // Step 3: Future extraction mentions Conference Hall again in Chapter 2
+      const ch2Update = update(2, {
+        chapterSummary: "Chapter 2 meeting",
+        locations: [
+          named("Nong Family Conference Hall", 2, {
+            originalName: "农家议事堂",
+            description: "Elders gathered in the hall",
+            confidence: 0.95,
+          }),
+        ],
+        relationships: [
+          {
+            subject: "Nong Family Conference Hall",
+            relationship: "hosts_meeting_of",
+            object: "Nong Family",
+            firstSeenChapter: 2,
+            lastSeenChapter: 2,
+            confidence: 0.9,
+          },
+        ],
+      });
+      await atomicWriteJson(pathsCh2.bibleUpdate, ch2Update);
+      await atomicWriteJson(pathsCh2.chapterMeta, { chapter: 2, stages: { storyBible: { status: "complete" } } });
+
+      const rebuiltBeforeCh3 = await rebuildStoryBibleBeforeChapter(root, slug, 3);
+      // Canonical entity does NOT reappear
+      expect(rebuiltBeforeCh3.canonicalEntities.some((e) => e.canonicalName === "Nong Family Conference Hall")).toBe(false);
+      // Minor reference updates evidence
+      const updatedRef = rebuiltBeforeCh3.minorReferences.find((r) => r.name === "Nong Family Conference Hall");
+      expect(updatedRef).toBeDefined();
+      expect(updatedRef?.sourceEvidence.some((e) => e.chapter === 2)).toBe(true);
+
+      // Step 4: Explicit Promotion
+      await atomicWriteJson(pathsCh1.bible, rebuiltBeforeCh3);
+      const promoteRes = await promoteMinorReference(root, slug, updatedRef!.id, {
+        reason: "Hall became significant battle venue",
+      });
+      expect(promoteRes.status).toBe("promoted");
+
+      // Verify minor representation removed / reconciled, canonical representation becomes active
+      const bibleAfterPromo = await readJsonIfExists<StoryBible>(pathsCh1.bible);
+      expect(bibleAfterPromo?.canonicalEntities.some((e) => e.canonicalName === "Nong Family Conference Hall")).toBe(true);
+      expect(bibleAfterPromo?.minorReferences.some((r) => r.name === "Nong Family Conference Hall")).toBe(false);
     });
   });
 

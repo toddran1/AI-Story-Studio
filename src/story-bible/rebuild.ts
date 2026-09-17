@@ -24,15 +24,16 @@ export async function rebuildStoryBibleBeforeChapter(root: string, slug: string,
       .map((entry) => Number(entry.name)).filter((number) => Number.isSafeInteger(number) && number > 0 && number < chapter).sort((a, b) => a - b);
   } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
   for (const number of numbers) {
-    if (number === options.chapterOverride?.chapter) { bible = mergeStoryBible(bible, normalizeStoryBibleUpdate(options.chapterOverride.update, number), number); continue; }
-    if (number === options.chapterOverride?.chapter) { bible = mergeStoryBible(bible, normalizeStoryBibleUpdate(options.chapterOverride.update, number), number, { overlay }); continue; }
+    if (number === options.chapterOverride?.chapter) {
+      bible = mergeStoryBible(bible, normalizeStoryBibleUpdate(options.chapterOverride.update, number), number, { overlay });
+      continue;
+    }
     const metadata = await readJsonIfExists<Chapter>(storyPaths(root, slug, number).chapterMeta);
     const state = metadata?.stages?.storyBible;
     if (state?.status === "failed" && !state.outputFingerprint && !state.completedAt) continue;
     // A source fingerprint mismatch marks the extraction stale, not absent:
     // the completed update is still valid canon and remains part of the rebuild.
     const raw = await readJsonIfExists<StoryBibleUpdate>(storyPaths(root, slug, number).bibleUpdate);
-    if (raw) bible = mergeStoryBible(bible, normalizeStoryBibleUpdate(storyBibleUpdateSchema.parse(raw), number), number);
     if (raw) bible = mergeStoryBible(bible, normalizeStoryBibleUpdate(storyBibleUpdateSchema.parse(raw), number), number, { overlay });
   }
   return (await applyManualBibleOverlay(root, slug, bible, { includeCanonical: options.includeCanonicalOverlay !== false })).bible;
