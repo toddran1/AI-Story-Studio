@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { normalizeSpeechText, speechNormalizationFingerprint } from "../src/tts/speech-normalization.js";
+import { normalizeSpeechForProvider, normalizeSpeechText, speechNormalizationFingerprint, speechNormalizationSettingsFromNarration } from "../src/tts/speech-normalization.js";
+import type { VocalizationRenderStrategy } from "../src/tts/vocalizations.js";
+
+const fishS2Tags: VocalizationRenderStrategy = { kind: "native_tags", tags: { laugh: "[laugh]", chuckle: "[laugh]", sigh: "[sigh]", gasp: "[gasp]" } };
+const fiendDragon = "Hahaha... Brat, once my fiend dragon comes out, all your bullshit undead are nothing but ants!";
 
 describe("provider-neutral speech normalization", () => {
   it("speaks high-confidence English structured values naturally", () => {
@@ -50,5 +54,82 @@ describe("provider-neutral speech normalization", () => {
     const ordered = speechNormalizationFingerprint("EXP and HP", "en-US", { speechAbbreviations: { EXP: "experience points", HP: "health points" } });
     const reordered = speechNormalizationFingerprint("EXP and HP", "en-US", { speechAbbreviations: { HP: "health points", EXP: "experience points" } });
     expect(first.fingerprint).toBe(same.fingerprint); expect(first.fingerprint).not.toBe(changed.fingerprint); expect(first.fingerprint).not.toBe(abbreviationsChanged.fingerprint); expect(ordered.fingerprint).toBe(reordered.fingerprint);
+  });
+});
+
+describe("vocalization speech normalization", () => {
+  it("rewrites vocalizations to canonical short forms with safe_normalize (the default)", () => {
+    const result = normalizeSpeechText('"Hahahahahahaha!" he crowed. "Grrrrrrrrrr!" came the reply.', "en-US");
+    expect(result.text).toBe('"Hahaha!" he crowed. "Grrr!" came the reply.');
+    expect(result.transformations).toEqual([
+      { kind: "vocalization", written: "Grrrrrrrrrr!", spoken: "Grrr!", start: 30, end: 42 },
+      { kind: "vocalization", written: "Hahahahahahaha!", spoken: "Hahaha!", start: 1, end: 16 },
+    ]);
+  });
+
+  it("records a vocalization transformation even when the canonical form matches the written form", () => {
+    const result = normalizeSpeechText(fiendDragon, "en-US");
+    expect(result.text).toBe(fiendDragon);
+    expect(result.transformations).toEqual([{ kind: "vocalization", written: "Hahaha...", spoken: "Hahaha...", start: 0, end: 9 }]);
+  });
+
+  it("renders mapped types as native tags and leaves unmapped types to the fallback", () => {
+    const tagged = normalizeSpeechText(fiendDragon, "en-US", {}, fishS2Tags);
+    expect(tagged.text).toBe("[laugh] Brat, once my fiend dragon comes out, all your bullshit undead are nothing but ants!");
+    expect(tagged.transformations[0]).toMatchObject({ kind: "vocalization", written: "Hahaha...", spoken: "[laugh]" });
+    // Sigh and gasp are mapped; growl has no tag and falls back to safe_normalize.
+    expect(normalizeSpeechText("He sighed. Sigh. Ahhh! Grrrrr!", "en-US", {}, fishS2Tags).text).toBe("He sighed. [sigh] [gasp] Grrr!");
+  });
+
+  it("omits vocalizations cleanly under omit strategy or omit_unsupported fallback", () => {
+    const omitted = normalizeSpeechText(fiendDragon, "en-US", {}, { kind: "omit" });
+    expect(omitted.text).toBe("Brat, once my fiend dragon comes out, all your bullshit undead are nothing but ants!");
+    expect(omitted.transformations[0]).toMatchObject({ kind: "vocalization", written: "Hahaha...", spoken: "" });
+    const fallbackOmitted = normalizeSpeechText("Grrr! Leave.", "en-US", { vocalizations: { fallback: "omit_unsupported" } }, { kind: "native_tags", tags: { laugh: "[laugh]" } });
+    expect(fallbackOmitted.text).toBe("Leave.");
+    expect(fallbackOmitted.transformations[0]).toMatchObject({ kind: "vocalization", written: "Grrr!", spoken: "" });
+  });
+
+  it("preserve mode records the detection without changing the text; disabled mode ignores vocalizations entirely", () => {
+    const preserved = normalizeSpeechText("Hahahahahahaha! He left.", "en-US", { vocalizations: { mode: "preserve" } }, fishS2Tags);
+    expect(preserved.text).toBe("Hahahahahahaha! He left.");
+    expect(preserved.transformations).toEqual([{ kind: "vocalization", written: "Hahahahahahaha!", spoken: "Hahahahahahaha!", start: 0, end: 15 }]);
+    const disabled = normalizeSpeechText("Hahahahahahaha! He left.", "en-US", { vocalizations: { mode: "disabled" } }, fishS2Tags);
+    expect(disabled.text).toBe("Hahahahahahaha! He left.");
+    expect(disabled.transformations).toEqual([]);
+  });
+
+  it("fingerprints vocalization settings and strategy", () => {
+    const base = speechNormalizationFingerprint(fiendDragon, "en-US");
+    const same = speechNormalizationFingerprint(fiendDragon, "en-US", {}, { kind: "safe_normalize" });
+    expect(base.fingerprint).toBe(same.fingerprint);
+    expect(base.fingerprint).not.toBe(speechNormalizationFingerprint(fiendDragon, "en-US", {}, fishS2Tags).fingerprint);
+    expect(base.fingerprint).not.toBe(speechNormalizationFingerprint(fiendDragon, "en-US", { vocalizations: { mode: "preserve" } }).fingerprint);
+    expect(base.fingerprint).not.toBe(speechNormalizationFingerprint(fiendDragon, "en-US", { vocalizations: { fallback: "omit_unsupported" } }).fingerprint);
+    // Existing behavior: time mode still changes the fingerprint.
+    expect(base.fingerprint).not.toBe(speechNormalizationFingerprint(fiendDragon, "en-US", { timeSpeechMode: "natural_24h" }).fingerprint);
+  });
+
+  it("maps narration settings into speech-normalization settings", () => {
+    expect(speechNormalizationSettingsFromNarration({
+      speechNormalization: "automatic", timeSpeechMode: "natural_24h",
+      speechAbbreviations: { EXP: "experience" }, speechVocalizations: { mode: "preserve", fallback: "omit_unsupported" },
+    })).toEqual({ mode: "automatic", timeSpeechMode: "natural_24h", speechAbbreviations: { EXP: "experience" }, vocalizations: { mode: "preserve", fallback: "omit_unsupported" } });
+    expect(speechNormalizationSettingsFromNarration({})).toEqual({ mode: undefined, timeSpeechMode: undefined, speechAbbreviations: undefined, vocalizations: undefined });
+  });
+
+  it("normalizeSpeechForProvider uses the provider strategy and defaults to safe_normalize without one", () => {
+    const narrationSettings = { speechNormalization: "automatic" as const, speechVocalizations: { mode: "automatic" as const, fallback: "safe_normalize" as const } };
+    const neutral = normalizeSpeechForProvider("Hahahahahahaha! He left.", "en-US", narrationSettings);
+    expect(neutral.normalized.text).toBe("Hahaha! He left.");
+    const fakeFish = {
+      name: "fish" as const,
+      vocalizationStrategy: () => fishS2Tags,
+      validateConfiguration: async () => {},
+      synthesize: async () => { throw new Error("not called"); },
+    };
+    const tagged = normalizeSpeechForProvider("Hahahahahahaha! He left.", "en-US", narrationSettings, fakeFish, "s2-pro");
+    expect(tagged.normalized.text).toBe("[laugh] He left.");
+    expect(tagged.fingerprint).not.toBe(neutral.fingerprint);
   });
 });

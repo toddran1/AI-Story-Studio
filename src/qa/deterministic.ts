@@ -3,7 +3,8 @@ import { CanonicalEntity } from "../domain/story-bible.js";
 import { continuityReviewSchema } from "../story-bible/continuity.js";
 import { loadNarrationNamingEntities } from "../story-bible/narration-names.js";
 import { loadPronunciationEntities } from "../story-bible/pronunciation.js";
-import { normalizeSpeechText } from "../tts/speech-normalization.js";
+import { normalizeSpeechText, speechNormalizationSettingsFromNarration } from "../tts/speech-normalization.js";
+import { detectVocalizations } from "../tts/vocalizations.js";
 import { readJsonIfExists } from "../storage/story-files.js";
 import { storyPaths } from "../storage/paths.js";
 import { normalizeQaText } from "./findings.js";
@@ -88,10 +89,10 @@ const SPEECH_TOKEN_PATTERNS: { kind: string; pattern: RegExp }[] = [
 
 /** Narration tokens a TTS engine will read aloud but speech normalization does not cover. */
 function speechReadinessDetections(story: Story, narration: string): FreshQaDetection[] {
-  const settings = story.narrationSettings;
-  const normalized = normalizeSpeechText(narration, story.outputLanguage, {
-    mode: settings.speechNormalization, timeSpeechMode: settings.timeSpeechMode, speechAbbreviations: settings.speechAbbreviations,
-  });
+  // QA runs provider-neutrally: the safe_normalize fallback is the baseline, so a
+  // provider with native tags can only do better than what is checked here.
+  const speechSettings = speechNormalizationSettingsFromNarration(story.narrationSettings);
+  const normalized = normalizeSpeechText(narration, story.outputLanguage, speechSettings);
   const covered = new Set(normalized.transformations.map((transformation) => transformation.written));
   const flagged = new Map<string, string>();
   for (const { kind, pattern } of SPEECH_TOKEN_PATTERNS) {
@@ -102,11 +103,34 @@ function speechReadinessDetections(story: Story, narration: string): FreshQaDete
       flagged.set(written, kind);
     }
   }
-  return [...flagged].map(([written, kind]) => ({
+  const detections: FreshQaDetection[] = [...flagged].map(([written, kind]) => ({
     category: "narrationFidelity" as const, severity: "warn" as const, origin: "deterministic" as const, safeToFix: false,
     message: `Narration contains the ${kind} "${written}", which speech normalization does not rewrite; the TTS engine may read it unnaturally.`,
     evidence: `"${written}" appears in the narration without a speech-normalization transformation.`,
   }));
+  const vocalizationTransformations = normalized.transformations.filter((transformation) => transformation.kind === "vocalization");
+  // A recorded transformation under active automatic handling means normalization
+  // consciously rendered the vocalization (its canonical spoken form can equal the
+  // written form — that is still synthesis-safe). Preserve/disabled handling and
+  // the preserve fallback leave the text to the provider blind, so those stay suspicious.
+  const vocalizationHandlingActive = (speechSettings.vocalizations?.mode ?? "automatic") === "automatic"
+    && (speechSettings.vocalizations?.fallback ?? "safe_normalize") !== "preserve";
+  const unhandled = new Map<string, string>();
+  for (const vocalization of detectVocalizations(narration)) {
+    if (unhandled.has(vocalization.sourceText)) continue;
+    const handled = vocalizationHandlingActive
+      && vocalizationTransformations.some((transformation) => transformation.written.includes(vocalization.sourceText));
+    if (!handled) unhandled.set(vocalization.sourceText, vocalization.vocalization);
+  }
+  for (const [written, kind] of unhandled) {
+    detections.push({
+      category: "narrationFidelity", severity: "warn", origin: "deterministic", safeToFix: false,
+      message: `TTS vocalization may synthesize unnaturally: the ${kind} "${written}" is left in the spoken text unchanged.`,
+      evidence: `"${written}" appears in the narration without a speech-normalization rewrite.`,
+      suggestedFix: `Enable automatic vocalization handling with the safe_normalize fallback, or accept the literal "${written}" rendering.`,
+    });
+  }
+  return detections;
 }
 
 /** Spoken entities whose pronunciation is missing (foreign-named) or needs review. */

@@ -40,7 +40,7 @@ import { withUsageScope } from "../cost/context.js";
 import { loadNarrationNamingEntities } from "../story-bible/narration-names.js";
 import { loadEligibleSummaryContext } from "../summaries/service.js";
 import { CENSOR_AUDIO_VERSION, CensorAudioService, FfmpegCensorAudioService, censorToneConfig } from "../tts/censor-audio.js";
-import { speechNormalizationFingerprint } from "../tts/speech-normalization.js";
+import { normalizeSpeechForProvider } from "../tts/speech-normalization.js";
 import { manualAcceptanceFingerprint } from "../studio/stage-acceptance.js";
 import { StageExecutionNode, dependentProcessingStages } from "../studio/stage-execution.js";
 
@@ -280,9 +280,9 @@ export class ChapterPipeline {
     // A blank per-story voice intentionally inherits the environment default. Include
     // the resolved value in the fingerprint so a changed default cannot reuse audio
     // generated with a different voice.
-    const speech = speechNormalizationFingerprint(ttsScript, options.story.outputLanguage, options.story.narrationSettings);
     const pronunciationData = await withUsageScope({ story: options.story.slug, chapter: options.chapter, stage: "pronunciation" }, () => enrichStoryPronunciations(options.root, options.story.slug, bible, this.llms.forStage(bibleConfig), bibleConfig, options.story.sourceLanguage));
     const ttsProvider = pronunciationProvider(this.tts.forName(ttsConfig.provider), pronunciationData.entities);
+    const speech = normalizeSpeechForProvider(ttsScript, options.story.outputLanguage, options.story.narrationSettings, ttsProvider, ttsConfig.model);
     const pronunciationFp = pronunciationFingerprint(resolvePronunciations(speech.normalized.text, pronunciationData.entities));
     const referenceId = ttsProvider.resolveReferenceId?.(ttsConfig.referenceId) ?? ttsConfig.referenceId;
     const bleepStrongProfanity = options.story.narrationSettings.bleepStrongProfanity === true;

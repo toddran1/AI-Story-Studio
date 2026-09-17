@@ -2,6 +2,7 @@ import { useEffect, useState, type ReactNode } from "react";
 import { api, post, put, type Job, type StorySummary } from "./api.js";
 import { estimateSummaryMinutes, SUMMARY_WORDS_PER_MINUTE } from "../../../src/summaries/types.js";
 import { AudioDeck } from "./AudioDeck.js";
+import { VocalizationList } from "./VocalizationList.js";
 import { SummaryScenePanel, SummaryArtworkPanel, SummaryVideoPanel } from "./SummaryVisualPanels.js";
 
 type Props = { slug: string; summary: StorySummary; busy: boolean; children: ReactNode;
@@ -11,9 +12,10 @@ export function SummaryLayers({ slug, summary, busy, children, onChange, onGener
   const [tab, setTab] = useState<"summary" | "narration" | "audio" | "scenes" | "artwork" | "video">("summary");
   const [text, setText] = useState(summary.narration?.text ?? "");
   const [working, setWorking] = useState(false);
-  const [spokenText, setSpokenText] = useState<string>();
+  const [spoken, setSpoken] = useState<{ spokenText: string; transformations?: Array<{ kind: string; written: string; spoken: string }> }>();
   useEffect(() => { setText(summary.narration?.text ?? ""); }, [summary.id, summary.narration?.text]);
-  useEffect(() => { setSpokenText(undefined); if (tab === "narration" && summary.narration?.text) void api<{ spokenText: string }>(`/stories/${slug}/summaries/${summary.id}/spoken-text`).then(value => setSpokenText(value.spokenText)).catch(onError); }, [slug, summary.id, summary.narration?.text, tab]);
+  useEffect(() => { setSpoken(undefined); if (tab === "narration" && summary.narration?.text) void api<{ spokenText: string; transformations?: Array<{ kind: string; written: string; spoken: string }> }>(`/stories/${slug}/summaries/${summary.id}/spoken-text`).then(setSpoken).catch(onError); }, [slug, summary.id, summary.narration?.text, tab]);
+  const spokenText = spoken?.spokenText;
   const base = `/stories/${slug}/summaries/${summary.id}`;
   const download = (type: string) => `/api${base}/export/${type}?download=1`;
   const action = async (stage: "narration" | "audio") => {
@@ -35,7 +37,7 @@ export function SummaryLayers({ slug, summary, busy, children, onChange, onGener
       {summary.narration?.reviewRequired && <div className="summary-media-warning">Naming or narration settings changed. Your manual text is preserved; review and retain it, or regenerate.</div>}
       {summary.narration?.error && <div className="error-box">{summary.narration.error}</div>}
       <textarea aria-label="Edit summary narration" value={text} onChange={(event) => setText(event.target.value)} placeholder="Generate narration from the canonical summary first." />
-      {spokenText && spokenText !== text && <details className="spoken-text-preview"><summary>View spoken text</summary><p>This is the provider-neutral representation sent through pronunciation and TTS processing. Your visible narration remains unchanged.</p><pre>{spokenText}</pre></details>}
+      {spokenText && spokenText !== text && <details className="spoken-text-preview"><summary>View spoken text</summary><p>This is the provider-neutral representation sent through pronunciation and TTS processing. Your visible narration remains unchanged.</p><pre>{spokenText}</pre><VocalizationList transformations={spoken?.transformations} /></details>}
       <footer><button className="button" disabled={disabled} onClick={() => void action("narration")}>{summary.narration ? "Regenerate narration" : "Generate narration"}</button>{summary.narration?.reviewRequired && <button className="button" disabled={disabled} onClick={() => void save(true)}>Retain / mark current</button>}<button className="button primary" disabled={disabled || !text.trim()} onClick={() => void save()}>Save narration edits</button>{summary.narration?.text && <a className="button" download href={download("narration")}>Download TXT</a>}</footer>
     </div> : tab === "scenes" ? <SummaryScenePanel key={summary.id} summary={summary} base={base} disabled={disabled} onChange={onChange} onGenerate={onGenerate} onError={onError} /> : tab === "artwork" ? <SummaryArtworkPanel key={summary.id} summary={summary} base={base} disabled={disabled} onChange={onChange} onGenerate={onGenerate} onError={onError} /> : tab === "video" ? <SummaryVideoPanel key={summary.id} summary={summary} base={base} disabled={disabled} onChange={onChange} onGenerate={onGenerate} onError={onError} /> : <div className="summary-media-editor">
       <header><span className="eyebrow">Listening copy</span><h3>Summary audio</h3><p>Generated from narration, using this book’s configured voice, delivery, censoring, and mastering.</p></header>

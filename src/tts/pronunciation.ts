@@ -20,6 +20,8 @@ export function pronunciationProvider(provider: TTSProvider, entities: readonly 
   return {
     name: provider.name, inputNormalizationVersion: provider.inputNormalizationVersion,
     pronunciationCapabilities: provider.pronunciationCapabilities,
+    vocalizationCapabilities: provider.vocalizationCapabilities,
+    vocalizationStrategy: provider.vocalizationStrategy?.bind(provider),
     resolveReferenceId: provider.resolveReferenceId?.bind(provider),
     validateConfiguration: () => provider.validateConfiguration(),
     synthesize: request => provider.synthesize({ ...request, pronunciation: resolvePronunciations(request.text, entities) }),

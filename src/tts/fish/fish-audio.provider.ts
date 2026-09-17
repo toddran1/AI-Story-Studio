@@ -6,10 +6,15 @@ import { normalizeFishSpeechText } from "./speech-normalizer.js";
 import { castQuotedDialogue, directQuotedDialogue, ensureChunkSpeakers } from "./dialogue-casting.js";
 import { isFishS2Model } from "./control-cues.js";
 import { adaptPronunciationText } from "../pronunciation.js";
+import type { VocalizationCapabilities, VocalizationRenderStrategy } from "../vocalizations.js";
 
 export class FishAudioProvider implements TTSProvider {
   readonly name = "fish" as const;
   readonly pronunciationCapabilities = { phoneticText: true } as const;
+  // Fish docs (docs.fish.audio TTS): S2 models support natural-language expression
+  // control. Tags are limited to the verified FISH_S2_CONTROL_CUES allowlist subset
+  // that maps to vocalization types; disambiguateFishS2Brackets strips anything else.
+  readonly vocalizationCapabilities: VocalizationCapabilities = { expressiveTags: true, supportedTypes: ["laugh", "chuckle", "sigh", "gasp"], separateSegments: false };
   // Included in the TTS fingerprint so audio made before normalization or
   // deterministic dialogue casting changes is never silently reused.
   readonly inputNormalizationVersion = "fish-speech-normalization-v5";
@@ -22,6 +27,13 @@ export class FishAudioProvider implements TTSProvider {
 
   resolveReferenceId(referenceId?: string): string | undefined {
     return normalizeFishReferenceId(referenceId) ?? normalizeFishReferenceId(this.defaultReferenceId);
+  }
+
+  /** Capability fallback: S2 models render the verified cue subset natively; s1 and
+   * unknown models fall back to canonical short spoken forms. No guessed tags. */
+  vocalizationStrategy(model?: string): VocalizationRenderStrategy {
+    if (!isFishS2Model(model)) return { kind: "safe_normalize" };
+    return { kind: "native_tags", tags: { laugh: "[laugh]", chuckle: "[laugh]", sigh: "[sigh]", gasp: "[gasp]" } };
   }
 
   async validateConfiguration(): Promise<void> { if (!this.apiKey) throw new ConfigurationError("Missing required fish credential (FISH_AUDIO_API_KEY). Add it to .env."); }

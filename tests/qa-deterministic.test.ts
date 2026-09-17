@@ -218,3 +218,54 @@ describe("QA mode", () => {
     expect(again.state.mode).toBe("thorough");
   });
 });
+
+describe("deterministic vocalization TTS-readiness checks", () => {
+  it("does not flag a vocalization handled by automatic normalization with the safe_normalize baseline", async () => {
+    const root = await mkdtemp(join(tmpdir(), "qa-det-"));
+    const { story } = await setup(root);
+    // QA considers a vocalization handled only when normalization actually rewrites it;
+    // the elongated laugh is collapsed to "Hahaha...", so no finding is raised.
+    const { detections } = await run(root, story, "Hahahahaha... Brat, once my fiend dragon comes out, all your bullshit undead are nothing but ants!");
+    expect(detections.filter((detection) => detection.category === "narrationFidelity")).toEqual([]);
+  });
+
+  it("does not flag a recognized vocalization whose canonical spoken form equals the written form", async () => {
+    const root = await mkdtemp(join(tmpdir(), "qa-det-"));
+    const { story } = await setup(root);
+    // "Hahaha..." is already the synthesis-safe canonical form: normalization records
+    // the transformation, so QA must not warn even though the text is unchanged.
+    const { detections } = await run(root, story, "Hahaha... Brat, once my fiend dragon comes out, all your bullshit undead are nothing but ants!");
+    expect(detections.filter((detection) => detection.category === "narrationFidelity")).toEqual([]);
+  });
+
+  it("flags a vocalization left in the spoken text by preserve mode", async () => {
+    const root = await mkdtemp(join(tmpdir(), "qa-det-"));
+    const { story } = await setup(root);
+    story.narrationSettings.speechVocalizations = { mode: "preserve", fallback: "safe_normalize" };
+    const { detections } = await run(root, story, "Hahaha... Brat, you are finished!");
+    const finding = detections.find((detection) => detection.category === "narrationFidelity")!;
+    expect(finding).toMatchObject({ severity: "warn", origin: "deterministic", safeToFix: false });
+    expect(finding.message).toContain("TTS vocalization may synthesize unnaturally");
+    expect(finding.message).toContain('"Hahaha..."');
+  });
+
+  it("keeps a dismissed vocalization finding dismissed on recheck and reports a changed vocalization as new", async () => {
+    const root = await mkdtemp(join(tmpdir(), "qa-det-"));
+    const { story } = await setup(root);
+    story.narrationSettings.speechVocalizations = { mode: "preserve", fallback: "safe_normalize" };
+    const { detections } = await run(root, story, "Hahaha... Brat, you are finished!");
+    const finding = detections.find((detection) => detection.category === "narrationFidelity")!;
+    const first = buildQaState(undefined, [finding], { chapter: 1, translation: "T", narration: "Hahaha... Brat, you are finished!", now: NOW });
+    first.state.findings[0]!.status = "dismissed";
+    // Same detection re-reported: the dismissal is respected, not reopened.
+    const again = buildQaState(first.state, [finding], { chapter: 1, translation: "T", narration: "Hahaha... Brat, you are finished!", now: NOW });
+    expect(again.state.findings).toHaveLength(1);
+    expect(again.state.findings[0]!.status).toBe("dismissed");
+    // A different vocalization text is a different detection, not the dismissed one.
+    const changed = await run(root, story, "Hmph! Brat, you are finished!");
+    const changedFinding = changed.detections.find((detection) => detection.category === "narrationFidelity")!;
+    expect(changedFinding.message).toContain('"Hmph!"');
+    const recheck = buildQaState(again.state, [changedFinding], { chapter: 1, translation: "T", narration: "Hmph! Brat, you are finished!", now: NOW });
+    expect(recheck.state.findings.some((item) => item.status === "open" && item.message.includes('"Hmph!"'))).toBe(true);
+  });
+});

@@ -1,10 +1,15 @@
 import { fingerprint } from "../utils/hash.js";
+import { scanVocalizations, type VocalizationRenderStrategy } from "./vocalizations.js";
+import type { TTSProvider } from "./provider.js";
 
-export const SPEECH_NORMALIZATION_VERSION = "speech-normalization-v2";
+export const SPEECH_NORMALIZATION_VERSION = "speech-normalization-v3";
 export type SpeechNormalizationMode = "automatic" | "enabled" | "disabled";
 export type TimeSpeechMode = "natural_12h" | "natural_24h" | "preserve";
-export type SpeechNormalizationSettings = { mode?: SpeechNormalizationMode; timeSpeechMode?: TimeSpeechMode; speechAbbreviations?: Record<string, string> };
-export type SpeechTransformation = { kind: "time" | "percentage" | "currency" | "measurement" | "number" | "chapter" | "quoted-label" | "abbreviation"; written: string; spoken: string; start: number; end: number };
+export type VocalizationMode = "automatic" | "preserve" | "disabled";
+export type VocalizationFallback = "safe_normalize" | "omit_unsupported" | "preserve";
+export type VocalizationSettings = { mode?: VocalizationMode; fallback?: VocalizationFallback };
+export type SpeechNormalizationSettings = { mode?: SpeechNormalizationMode; timeSpeechMode?: TimeSpeechMode; speechAbbreviations?: Record<string, string>; vocalizations?: VocalizationSettings };
+export type SpeechTransformation = { kind: "time" | "percentage" | "currency" | "measurement" | "number" | "chapter" | "quoted-label" | "abbreviation" | "vocalization"; written: string; spoken: string; start: number; end: number };
 export type SpeechNormalizationResult = { text: string; transformations: SpeechTransformation[]; warnings: string[] };
 
 const small = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen", "eighteen", "nineteen"];
@@ -14,7 +19,7 @@ const labelNouns = "feature|skill|ability|class|talent|dungeon|item|system(?:\u0
 
 /** A conservative, provider-neutral spoken form. It intentionally leaves ambiguous IDs,
  * years, dates, ratios, and bare numbers untouched. */
-export function normalizeSpeechText(text: string, language: string, settings: SpeechNormalizationSettings = {}): SpeechNormalizationResult {
+export function normalizeSpeechText(text: string, language: string, settings: SpeechNormalizationSettings = {}, vocalizationRendering?: VocalizationRenderStrategy): SpeechNormalizationResult {
   const mode = settings.mode ?? "automatic";
   if (mode === "disabled" || (mode === "automatic" && !isEnglish(language))) return { text, transformations: [], warnings: [] };
   const timeMode = settings.timeSpeechMode ?? "natural_12h";
@@ -57,12 +62,71 @@ export function normalizeSpeechText(text: string, language: string, settings: Sp
     const value = Number(/\d+/.exec(written)?.[0]); return Number.isSafeInteger(value) ? `chapter ${speakInteger(value)}` : undefined;
   });
   replace("number", /(?<![\p{L}\p{N}])\d{1,3}(?:,\d{3})+(?![\p{L}\p{N}])/gu, written => speakInteger(Number(written.replaceAll(",", ""))));
+  output = applyVocalizations(output, settings, vocalizationRendering, transformations);
   return { text: output, transformations, warnings: [] };
 }
 
-export function speechNormalizationFingerprint(text: string, language: string, settings: SpeechNormalizationSettings = {}) {
-  const normalized = normalizeSpeechText(text, language, settings);
-  return { normalized, fingerprint: fingerprint({ version: SPEECH_NORMALIZATION_VERSION, language, settings: { mode: settings.mode ?? "automatic", timeSpeechMode: settings.timeSpeechMode ?? "natural_12h", speechAbbreviations: canonicalAbbreviations(settings.speechAbbreviations) }, text: normalized.text }) };
+function applyVocalizations(text: string, settings: SpeechNormalizationSettings, rendering: VocalizationRenderStrategy | undefined, transformations: SpeechTransformation[]): string {
+  const mode = settings.vocalizations?.mode ?? "automatic";
+  if (mode === "disabled") return text;
+  const strategy = rendering ?? { kind: "safe_normalize" as const };
+  const fallback = settings.vocalizations?.fallback ?? "safe_normalize";
+  let omitted = false;
+  let output = text;
+  for (const item of scanVocalizations(text).reverse()) {
+    const record = (spoken: string) => transformations.push({ kind: "vocalization", written: item.sourceText, spoken, start: item.start, end: item.end });
+    // Preserve mode and low-confidence detections never alter the written text;
+    // they are still recorded for diagnostics.
+    if (mode === "preserve" || item.confidence < 0.6) { record(item.sourceText); continue; }
+    const tag = strategy.kind === "native_tags" ? strategy.tags[item.vocalization] : undefined;
+    if (strategy.kind === "native_tags" && tag) {
+      record(tag);
+      output = output.slice(0, item.start) + tag + output.slice(item.end);
+    } else if (strategy.kind === "omit" || fallback === "omit_unsupported") {
+      record("");
+      output = output.slice(0, item.start) + output.slice(item.end);
+      omitted = true;
+    } else if (fallback === "preserve") {
+      record(item.sourceText);
+    } else {
+      record(item.spokenForm);
+      output = output.slice(0, item.start) + item.spokenForm + output.slice(item.end);
+    }
+  }
+  return omitted ? cleanupOmittedVocalizations(output) : output;
+}
+
+/** Removing a vocalization must leave surrounding dialogue clean: no doubled
+ * spaces, no stranded or duplicated punctuation. */
+function cleanupOmittedVocalizations(text: string): string {
+  return text
+    .replace(/[ \t]{2,}/g, " ")
+    .replace(/ ([,.!?;:…—])/g, "$1")
+    .replace(/,\s*([.!?…—])/g, "$1")
+    .replace(/([.!?…—,])\1+/g, "$1")
+    .replace(/^[ \t]+/gm, "");
+}
+
+export function speechNormalizationFingerprint(text: string, language: string, settings: SpeechNormalizationSettings = {}, vocalizationRendering?: VocalizationRenderStrategy & { provider?: string }) {
+  const normalized = normalizeSpeechText(text, language, settings, vocalizationRendering);
+  return { normalized, fingerprint: fingerprint({ version: SPEECH_NORMALIZATION_VERSION, language, settings: { mode: settings.mode ?? "automatic", timeSpeechMode: settings.timeSpeechMode ?? "natural_12h", speechAbbreviations: canonicalAbbreviations(settings.speechAbbreviations), vocalizations: { mode: settings.vocalizations?.mode ?? "automatic", fallback: settings.vocalizations?.fallback ?? "safe_normalize" } }, vocalizationStrategy: vocalizationRendering ?? { kind: "safe_normalize" }, text: normalized.text }) };
+}
+
+/** Maps story narration settings into speech-normalization settings. Without this the
+ * configured `speechNormalization` mode is silently ignored (it is not the `mode` key). */
+export function speechNormalizationSettingsFromNarration(narrationSettings: {
+  speechNormalization?: SpeechNormalizationMode;
+  timeSpeechMode?: TimeSpeechMode;
+  speechAbbreviations?: Record<string, string>;
+  speechVocalizations?: VocalizationSettings;
+}): SpeechNormalizationSettings {
+  return { mode: narrationSettings.speechNormalization, timeSpeechMode: narrationSettings.timeSpeechMode, speechAbbreviations: narrationSettings.speechAbbreviations, vocalizations: narrationSettings.speechVocalizations };
+}
+
+/** The one shared speech-normalization entry point for every TTS consumer. */
+export function normalizeSpeechForProvider(text: string, language: string, narrationSettings: Parameters<typeof speechNormalizationSettingsFromNarration>[0], provider?: TTSProvider, model?: string) {
+  const strategy = provider?.vocalizationStrategy?.(model) ?? { kind: "safe_normalize" as const };
+  return speechNormalizationFingerprint(text, language, speechNormalizationSettingsFromNarration(narrationSettings), provider ? { ...strategy, provider: provider.name } : strategy);
 }
 
 function isEnglish(language: string) { return /^en(?:[-_]|$)/i.test(language.trim()); }

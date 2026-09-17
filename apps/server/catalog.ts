@@ -25,7 +25,7 @@ import { fileFingerprint } from "../../src/utils/file-fingerprint.js";
 import { logger } from "../../src/utils/logger.js";
 import { AlignmentArtifact, alignmentArtifactSchema } from "../../src/alignment/types.js";
 import { SubtitleDocument, subtitleDocumentSchema } from "../../src/subtitles/types.js";
-import { normalizeSpeechText } from "../../src/tts/speech-normalization.js";
+import { normalizeSpeechForProvider } from "../../src/tts/speech-normalization.js";
 import { continuityReviewSchema } from "../../src/story-bible/continuity.js";
 import { applyCanonicalOverlay, findDuplicateSuggestions } from "../../src/story-bible/canonical.js";
 import { ttsProviderNameSchema } from "../../src/domain/provider.js";
@@ -124,7 +124,7 @@ export async function getChapter(root: string, slug: string, chapter: number) {
   const videoAvailable = await exists(paths.video);
   const videoStale = videoAvailable && (!fresh || metadata?.stages.video.status !== "complete");
   const narration = await readTextIfExists(paths.narration); const ttsScript = (await readTextIfExists(paths.narrationTts)) ?? narration;
-  const speech = ttsScript && story ? normalizeSpeechText(ttsScript, story.outputLanguage, story.narrationSettings) : undefined;
+  const speech = ttsScript && story ? normalizeSpeechForProvider(ttsScript, story.outputLanguage, story.narrationSettings).normalized : undefined;
   return {
     chapter, navigation, metadata, stale: !fresh || metadata?.stages.ingestion.status !== "complete", original: await readTextIfExists(paths.original),
     translation: await readTextIfExists(paths.english), narration, spokenText: speech?.text, speechTransformations: speech?.transformations ?? [],
@@ -186,7 +186,7 @@ export const settingsUpdateSchema = z.object({
   title: z.string().trim().min(1), author: z.string().trim().optional(), description: z.string().max(10_000).default(""), tags: z.array(z.string()).max(30).default([]), notes: z.string().max(20_000).default(""), sourceLanguage: z.string().trim().min(2), outputLanguage: z.string().trim().min(2),
   recentChapterSummaries: z.number().int().min(0).max(100),
   qaMode: z.enum(["production", "thorough"]).optional(),
-  narrationSettings: z.object({ profanityMode: z.enum(["preserve", "soften-strong"]), bleepStrongProfanity: z.boolean().default(false), includeChapterTitle: z.boolean().optional(), speechNormalization: z.enum(["automatic", "enabled", "disabled"]).default("automatic"), timeSpeechMode: z.enum(["natural_12h", "natural_24h", "preserve"]).default("natural_12h"), speechAbbreviations: z.record(z.string().trim().regex(/^[A-Za-z][A-Za-z0-9-]{0,29}$/), z.string().trim().min(1).max(120)).default({}) }).optional(),
+  narrationSettings: z.object({ profanityMode: z.enum(["preserve", "soften-strong"]), bleepStrongProfanity: z.boolean().default(false), includeChapterTitle: z.boolean().optional(), speechNormalization: z.enum(["automatic", "enabled", "disabled"]).default("automatic"), timeSpeechMode: z.enum(["natural_12h", "natural_24h", "preserve"]).default("natural_12h"), speechAbbreviations: z.record(z.string().trim().regex(/^[A-Za-z][A-Za-z0-9-]{0,29}$/), z.string().trim().min(1).max(120)).default({}), speechVocalizations: z.object({ mode: z.enum(["automatic", "preserve", "disabled"]).default("automatic"), fallback: z.enum(["safe_normalize", "omit_unsupported", "preserve"]).default("safe_normalize") }).default({ mode: "automatic", fallback: "safe_normalize" }) }).optional(),
   translation: z.object({ provider: z.enum(["openai", "gemini", "kimi"]), model: z.string().trim().min(1) }),
   narration: z.object({ provider: z.enum(["openai", "gemini", "kimi"]), model: z.string().trim().min(1) }),
   qa: z.object({ provider: z.enum(["openai", "gemini", "kimi"]), model: z.string().trim().min(1) }),

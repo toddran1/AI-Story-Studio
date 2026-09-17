@@ -104,6 +104,17 @@ describe("summary narration and audio", () => {
     expect(tts.requests[0]?.text).toBe("It activates its Worry-Free E-X-P feature.");
   });
 
+  it("normalizes vocalizations in summary narration for TTS without editing the narration", async () => {
+    const canonical = await create(); const written = "Hehe... that worked.";
+    await media.editNarration("demo-story", canonical.id, { text: written });
+    const speech = await media.speech("demo-story", canonical.id); await media.audio("demo-story", canonical.id);
+    // MockTTS has no native-tag strategy, so the safe_normalize fallback applies the
+    // canonical spoken form ("Hehe..." → "Hehehe..."); the stored narration is untouched.
+    expect(speech).toMatchObject({ narrationText: written, spokenText: "Hehehe... that worked." });
+    expect(speech.transformations).toEqual([expect.objectContaining({ kind: "vocalization", written: "Hehe...", spoken: "Hehehe..." })]);
+    expect(tts.requests[0]?.text).toBe("Hehehe... that worked.");
+  });
+
   it("applies legacy preferred names and contextual alias rules through the shared narration context", async () => {
     const bible = mergeStoryBible(emptyStoryBible(), storyBibleUpdateSchema.parse({ chapterSummary: "Battle", characters: [{ canonicalEnglishName: "Su Ming", originalName: "苏铭", aliases: ["Student Su"], firstSeenChapter: 1, lastSeenChapter: 1 }] }), 1);
     bible.canonicalEntities[0]!.preferredNarrationName = "Shi Wang";

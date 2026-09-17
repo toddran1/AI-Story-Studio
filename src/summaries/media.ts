@@ -15,7 +15,7 @@ import { narrationDeliveryProfile, stripDeliveryCues } from "../narration/tts-di
 import type { LLMRouter } from "../llm/router.js";
 import type { TTSProviderRouter } from "../tts/router.js";
 import { censorToneConfig, type CensorAudioService } from "../tts/censor-audio.js";
-import { speechNormalizationFingerprint } from "../tts/speech-normalization.js";
+import { normalizeSpeechForProvider } from "../tts/speech-normalization.js";
 import type { AudioMasteringProcessor } from "../audio/mastering.js";
 import { audioMasteringFingerprint, masteringInputs, inputFingerprints } from "../audio/chapter-audio.js";
 import { atomicWrite, atomicWriteJson } from "../storage/atomic-write.js";
@@ -73,9 +73,9 @@ export class SummaryMediaService {
       model: story.pipeline.narration, language: story.outputLanguage, profanity: story.narrationSettings.profanityMode,
       includeTitle: story.narrationSettings.includeChapterTitle !== false, intensity: config.deliveryIntensity, delivery,
       promptVersion: NARRATION_PROMPT_VERSION, naming: context.canonicalEntities.map(({ id, canonicalName, originalName, aliases, localizedNaming, preferredNarrationName, aliasNarrationRules }) => ({ id, canonicalName, originalName, aliases, localizedNaming, preferredNarrationName, aliasNarrationRules })) });
-    const spoken = speechNormalizationFingerprint(summary.narration?.ttsText ?? summary.narration?.text ?? "", story.outputLanguage, story.narrationSettings);
     const pronunciationEntities = await loadPronunciationEntities(this.root, slug);
     const provider = pronunciationProvider(this.ttsRouter.forName(config.provider), pronunciationEntities);
+    const spoken = normalizeSpeechForProvider(summary.narration?.ttsText ?? summary.narration?.text ?? "", story.outputLanguage, story.narrationSettings, provider, config.model);
     const pronunciationFp = pronunciationFingerprint(resolvePronunciations(spoken.normalized.text, pronunciationEntities));
     const referenceId = provider.resolveReferenceId?.(config.referenceId) ?? config.referenceId;
     const ttsFingerprint = fingerprint({ version: "summary-tts-v1", text: summary.narration?.ttsText ?? summary.narration?.text, speech: spoken.fingerprint,

@@ -38,7 +38,9 @@ export class TrackedLLMProvider implements LLMProvider {
 }
 
 export class TrackedTTSProvider implements TTSProvider {
-  readonly name; constructor(private readonly inner: TTSProvider, private readonly sink: UsageSink) { this.name = inner.name; }
+  readonly name; readonly inputNormalizationVersion; readonly pronunciationCapabilities; readonly vocalizationCapabilities;
+  constructor(private readonly inner: TTSProvider, private readonly sink: UsageSink) { this.name = inner.name; this.inputNormalizationVersion = inner.inputNormalizationVersion; this.pronunciationCapabilities = inner.pronunciationCapabilities; this.vocalizationCapabilities = inner.vocalizationCapabilities; }
+  vocalizationStrategy(model?: string) { return this.inner.vocalizationStrategy?.(model) ?? { kind: "safe_normalize" as const }; }
   resolveReferenceId(id?: string) { return this.inner.resolveReferenceId?.(id); } validateConfiguration() { return this.inner.validateConfiguration(); }
   async synthesize(request: TTSRequest) { const scope = next("tts", request.model); if (!scope) return this.inner.synthesize(request); const attemptedAt = new Date().toISOString();
     try { const result = await this.inner.synthesize(request); await persist(this.sink, { ...base(scope, this.name, request.model, "tts", attemptedAt, true, result.requestIds?.join(",")), inputCharacters: [...request.text].length, inputUtf8Bytes: Buffer.byteLength(request.text), outputBytes: result.audio.byteLength }); return result; }

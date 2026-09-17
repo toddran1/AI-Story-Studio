@@ -2,7 +2,7 @@ import { loadPronunciationEntities, enrichStoryPronunciations, clearPronunciatio
 import { pronunciationProvider, pronunciationFingerprint, resolvePronunciations } from "../../src/tts/pronunciation.js";
 import { randomUUID } from "node:crypto";
 import { censorToneConfig } from "../../src/tts/censor-audio.js";
-import { speechNormalizationFingerprint } from "../../src/tts/speech-normalization.js";
+import { normalizeSpeechForProvider } from "../../src/tts/speech-normalization.js";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
 import { z } from "zod";
@@ -678,7 +678,7 @@ export class StudioOperations {
       const entity = entities.find(item => item.id === id); if (!entity) throw new Error("Canonical entity was not found");
       const name = entity.localizedNaming?.fullName ?? entity.preferredNarrationName ?? entity.canonicalName;
       const text = entity.type === "location" ? `They finally arrived in ${name}.` : `${name} followed them through the gate.`;
-      const config = story.pipeline.tts; const provider = pronunciationProvider(this.tts.forName(config.provider), entities); const speech = speechNormalizationFingerprint(text, story.outputLanguage, story.narrationSettings);
+      const config = story.pipeline.tts; const provider = pronunciationProvider(this.tts.forName(config.provider), entities); const speech = normalizeSpeechForProvider(text, story.outputLanguage, story.narrationSettings, provider, config.model);
       const key = fingerprint({ text, speech: speech.fingerprint, config, reference: provider.resolveReferenceId?.(config.referenceId), pronunciation: pronunciationFingerprint(resolvePronunciations(speech.normalized.text, entities)), normalization: provider.inputNormalizationVersion, censor: { version: this.censor.version, config: censorToneConfig }, bleep: story.narrationSettings.bleepStrongProfanity });
       const cachePath = join(storyPaths(this.root, slug, 1).story, "pronunciation-previews", `${key}.json`);
       const cachedRaw = await readJsonIfExists(cachePath);
@@ -730,7 +730,7 @@ export class StudioOperations {
     });
   }
 
-  startVoicePreview(slug: string, raw: unknown) { slugSchema.parse(slug); const input = voicePreviewSchema.parse(raw); return this.jobs.create("voicePreview", slug, async () => { const story = await loadStory(storyPaths(this.root, slug, 1).storyConfig); const config = story.pipeline.tts; const request = { ...input, provider: input.provider ?? config.provider, model: input.model ?? config.model, referenceId: input.referenceId ?? config.referenceId, speed: input.speed ?? config.speed }; const speech = speechNormalizationFingerprint(request.text, story.outputLanguage, story.narrationSettings); const result = await withUsageScope({story:slug,stage:"voicePreview"},async ()=>this.censor.synthesize(pronunciationProvider(this.tts.forName(request.provider), await loadPronunciationEntities(this.root, slug)), { text: speech.normalized.text, model: request.model, referenceId: request.referenceId,
+  startVoicePreview(slug: string, raw: unknown) { slugSchema.parse(slug); const input = voicePreviewSchema.parse(raw); return this.jobs.create("voicePreview", slug, async () => { const story = await loadStory(storyPaths(this.root, slug, 1).storyConfig); const config = story.pipeline.tts; const request = { ...input, provider: input.provider ?? config.provider, model: input.model ?? config.model, referenceId: input.referenceId ?? config.referenceId, speed: input.speed ?? config.speed }; const provider = pronunciationProvider(this.tts.forName(request.provider), await loadPronunciationEntities(this.root, slug)); const speech = normalizeSpeechForProvider(request.text, story.outputLanguage, story.narrationSettings, provider, request.model); const result = await withUsageScope({story:slug,stage:"voicePreview"},async ()=>this.censor.synthesize(provider, { text: speech.normalized.text, model: request.model, referenceId: request.referenceId,
     secondaryReferenceId: config.secondaryReferenceId, voiceMode: config.voiceMode, deliveryIntensity: config.deliveryIntensity, qualityGuard: config.qualityGuard,
     bleepStrongProfanity: story.narrationSettings.bleepStrongProfanity,
     speed: request.speed, format: config.format, sampleRate: 44100, bitrate: 192, normalize: true, maxCharsPerRequest: config.maxCharsPerRequest })); const saved = await saveVoicePreview(this.root, slug, result.audio, request); await recordActivity(this.root, slug, "voice.preview", "Generated a voice preview"); return saved; }); }
