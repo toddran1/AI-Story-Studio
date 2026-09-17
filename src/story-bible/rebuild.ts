@@ -4,6 +4,7 @@ import { StoryBible, StoryBibleUpdate, emptyStoryBible, storyBibleUpdateSchema }
 import { storyPaths } from "../storage/paths.js";
 import { readJsonIfExists } from "../storage/story-files.js";
 import { Chapter } from "../domain/chapter.js";
+import { canonicalOverlaySchema } from "./canonical.js";
 import { mergeStoryBible, normalizeStoryBibleUpdate } from "./updater.js";
 import { SourceManifest, sourceManifestSchema } from "../source/types.js";
 import { applyManualBibleOverlay } from "../studio/workflow.js";
@@ -12,6 +13,9 @@ import { applyManualBibleOverlay } from "../studio/workflow.js";
 export async function rebuildStoryBibleBeforeChapter(root: string, slug: string, chapter: number, options: { includeCanonicalOverlay?: boolean; chapterOverride?: { chapter: number; update: StoryBibleUpdate } } = {}): Promise<StoryBible> {
   let bible = emptyStoryBible();
   const paths = storyPaths(root, slug, chapter); const chaptersDir = join(paths.story, "chapters");
+  const overlayRaw = await readJsonIfExists(paths.bibleCanonicalManual);
+  const parsedOverlay = overlayRaw ? canonicalOverlaySchema.safeParse(overlayRaw) : undefined;
+  const overlay = parsedOverlay?.success ? parsedOverlay.data : undefined;
   const manifestRaw = await readJsonIfExists<SourceManifest>(paths.sourceManifest);
   const manifest = manifestRaw ? sourceManifestSchema.safeParse(manifestRaw) : undefined;
   let numbers: number[] = [];
@@ -21,6 +25,7 @@ export async function rebuildStoryBibleBeforeChapter(root: string, slug: string,
   } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
   for (const number of numbers) {
     if (number === options.chapterOverride?.chapter) { bible = mergeStoryBible(bible, normalizeStoryBibleUpdate(options.chapterOverride.update, number), number); continue; }
+    if (number === options.chapterOverride?.chapter) { bible = mergeStoryBible(bible, normalizeStoryBibleUpdate(options.chapterOverride.update, number), number, { overlay }); continue; }
     const metadata = await readJsonIfExists<Chapter>(storyPaths(root, slug, number).chapterMeta);
     const state = metadata?.stages?.storyBible;
     if (state?.status === "failed" && !state.outputFingerprint && !state.completedAt) continue;
@@ -28,6 +33,7 @@ export async function rebuildStoryBibleBeforeChapter(root: string, slug: string,
     // the completed update is still valid canon and remains part of the rebuild.
     const raw = await readJsonIfExists<StoryBibleUpdate>(storyPaths(root, slug, number).bibleUpdate);
     if (raw) bible = mergeStoryBible(bible, normalizeStoryBibleUpdate(storyBibleUpdateSchema.parse(raw), number), number);
+    if (raw) bible = mergeStoryBible(bible, normalizeStoryBibleUpdate(storyBibleUpdateSchema.parse(raw), number), number, { overlay });
   }
   return (await applyManualBibleOverlay(root, slug, bible, { includeCanonical: options.includeCanonicalOverlay !== false })).bible;
 }

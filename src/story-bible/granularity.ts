@@ -17,7 +17,11 @@ import { atomicWriteJson } from "../storage/atomic-write.js";
 import { storyPaths } from "../storage/paths.js";
 import { readJsonIfExists } from "../storage/story-files.js";
 import { withStoryLock } from "../storage/story-lock.js";
+import { fingerprint } from "../utils/hash.js";
+import { logger } from "../utils/logger.js";
 import {
+  ManualDemotion,
+  ManualPromotion,
   applyCanonicalOverlay,
   canonicalOverlaySchema,
   findDuplicateSuggestions,
@@ -48,9 +52,12 @@ export interface CandidateEntityInput {
 export interface ClassificationContext {
   canonicalEntities: CanonicalEntity[];
   minorReferences?: MinorEntityReference[];
+  demotions?: ManualDemotion[];
+  promotions?: ManualPromotion[];
   demotedEntityIds?: Set<string>;
   promotedReferenceIds?: Set<string>;
   parentAssignments?: Record<string, string>;
+  manualOverrides?: Record<string, any>;
 }
 
 const SUB_LOCATION_KEYWORDS = [
@@ -85,6 +92,17 @@ const aiClassificationResponseSchema = z.object({
 
 /**
  * Synchronous, deterministic evaluation of entity persistence worthiness.
+ * Enforces strict decision precedence:
+ * 1. Explicit manual promotion
+ * 2. Explicit manual demotion
+ * 3. Protected / manual canonical decisions
+ * 4. Matches established canonical entity
+ * 5. Matches established minor reference
+ * 6. Character title / Named artifact protections
+ * 7. Sub-location / facility parent containment
+ * 8. Generic incidental patterns
+ * 9. Entity Type heuristics
+ * 10. Default fallback
  */
 export function classifyEntityPersistenceSync(
   candidate: CandidateEntityInput,
@@ -96,6 +114,97 @@ export function classifyEntityPersistenceSync(
   const allCandidateNames = new Set([normName, normOriginal, ...candidateAliases].filter(Boolean));
 
   // 1. Check if candidate matches an existing canonical entity
+  // 1. Explicit manual promotion (overlay.promotions or context.promotedReferenceIds)
+  if (context.promotions) {
+    for (const promo of context.promotions) {
+      if (allCandidateNames.has(normalizeEntityName(promo.name))) {
+        return {
+          disposition: "canonical",
+          confidence: 1.0,
+          reason: `Explicit manual promotion: ${promo.reason || "promoted by user"}`,
+        };
+      }
+    }
+  }
+  if (context.promotedReferenceIds && context.minorReferences) {
+    for (const ref of context.minorReferences) {
+      if (context.promotedReferenceIds.has(ref.id)) {
+        const refNames = [ref.name, ref.originalName, ...(ref.aliases ?? [])].map(normalizeEntityName).filter(Boolean);
+        if (refNames.some((n) => allCandidateNames.has(n))) {
+          return {
+            disposition: "canonical",
+            confidence: 1.0,
+            reason: `Explicitly promoted reference '${ref.name}'`,
+          };
+        }
+      }
+    }
+  }
+
+  // 2. Explicit manual demotion (overlay.demotions or context.demotedEntityIds)
+  if (context.demotions) {
+    for (const demo of context.demotions) {
+      const demoNames = [demo.name, demo.originalName].map(normalizeEntityName).filter(Boolean);
+      if (demoNames.some((n) => allCandidateNames.has(n))) {
+        const parentId = demo.parentEntityId ?? context.parentAssignments?.[demo.entityId];
+        return {
+          disposition: "minor_reference",
+          confidence: 1.0,
+          parentEntityId: parentId || undefined,
+          reason: `Explicit manual demotion: ${demo.reason || "demoted by user"}`,
+        };
+      }
+    }
+  }
+  if (context.demotedEntityIds) {
+    for (const entity of context.canonicalEntities) {
+      if (context.demotedEntityIds.has(entity.id)) {
+        const entityNames = [entity.canonicalName, entity.originalName, ...entity.aliases].map(normalizeEntityName).filter(Boolean);
+        if (entityNames.some((n) => allCandidateNames.has(n))) {
+          const parentId = context.parentAssignments?.[entity.id];
+          return {
+            disposition: "minor_reference",
+            confidence: 1.0,
+            parentEntityId: parentId || undefined,
+            reason: `Previously demoted by manual configuration`,
+          };
+        }
+      }
+    }
+  }
+
+  // 3. Protected / manual canonical decisions
+  for (const entity of context.canonicalEntities) {
+    const entityNames = [entity.canonicalName, entity.originalName, ...entity.aliases].map(normalizeEntityName).filter(Boolean);
+    if (entityNames.some((n) => allCandidateNames.has(n))) {
+      const override = context.manualOverrides?.[entity.id];
+      const isProtected =
+        entity.canonicalNameLocked ||
+        override?.canonicalNameLocked ||
+        Boolean(entity.preferredNarrationName || override?.preferredNarrationName) ||
+        Boolean(entity.localizedNaming || override?.localizedNaming) ||
+        entity.pronunciation?.locked ||
+        entity.pronunciation?.source === "manual" ||
+        Boolean(override?.pronunciation?.locked || override?.pronunciation?.source === "manual") ||
+        entity.origin === "manual" ||
+        Boolean(override?.notes || (entity.notes && entity.notes.trim().length > 0)) ||
+        Boolean(override?.status) ||
+        Boolean(override?.aliases && override.aliases.length > 0) ||
+        Boolean(override?.aliasNarrationRules && override.aliasNarrationRules.length > 0) ||
+        Boolean(entity.aliasNarrationRules && entity.aliasNarrationRules.length > 0);
+
+      if (isProtected) {
+        return {
+          disposition: "canonical",
+          confidence: 1.0,
+          existingEntityId: entity.id,
+          reason: `Protected canonical entity with manual configuration: '${entity.canonicalName}'`,
+        };
+      }
+    }
+  }
+
+  // 4. Matches established canonical entity (without manual protection)
   for (const entity of context.canonicalEntities) {
     const entityNames = [entity.canonicalName, entity.originalName, ...entity.aliases].map(normalizeEntityName).filter(Boolean);
     if (entityNames.some((n) => allCandidateNames.has(n))) {
@@ -112,10 +221,17 @@ export function classifyEntityPersistenceSync(
   if (context.demotedEntityIds) {
     for (const entity of context.canonicalEntities) {
       if (context.demotedEntityIds.has(entity.id) && allCandidateNames.has(normalizeEntityName(entity.canonicalName))) {
+  // 5. Matches established minor reference
+  if (context.minorReferences) {
+    for (const ref of context.minorReferences) {
+      const refNames = [ref.name, ref.originalName, ...(ref.aliases ?? [])].map(normalizeEntityName).filter(Boolean);
+      if (refNames.some((n) => allCandidateNames.has(n))) {
         return {
           disposition: "minor_reference",
           confidence: 1.0,
           reason: `Previously demoted by manual configuration`,
+          parentEntityId: ref.parentEntityId,
+          reason: `Matches established minor reference '${ref.name}'`,
         };
       }
     }
@@ -132,11 +248,30 @@ export function classifyEntityPersistenceSync(
         };
       }
     }
+  // 6. Character / Title or Named Artifact protections before sub-location heuristics
+  const candidateType = candidate.type ?? "concept";
+  const isCharacterTitle = /\b(?:patriarch|matriarch|elder|master|ancestor|sect master|clan head|leader|chief|commander|general|captain)\b/i.test(candidate.name);
+  if (isCharacterTitle && candidateType !== "location") {
+    return {
+      disposition: "canonical",
+      confidence: 0.9,
+      reason: "Character with specific title or leadership role.",
+    };
   }
 
   // 4. Semantic sub-location / facility parent containment detection
   // Rule: Candidate is a location (or concept) representing a sub-space/facility of a known Organization or Location
   const candidateType = candidate.type ?? "concept";
+  const isNamedArtifact = /\b(?:ancestral sword|ancient cauldron|sacred bell|dragon seal|heavenly mirror|divine spear)\b/i.test(candidate.name);
+  if (isNamedArtifact && candidateType !== "location") {
+    return {
+      disposition: "canonical",
+      confidence: 0.88,
+      reason: "Named unique artifact with plot significance.",
+    };
+  }
+
+  // 7. Semantic sub-location / facility parent containment detection
   if (candidateType === "location" || candidateType === "concept") {
     for (const entity of context.canonicalEntities) {
       if (entity.type !== "organization" && entity.type !== "location") continue;
@@ -167,6 +302,7 @@ export function classifyEntityPersistenceSync(
   }
 
   // 5. Generic incidental patterns
+  // 8. Generic incidental patterns
   for (const pattern of GENERIC_INCIDENTAL_PATTERNS) {
     if (pattern.test(candidate.name)) {
       return {
@@ -179,9 +315,11 @@ export function classifyEntityPersistenceSync(
 
   // 6. Character / Organization / Plot artifact / Ability signals
   // Characters with real names, specific original names, or explicit gender/pronouns deserve canonical identity
+  // 9. Entity Type heuristics
   if (candidateType === "character") {
     // Check if it's a generic descriptor vs an actual character
     const isGenericRole = /^(?:guard|soldier|servant|waiter|passerby|patrol|disciple|elder|clerk)\s*#?\d*$/i.test(candidate.name.trim());
+    const isGenericRole = /^(?:guard|soldier|servant|waiter|passerby|patrol|disciple|clerk)\s*#?\d*$/i.test(candidate.name.trim());
     if (isGenericRole && !candidate.originalName) {
       return {
         disposition: "minor_reference",
@@ -189,10 +327,14 @@ export function classifyEntityPersistenceSync(
         reason: "Incidental unnamed character with no independent persistent identity.",
       };
     }
+    const hasPriorAppearances = candidate.firstSeenChapter !== undefined && candidate.lastSeenChapter !== undefined && candidate.lastSeenChapter > candidate.firstSeenChapter;
     return {
       disposition: "canonical",
       confidence: 0.92,
       reason: "Recurring character entity with independent narrative actions and persistent role.",
+      reason: hasPriorAppearances
+        ? "Recurring character entity with independent narrative actions and persistent role."
+        : "Character entity with independent narrative actions and persistent role.",
     };
   }
 
@@ -258,6 +400,7 @@ export function classifyEntityPersistenceSync(
   }
 
   // Default fallback:
+  // 10. Default fallback:
   if (candidate.originalName && candidate.originalName.length >= 2) {
     return {
       disposition: "canonical",
@@ -413,9 +556,18 @@ export async function analyzeStoryBible(
     if (entity.preferredNarrationName) protectedReasons.push(`Preferred narration name: ${entity.preferredNarrationName}`);
     if (entity.localizedNaming) protectedReasons.push(`Localized naming configured: ${entity.localizedNaming.fullName || entity.localizedNaming.shortName}`);
     if (entity.pronunciation?.locked || entity.pronunciation?.source === "manual") protectedReasons.push("Manual pronunciation locked");
+    if (entity.canonicalNameLocked || override?.canonicalNameLocked) protectedReasons.push("Canonical name locked");
+    if (entity.preferredNarrationName || override?.preferredNarrationName) protectedReasons.push(`Preferred narration name: ${entity.preferredNarrationName || override?.preferredNarrationName}`);
+    if (entity.localizedNaming || override?.localizedNaming) protectedReasons.push(`Localized naming configured: ${(entity.localizedNaming || override?.localizedNaming)?.fullName || (entity.localizedNaming || override?.localizedNaming)?.shortName}`);
+    if (entity.pronunciation?.locked || entity.pronunciation?.source === "manual" || override?.pronunciation?.locked || override?.pronunciation?.source === "manual") protectedReasons.push("Manual pronunciation locked");
     if (entity.origin === "manual") protectedReasons.push("Created manually");
     if (override?.notes || (entity.notes && entity.notes.trim().length > 0)) protectedReasons.push("Manual notes exist");
     if (override?.status) protectedReasons.push(`Manual status: ${override.status}`);
+    if (override?.aliases && override.aliases.length > 0) protectedReasons.push("Manual aliases configured");
+    if ((entity.aliasNarrationRules && entity.aliasNarrationRules.length > 0) || (override?.aliasNarrationRules && override.aliasNarrationRules.length > 0)) protectedReasons.push("Alias narration rules configured");
+    if (bible.canonicalRelationships.some((r) => (r.sourceEntityId === entity.id || r.targetEntityId === entity.id) && (r.locked || r.origin === "manual"))) {
+      protectedReasons.push("Protected relationship exists");
+    }
 
     const isProtected = protectedReasons.length > 0;
     const appearances = {
@@ -423,12 +575,21 @@ export async function analyzeStoryBible(
       lastKnown: entity.lastKnownAppearance,
       count: Math.max(1, entity.provenance.length),
     };
+      lastKnownAppearance: entity.lastKnownAppearance,
+      appearances: {
+        first: entity.firstAppearance,
+        lastKnown: entity.lastKnownAppearance,
+        count: Math.max(1, entity.provenance.length),
+      },
+    }.appearances;
 
     // Check duplicate pair
     const duplicate = duplicatePairs.get(entity.id);
     if (duplicate && duplicate.confidence >= 0.8) {
+      const recId = `rec_${fingerprint({ entityId: entity.id, action: "merge", target: duplicate.target.id }).slice(0, 16)}`;
       recommendations.push({
         id: `rec_${randomUUID().slice(0, 8)}`,
+        id: recId,
         entityId: entity.id,
         canonicalName: entity.canonicalName,
         originalName: entity.originalName,
@@ -462,14 +623,17 @@ export async function analyzeStoryBible(
       {
         canonicalEntities: bible.canonicalEntities.filter((e) => e.id !== entity.id),
         minorReferences: bible.minorReferences,
+        manualOverrides,
       },
       options,
     );
 
     if (classification.disposition === "minor_reference") {
       const parent = classification.parentEntityId ? entityMap.get(classification.parentEntityId) : undefined;
+      const recId = `rec_${fingerprint({ entityId: entity.id, action: "minor_reference", parent: classification.parentEntityId }).slice(0, 16)}`;
       recommendations.push({
         id: `rec_${randomUUID().slice(0, 8)}`,
+        id: recId,
         entityId: entity.id,
         canonicalName: entity.canonicalName,
         originalName: entity.originalName,
@@ -487,8 +651,10 @@ export async function analyzeStoryBible(
         safeToAutoApply: !isProtected && classification.confidence >= 0.9,
       });
     } else if (classification.disposition === "needs_review") {
+      const recId = `rec_${fingerprint({ entityId: entity.id, action: "needs_review" }).slice(0, 16)}`;
       recommendations.push({
         id: `rec_${randomUUID().slice(0, 8)}`,
+        id: recId,
         entityId: entity.id,
         canonicalName: entity.canonicalName,
         originalName: entity.originalName,
@@ -502,8 +668,10 @@ export async function analyzeStoryBible(
         safeToAutoApply: false,
       });
     } else {
+      const recId = `rec_${fingerprint({ entityId: entity.id, action: "keep_canonical" }).slice(0, 16)}`;
       recommendations.push({
         id: `rec_${randomUUID().slice(0, 8)}`,
+        id: recId,
         entityId: entity.id,
         canonicalName: entity.canonicalName,
         originalName: entity.originalName,
@@ -559,8 +727,26 @@ export async function demoteCanonicalEntity(
     const bibleRaw = await readJsonIfExists(paths.bible);
     if (!bibleRaw) throw new Error("Story Bible not found");
     const bible = storyBibleSchema.parse(bibleRaw);
+
+    const refId = `ref_${entityId.startsWith("ent_") ? entityId.slice(4) : entityId}`;
     const entity = bible.canonicalEntities.find((e) => e.id === entityId);
     if (!entity) throw new Error(`Canonical entity '${entityId}' was not found`);
+
+    // Idempotency: if already demoted to minor references and not in canonicalEntities
+    if (!entity) {
+      const alreadyRef = bible.minorReferences.find(
+        (r) => r.id === refId || r.demotedFromEntityId === entityId,
+      );
+      if (alreadyRef) {
+        return {
+          status: "already_demoted" as const,
+          entityId,
+          referenceId: alreadyRef.id,
+          bible,
+        };
+      }
+      throw new Error(`Canonical entity '${entityId}' was not found`);
+    }
 
     const overlay = canonicalOverlaySchema.parse(
       (await readJsonIfExists(paths.bibleCanonicalManual)) ?? {
@@ -573,12 +759,39 @@ export async function demoteCanonicalEntity(
       },
     );
 
+    const override = overlay.overrides[entityId];
+
     // Check protection
     if (!options.force) {
       if (entity.canonicalNameLocked) throw new Error(`Cannot demote '${entity.canonicalName}': canonical name is locked`);
       if (entity.preferredNarrationName) throw new Error(`Cannot demote '${entity.canonicalName}': preferred narration name is set`);
       if (entity.localizedNaming) throw new Error(`Cannot demote '${entity.canonicalName}': localized naming is configured`);
       if (entity.pronunciation?.locked || entity.pronunciation?.source === "manual") throw new Error(`Cannot demote '${entity.canonicalName}': pronunciation is locked`);
+      const protectedReasons: string[] = [];
+      if (entity.canonicalNameLocked || override?.canonicalNameLocked) protectedReasons.push("canonical name is locked");
+      if (entity.preferredNarrationName || override?.preferredNarrationName) protectedReasons.push("preferred narration name is set");
+      if (entity.localizedNaming || override?.localizedNaming) protectedReasons.push("localized naming is configured");
+      if (entity.pronunciation?.locked || entity.pronunciation?.source === "manual" || override?.pronunciation?.locked || override?.pronunciation?.source === "manual") protectedReasons.push("pronunciation is locked");
+      if (entity.origin === "manual") protectedReasons.push("entity was created manually");
+      if (override?.notes || (entity.notes && entity.notes.trim().length > 0)) protectedReasons.push("manual notes exist");
+      if (override?.status) protectedReasons.push("manual status is configured");
+      if (override?.aliases && override.aliases.length > 0) protectedReasons.push("manual aliases configured");
+      if ((entity.aliasNarrationRules && entity.aliasNarrationRules.length > 0) || (override?.aliasNarrationRules && override.aliasNarrationRules.length > 0)) protectedReasons.push("alias narration rules configured");
+
+      if (protectedReasons.length > 0) {
+        throw new Error(`Cannot demote '${entity.canonicalName}': entity has protected manual configuration (${protectedReasons.join(", ")})`);
+      }
+    }
+
+    // Validate parentEntityId if provided
+    if (options.parentEntityId) {
+      if (options.parentEntityId === entityId) {
+        throw new Error(`Cannot set parent entity to self for '${entity.canonicalName}'`);
+      }
+      const parentExists = bible.canonicalEntities.some((e) => e.id === options.parentEntityId);
+      if (!parentExists) {
+        throw new Error(`Parent entity '${options.parentEntityId}' was not found in canonical entities`);
+      }
     }
 
     const now = new Date().toISOString();
@@ -586,6 +799,7 @@ export async function demoteCanonicalEntity(
     const refId = `ref_${entity.id.slice(4)}`;
 
     // Add demotion record
+    // Add or update demotion record in overlay
     const existingDemotion = overlay.demotions.find((d) => d.entityId === entityId);
     if (!existingDemotion) {
       overlay.demotions.push({
@@ -598,6 +812,11 @@ export async function demoteCanonicalEntity(
         demotedAt: now,
         source: options.source ?? "manual",
       });
+    } else {
+      existingDemotion.name = entity.canonicalName;
+      if (options.parentEntityId) existingDemotion.parentEntityId = options.parentEntityId;
+      existingDemotion.reason = reason;
+      existingDemotion.source = options.source ?? existingDemotion.source;
     }
 
     if (options.parentEntityId) {
@@ -607,6 +826,7 @@ export async function demoteCanonicalEntity(
 
     // Remove any existing manual promotion record
     overlay.promotions = overlay.promotions.filter((p) => p.referenceId !== refId && p.name !== entity.canonicalName);
+    overlay.promotions = overlay.promotions.filter((p) => p.referenceId !== refId && normalizeEntityName(p.name) !== normalizeEntityName(entity.canonicalName));
 
     // Create or update minor reference in bible
     const existingRef = bible.minorReferences.find(
@@ -642,6 +862,45 @@ export async function demoteCanonicalEntity(
     // Remove entity from canonicalEntities
     bible.canonicalEntities = bible.canonicalEntities.filter((e) => e.id !== entityId);
 
+    // Dependency reconciliation:
+    // 1. Canonical relationships
+    if (options.parentEntityId) {
+      for (const rel of bible.canonicalRelationships) {
+        if (rel.sourceEntityId === entityId) rel.sourceEntityId = options.parentEntityId;
+        if (rel.targetEntityId === entityId) rel.targetEntityId = options.parentEntityId;
+      }
+      // Remove self-relationships
+      bible.canonicalRelationships = bible.canonicalRelationships.filter(
+        (rel) => rel.sourceEntityId !== rel.targetEntityId,
+      );
+    } else {
+      // Remove relationships involving demoted entity
+      bible.canonicalRelationships = bible.canonicalRelationships.filter(
+        (rel) => rel.sourceEntityId !== entityId && rel.targetEntityId !== entityId,
+      );
+    }
+
+    // 2. Child minor references
+    for (const childRef of bible.minorReferences) {
+      if (childRef.parentEntityId === entityId) {
+        if (options.parentEntityId) {
+          childRef.parentEntityId = options.parentEntityId;
+          overlay.parentAssignments[childRef.id] = options.parentEntityId;
+        } else {
+          childRef.parentEntityId = undefined;
+          delete overlay.parentAssignments[childRef.id];
+        }
+      }
+    }
+
+    // 3. Timeline events
+    if (options.parentEntityId) {
+      for (const event of bible.entityTimeline) {
+        if (event.entityId === entityId) event.entityId = options.parentEntityId;
+        if (event.relatedEntityId === entityId) event.relatedEntityId = options.parentEntityId;
+      }
+    }
+
     // Audit
     bible.granularityAudits.push({
       id: randomUUID(),
@@ -659,6 +918,7 @@ export async function demoteCanonicalEntity(
     await atomicWriteJson(paths.bibleCanonicalManual, overlay);
     await atomicWriteJson(paths.bible, bible);
     return { status: "demoted", entityId, referenceId: refId, bible };
+    return { status: "demoted" as const, entityId, referenceId: refId, bible };
   });
 }
 
@@ -691,21 +951,55 @@ export async function promoteMinorReference(
       },
     );
 
+    const ref = bible.minorReferences.find((r) => r.id === referenceId);
+    const promoRecord = overlay.promotions.find((p) => p.referenceId === referenceId);
+    const derivedEntityId = referenceId.startsWith("ref_") ? `ent_${referenceId.slice(4)}` : undefined;
+
+    // Idempotency: if already in canonicalEntities
+    const targetEntityId = ref?.demotedFromEntityId;
+    const existingCanonical = bible.canonicalEntities.find(
+      (e) =>
+        (targetEntityId && e.id === targetEntityId) ||
+        (derivedEntityId && e.id === derivedEntityId) ||
+        (ref && normalizeEntityName(e.canonicalName) === normalizeEntityName(ref.name)) ||
+        (promoRecord && normalizeEntityName(e.canonicalName) === normalizeEntityName(promoRecord.name)),
+    );
+
+    if (!ref) {
+      if (existingCanonical) {
+        return { status: "already_promoted" as const, referenceId, entity: existingCanonical, bible };
+      }
+      throw new Error(`Minor reference '${referenceId}' was not found`);
+    }
+
+    if (existingCanonical && !ref.demotedFromEntityId) {
+      return { status: "already_promoted" as const, referenceId, entity: existingCanonical, bible };
+    }
+
     const now = new Date().toISOString();
     const reason = options.reason || "Promoted to canonical entity";
     const entityId = ref.demotedFromEntityId || `ent_${randomUUID().replace(/-/g, "").slice(0, 24)}`;
+    const entityId = ref.demotedFromEntityId || `ent_${fingerprint({ name: ref.name, type: ref.type, origin: ref.originalName }).slice(0, 24)}`;
 
     // Remove any demotion record matching this entity or reference
     overlay.demotions = overlay.demotions.filter((d) => d.entityId !== entityId && normalizeEntityName(d.name) !== normalizeEntityName(ref.name));
 
+    // Remove parent assignments for this reference / entity
+    delete overlay.parentAssignments[referenceId];
+    delete overlay.parentAssignments[entityId];
+
     // Record promotion
+    const promotionSource: "manual" | "analyzer" | "ai" = options.source ?? "manual";
     overlay.promotions.push({
       referenceId,
       name: ref.name,
       promotedAt: now,
       reason,
       source: options.source ?? "manual",
+      source: promotionSource,
     });
+
+    const promotionOrigin: "manual" | "automatic" = promotionSource === "manual" ? "manual" : "automatic";
 
     // Create canonical entity
     const existingIndex = bible.canonicalEntities.findIndex((e) => e.id === entityId);
@@ -715,6 +1009,7 @@ export async function promoteMinorReference(
       canonicalName: ref.name,
       originalName: ref.originalName || "",
       description: "",
+      description: ref.contextNotes || "",
       aliases: ref.aliases,
       firstAppearance: ref.firstSeenChapter || 1,
       lastKnownAppearance: ref.lastSeenChapter || ref.firstSeenChapter || 1,
@@ -722,10 +1017,12 @@ export async function promoteMinorReference(
       notes: "",
       canonicalNameLocked: false,
       origin: "manual",
+      origin: promotionOrigin,
       provenance: ref.sourceEvidence.map((e) => ({
         chapter: e.chapter,
         kind: "extraction" as const,
         origin: "manual" as const,
+        origin: promotionOrigin,
       })),
       aliasNarrationRules: [],
       mergedFromIds: [],
@@ -749,14 +1046,23 @@ export async function promoteMinorReference(
           startChapter: ref.firstSeenChapter || 1,
           state: "current",
           provenance: [{ chapter: ref.firstSeenChapter || 1, kind: "relationship", origin: "manual" }],
+          provenance: [{ chapter: ref.firstSeenChapter || 1, kind: "relationship", origin: promotionOrigin }],
           locked: false,
           origin: "manual",
+          origin: promotionOrigin,
         });
       }
     }
 
     // Remove from minorReferences
     bible.minorReferences = bible.minorReferences.filter((r) => r.id !== referenceId);
+
+    // Reconcile child minor references that pointed to referenceId or demotedFromEntityId
+    for (const childRef of bible.minorReferences) {
+      if (childRef.parentEntityId === referenceId || childRef.parentEntityId === entityId) {
+        childRef.parentEntityId = entityId;
+      }
+    }
 
     // Audit
     bible.granularityAudits.push({
@@ -775,6 +1081,7 @@ export async function promoteMinorReference(
     await atomicWriteJson(paths.bibleCanonicalManual, overlay);
     await atomicWriteJson(paths.bible, bible);
     return { status: "promoted", referenceId, entity: newEntity, bible };
+    return { status: "promoted" as const, referenceId, entity: newEntity, bible };
   });
 }
 
@@ -816,11 +1123,31 @@ export async function updateMinorReference(
     if (patch.aliases !== undefined) ref.aliases = patch.aliases;
     if (patch.status !== undefined) ref.status = patch.status;
     if (patch.contextNotes !== undefined) ref.contextNotes = patch.contextNotes ?? undefined;
+
     if (patch.parentEntityId !== undefined) {
       ref.parentEntityId = patch.parentEntityId ?? undefined;
       overlay.parentAssignments[referenceId] = patch.parentEntityId || "";
       if (ref.demotedFromEntityId) {
         overlay.parentAssignments[ref.demotedFromEntityId] = patch.parentEntityId || "";
+      if (patch.parentEntityId) {
+        if (patch.parentEntityId === referenceId || patch.parentEntityId === ref.demotedFromEntityId) {
+          throw new Error(`Minor reference '${ref.name}' cannot be its own parent`);
+        }
+        const parentExists = bible.canonicalEntities.some((e) => e.id === patch.parentEntityId);
+        if (!parentExists) {
+          throw new Error(`Parent entity '${patch.parentEntityId}' was not found in canonical entities`);
+        }
+        ref.parentEntityId = patch.parentEntityId;
+        overlay.parentAssignments[referenceId] = patch.parentEntityId;
+        if (ref.demotedFromEntityId) {
+          overlay.parentAssignments[ref.demotedFromEntityId] = patch.parentEntityId;
+        }
+      } else {
+        ref.parentEntityId = undefined;
+        delete overlay.parentAssignments[referenceId];
+        if (ref.demotedFromEntityId) {
+          delete overlay.parentAssignments[ref.demotedFromEntityId];
+        }
       }
     }
     ref.updatedAt = new Date().toISOString();
@@ -828,7 +1155,31 @@ export async function updateMinorReference(
     await atomicWriteJson(paths.bibleCanonicalManual, overlay);
     await atomicWriteJson(paths.bible, bible);
     return { status: "updated", reference: ref };
+    return { status: "updated" as const, reference: ref };
   });
+}
+
+export interface BulkCleanupFailedItem {
+  entityId: string;
+  canonicalName: string;
+  action: "demote" | "merge";
+  reason: string;
+}
+
+export interface BulkCleanupResult {
+  analyzedCount: number;
+  appliedCount: number;
+  appliedDemotionsCount: number;
+  appliedMergesCount: number;
+  demotedCount: number;
+  mergedCount: number;
+  skippedProtectedCount: number;
+  failedCount: number;
+  appliedDemotions: string[];
+  appliedMerges: string[];
+  skippedProtected: string[];
+  failed: BulkCleanupFailedItem[];
+  bible: StoryBible;
 }
 
 /**
@@ -840,6 +1191,7 @@ export async function applyCleanupRecommendations(
   recommendationIdsOrOptions: string[] | { recommendationIds?: string[]; highConfidenceOnly?: boolean } = [],
   options: { highConfidenceOnly?: boolean } = {},
 ) {
+): Promise<BulkCleanupResult> {
   const ids = Array.isArray(recommendationIdsOrOptions)
     ? recommendationIdsOrOptions
     : (recommendationIdsOrOptions.recommendationIds ?? []);
@@ -851,10 +1203,16 @@ export async function applyCleanupRecommendations(
   const targetRecs = report.recommendations.filter(
     (r) => ids.includes(r.id) || (highConfidenceOnly && r.safeToAutoApply),
   );
+  const targetRecs = report.recommendations.filter((r) => {
+    if (ids.length > 0) return ids.includes(r.id);
+    if (highConfidenceOnly) return r.safeToAutoApply;
+    return true;
+  });
 
   const appliedDemotions: string[] = [];
   const appliedMerges: string[] = [];
   const skippedProtected: string[] = [];
+  const failed: BulkCleanupFailedItem[] = [];
 
   for (const rec of targetRecs) {
     if (rec.protected) {
@@ -865,6 +1223,7 @@ export async function applyCleanupRecommendations(
     if (rec.recommendation === "minor_reference") {
       try {
         await demoteCanonicalEntity(root, slug, rec.entityId, {
+        const res = await demoteCanonicalEntity(root, slug, rec.entityId, {
           parentEntityId: rec.parentEntityId,
           reason: rec.reason,
           source: "analyzer",
@@ -872,6 +1231,17 @@ export async function applyCleanupRecommendations(
         appliedDemotions.push(rec.canonicalName);
       } catch {
         // Skip on error
+        if (res.status === "demoted") {
+          appliedDemotions.push(rec.canonicalName);
+        }
+      } catch (err) {
+        logger.warn({ entityId: rec.entityId, err }, "Failed to demote canonical entity during cleanup");
+        failed.push({
+          entityId: rec.entityId,
+          canonicalName: rec.canonicalName,
+          action: "demote",
+          reason: err instanceof Error ? err.message : String(err),
+        });
       }
     } else if (rec.recommendation === "merge" && rec.targetEntityId) {
       try {
@@ -882,20 +1252,35 @@ export async function applyCleanupRecommendations(
         }
       } catch {
         // Skip on error
+      } catch (err) {
+        logger.warn({ entityId: rec.entityId, err }, "Failed to merge canonical entity during cleanup");
+        failed.push({
+          entityId: rec.entityId,
+          canonicalName: rec.canonicalName,
+          action: "merge",
+          reason: err instanceof Error ? err.message : String(err),
+        });
       }
     }
   }
 
   const updatedBible = await readJsonIfExists(storyPaths(root, slug, 1).bible);
+  const bible = updatedBible ? storyBibleSchema.parse(updatedBible) : emptyStoryBible();
+
   return {
+    analyzedCount: report.totalCanonical,
+    appliedCount: appliedDemotions.length + appliedMerges.length,
     appliedDemotionsCount: appliedDemotions.length,
     appliedMergesCount: appliedMerges.length,
     demotedCount: appliedDemotions.length,
     mergedCount: appliedMerges.length,
     skippedProtectedCount: skippedProtected.length,
+    failedCount: failed.length,
     appliedDemotions,
     appliedMerges,
     skippedProtected,
     bible: updatedBible ? storyBibleSchema.parse(updatedBible) : emptyStoryBible(),
+    failed,
+    bible,
   };
 }

@@ -9,7 +9,6 @@ import { normalizeEntityName } from "./updater.js";
 
 const overrideSchema = z.object({ canonicalName: z.string().trim().min(1).max(300).optional(), aliases: z.array(z.string().trim().min(1).max(300)).max(100).optional(), canonicalNameLocked: z.boolean().optional(), notes: z.string().max(10_000).optional(), status: z.string().max(500).optional(), preferredNarrationName: z.string().trim().min(1).max(300).nullable().optional(), aliasNarrationRules: canonicalEntitySchema.shape.aliasNarrationRules.optional(), localizedNaming: localizedNamingSchema.nullable().optional(), pronunciation: canonicalEntitySchema.shape.pronunciation.unwrap().nullable().optional(), snapshot: canonicalEntitySchema.optional(), updatedAt: z.string() });
 const manualMergeSchema = z.object({ id: z.string().uuid(), targetEntityId: z.string(), sourceEntityIds: z.array(z.string()).min(1), reason: z.string().min(1), createdAt: z.string(), undoneAt: z.string().optional() });
-export const canonicalOverlaySchema = z.object({ version: z.literal(1), overrides: z.record(z.string(), overrideSchema).default({}), merges: z.array(manualMergeSchema).default([]) });
 export const manualDemotionSchema = z.object({
   entityId: z.string(),
   name: z.string(),
@@ -39,17 +38,17 @@ export const canonicalOverlaySchema = z.object({
   promotions: z.array(manualPromotionSchema).default([]),
   parentAssignments: z.record(z.string(), z.string()).default({}),
 });
+export type CanonicalOverlay = z.infer<typeof canonicalOverlaySchema>;
 export type DuplicateSuggestion = { id: string; entityIds: [string, string]; entities: [{ id: string; name: string }, { id: string; name: string }]; confidence: number; reason: string; supportingChapters: number[] };
 
 export async function applyCanonicalOverlay(root: string, slug: string, input: StoryBible) {
-  const paths = storyPaths(root, slug, 1); const overlay = canonicalOverlaySchema.parse((await readJsonIfExists(paths.bibleCanonicalManual)) ?? { version: 1, overrides: {}, merges: [] }); const bible = structuredClone(input);
   const paths = storyPaths(root, slug, 1);
   const overlay = canonicalOverlaySchema.parse((await readJsonIfExists(paths.bibleCanonicalManual)) ?? { version: 1, overrides: {}, merges: [], demotions: [], promotions: [], parentAssignments: {} });
   const bible = structuredClone(input);
   const demotedIds = new Set(overlay.demotions.map((item) => item.entityId));
+  const demotedNames = new Set(overlay.demotions.map((item) => normalizeEntityName(item.name)).filter(Boolean));
 
   const present = new Set(bible.canonicalEntities.map((entity) => entity.id));
-  for (const entity of bible.canonicalEntities) { const value = overlay.overrides[entity.id]; if (value) applyOverride(entity, value); }
   for (const entity of bible.canonicalEntities) {
     const value = overlay.overrides[entity.id];
     if (value) applyOverride(entity, value);
@@ -57,10 +56,11 @@ export async function applyCanonicalOverlay(root: string, slug: string, input: S
   // Automatic extraction can be rebuilt from a shorter chapter range. A protected
   // record must not silently disappear in that case: its last validated snapshot
   // remains visible until a later extraction recognizes the identity again.
-  for (const [id, value] of Object.entries(overlay.overrides)) if (!present.has(id) && value.snapshot) bible.canonicalEntities.push(applyOverride(structuredClone(value.snapshot), value));
   // Demoted entities must never be resurrected by orphan snapshot recovery.
   for (const [id, value] of Object.entries(overlay.overrides)) {
     if (!present.has(id) && !demotedIds.has(id) && value.snapshot) {
+    const snapshotName = value.snapshot ? normalizeEntityName(value.snapshot.canonicalName) : "";
+    if (!present.has(id) && !demotedIds.has(id) && !demotedNames.has(snapshotName) && value.snapshot) {
       bible.canonicalEntities.push(applyOverride(structuredClone(value.snapshot), value));
     }
   }
@@ -68,11 +68,19 @@ export async function applyCanonicalOverlay(root: string, slug: string, input: S
   // Apply demotions: remove from canonicalEntities and ensure recorded as minor reference
   for (const demotion of overlay.demotions) {
     const existingIndex = bible.canonicalEntities.findIndex((item) => item.id === demotion.entityId);
+    const normDemoName = normalizeEntityName(demotion.name);
+    const existingIndex = bible.canonicalEntities.findIndex(
+      (item) => item.id === demotion.entityId || normalizeEntityName(item.canonicalName) === normDemoName,
+    );
     if (existingIndex >= 0) {
       const entity = bible.canonicalEntities[existingIndex]!;
       bible.canonicalEntities.splice(existingIndex, 1);
       const refId = `ref_${entity.id.slice(4)}`;
       const existingRef = bible.minorReferences.find((item) => item.id === refId || item.demotedFromEntityId === entity.id || normalizeEntityName(item.name) === normalizeEntityName(entity.canonicalName));
+      const refId = `ref_${entity.id.startsWith("ent_") ? entity.id.slice(4) : entity.id}`;
+      const existingRef = bible.minorReferences.find(
+        (item) => item.id === refId || item.demotedFromEntityId === entity.id || normalizeEntityName(item.name) === normalizeEntityName(entity.canonicalName),
+      );
       const parentId = demotion.parentEntityId ?? overlay.parentAssignments[refId] ?? overlay.parentAssignments[entity.id];
       if (!existingRef) {
         bible.minorReferences.push({
@@ -81,6 +89,7 @@ export async function applyCanonicalOverlay(root: string, slug: string, input: S
           originalName: entity.originalName || undefined,
           type: entity.type as any,
           parentEntityId: parentId,
+          parentEntityId: parentId || undefined,
           aliases: entity.aliases,
           firstSeenChapter: entity.firstAppearance,
           lastSeenChapter: entity.lastKnownAppearance,
@@ -95,6 +104,12 @@ export async function applyCanonicalOverlay(root: string, slug: string, input: S
         });
       } else if (parentId && !existingRef.parentEntityId) {
         existingRef.parentEntityId = parentId;
+      } else {
+        existingRef.status = "minor";
+        existingRef.demotedFromEntityId = entity.id;
+        if (parentId && !existingRef.parentEntityId) {
+          existingRef.parentEntityId = parentId;
+        }
       }
     }
   }
