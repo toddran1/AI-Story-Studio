@@ -45,7 +45,7 @@ import { manualAcceptanceFingerprint } from "../studio/stage-acceptance.js";
 import { StageExecutionNode, dependentProcessingStages } from "../studio/stage-execution.js";
 
 export type ForceStage = "translation" | "narration" | "qa" | "story-bible" | "continuity" | "tts" | "audio" | "all";
-export type PipelineStageEvent = { stage: StageName; status: "started" | "completed" | "reused"; state: StageState };
+export type PipelineStageEvent = { stage: StageName; status: "started" | "completed" | "reused"; state: StageState; detail?: string };
 export type PipelineOptions = {
   root: string; story: Story; chapter: number; inputPath: string; force?: ForceStage;
   stopAfter?: StageName;
@@ -280,7 +280,8 @@ export class ChapterPipeline {
     // A blank per-story voice intentionally inherits the environment default. Include
     // the resolved value in the fingerprint so a changed default cannot reuse audio
     // generated with a different voice.
-    const pronunciationData = await withUsageScope({ story: options.story.slug, chapter: options.chapter, stage: "pronunciation" }, () => enrichStoryPronunciations(options.root, options.story.slug, bible, this.llms.forStage(bibleConfig), bibleConfig, options.story.sourceLanguage));
+    const pronunciationData = await withUsageScope({ story: options.story.slug, chapter: options.chapter, stage: "pronunciation" }, () => enrichStoryPronunciations(options.root, options.story.slug, bible, this.llms.forStage(bibleConfig), bibleConfig, options.story.sourceLanguage, undefined, false, false,
+      (progress) => { if (progress.total > 0) options.onStageEvent?.({ stage: "tts", status: "started", state: chapter.stages.tts, detail: `Enriching pronunciations ${progress.processed}/${progress.total}` }); }));
     const ttsProvider = pronunciationProvider(this.tts.forName(ttsConfig.provider), pronunciationData.entities);
     const speech = normalizeSpeechForProvider(ttsScript, options.story.outputLanguage, options.story.narrationSettings, ttsProvider, ttsConfig.model);
     const pronunciationFp = pronunciationFingerprint(resolvePronunciations(speech.normalized.text, pronunciationData.entities));

@@ -156,6 +156,26 @@ describe("pronunciation persistence and production boundary", () => {
     await enrichStoryPronunciations(root, story.slug, base, llm, story.pipeline.storyBible, story.sourceLanguage);
     expect(generate).toHaveBeenCalledTimes(1);
   });
+  it("reports enrichment progress as candidates are processed", async () => {
+    const { root, story, bible, entity, paths } = await fixture(); const second = structuredClone(entity), third = structuredClone(entity);
+    second.id = "ent_222222222222222222222222"; second.canonicalName = "Lin Yao"; second.originalName = "林遥"; second.aliases = [];
+    third.id = "ent_333333333333333333333333"; third.canonicalName = "Mo Xie"; third.originalName = "莫邪"; third.aliases = [];
+    const base = { ...bible, canonicalEntities: [entity, second, third] }; const llm = new MockLLM();
+    await atomicWrite(paths.original, "江月与林遥、莫邪一起走进山门。");
+    vi.spyOn(llm, "generateStructured").mockImplementation(async request => ({ value: request.schema.parse({ results: [
+      { entityId: entity.id, pronunciation: { mode: "automatic", sourceLanguage: "zh-CN", confidence: .9 } },
+      { entityId: second.id, pronunciation: null },
+      { entityId: third.id, pronunciation: null },
+    ] }) }));
+    const events: Array<{ processed: number; total: number }> = [];
+    await enrichStoryPronunciations(root, story.slug, base, llm, story.pipeline.storyBible, story.sourceLanguage, undefined, false, false, event => events.push(event));
+    expect(events[0]).toEqual({ processed: 0, total: 3 });
+    expect(events.at(-1)).toEqual({ processed: 3, total: 3 });
+    // Fully cached run: total is zero, so callers can skip rendering progress.
+    const cached: Array<{ processed: number; total: number }> = [];
+    await enrichStoryPronunciations(root, story.slug, base, llm, story.pipeline.storyBible, story.sourceLanguage, undefined, false, false, event => cached.push(event));
+    expect(cached).toEqual([{ processed: 0, total: 0 }]);
+  });
   it("marks only referenced sound-dependent stages stale and retains playable files", async () => {
     const { root, story, entity } = await fixture(); const now = new Date().toISOString();
     for (const number of [1, 2]) {

@@ -48,7 +48,8 @@ export async function loadPronunciationAttempts(root: string, slug: string) {
 }
 
 /** Caller holds the story lock. Cache automatic and unresolved outcomes by canonical identity. */
-export async function enrichStoryPronunciations(root: string, slug: string, base: StoryBible, provider: LLMProvider, config: StageModelConfig, language: string, ids?: string[], force = Boolean(ids), dryRun = false) {
+export async function enrichStoryPronunciations(root: string, slug: string, base: StoryBible, provider: LLMProvider, config: StageModelConfig, language: string, ids?: string[], force = Boolean(ids), dryRun = false,
+  onProgress?: (progress: { processed: number; total: number }) => void) {
   const startedAt = Date.now();
   const path = join(storyPaths(root, slug, 1).story, "pronunciation-enrichment.json");
   const pendingPath = join(storyPaths(root, slug, 1).story, "pronunciation-invalidation-pending.json");
@@ -75,6 +76,7 @@ export async function enrichStoryPronunciations(root: string, slug: string, base
     candidates.push({ entity, evidence, input }); summary.eligible++;
   }
   summary.batches = Math.ceil(candidates.length / 8);
+  onProgress?.({ processed: 0, total: candidates.length });
   if (dryRun) return { enriched, unresolved, entities, summary: { ...summary, successful: 0, needsReview: 0, durationMs: Date.now() - startedAt }, dryRun: true };
   const persist = async (entity: CanonicalEntity, input: string, value: CanonicalEntity["pronunciation"] | undefined) => {
     const next = value ? { ...value, sourceLanguage: value.sourceLanguage ?? language, needsReview: value.needsReview ?? (value.confidence ?? 1) < .7, source: "ai" as const, locked: false, updatedAt: new Date().toISOString() } : undefined;
@@ -106,6 +108,7 @@ export async function enrichStoryPronunciations(root: string, slug: string, base
           await persist(item.entity, item.input, value === null ? undefined : value ?? unresolvedPronunciation(language, item.evidence));
         }
       }
+      onProgress?.({ processed: Math.min(start + batch.length, candidates.length), total: candidates.length });
     }
   } finally {
     if (pending.length) { await invalidatePronunciationChanges(root, slug, pending); await atomicWriteJson(pendingPath, []); }
