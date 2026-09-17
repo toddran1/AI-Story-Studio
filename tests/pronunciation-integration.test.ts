@@ -137,6 +137,25 @@ describe("pronunciation persistence and production boundary", () => {
     const result = await enrichStoryPronunciations(root, story.slug, base, llm, story.pipeline.storyBible, story.sourceLanguage);
     expect(generate).toHaveBeenCalledTimes(1); expect(result.summary.protected).toBe(1); expect(result.enriched).toEqual([second.id, third.id]);
   });
+  it("distinguishes an explicit null (ordinary term, cached silently) from an entity missing from the batch results (unresolved)", async () => {
+    const { root, story, bible, entity, paths } = await fixture(); const ordinary = structuredClone(entity);
+    ordinary.id = "ent_222222222222222222222222"; ordinary.canonicalName = "Level"; ordinary.originalName = "等级"; ordinary.aliases = [];
+    const base = { ...bible, canonicalEntities: [entity, ordinary] }; const llm = new MockLLM();
+    await atomicWrite(paths.original, "江月突破了等级。");
+    const generate = vi.spyOn(llm, "generateStructured").mockImplementation(async request => ({ value: request.schema.parse({ results: [
+      { entityId: ordinary.id, pronunciation: null },
+    ] }) }));
+    const result = await enrichStoryPronunciations(root, story.slug, base, llm, story.pipeline.storyBible, story.sourceLanguage);
+    const entities = await loadPronunciationEntities(root, story.slug);
+    // Explicit null: no record, no unresolved flag, and the attempt is cached.
+    expect(entities.find(item => item.id === ordinary.id)?.pronunciation).toBeUndefined();
+    expect(result.unresolved).not.toContain(ordinary.id);
+    // Missing from the batch results: reviewable unresolved record.
+    expect(entities.find(item => item.id === entity.id)?.pronunciation).toMatchObject({ needsReview: true, confidence: 0 });
+    // A second run must not re-query the cached null outcome.
+    await enrichStoryPronunciations(root, story.slug, base, llm, story.pipeline.storyBible, story.sourceLanguage);
+    expect(generate).toHaveBeenCalledTimes(1);
+  });
   it("marks only referenced sound-dependent stages stale and retains playable files", async () => {
     const { root, story, entity } = await fixture(); const now = new Date().toISOString();
     for (const number of [1, 2]) {

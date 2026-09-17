@@ -3,6 +3,7 @@ import { pronunciationSchema, type CanonicalEntity, type EntityPronunciation } f
 import type { LLMProvider } from "../llm/provider.js";
 import type { StageModelConfig } from "../domain/provider.js";
 import { fingerprint } from "../utils/hash.js";
+import { logger } from "../utils/logger.js";
 import type { TTSProvider } from "./provider.js";
 
 export const PRONUNCIATION_VERSION = "pronunciation-v1";
@@ -107,9 +108,38 @@ export async function enrichPronunciation(provider: LLMProvider, config: StageMo
 /** Batch compatible automatic entities to reduce provider calls while retaining per-entity evidence. */
 export async function enrichPronunciationBatch(provider: LLMProvider, config: StageModelConfig, entities: Array<{ entity: CanonicalEntity; evidence: PronunciationSourceEvidence[] }>, sourceLanguage: string) {
   const schema = z.object({ results: z.array(z.object({ entityId: z.string(), pronunciation: pronunciationSchema.nullable() })).max(entities.length) });
-  const result = await provider.generateStructured({ model: config.model, schemaName: "entity_pronunciation_batch", schema,
-    instructions: "Enrich these foreign story entities for English narration. Each entity has evidence from its own source novel. Never infer original script from an English transliteration alone. For each item, use original-language spelling only when its supplied evidence establishes it. Return null for ordinary English terms. For unresolved identity, return automatic mode, low confidence, needsReview true, and no guessed originalText, romanization, or phoneticHint. Mandarin romanization must use tone-marked Hanyu Pinyin. Use original_language mode for a confident source-language identity. Keep each entity ID exactly as supplied; do not return an item for a different ID.",
-    input: JSON.stringify({ storySourceLanguage: sourceLanguage, entities }) });
-  const allowed = new Set(entities.map(item => item.entity.id));
-  return { pronunciations: new Map(result.value.results.filter(item => allowed.has(item.entityId)).map(item => [item.entityId, item.pronunciation ?? undefined])), usage: result.usage };
+  try {
+    const result = await provider.generateStructured({ model: config.model, schemaName: "entity_pronunciation_batch", schema,
+      instructions: "Enrich these foreign story entities for English narration. Each entity has evidence from its own source novel. Never infer original script from an English transliteration alone. For each item, use original-language spelling only when its supplied evidence establishes it. Return null for ordinary English terms. For unresolved identity, return automatic mode, low confidence, needsReview true, and no guessed originalText, romanization, or phoneticHint. Mandarin romanization must use tone-marked Hanyu Pinyin. Use original_language mode for a confident source-language identity. Keep each entity ID exactly as supplied; do not return an item for a different ID.",
+      input: JSON.stringify({ storySourceLanguage: sourceLanguage, entities }) });
+    const allowed = new Set(entities.map(item => item.entity.id));
+    // null marks an explicit "ordinary translated term, no guidance needed"
+    // answer; only an entity missing from the results is unresolved.
+    return { pronunciations: new Map(result.value.results.filter(item => allowed.has(item.entityId)).map(item => [item.entityId, item.pronunciation ?? null])), usage: result.usage };
+  } catch (error) {
+    // A malformed batch response (e.g. the model omitted the results array)
+    // must not abort the whole job: retry the same entities one at a time.
+    // Genuine request failures (auth, network, quota) still propagate.
+    if (!isStructuredShapeError(error)) throw error;
+    // Surface the raw-response excerpt (embedded by the provider) so the batch
+    // contract can be fixed instead of silently paying for per-entity retries.
+    logger.warn({ provider: provider.name, model: config.model, entities: entities.length, err: error instanceof Error ? error.message : String(error) },
+      "Pronunciation batch response was malformed; falling back to per-entity enrichment");
+    const pronunciations = new Map<string, EntityPronunciation | null>();
+    const usages: Array<{ requestId?: string; inputTokens?: number; outputTokens?: number; cachedTokens?: number }> = [];
+    for (const item of entities) {
+      const result = await enrichPronunciation(provider, config, item.entity, sourceLanguage, item.evidence);
+      pronunciations.set(item.entity.id, result.pronunciation ?? null);
+      if (result.usage) usages.push(result.usage);
+    }
+    const sum = (key: "inputTokens" | "outputTokens" | "cachedTokens") => usages.some(usage => usage[key] !== undefined) ? usages.reduce((total, usage) => total + (usage[key] ?? 0), 0) : undefined;
+    return { pronunciations, usage: usages.length ? { requestId: usages.map(usage => usage.requestId).filter(Boolean).join(",") || undefined, inputTokens: sum("inputTokens"), outputTokens: sum("outputTokens"), cachedTokens: sum("cachedTokens") } : undefined };
+  }
+}
+
+function isStructuredShapeError(error: unknown): boolean {
+  for (let current: unknown = error; current; current = (current as { cause?: unknown }).cause) {
+    if (current instanceof z.ZodError || current instanceof SyntaxError) return true;
+  }
+  return false;
 }

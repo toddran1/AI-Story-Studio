@@ -45,7 +45,13 @@ export class GeminiProvider implements LLMProvider {
         });
       }
       if (!interaction.output_text?.trim()) throw new ProviderError("Gemini returned no structured output");
-      return { value: request.schema.parse(JSON.parse(interaction.output_text)), usage: usageFrom(interaction) };
+      const text = interaction.output_text;
+      try {
+        return { value: request.schema.parse(JSON.parse(text)), usage: usageFrom(interaction) };
+      } catch (error) {
+        const excerpt = text.length > 300 ? `${text.slice(0, 300)}…` : text;
+        throw new ProviderError(`Gemini structured output did not match the expected shape. Raw output excerpt: ${excerpt}`, { cause: error });
+      }
     } catch (error) { if (error instanceof ConfigurationError) throw error; throw new ProviderError("Gemini structured Interactions API request failed", { cause: error }); }
   }
 }

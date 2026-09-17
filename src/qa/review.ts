@@ -74,10 +74,17 @@ export function anchorAbsentFromContent(finding: QaFinding, content: string, ent
   }
   const excerptKey = finding.provenance?.excerptKey;
   if (excerptKey) {
-    const tokens = [...tokenSet(excerptKey)];
+    // Presence must mean a contiguous phrase survived, not scattered stopwords:
+    // after a genuine rewrite, shared words like "su ming" or "chapter" remain
+    // everywhere, but no 4-token run of the old excerpt does.
+    const tokens = excerptKey.split(" ").filter(Boolean);
     if (tokens.length) {
-      const present = tokens.filter((token) => normalized.includes(token)).length;
-      if (present / tokens.length < 0.5) return true;
+      const window = Math.min(4, tokens.length);
+      let present = false;
+      for (let index = 0; index + window <= tokens.length; index++) {
+        if (normalized.includes(tokens.slice(index, index + window).join(" "))) { present = true; break; }
+      }
+      if (!present) return true;
     }
   }
   return false;

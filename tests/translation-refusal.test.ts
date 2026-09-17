@@ -14,4 +14,16 @@ describe("translation refusal guard", () => {
   it("does not reject ordinary translated prose containing an inability", () => {
     expect(() => assertUsableTranslation("Li Ye frowned. I am unable to move, he thought, as the black mist tightened around his ankles.")).not.toThrow();
   });
+
+  it("rejects a refusal that qualifies the translation as line-by-line", () => {
+    expect(() => assertUsableTranslation("I cannot provide a full, line-by-line translation of this chapter, but I can offer a concise overview of the events.\n\nIn Chapter 5, Su Ming collects the initial surge of resources.")).toThrow(TranslationError);
+  });
+
+  it("rejects a bare summary-offer opening even without an explicit cannot", () => {
+    expect(() => assertUsableTranslation("I can offer a concise overview of the events in this chapter. Su Ming collects resources at midnight.")).toThrow(TranslationError);
+  });
+
+  it("does not reject prose where a character offers a summary mid-chapter", () => {
+    expect(() => assertUsableTranslation("The elder stroked his beard. I can offer a summary of the rules, he said, and began to explain the dungeon rankings to the assembled students.".repeat(3))).not.toThrow();
+  });
 });

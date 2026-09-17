@@ -170,6 +170,28 @@ describe("reconcileQaState outcome matrix", () => {
     expect(deriveIssues(findings)).toEqual([]);
   });
 
+  it("obsoletes stale findings after a full rewrite even though individual excerpt words still appear", () => {
+    // Regression: scattered stopwords ("su ming", "chapter", "midnight") survive any
+    // rewrite; only a contiguous phrase proves the old anchor is still present.
+    const oldNarration = "Chapter 5 Summary: Su Ming collects the initial surge of resources accumulated by his ability at midnight.";
+    const issue = detection({ category: "numbers", message: "The narration is a brief synopsis.", evidence: `NARRATION: "${oldNarration}"` });
+    const state = buildQaState(undefined, [issue], { chapter: 5, translation: oldNarration, narration: oldNarration, now: NOW }).state;
+    const rewritten = "Chapter 5: Novice Dungeon. The time had come. Su Ming nervously summoned the Super System interface at midnight, then chose to withdraw the accumulated points before the assembled students.";
+    const { findings, outcome } = reconcileQaState(state, [], { chapter: 5, content: rewritten, now: NOW });
+    expect(findings[0]!.status).toBe("obsolete");
+    expect(outcome.obsoleted).toBe(1);
+  });
+
+  it("keeps an open finding whose anchored phrase survives the edit", () => {
+    const passage = "Su Ming nervously summoned the Super System interface and chose to withdraw the accumulated points.";
+    const issue = detection({ category: "numbers", message: "The accumulated total is missing.", evidence: `NARRATION: "${passage}"` });
+    const state = buildQaState(undefined, [issue], { chapter: 5, translation: passage, narration: passage, now: NOW }).state;
+    const edited = `The time had come. ${passage} He then left the dungeon.`; // phrase survives verbatim
+    const { findings, outcome } = reconcileQaState(state, [], { chapter: 5, content: edited, now: NOW });
+    expect(findings[0]!.status).toBe("open");
+    expect(outcome.obsoleted).toBe(0);
+  });
+
   it("adds an unmatched fresh detection as a new open finding", () => {
     const { findings, outcome } = reconcileQaState(baseState(), [detection({ category: "dialogue", message: "A line was dropped.", evidence: "The warning is missing." })], { chapter: 3, now: NOW });
     expect(findings).toHaveLength(2);

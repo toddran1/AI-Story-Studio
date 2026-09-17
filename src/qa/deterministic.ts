@@ -2,7 +2,7 @@ import { Story } from "../domain/story.js";
 import { CanonicalEntity } from "../domain/story-bible.js";
 import { continuityReviewSchema } from "../story-bible/continuity.js";
 import { loadNarrationNamingEntities } from "../story-bible/narration-names.js";
-import { loadPronunciationEntities } from "../story-bible/pronunciation.js";
+import { loadPronunciationAttempts, loadPronunciationEntities, pronunciationAttemptInput } from "../story-bible/pronunciation.js";
 import { normalizeSpeechText, speechNormalizationSettingsFromNarration } from "../tts/speech-normalization.js";
 import { detectVocalizations } from "../tts/vocalizations.js";
 import { readJsonIfExists } from "../storage/story-files.js";
@@ -134,12 +134,15 @@ function speechReadinessDetections(story: Story, narration: string): FreshQaDete
 }
 
 /** Spoken entities whose pronunciation is missing (foreign-named) or needs review. */
-function pronunciationDetections(entities: CanonicalEntity[], narration: string): FreshQaDetection[] {
+function pronunciationDetections(entities: CanonicalEntity[], narration: string, attempts: Record<string, string>, sourceLanguage: string): FreshQaDetection[] {
   const detections: FreshQaDetection[] = [];
   for (const entity of entities) {
     const names = [entity.canonicalName, entity.originalName, ...entity.aliases, entity.preferredNarrationName ?? "", entity.localizedNaming?.fullName ?? "", entity.localizedNaming?.shortName ?? ""];
     if (!names.some((name) => containsName(narration, name))) continue;
     if (!entity.pronunciation) {
+      // A completed enrichment attempt with no record means the system already
+      // determined no guidance is needed (ordinary translated term); don't nag.
+      if (attempts[entity.id] === pronunciationAttemptInput(entity, sourceLanguage)) continue;
       // Ordinary translated English terms need no guidance; flag only entities
       // with a distinct original-language name actually spoken in narration.
       if (entity.originalName && normalizeQaText(entity.originalName) !== normalizeQaText(entity.canonicalName)) {
@@ -183,16 +186,17 @@ export async function runDeterministicQaChecks(deps: {
   narration: string;
 }): Promise<DeterministicQaResult> {
   const { root, story, translation, narration } = deps;
-  const [namingEntities, pronunciationEntities, acceptedContinuity] = await Promise.all([
+  const [namingEntities, pronunciationEntities, acceptedContinuity, pronunciationAttempts] = await Promise.all([
     loadNarrationNamingEntities(root, story.slug),
     loadPronunciationEntities(root, story.slug),
     loadAcceptedContinuity(root, story.slug),
+    loadPronunciationAttempts(root, story.slug),
   ]);
   const detections: FreshQaDetection[] = [
     ...namingDetections(namingEntities, narration),
     ...duplicateParagraphDetections(translation, narration),
     ...speechReadinessDetections(story, narration),
-    ...pronunciationDetections(pronunciationEntities, narration),
+    ...pronunciationDetections(pronunciationEntities, narration, pronunciationAttempts, story.sourceLanguage),
   ];
   return { detections, acceptedContinuity };
 }

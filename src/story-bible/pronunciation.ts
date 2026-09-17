@@ -38,6 +38,15 @@ function unresolvedPronunciation(language: string, evidence: PronunciationSource
   return { mode: "automatic" as const, sourceLanguage: language, confidence: 0, needsReview: true, evidence, source: "ai" as const, locked: false, updatedAt: new Date().toISOString() };
 }
 
+/** Canonical-identity cache key recorded for every completed enrichment attempt. */
+export function pronunciationAttemptInput(entity: CanonicalEntity, language: string) {
+  return fingerprint({ version: PRONUNCIATION_VERSION, id: entity.id, name: entity.canonicalName, original: entity.originalName, aliases: entity.aliases, language, type: entity.type });
+}
+
+export async function loadPronunciationAttempts(root: string, slug: string) {
+  return attemptsSchema.parse(await readJsonIfExists(join(storyPaths(root, slug, 1).story, "pronunciation-enrichment.json")) ?? {});
+}
+
 /** Caller holds the story lock. Cache automatic and unresolved outcomes by canonical identity. */
 export async function enrichStoryPronunciations(root: string, slug: string, base: StoryBible, provider: LLMProvider, config: StageModelConfig, language: string, ids?: string[], force = Boolean(ids), dryRun = false) {
   const startedAt = Date.now();
@@ -55,7 +64,7 @@ export async function enrichStoryPronunciations(root: string, slug: string, base
     const pronunciation = entity.pronunciation;
     if (pronunciation?.locked || pronunciation?.source === "manual") { summary.protected++; continue; }
     if (!force && pronunciation && !pronunciation.needsReview) { summary.alreadyEnriched++; continue; }
-    const input = fingerprint({ version: PRONUNCIATION_VERSION, id: entity.id, name: entity.canonicalName, original: entity.originalName, aliases: entity.aliases, language, type: entity.type });
+    const input = pronunciationAttemptInput(entity, language);
     if (!force && attempts[entity.id] === input) { summary.alreadyEnriched++; continue; }
     if (!entity.originalName && /^en(?:-|$)|^english$/i.test(language)) { summary.notNeeded++; continue; }
     const evidence = await collectSourceEvidence(root, slug, entity);
@@ -89,7 +98,13 @@ export async function enrichStoryPronunciations(root: string, slug: string, base
         await persist(item.entity, item.input, result.pronunciation ?? (item.evidence.length ? undefined : unresolvedPronunciation(language, item.evidence)));
       } else {
         const result = await enrichPronunciationBatch(provider, config, batch.map(item => ({ entity: item.entity, evidence: item.evidence })), language);
-        for (const item of batch) await persist(item.entity, item.input, result.pronunciations.get(item.entity.id) ?? unresolvedPronunciation(language, item.evidence));
+        for (const item of batch) {
+          const value = result.pronunciations.get(item.entity.id);
+          // null = the provider explicitly identified an ordinary translated term
+          // that needs no guidance (attempt is still cached); only an entity
+          // missing from the batch results is unresolved.
+          await persist(item.entity, item.input, value === null ? undefined : value ?? unresolvedPronunciation(language, item.evidence));
+        }
       }
     }
   } finally {

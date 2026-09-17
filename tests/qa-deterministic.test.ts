@@ -3,7 +3,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { storySchema } from "../src/domain/story.js";
-import { emptyStoryBible, storyBibleSchema } from "../src/domain/story-bible.js";
+import { emptyStoryBible, storyBibleSchema, canonicalEntitySchema } from "../src/domain/story-bible.js";
+import { pronunciationAttemptInput } from "../src/story-bible/pronunciation.js";
 import { runDeterministicQaChecks } from "../src/qa/deterministic.js";
 import { addQaException, exceptionsPromptSection, filterExceptedFindings, listQaExceptions, removeQaException } from "../src/qa/exceptions.js";
 import { buildQaState } from "../src/qa/review.js";
@@ -114,6 +115,21 @@ describe("deterministic pronunciation checks", () => {
     expect(findings.find((detection) => detection.entityIds?.[0] === "ent_dddddddddddddddddddddddd")!.message).toContain("no pronunciation guidance");
     // Ordinary translated English terms need no pronunciation record.
     expect(findings.some((detection) => detection.entityIds?.[0] === "ent_eeeeeeeeeeeeeeeeeeeeeeee")).toBe(false);
+  });
+
+  it("stays silent for entities whose completed enrichment attempt determined no guidance was needed", async () => {
+    const root = await mkdtemp(join(tmpdir(), "qa-det-"));
+    const term = entity({ id: "ent_ffffffffffffffffffffffff", canonicalName: "Level", originalName: "等级" });
+    const { story, paths } = await setup(root, { entities: [term] });
+    const parsed = canonicalEntitySchema.parse(term);
+    await atomicWriteJson(join(paths.story, "pronunciation-enrichment.json"), { [parsed.id]: pronunciationAttemptInput(parsed, story.sourceLanguage) });
+    const { detections } = await run(root, story, "His Level rose quickly.");
+    expect(detections.filter((detection) => detection.category === "names")).toEqual([]);
+    // A stale attempt (identity changed afterwards) must not suppress the warning.
+    const renamed = { ...term, canonicalName: "Level Rank" };
+    await atomicWriteJson(paths.bible, storyBibleSchema.parse({ ...emptyStoryBible(), canonicalEntities: [entity(renamed)] }));
+    const flagged = await run(root, story, "His Level Rank rose quickly.");
+    expect(flagged.detections.some((detection) => detection.category === "names" && detection.message.includes("no pronunciation guidance"))).toBe(true);
   });
 });
 

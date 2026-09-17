@@ -87,7 +87,10 @@ describe("chapter QA state endpoint", () => {
 
   it("supports recheck modes and reports the summary in the job result", async () => {
     const narration = "The keeper raised the Azure Flame high above the gate.";
-    const { root, story } = await fixture({ detections: [detection()], translation: narration, narration });
+    // Anchor the prior finding to a phrase that genuinely survives in the content;
+    // scattered shared words no longer count as presence.
+    const anchored = detection({ evidence: `Narration says "The keeper raised the Azure Flame" at dusk.` });
+    const { root, story } = await fixture({ detections: [anchored], translation: narration, narration });
     const openai = openaiQa();
     const { jobs, operations } = operationsWith(root, openai);
     const finished = await waitForJob(jobs, operations.startQaRecheck(story.slug, 1, { mode: "changed" }).id);
@@ -189,7 +192,7 @@ describe("safe fixes", () => {
       narration, bibleEntities: [namingEntity],
       detections: [
         detection({ category: "names", message: `Narration uses "Suming" but the authorized narration rendering is "Asher".`, evidence: `Narration contains "Suming" but never "Asher".`, origin: "deterministic", safeToFix: true, entityIds: ["ent_aaaaaaaaaaaaaaaaaaaaaaaa"] }),
-        detection({ message: "Use the canonical ability name", evidence: "Azure Flame is the locked term." }),
+        detection({ message: "Use the canonical ability name", evidence: `Narration says "the heavy door" but the locked term is required.` }),
       ],
     });
     const state = await readState(paths);

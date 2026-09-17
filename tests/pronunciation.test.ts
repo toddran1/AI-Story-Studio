@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { canonicalEntitySchema, pronunciationSchema } from "../src/domain/story-bible.js";
-import { adaptPronunciationText, enrichPronunciation, pronunciationFingerprint, resolvePronunciations } from "../src/tts/pronunciation.js";
+import { adaptPronunciationText, enrichPronunciation, enrichPronunciationBatch, pronunciationFingerprint, resolvePronunciations } from "../src/tts/pronunciation.js";
 import { normalizeSpeechText } from "../src/tts/speech-normalization.js";
+import { ProviderError } from "../src/pipeline/errors.js";
 import type { LLMProvider } from "../src/llm/provider.js";
 
 const entity = canonicalEntitySchema.parse({ id: "ent_123456789012345678901234", type: "character", canonicalName: "Jiang Yue", originalName: "江月", aliases: ["Mr. Jiang"], firstAppearance: 1, lastKnownAppearance: 2,
@@ -59,5 +60,35 @@ describe("provider-neutral pronunciation foundation", () => {
     const provider = { generateStructured: () => { throw new Error("must not call"); } } as unknown as LLMProvider;
     const locked = { ...entity, pronunciation: { ...entity.pronunciation!, locked: true } };
     expect((await enrichPronunciation(provider, { provider: "openai", model: "fake" }, locked, "zh-CN")).pronunciation).toEqual(locked.pronunciation);
+  });
+});
+
+describe("pronunciation batch enrichment resilience", () => {
+  const config = { provider: "openai", model: "fake" } as const;
+  const candidates = [
+    { entity: { ...entity, pronunciation: undefined }, evidence: [] },
+    { entity: { ...entity, id: "ent_223456789012345678901234", canonicalName: "Mo Xie", pronunciation: undefined }, evidence: [] },
+  ];
+  const single = (id: string) => ({ pronunciation: { mode: "automatic" as const, phoneticHint: `hint-${id}`, confidence: .8, source: "ai" as const } });
+  it("falls back to per-entity enrichment when the batch response shape is invalid", async () => {
+    const provider = {
+      generateStructured: async (request: { schemaName: string; schema: { parse(value: unknown): unknown } }) => {
+        if (request.schemaName === "entity_pronunciation_batch") {
+          // Mirror the production failure: the model returned JSON without the results array.
+          request.schema.parse({});
+          throw new Error("parse should have failed");
+        }
+        const input = JSON.parse((request as unknown as { input: string }).input) as { entity: { id: string } };
+        return { value: single(input.entity.id), usage: { requestId: `req-${input.entity.id}`, inputTokens: 10, outputTokens: 5 } };
+      },
+    } as unknown as LLMProvider;
+    const result = await enrichPronunciationBatch(provider, config, candidates, "zh-CN");
+    expect([...result.pronunciations.keys()].sort()).toEqual(candidates.map(item => item.entity.id).sort());
+    expect(result.pronunciations.get(candidates[0]!.entity.id)?.phoneticHint).toBe(`hint-${candidates[0]!.entity.id}`);
+    expect(result.usage?.inputTokens).toBe(20);
+  });
+  it("still propagates genuine request failures", async () => {
+    const provider = { generateStructured: async () => { throw new ProviderError("Gemini structured Interactions API request failed"); } } as unknown as LLMProvider;
+    await expect(enrichPronunciationBatch(provider, config, candidates, "zh-CN")).rejects.toThrow("Interactions API request failed");
   });
 });
