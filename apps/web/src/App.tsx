@@ -255,22 +255,117 @@ function LegacyBiblePage({ slug }: { slug: string }) { const [view, setView] = u
 
 function BiblePage({ slug, navigate }: { slug: string; navigate: (path: string) => void }) {
   const [view, setView] = useState<any>(); const [detail, setDetail] = useState<any>(); const [editing, setEditing] = useState<any>(); const [error, setError] = useState(""); const [notice, setNotice] = useState(""); const [query, setQuery] = useState(""); const deferred = useDeferredValue(query); const [type, setType] = useState("all"); const [sort, setSort] = useState("last"); const [page, setPage] = useState(1);
+  const [tab, setTab] = useState<"canonical" | "references" | "cleanup">("canonical");
+  const [refsView, setRefsView] = useState<any>(); const [refsQuery, setRefsQuery] = useState(""); const deferredRefs = useDeferredValue(refsQuery); const [refsType, setRefsType] = useState("all"); const [refsPage, setRefsPage] = useState(1);
+  const [analysis, setAnalysis] = useState<any>(); const [loadingAnalysis, setLoadingAnalysis] = useState(false);
   const load = () => api<any>(`/stories/${slug}/story-bible/entities?page=${page}&pageSize=50&type=${type}&sort=${sort}&q=${encodeURIComponent(deferred)}`).then(setView); useEffect(() => { void load().catch((value) => setError(message(value))); }, [slug, page, type, sort, deferred]);
+  const loadReferences = () => api<any>(`/stories/${slug}/story-bible/references?page=${refsPage}&pageSize=50&type=${refsType}&q=${encodeURIComponent(deferredRefs)}`).then(setRefsView);
+  useEffect(() => { if (tab === "references") void loadReferences().catch((value) => setError(message(value))); }, [slug, tab, refsPage, refsType, deferredRefs]);
+  const loadAnalysis = async () => { try { setLoadingAnalysis(true); const res = await api<any>(`/stories/${slug}/story-bible/analysis`); setAnalysis(res); } catch (value) { setError(message(value)); } finally { setLoadingAnalysis(false); } };
+  useEffect(() => { if (tab === "cleanup" && !analysis) void loadAnalysis(); }, [slug, tab]);
   const open = (id: string) => api<any>(`/stories/${slug}/story-bible/entities/${id}`).then(setDetail).catch((value) => setError(message(value)));
   const save = async () => { try { setError(""); const aliases = editing.aliasDrafts.map((item: any) => item.alias.trim()).filter(Boolean); const aliasNarrationRules = editing.aliasDrafts.filter((item: any) => item.alias.trim()).map((item: any) => ({ alias: item.alias.trim(), behavior: item.behavior, ...(item.behavior === "custom" ? { replacement: item.replacement.trim() } : {}) })); const response = await put<any>(`/stories/${slug}/story-bible/entities/${editing.id}`, { canonicalName: editing.canonicalName, aliases, canonicalNameLocked: editing.canonicalNameLocked, preferredNarrationName: editing.preferredNarrationName.trim() || null, aliasNarrationRules, pronunciation: editing.pronunciation ?? null, notes: editing.notes, status: editing.status }); const affected = response.invalidation?.affectedChapters?.length ?? 0; const manual = response.invalidation?.manualNarrationChapters?.length ?? 0; setNotice(affected ? `${affected} chapter${affected === 1 ? "" : "s"} marked affected.${manual ? ` ${manual} manual narration edit${manual === 1 ? " was" : "s were"} preserved for review.` : ""}` : "Protected record saved."); setEditing(undefined); setDetail(undefined); await load(); } catch (value) { setError(message(value)); } };
   const merge = async (item: any) => { const [target, source] = item.entities; if (!confirm(`Merge ${source.name} into ${target.name}? All references and history will be preserved.`)) return; try { await post(`/stories/${slug}/story-bible/merges`, { targetEntityId: target.id, sourceEntityIds: [source.id], reason: `Approved duplicate suggestion: ${item.reason}` }); setDetail(undefined); await load(); } catch (value) { setError(message(value)); } };
   const undo = async (id: string) => { if (!confirm("Undo this merge and restore the source entities?")) return; try { await post(`/stories/${slug}/story-bible/merges/${id}/undo`, {}); setDetail(undefined); await load(); } catch (value) { setError(message(value)); } };
+  const demote = async (entity: any) => {
+    if (!confirm(`Convert "${entity.canonicalName}" to a minor reference?\n\nIt will remain tracked under its parent without cluttering the canonical entity list.`)) return;
+    try {
+      setError("");
+      await post(`/stories/${slug}/story-bible/entities/${entity.id}/demote`, { disposition: "minor_reference", reason: "Converted via Canonical Entity Sheet" });
+      setNotice(`Converted "${entity.canonicalName}" to a minor reference.`);
+      setDetail(undefined);
+      await load();
+      if (tab === "references") void loadReferences();
+      if (analysis) void loadAnalysis();
+    } catch (value) { setError(message(value)); }
+  };
+  const promote = async (ref: any) => {
+    if (!confirm(`Promote "${ref.name}" to a canonical entity?`)) return;
+    try {
+      setError("");
+      await post(`/stories/${slug}/story-bible/references/${ref.id}/promote`, { reason: "Promoted via Story Bible desk" });
+      setNotice(`Promoted "${ref.name}" to canonical entity.`);
+      await loadReferences();
+      await load();
+      if (analysis) void loadAnalysis();
+    } catch (value) { setError(message(value)); }
+  };
+  const applyCleanup = async (highConfidenceOnly = true) => {
+    if (!confirm(highConfidenceOnly ? "Apply all safe, high-confidence cleanup recommendations?" : "Apply all recommended cleanup actions?")) return;
+    try {
+      setError("");
+      const result = await post<any>(`/stories/${slug}/story-bible/cleanup/apply`, { highConfidenceOnly });
+      setNotice(`Cleanup applied: ${result.demotedCount ?? 0} demoted, ${result.mergedCount ?? 0} merged.`);
+      await loadAnalysis();
+      await load();
+      if (tab === "references") void loadReferences();
+    } catch (value) { setError(message(value)); }
+  };
   if (!view) return error ? <LoadFailure error={error} /> : <Loading />;
   return <section className="page canonical-page"><div className="section-heading"><div><span className="eyebrow">Long-form memory</span><h2>Story Bible</h2><p>Canonical identities, aliases, history, relationships, and traceable evidence.</p></div><div className="production-head-actions"><button className="button" onClick={() => navigate(`/stories/${slug}/names`)}>Names / Localization</button><button className="button" onClick={() => navigate(`/stories/${slug}/continuity`)}>Continuity review</button></div></div>{error && <ErrorBox text={error} />}{notice && <div className="naming-notice">{notice}</div>}{view.staleExtractionChapters?.length > 0 && <ArtifactStatusNotice status="stale" reason={`${view.staleExtractionChapters.length} chapter${view.staleExtractionChapters.length === 1 ? " has" : "s have"} stale Story Bible extraction. Canonical records remain available, but some evidence may need refresh.`} />}<div className="canonical-toolbar"><input className="search" placeholder="Search canonical names, aliases, narration names, or localized names" value={query} onChange={(event) => { setQuery(event.target.value); setPage(1); }} /><select value={type} onChange={(event) => { setType(event.target.value); setPage(1); }}><option value="all">All entity types</option>{Object.keys(view.counts).map((value) => <option value={value} key={value}>{pretty(value)} · {view.counts[value]}</option>)}</select><select value={sort} onChange={(event) => setSort(event.target.value)}><option value="last">Most recently seen</option><option value="first">First appearance</option><option value="name">Canonical name</option></select></div>
     {view.duplicateSuggestions?.length > 0 && <div className="duplicate-strip"><div><span className="eyebrow">Possible duplicates</span><b>{view.duplicateSuggestions.length} suggestions need approval</b></div>{view.duplicateSuggestions.slice(0, 3).map((item: any) => <article key={item.id}><div><b>{item.entities[0].name}</b><span>↔</span><b>{item.entities[1].name}</b></div><small>{Math.round(item.confidence * 100)}% · {item.reason} · Ch. {item.supportingChapters.join(", ")}</small><button onClick={() => merge(item)}>Review & merge</button></article>)}</div>}
     <div className="entity-table"><div className="entity-row heading"><span>Canonical entity</span><span>Type</span><span>Appearances</span><span>Origin</span><span>Issues</span></div>{view.items.map((entity: any) => <button className="entity-row" key={entity.id} onClick={() => open(entity.id)}><span><b>{entity.canonicalName}</b><small>{entity.aliases.length ? entity.aliases.join(" · ") : entity.originalName}</small></span><span>{pretty(entity.type)}</span><span className="mono">{entity.firstAppearance}—{entity.lastKnownAppearance}</span><span>{entity.canonicalNameLocked && <i className="lock-dot">Locked</i>} {pretty(entity.origin)}</span><span className={entity.conflictCount ? "issue-count" : ""}>{entity.conflictCount || "—"}</span></button>)}</div>{!view.items.length && <Empty title="No matching canonical entities" text="Run Story Bible extraction or change the filters." />}<div className="pagination"><button disabled={page <= 1} onClick={() => setPage(page - 1)}>Previous</button><span className="mono">Page {view.page} / {view.pages} · {view.total} entities</span><button disabled={page >= view.pages} onClick={() => setPage(page + 1)}>Next</button></div>
     {detail && <CanonicalEntitySheet detail={detail} slug={slug} navigate={navigate} onClose={() => setDetail(undefined)} onUndo={undo} onEdit={() => setEditing(canonicalDraft(detail.entity))} />}
+  return <section className="page canonical-page"><div className="section-heading"><div><span className="eyebrow">Long-form memory</span><h2>Story Bible</h2><p>Canonical identities, aliases, history, relationships, and traceable evidence.</p></div><div className="production-head-actions"><button className="button" onClick={() => navigate(`/stories/${slug}/names`)}>Names / Localization</button><button className="button" onClick={() => navigate(`/stories/${slug}/continuity`)}>Continuity review</button></div></div>{error && <ErrorBox text={error} />}{notice && <div className="naming-notice">{notice}</div>}{view.staleExtractionChapters?.length > 0 && <ArtifactStatusNotice status="stale" reason={`${view.staleExtractionChapters.length} chapter${view.staleExtractionChapters.length === 1 ? " has" : "s have"} stale Story Bible extraction. Canonical records remain available, but some evidence may need refresh.`} />}
+    <div className="segmented" style={{ marginBottom: "18px" }}>
+      <button className={tab === "canonical" ? "active" : ""} onClick={() => setTab("canonical")}>Canonical entities ({view.total})</button>
+      <button className={tab === "references" ? "active" : ""} onClick={() => setTab("references")}>Minor references</button>
+      <button className={tab === "cleanup" ? "active" : ""} onClick={() => setTab("cleanup")}>Analyzer &amp; Cleanup</button>
+    </div>
+    {tab === "canonical" && <>
+      <div className="canonical-toolbar"><input className="search" placeholder="Search canonical names, aliases, narration names, or localized names" value={query} onChange={(event) => { setQuery(event.target.value); setPage(1); }} /><select value={type} onChange={(event) => { setType(event.target.value); setPage(1); }}><option value="all">All entity types</option>{Object.keys(view.counts).map((value) => <option value={value} key={value}>{pretty(value)} · {view.counts[value]}</option>)}</select><select value={sort} onChange={(event) => setSort(event.target.value)}><option value="last">Most recently seen</option><option value="first">First appearance</option><option value="name">Canonical name</option></select></div>
+      {view.duplicateSuggestions?.length > 0 && <div className="duplicate-strip"><div><span className="eyebrow">Possible duplicates</span><b>{view.duplicateSuggestions.length} suggestions need approval</b></div>{view.duplicateSuggestions.slice(0, 3).map((item: any) => <article key={item.id}><div><b>{item.entities[0].name}</b><span>↔</span><b>{item.entities[1].name}</b></div><small>{Math.round(item.confidence * 100)}% · {item.reason} · Ch. {item.supportingChapters.join(", ")}</small><button onClick={() => merge(item)}>Review & merge</button></article>)}</div>}
+      <div className="entity-table"><div className="entity-row heading"><span>Canonical entity</span><span>Type</span><span>Appearances</span><span>Origin</span><span>Issues</span></div>{view.items.map((entity: any) => <button className="entity-row" key={entity.id} onClick={() => open(entity.id)}><span><b>{entity.canonicalName}</b><small>{entity.aliases.length ? entity.aliases.join(" · ") : entity.originalName}</small></span><span>{pretty(entity.type)}</span><span className="mono">{entity.firstAppearance}—{entity.lastKnownAppearance}</span><span>{entity.canonicalNameLocked && <i className="lock-dot">Locked</i>} {pretty(entity.origin)}</span><span className={entity.conflictCount ? "issue-count" : ""}>{entity.conflictCount || "—"}</span></button>)}</div>{!view.items.length && <Empty title="No matching canonical entities" text="Run Story Bible extraction or change the filters." />}<div className="pagination"><button disabled={page <= 1} onClick={() => setPage(page - 1)}>Previous</button><span className="mono">Page {view.page} / {view.pages} · {view.total} entities</span><button disabled={page >= view.pages} onClick={() => setPage(page + 1)}>Next</button></div>
+    </>}
+    {tab === "references" && <>
+      <div className="canonical-toolbar"><input className="search" placeholder="Search minor references" value={refsQuery} onChange={(event) => { setRefsQuery(event.target.value); setRefsPage(1); }} /><select value={refsType} onChange={(event) => { setRefsType(event.target.value); setRefsPage(1); }}><option value="all">All entity types</option>{refsView?.counts && Object.keys(refsView.counts).map((value) => <option value={value} key={value}>{pretty(value)} · {refsView.counts[value]}</option>)}</select></div>
+      <div className="entity-table"><div className="entity-row heading" style={{ gridTemplateColumns: "1.5fr 1fr 1.5fr 1fr 1fr 100px" }}><span>Reference name</span><span>Type</span><span>Parent entity</span><span>Appearances</span><span>Disposition</span><span>Actions</span></div>{refsView?.items?.map((ref: any) => <div className="entity-row" key={ref.id} style={{ gridTemplateColumns: "1.5fr 1fr 1.5fr 1fr 1fr 100px", cursor: "default" }}><span><b>{ref.name}</b>{ref.originalName && <small>{ref.originalName}</small>}</span><span>{pretty(ref.type)}</span><span>{ref.parentEntityName ? <b>{ref.parentEntityName}</b> : <span style={{ color: "#777" }}>—</span>}</span><span className="mono">Ch. {ref.firstSeenChapter}—{ref.lastSeenChapter}</span><span>{pretty(ref.disposition)}</span><span><button className="button" style={{ padding: "4px 8px", fontSize: "10px" }} onClick={() => promote(ref)}>Promote</button></span></div>)}</div>{!refsView?.items?.length && <Empty title="No minor references found" text="No minor references recorded yet or matching your filters." />}{refsView && refsView.pages > 1 && <div className="pagination"><button disabled={refsPage <= 1} onClick={() => setRefsPage(refsPage - 1)}>Previous</button><span className="mono">Page {refsView.page} / {refsView.pages} · {refsView.total} references</span><button disabled={refsPage >= refsView.pages} onClick={() => setRefsPage(refsPage + 1)}>Next</button></div>}
+    </>}
+    {tab === "cleanup" && (loadingAnalysis ? <Loading /> : analysis ? <div className="cleanup-view">
+      <div className="qa-summary" style={{ gridTemplateColumns: "repeat(4, 1fr)", marginBottom: "20px" }}>
+        <div className="qa-count"><span>Canonical entities</span><b>{analysis.totalCanonical}</b></div>
+        <div className="qa-count warn"><span>Demote candidates</span><b>{analysis.convertMinorCount}</b></div>
+        <div className="qa-count pass"><span>Duplicate / Merge</span><b>{analysis.possibleDuplicatesCount}</b></div>
+        <div className="qa-count"><span>Needs review / Protected</span><b>{analysis.needsReviewCount + analysis.protectedCount}</b></div>
+      </div>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "16px" }}>
+        <p style={{ margin: 0, color: "var(--muted)", fontSize: "12px" }}>Automated recommendations for bounded, high-signal entities. Protected entities with locks or manual edits are never auto-demoted.</p>
+        <div style={{ display: "flex", gap: "8px" }}>
+          <button className="button" onClick={loadAnalysis}>Refresh analysis</button>
+          <button className="button primary" onClick={() => applyCleanup(true)} disabled={!analysis.recommendations?.some((r: any) => r.safeToAutoApply)}>Apply safe recommendations</button>
+        </div>
+      </div>
+      <div className="recommendations-list" style={{ display: "grid", gap: "12px" }}>
+        {analysis.recommendations?.map((rec: any) => <article key={rec.id} className="continuity-card" style={{ padding: "16px", borderRadius: "8px", background: "#141419", border: "1px solid var(--line)" }}>
+          <header style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "8px" }}>
+            <span className="eyebrow">{pretty(rec.type)} · {pretty(rec.recommendation)}</span>
+            <span style={{ fontSize: "10px", fontFamily: "var(--mono)", color: rec.confidence >= 0.85 ? "var(--pass)" : "var(--warn)" }}>{Math.round(rec.confidence * 100)}% confidence</span>
+          </header>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: "16px" }}>
+            <div>
+              <h3 style={{ margin: "0 0 4px", fontSize: "16px" }}>{rec.canonicalName}</h3>
+              {rec.parentEntityName && <div style={{ fontSize: "11px", color: "var(--muted)", marginBottom: "4px" }}>Parent: <b>{rec.parentEntityName}</b></div>}
+              {rec.targetEntityName && <div style={{ fontSize: "11px", color: "var(--muted)", marginBottom: "4px" }}>Target: <b>{rec.targetEntityName}</b></div>}
+              <p style={{ margin: "4px 0", fontSize: "12px", color: "#aaa9b3" }}>{rec.reason}</p>
+              {rec.protected && rec.protectedReasons?.length > 0 && <div style={{ marginTop: "6px", display: "flex", gap: "6px", flexWrap: "wrap" }}>{rec.protectedReasons.map((r: string, idx: number) => <span key={idx} style={{ background: "rgba(223, 166, 75, 0.15)", color: "#dfa64b", fontSize: "9px", padding: "2px 6px", borderRadius: "4px" }}>🔒 {r}</span>)}</div>}
+            </div>
+            <div style={{ display: "flex", gap: "8px", flexShrink: 0 }}>
+              {rec.recommendation === "minor_reference" && <button className="button" style={{ fontSize: "10px" }} onClick={async () => { try { setError(""); await post(`/stories/${slug}/story-bible/entities/${rec.entityId}/demote`, { parentEntityId: rec.parentEntityId, disposition: "minor_reference", reason: rec.reason }); setNotice(`Demoted "${rec.canonicalName}" to minor reference.`); await loadAnalysis(); await load(); } catch (e) { setError(message(e)); } }}>Demote to reference</button>}
+              {rec.recommendation === "merge" && rec.targetEntityId && <button className="button" style={{ fontSize: "10px" }} onClick={async () => { try { setError(""); await post(`/stories/${slug}/story-bible/merges`, { targetEntityId: rec.targetEntityId, sourceEntityIds: [rec.entityId], reason: rec.reason }); setNotice(`Merged "${rec.canonicalName}" into "${rec.targetEntityName}".`); await loadAnalysis(); await load(); } catch (e) { setError(message(e)); } }}>Merge entity</button>}
+            </div>
+          </div>
+        </article>)}
+        {!analysis.recommendations?.length && <Empty title="Story Bible is clean" text="No entities currently warrant demotion or cleanup." />}
+      </div>
+    </div> : <LoadFailure error="Could not load analysis." />)}
+    {detail && <CanonicalEntitySheet detail={detail} slug={slug} navigate={navigate} onClose={() => setDetail(undefined)} onUndo={undo} onEdit={() => setEditing(canonicalDraft(detail.entity))} onDemote={() => demote(detail.entity)} />}
     <PronunciationPanel slug={slug} />{editing && <CanonicalEntityEditor slug={slug} value={editing} onChange={setEditing} onClose={() => setEditing(undefined)} onSave={save} />}</section>;
 }
 
 function canonicalDraft(entity: any) { const rules = new Map((entity.aliasNarrationRules ?? []).map((rule: any) => [rule.alias.toLocaleLowerCase(), rule])); return { ...entity, preferredNarrationName: entity.preferredNarrationName ?? "", aliasDrafts: entity.aliases.map((alias: string) => ({ alias, behavior: rules.get(alias.toLocaleLowerCase())?.behavior ?? "no_override", replacement: rules.get(alias.toLocaleLowerCase())?.replacement ?? "" })) }; }
 function namingLabel(alias: string, entity: any) { const rule = (entity.aliasNarrationRules ?? []).find((item: any) => item.alias.toLocaleLowerCase() === alias.toLocaleLowerCase()); if (!rule || rule.behavior === "no_override") return "No override"; if (rule.behavior === "use_preferred") return entity.preferredNarrationName ? `Use ${entity.preferredNarrationName}` : "Use preferred name"; return `Custom → ${rule.replacement}`; }
 export function CanonicalEntitySheet({ detail, slug, navigate, onClose, onUndo, onEdit }: any) {
+export function CanonicalEntitySheet({ detail, slug, navigate, onClose, onUndo, onEdit, onDemote }: any) {
   const entity = detail.entity;
   const activeMerges = detail.merges.filter((item: any) => !item.undoneAt);
   return <div className="editor-sheet entity-sheet">
@@ -284,6 +379,23 @@ export function CanonicalEntitySheet({ detail, slug, navigate, onClose, onUndo, 
       <div className="narration-margin-note"><span className="eyebrow">Localized identity</span><b>{entity.localizedNaming?.fullName || entity.localizedNaming?.shortName || "Not configured"}</b><small>{entity.localizedNaming ? `${pretty(entity.localizedNaming.usageMode)} · ${entity.localizedNaming.locale}${entity.localizedNaming.shortName ? ` · short: ${entity.localizedNaming.shortName}` : ""}` : "Add locale-aware full and short forms without changing canonical identity"}</small></div>
       <h4>Aliases</h4>
       {entity.aliases.length ? <div className="alias-reading-list">{entity.aliases.map((alias: string) => <div key={alias}><b>{alias}</b><span>{namingLabel(alias, entity)}</span></div>)}</div> : <p>No aliases recorded.</p>}
+      {detail.relatedReferences?.length > 0 && (
+        <details className="related-references">
+          <summary>Related references ({detail.relatedReferences.length})</summary>
+          <div className="related-references-list">
+            {detail.relatedReferences.map((ref: any) => (
+              <div key={ref.id} className="related-ref-row">
+                <div>
+                  <b>{ref.name}</b>
+                  {ref.originalName && <small> · {ref.originalName}</small>}
+                </div>
+                <span>{pretty(ref.type)}</span>
+                <span className="mono">Ch. {ref.firstSeenChapter}—{ref.lastSeenChapter}</span>
+              </div>
+            ))}
+          </div>
+        </details>
+      )}
       <h4>Timeline</h4>
       <div className="entity-history">{detail.timeline.map((item: any) => <button key={item.id} onClick={() => navigate(`/stories/${slug}/chapters/${item.chapter}`)}><b>Ch. {item.chapter}</b><span>{pretty(item.type)}</span><p>{item.summary}</p></button>)}</div>
       <h4>Relationships</h4>
@@ -297,9 +409,15 @@ export function CanonicalEntitySheet({ detail, slug, navigate, onClose, onUndo, 
         {activeMerges.map((item: any) => <button className="merge-undo" key={item.id} onClick={() => onUndo(item.id)}>Undo merge · {item.reason}</button>)}
       </div>
       <div className="production-head-actions"><button className="button" onClick={() => navigate(`/stories/${slug}/names?entity=${entity.id}`)}>Open localization</button><button className="button primary" onClick={onEdit}>Edit canonical record</button></div>
+      <div className="production-head-actions">
+        {onDemote && !entity.canonicalNameLocked && <button className="button" onClick={onDemote}>Convert to minor reference</button>}
+        <button className="button" onClick={() => navigate(`/stories/${slug}/names?entity=${entity.id}`)}>Open localization</button>
+        <button className="button primary" onClick={onEdit}>Edit canonical record</button>
+      </div>
     </footer>
   </div>;
 }
+
 export function EntityStatusField({ type, value, onChange }: { type: string; value: string | undefined; onChange: (value: string) => void }) {
   const current = value ?? "unknown";
   const standard = current !== "" && isStandardEntityStatus(type, current);

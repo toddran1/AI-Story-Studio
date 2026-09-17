@@ -166,6 +166,67 @@ export async function getStoryBibleView(root: string, slug: string) { const bibl
 export async function getCanonicalEntitiesPage(root: string, slug: string, options: { page: number; pageSize: number; type?: string; query?: string; sort?: string }) { const bible = await getStoryBible(root, slug); let entities = bible.canonicalEntities; const query = options.query?.trim().toLocaleLowerCase(); if (options.type && options.type !== "all") entities = entities.filter((item) => item.type === options.type); if (query) entities = entities.filter((item) => [item.canonicalName, item.originalName, item.preferredNarrationName ?? "", item.localizedNaming?.fullName ?? "", item.localizedNaming?.shortName ?? "", item.localizedNaming?.notes ?? "", item.description, item.notes, ...item.aliases, ...item.aliasNarrationRules.flatMap((rule) => [rule.alias, rule.replacement ?? ""])].some((value) => value.toLocaleLowerCase().includes(query))); const direction = options.sort === "last" ? (a: typeof entities[number], b: typeof entities[number]) => b.lastKnownAppearance - a.lastKnownAppearance : options.sort === "first" ? (a: typeof entities[number], b: typeof entities[number]) => a.firstAppearance - b.firstAppearance : (a: typeof entities[number], b: typeof entities[number]) => a.canonicalName.localeCompare(b.canonicalName); entities = [...entities].sort(direction); const pageSize = Math.min(100, Math.max(1, Math.floor(options.pageSize))); const pages = Math.max(1, Math.ceil(entities.length / pageSize)); const page = Math.min(pages, Math.max(1, Math.floor(options.page))); const reviewRaw = await readJsonIfExists(storyPaths(root, slug, 1).continuityReview); const review = reviewRaw ? continuityReviewSchema.safeParse(reviewRaw) : undefined; const openCounts = new Map<string, number>(); if (review?.success) for (const finding of review.data.findings.filter((item) => item.status === "open")) for (const id of finding.entityIds) openCounts.set(id, (openCounts.get(id) ?? 0) + 1); return { items: entities.slice((page - 1) * pageSize, page * pageSize).map((item) => ({ ...item, conflictCount: openCounts.get(item.id) ?? 0 })), page, pageSize, pages, total: entities.length, counts: Object.fromEntries(["character", "location", "organization", "ability", "item", "concept"].map((type) => [type, bible.canonicalEntities.filter((item) => item.type === type).length])), duplicateSuggestions: page === 1 && !query ? findDuplicateSuggestions(bible.canonicalEntities).slice(0, 50) : [] }; }
 
 export async function getCanonicalEntityDetail(root: string, slug: string, id: string) { const bible = await getStoryBible(root, slug); const entity = bible.canonicalEntities.find((item) => item.id === id); if (!entity) throw new Error("Canonical entity was not found"); const related = bible.canonicalRelationships.filter((item) => item.sourceEntityId === id || item.targetEntityId === id); const relatedIds = new Set(related.flatMap((item) => [item.sourceEntityId, item.targetEntityId])); const names = Object.fromEntries(bible.canonicalEntities.filter((item) => relatedIds.has(item.id)).map((item) => [item.id, item.canonicalName])); const reviewRaw = await readJsonIfExists(storyPaths(root, slug, 1).continuityReview); const review = reviewRaw ? continuityReviewSchema.safeParse(reviewRaw) : undefined; return { entity, timeline: bible.entityTimeline.filter((item) => item.entityId === id).sort((a, b) => a.chapter - b.chapter), relationships: related, relatedNames: names, issues: review?.success ? review.data.findings.filter((item) => item.entityIds.includes(id)) : [], merges: bible.merges.filter((item) => item.targetEntityId === id || item.sourceEntityIds.includes(id)) }; }
+import { analyzeStoryBible } from "../../src/story-bible/granularity.js";
+
+export async function getCanonicalEntityDetail(root: string, slug: string, id: string) {
+  const bible = await getStoryBible(root, slug);
+  const entity = bible.canonicalEntities.find((item) => item.id === id);
+  if (!entity) throw new Error("Canonical entity was not found");
+  const related = bible.canonicalRelationships.filter((item) => item.sourceEntityId === id || item.targetEntityId === id);
+  const relatedIds = new Set(related.flatMap((item) => [item.sourceEntityId, item.targetEntityId]));
+  const names = Object.fromEntries(bible.canonicalEntities.filter((item) => relatedIds.has(item.id)).map((item) => [item.id, item.canonicalName]));
+  const reviewRaw = await readJsonIfExists(storyPaths(root, slug, 1).continuityReview);
+  const review = reviewRaw ? continuityReviewSchema.safeParse(reviewRaw) : undefined;
+  const relatedReferences = (bible.minorReferences ?? []).filter((ref) => ref.parentEntityId === id);
+  return {
+    entity,
+    timeline: bible.entityTimeline.filter((item) => item.entityId === id).sort((a, b) => a.chapter - b.chapter),
+    relationships: related,
+    relatedNames: names,
+    relatedReferences,
+    issues: review?.success ? review.data.findings.filter((item) => item.entityIds.includes(id)) : [],
+    merges: bible.merges.filter((item) => item.targetEntityId === id || item.sourceEntityIds.includes(id)),
+  };
+}
+
+export async function getMinorReferencesPage(
+  root: string,
+  slug: string,
+  options: { page: number; pageSize: number; parentEntityId?: string; type?: string; query?: string },
+) {
+  const bible = await getStoryBible(root, slug);
+  let refs = bible.minorReferences ?? [];
+  if (options.parentEntityId) refs = refs.filter((item) => item.parentEntityId === options.parentEntityId);
+  if (options.type && options.type !== "all") refs = refs.filter((item) => item.type === options.type);
+  const query = options.query?.trim().toLowerCase();
+  if (query) {
+    refs = refs.filter((item) =>
+      item.name.toLowerCase().includes(query) ||
+      (item.originalName && item.originalName.toLowerCase().includes(query)) ||
+      item.aliases.some((a) => a.toLowerCase().includes(query)),
+    );
+  }
+  refs = [...refs].sort((a, b) => (b.lastSeenChapter ?? 0) - (a.lastSeenChapter ?? 0) || (b.occurrenceCount ?? 1) - (a.occurrenceCount ?? 1));
+  const pageSize = Math.min(100, Math.max(1, Math.floor(options.pageSize)));
+  const pages = Math.max(1, Math.ceil(refs.length / pageSize));
+  const page = Math.min(pages, Math.max(1, Math.floor(options.page)));
+  const parentNames = Object.fromEntries(bible.canonicalEntities.map((e) => [e.id, e.canonicalName]));
+  return {
+    items: refs.slice((page - 1) * pageSize, page * pageSize).map((r) => ({
+      ...r,
+      parentEntityName: r.parentEntityId ? parentNames[r.parentEntityId] : undefined,
+    })),
+    page,
+    pageSize,
+    pages,
+    total: refs.length,
+    counts: Object.fromEntries(["location", "item", "character", "organization", "ability", "concept", "other"].map((type) => [type, (bible.minorReferences ?? []).filter((item) => item.type === type).length])),
+  };
+}
+
+export async function getStoryBibleAnalysis(root: string, slug: string) {
+  return analyzeStoryBible(root, slug);
+}
 
 export async function getContinuityReview(root: string, slug: string, status?: string) { const raw = await readJsonIfExists(storyPaths(root, slug, 1).continuityReview); const parsed = raw ? continuityReviewSchema.parse(raw) : continuityReviewSchema.parse({ version: 1, analyzedThroughChapter: 0, inputFingerprint: "none", updatedAt: new Date(0).toISOString(), findings: [] }); const findings = status && status !== "all" ? parsed.findings.filter((item) => item.status === status) : parsed.findings; const bible = await getStoryBible(root, slug); const names = Object.fromEntries(bible.canonicalEntities.map((item) => [item.id, item.canonicalName])); return { ...parsed, findings, names, counts: { open: parsed.findings.filter((item) => item.status === "open").length, resolved: parsed.findings.filter((item) => item.status !== "open").length } }; }
 

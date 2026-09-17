@@ -7,6 +7,7 @@ import { isAbsolute, join } from "node:path";
 import { IncomingMessage, ServerResponse } from "node:http";
 import { z } from "zod";
 import { getAudioDashboard, getCanonicalEntitiesPage, getCanonicalEntityDetail, getChapter, getChapterPage, getContinuityReview, getOutputsLibrary, getQaDashboard, getScenesDashboard, getStoryBibleView, getStoryDashboard, getStoryOverview, getVideoDashboard, listStories, updateStorySettings, chapterFilterSchema } from "./catalog.js";
+import { getAudioDashboard, getCanonicalEntitiesPage, getCanonicalEntityDetail, getChapter, getChapterPage, getContinuityReview, getMinorReferencesPage, getOutputsLibrary, getQaDashboard, getScenesDashboard, getStoryBibleView, getStoryDashboard, getStoryOverview, getVideoDashboard, listStories, updateStorySettings, chapterFilterSchema } from "./catalog.js";
 import { JobConflictError } from "./job-manager.js";
 import { StudioOperations } from "./operations.js";
 import { exportPaths, previewPaths, sceneImagePath, storyPaths, videoExportPaths, voicePreviewPaths } from "../../src/storage/paths.js";
@@ -245,6 +246,18 @@ export function createApiHandler(operations: StudioOperations) {
         if (request.method === "POST") return send(response, 202, pronunciationMatch[3] === "test" && id ? operations.startPronunciationTest(slug, id) : operations.startPronunciationEnrichment(slug, id ? { entityId: id } : await jsonBody(request)));
       }
       if (localizationSuggestionsMatch && request.method === "POST") return send(response, 202, operations.startLocalizationSuggestions(localizationSuggestionsMatch[1]!, localizationSuggestionsMatch[2]!, await jsonBody(request)));
+      const bibleAnalysisMatch = /^\/api\/stories\/([a-z0-9-]+)\/story-bible\/analysis$/.exec(url.pathname);
+      if (bibleAnalysisMatch && request.method === "GET") return send(response, 200, await operations.analyzeStoryBible(bibleAnalysisMatch[1]!));
+      const bibleCleanupMatch = /^\/api\/stories\/([a-z0-9-]+)\/story-bible\/cleanup\/apply$/.exec(url.pathname);
+      if (bibleCleanupMatch && request.method === "POST") return send(response, 200, await operations.applyCleanupRecommendations(bibleCleanupMatch[1]!, await jsonBody(request)));
+      const bibleDemoteMatch = /^\/api\/stories\/([a-z0-9-]+)\/story-bible\/entities\/(ent_[a-f0-9]{24})\/demote$/.exec(url.pathname);
+      if (bibleDemoteMatch && request.method === "POST") return send(response, 200, await operations.demoteCanonicalEntity(bibleDemoteMatch[1]!, bibleDemoteMatch[2]!, await jsonBody(request)));
+      const bibleRefsMatch = /^\/api\/stories\/([a-z0-9-]+)\/story-bible\/references$/.exec(url.pathname);
+      if (bibleRefsMatch && request.method === "GET") return send(response, 200, await getMinorReferencesPage(operations.root, bibleRefsMatch[1]!, { page: integerParam(url.searchParams.get("page"), 1), pageSize: boundedPageSize(url.searchParams.get("pageSize")), parentEntityId: optionalString(url.searchParams.get("parent")), type: optionalString(url.searchParams.get("type")), query: optionalString(url.searchParams.get("q")) }));
+      const bibleRefPromoteMatch = /^\/api\/stories\/([a-z0-9-]+)\/story-bible\/references\/([a-z0-9-_]+)\/promote$/.exec(url.pathname);
+      if (bibleRefPromoteMatch && request.method === "POST") return send(response, 200, await operations.promoteMinorReference(bibleRefPromoteMatch[1]!, bibleRefPromoteMatch[2]!, await jsonBody(request)));
+      const bibleRefMatch = /^\/api\/stories\/([a-z0-9-]+)\/story-bible\/references\/([a-z0-9-_]+)$/.exec(url.pathname);
+      if (bibleRefMatch && request.method === "PUT") return send(response, 200, await operations.updateMinorReference(bibleRefMatch[1]!, bibleRefMatch[2]!, await jsonBody(request)));
       const bibleMergeMatch = /^\/api\/stories\/([a-z0-9-]+)\/story-bible\/merges$/.exec(url.pathname);
       if (bibleMergeMatch && request.method === "POST") return send(response, 201, await operations.mergeCanonicalEntities(bibleMergeMatch[1]!, await jsonBody(request)));
       const bibleMergeUndoMatch = /^\/api\/stories\/([a-z0-9-]+)\/story-bible\/merges\/([a-f0-9-]{36})\/undo$/.exec(url.pathname);

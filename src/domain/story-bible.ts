@@ -82,9 +82,54 @@ export const canonicalRelationshipSchema = z.object({
 export type CanonicalRelationship = z.infer<typeof canonicalRelationshipSchema>;
 export const mergeRecordSchema = z.object({ id: z.string().uuid(), targetEntityId: z.string(), sourceEntityIds: z.array(z.string()).min(1), reason: z.string(), createdAt: z.string(), undoneAt: z.string().optional() });
 
+export const persistenceDispositionSchema = z.enum(["canonical", "minor_reference", "merge_existing", "needs_review"]);
+export type PersistenceDisposition = z.infer<typeof persistenceDispositionSchema>;
+
+export const minorEntityReferenceSchema = z.object({
+  id: z.string().min(1).max(300),
+  name: z.string().trim().min(1).max(300),
+  originalName: z.string().max(300).optional(),
+  type: z.enum(["location", "item", "character", "organization", "ability", "concept", "other"]).optional(),
+  parentEntityId: z.string().optional(),
+  aliases: z.array(z.string().min(1).max(300)).max(100).default([]),
+  firstSeenChapter: z.number().int().positive().optional(),
+  lastSeenChapter: z.number().int().positive().optional(),
+  occurrenceCount: z.number().int().positive().default(1),
+  sourceEvidence: z.array(z.object({
+    chapter: z.number().int().positive(),
+    excerpt: z.string().max(1000).optional(),
+  })).max(20).default([]),
+  confidence: z.number().min(0).max(1).optional(),
+  significanceScore: z.number().min(0).max(100).optional(),
+  disposition: persistenceDispositionSchema.optional().default("minor_reference"),
+  source: z.enum(["automatic", "manual_demotion"]).optional().default("automatic"),
+  contextNotes: z.string().max(1000).optional(),
+  status: z.enum(["minor", "promotion_candidate"]).optional().default("minor"),
+  demotedFromEntityId: z.string().optional(),
+  createdAt: z.string().optional(),
+  updatedAt: z.string().optional(),
+});
+export type MinorEntityReference = z.infer<typeof minorEntityReferenceSchema>;
+
+export const granularityAuditSchema = z.object({
+  id: z.string().uuid(),
+  action: z.enum(["promoted", "demoted", "merged", "kept"]),
+  fromEntityId: z.string().optional(),
+  toEntityId: z.string().optional(),
+  parentEntityId: z.string().optional(),
+  referenceId: z.string().optional(),
+  name: z.string(),
+  reason: z.string().optional(),
+  confidence: z.number().min(0).max(1).optional(),
+  source: z.enum(["automatic", "ai", "manual", "analyzer"]),
+  timestamp: z.string(),
+});
+export type GranularityAudit = z.infer<typeof granularityAuditSchema>;
+
 export const storyBibleSchema = storyBibleUpdateSchema.extend({
   version: z.number().int().nonnegative().default(0), chapterSummaries: z.record(z.string(), z.string()).default({}), canonicalEntities: z.array(canonicalEntitySchema).default([]),
   canonicalRelationships: z.array(canonicalRelationshipSchema).default([]), entityTimeline: z.array(timelineEventSchema).default([]), merges: z.array(mergeRecordSchema).default([]),
+  minorReferences: z.array(minorEntityReferenceSchema).default([]), granularityAudits: z.array(granularityAuditSchema).default([]),
 }).omit({ chapterSummary: true, timelineEvents: true });
 
 export type StoryBibleUpdate = z.infer<typeof storyBibleUpdateSchema>;

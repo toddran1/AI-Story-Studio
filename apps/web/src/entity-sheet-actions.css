@@ -80,3 +80,42 @@
     width: 100%;
   }
 }
+
+.related-references {
+  margin: 16px 0;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.related-references summary {
+  padding: 10px 14px;
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--muted);
+  user-select: none;
+}
+
+.related-references summary:hover {
+  color: var(--ink);
+}
+
+.related-references-list {
+  padding: 0 14px 10px;
+  display: grid;
+  gap: 8px;
+}
+
+.related-ref-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 11px;
+  padding: 6px 0;
+  border-top: 1px solid var(--line);
+}
+
+.related-ref-row small {
+  color: var(--muted);
+}

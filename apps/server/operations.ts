@@ -61,6 +61,7 @@ import { AlignmentEngine } from "../../src/alignment/types.js";
 import { alignStoredChapter } from "../../src/alignment/chapter-alignment.js";
 import { discardManualSubtitles, saveManualSubtitles } from "../../src/subtitles/chapter-subtitles.js";
 import { backfillCanonicalSnapshots, mergeCanonicalEntities, undoCanonicalMerge, updateCanonicalEntity } from "../../src/story-bible/canonical.js";
+import { analyzeStoryBible, applyCleanupRecommendations, demoteCanonicalEntity, promoteMinorReference, updateMinorReference } from "../../src/story-bible/granularity.js";
 import { continuityFindingSchema, resolveContinuityFinding } from "../../src/story-bible/continuity.js";
 import { PostgresUsageRepository } from "../../src/cost/repository.js";
 import { estimatePlanCost } from "../../src/cost/estimate.js";
@@ -728,6 +729,63 @@ export class StudioOperations {
       }
       const finding = await resolveContinuityFinding(this.root, slug, id, input.resolution, input.note); invalidateCatalogCache(this.root, slug); await recordActivity(this.root, slug, "continuity.resolved", `Resolved ${finding.type} finding`); return { finding };
     });
+  }
+
+  async analyzeStoryBible(slug: string) {
+    slugSchema.parse(slug);
+    return analyzeStoryBible(this.root, slug);
+  }
+
+  async applyCleanupRecommendations(slug: string, raw: unknown) {
+    slugSchema.parse(slug);
+    const input = z.object({
+      recommendationIds: z.array(z.string()).default([]),
+      highConfidenceOnly: z.boolean().default(false),
+    }).passthrough().parse(raw ?? {});
+    const result = await applyCleanupRecommendations(this.root, slug, input.recommendationIds, {
+      highConfidenceOnly: input.highConfidenceOnly,
+    });
+    invalidateCatalogCache(this.root, slug);
+    await recordActivity(this.root, slug, "bible.cleanup.applied", `Applied Story Bible cleanup: demoted ${result.appliedDemotionsCount}, merged ${result.appliedMergesCount}`);
+    return result;
+  }
+
+  async demoteCanonicalEntity(slug: string, id: string, raw: unknown) {
+    slugSchema.parse(slug);
+    const input = z.object({
+      parentEntityId: z.string().optional(),
+      reason: z.string().optional(),
+      force: z.boolean().optional(),
+    }).passthrough().parse(raw ?? {});
+    const result = await demoteCanonicalEntity(this.root, slug, id, input);
+    invalidateCatalogCache(this.root, slug);
+    await recordActivity(this.root, slug, "bible.entity.demoted", `Demoted canonical entity ${id} to minor reference`);
+    return result;
+  }
+
+  async promoteMinorReference(slug: string, id: string, raw: unknown) {
+    slugSchema.parse(slug);
+    const input = z.object({
+      reason: z.string().optional(),
+    }).passthrough().parse(raw ?? {});
+    const result = await promoteMinorReference(this.root, slug, id, input);
+    invalidateCatalogCache(this.root, slug);
+    await recordActivity(this.root, slug, "bible.reference.promoted", `Promoted minor reference ${id} to canonical entity`);
+    return result;
+  }
+
+  async updateMinorReference(slug: string, id: string, raw: unknown) {
+    slugSchema.parse(slug);
+    const input = z.object({
+      name: z.string().optional(),
+      parentEntityId: z.string().nullable().optional(),
+      status: z.enum(["minor", "promotion_candidate"]).optional(),
+      aliases: z.array(z.string()).optional(),
+      contextNotes: z.string().nullable().optional(),
+    }).passthrough().parse(raw ?? {});
+    const result = await updateMinorReference(this.root, slug, id, input);
+    invalidateCatalogCache(this.root, slug);
+    return result;
   }
 
   startVoicePreview(slug: string, raw: unknown) { slugSchema.parse(slug); const input = voicePreviewSchema.parse(raw); return this.jobs.create("voicePreview", slug, async () => { const story = await loadStory(storyPaths(this.root, slug, 1).storyConfig); const config = story.pipeline.tts; const request = { ...input, provider: input.provider ?? config.provider, model: input.model ?? config.model, referenceId: input.referenceId ?? config.referenceId, speed: input.speed ?? config.speed }; const provider = pronunciationProvider(this.tts.forName(request.provider), await loadPronunciationEntities(this.root, slug)); const speech = normalizeSpeechForProvider(request.text, story.outputLanguage, story.narrationSettings, provider, request.model); const result = await withUsageScope({story:slug,stage:"voicePreview"},async ()=>this.censor.synthesize(provider, { text: speech.normalized.text, model: request.model, referenceId: request.referenceId,
