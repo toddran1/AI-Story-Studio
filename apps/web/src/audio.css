@@ -24,6 +24,8 @@
 .audio-layout { display: grid; grid-template-columns: 1.4fr .8fr; gap: 14px; margin-top: 28px; }
 .audio-layout > section { min-width: 0; }
 .audio-layout h3 { font: 500 21px var(--serif); border-bottom: 1px solid var(--line); padding-bottom: 10px; }
+.audio-master-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; border-bottom: 1px solid var(--line); padding-bottom: 10px; }
+.audio-master-heading h3 { border: 0; padding: 0; margin: 0; }
 .master-list,.export-list { display: grid; }
 .master-list article { display: grid; grid-template-columns: 45px minmax(130px,1fr) 100px minmax(180px,.8fr); gap: 12px; align-items: center; border-bottom: 1px solid var(--line); padding: 10px 4px; }
 .master-list > article > span:first-child { font-size: 9px; color: #777680; }
@@ -50,4 +52,5 @@
   .master-audio { grid-column: 2/-1; }
   .export-actions { display: grid; }
   .audio-page .section-heading { display: grid; }
+  .audio-master-heading { align-items: flex-start; }
 }

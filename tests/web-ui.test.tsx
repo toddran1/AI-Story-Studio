@@ -1,6 +1,6 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import { App, chapterPageSize, EntityStatusField, QaFindingCard, QaResolvedFindings, shouldRefreshAfterJob } from "../apps/web/src/App.js";
+import { App, chapterPageSize, EntityStatusField, paginateRows, QaFindingCard, QaResolvedFindings, shouldRefreshAfterJob } from "../apps/web/src/App.js";
 import type { QaFinding } from "../apps/web/src/api.js";
 import { pretty } from "../apps/web/src/format.js";
 import { ChapterImportPage, savedStorySourceUrl } from "../apps/web/src/ChapterImportPage.js";
@@ -26,6 +26,10 @@ describe("web UI", () => {
   });
   it("uses 50 chapters per page by default and permits the supported page sizes", () => {
     expect(chapterPageSize("")).toBe(50); expect(chapterPageSize("?pageSize=10")).toBe(10); expect(chapterPageSize("?pageSize=100")).toBe(100); expect(chapterPageSize("?pageSize=75")).toBe(50);
+  });
+  it("paginates chapter masters with an accurate row and page count", () => {
+    const result = paginateRows(Array.from({ length: 51 }, (_, index) => index + 1), 2, 50);
+    expect(result).toMatchObject({ page: 2, pages: 2, total: 51 }); expect(result.items).toEqual([51]);
   });
   it("renders standardized statuses and preserves legacy values through the custom field", () => {
     const standard = renderToStaticMarkup(<EntityStatusField type="character" value="Alive" onChange={() => undefined} />);
