@@ -39,7 +39,7 @@ export const canonicalOverlaySchema = z.object({
   parentAssignments: z.record(z.string(), z.string()).default({}),
 });
 export type CanonicalOverlay = z.infer<typeof canonicalOverlaySchema>;
-export { DuplicateSuggestion, findDuplicateSuggestions, duplicateScore } from "./duplicate-detection.js";
+export { type DuplicateSuggestion, findDuplicateSuggestions, duplicateScore } from "./duplicate-detection.js";
 
 export async function applyCanonicalOverlay(root: string, slug: string, input: StoryBible) {
   const paths = storyPaths(root, slug, 1);
