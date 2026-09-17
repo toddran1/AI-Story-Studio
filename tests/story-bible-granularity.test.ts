@@ -508,6 +508,485 @@ describe("Story Bible Entity Granularity & Intelligent Cleanup", () => {
       // Granularity audits are never leaked to LLM context
       expect(contextWithMention.granularityAudits ?? []).toHaveLength(0);
     });
+
+    it("includes directly mentioned unparented minor references into retrieved Story Bible context", () => {
+      const bible = emptyStoryBible();
+      bible.canonicalEntities = [
+        {
+          id: "ent_000000000000000000000001",
+          canonicalName: "Su Ming",
+          originalName: "",
+          type: "character",
+          aliases: [],
+          aliasNarrationRules: [],
+          description: "Protagonist",
+          firstAppearance: 1,
+          lastKnownAppearance: 2,
+          provenance: [{ chapter: 1, kind: "extraction", origin: "automatic" }],
+          origin: "automatic",
+          mergedFromIds: [],
+          notes: "",
+          canonicalNameLocked: false,
+          status: "unknown",
+        },
+      ];
+      bible.minorReferences = [
+        {
+          id: "ref_ancient_tablet",
+          name: "Ancient Stone Tablet",
+          originalName: "古石碑",
+          type: "item",
+          disposition: "minor_reference",
+          confidence: 0.9,
+          parentEntityId: undefined, // unparented!
+          firstSeenChapter: 1,
+          lastSeenChapter: 2,
+          occurrenceCount: 1,
+          source: "automatic",
+          status: "minor",
+          aliases: ["Old Stone Inscription"],
+          sourceEvidence: [{ chapter: 1 }],
+        },
+        {
+          id: "ref_unmentioned_box",
+          name: "Discarded Wooden Box",
+          type: "item",
+          disposition: "minor_reference",
+          confidence: 0.9,
+          parentEntityId: undefined,
+          firstSeenChapter: 1,
+          lastSeenChapter: 2,
+          occurrenceCount: 1,
+          source: "automatic",
+          status: "minor",
+          aliases: [],
+          sourceEvidence: [{ chapter: 1 }],
+        },
+      ];
+
+      const chapterText = "Su Ming examined the Ancient Stone Tablet carved with ancient glyphs.";
+      const context = retrieveRelevantContext(bible, chapterText, 2);
+
+      // Directly mentioned unparented minor reference must be included
+      expect(context.minorReferences?.some((r) => r.name === "Ancient Stone Tablet")).toBe(true);
+      // Unmentioned unparented minor reference must be excluded
+      expect(context.minorReferences?.some((r) => r.name === "Discarded Wooden Box")).toBe(false);
+    });
+
+    it("excludes parented minor reference if its parent entity is not selected in context", () => {
+      const bible = emptyStoryBible();
+      // Parent entity is old and not mentioned in chapter text (score 0, filtered out when maxEntities is small)
+      bible.canonicalEntities = [
+        {
+          id: "ent_000000000000000000000001",
+          canonicalName: "Su Ming",
+          originalName: "",
+          type: "character",
+          aliases: [],
+          aliasNarrationRules: [],
+          description: "Hero",
+          firstAppearance: 1,
+          lastKnownAppearance: 50,
+          provenance: [{ chapter: 50, kind: "extraction", origin: "automatic" }],
+          origin: "automatic",
+          mergedFromIds: [],
+          notes: "",
+          canonicalNameLocked: false,
+          status: "unknown",
+        },
+        {
+          id: "ent_000000000000000000000002",
+          canonicalName: "Forgotten Clan",
+          originalName: "",
+          type: "organization",
+          aliases: [],
+          aliasNarrationRules: [],
+          description: "Ancient clan from chapter 1",
+          firstAppearance: 1,
+          lastKnownAppearance: 1,
+          provenance: [{ chapter: 1, kind: "extraction", origin: "automatic" }],
+          origin: "automatic",
+          mergedFromIds: [],
+          notes: "",
+          canonicalNameLocked: false,
+          status: "unknown",
+        },
+      ];
+      bible.minorReferences = [
+        {
+          id: "ref_pavilion",
+          name: "Forgotten Clan Ancestral Pavilion",
+          type: "location",
+          disposition: "minor_reference",
+          confidence: 0.9,
+          parentEntityId: "ent_000000000000000000000002",
+          firstSeenChapter: 1,
+          lastSeenChapter: 1,
+          occurrenceCount: 1,
+          source: "automatic",
+          status: "minor",
+          aliases: [],
+          sourceEvidence: [{ chapter: 1 }],
+        },
+      ];
+
+      // Chapter text mentions the pavilion name, but Forgotten Clan itself is not selected because maxEntities=1 selects only Su Ming
+      const context = retrieveRelevantContext(
+        bible,
+        "Su Ming remembered the Forgotten Clan Ancestral Pavilion from long ago.",
+        50,
+        { maxEntities: 1 },
+      );
+      // Parent is ent_000000000000000000000002 which is not among selectedEntities
+      expect(context.canonicalEntities.map((e) => e.id)).toEqual(["ent_000000000000000000000001"]);
+      // Because parent is not selected, the parented minor reference must be excluded
+      expect(context.minorReferences?.some((r) => r.name === "Forgotten Clan Ancestral Pavilion")).toBe(false);
+    });
+
+    it("sheds minor references before canonical entities under character budget constraints", () => {
+      const bible = emptyStoryBible();
+      bible.canonicalEntities = [
+        {
+          id: "ent_000000000000000000000001",
+          canonicalName: "Su Ming",
+          originalName: "",
+          type: "character",
+          aliases: [],
+          aliasNarrationRules: [],
+          description: "Protagonist of the novel who walks the cultivation path.",
+          firstAppearance: 1,
+          lastKnownAppearance: 2,
+          provenance: [{ chapter: 1, kind: "extraction", origin: "automatic" }],
+          origin: "automatic",
+          mergedFromIds: [],
+          notes: "",
+          canonicalNameLocked: false,
+          status: "unknown",
+        },
+      ];
+      bible.minorReferences = [
+        {
+          id: "ref_1",
+          name: "Stone Tablet",
+          type: "item",
+          disposition: "minor_reference",
+          confidence: 0.9,
+          parentEntityId: undefined,
+          firstSeenChapter: 1,
+          lastSeenChapter: 2,
+          occurrenceCount: 1,
+          source: "automatic",
+          status: "minor",
+          aliases: [],
+          sourceEvidence: [{ chapter: 1 }],
+        },
+      ];
+
+      const fullContext = retrieveRelevantContext(bible, "Su Ming inspected the Stone Tablet.", 2, { maxCharacters: 50_000 });
+      expect(fullContext.canonicalEntities.length).toBe(1);
+      expect(fullContext.minorReferences.length).toBe(1);
+
+      // Tight budget: minor references must be shed first while preserving canonical entity
+      const tightContext = retrieveRelevantContext(bible, "Su Ming inspected the Stone Tablet.", 2, { maxCharacters: 4000 });
+      expect(tightContext.canonicalEntities.length).toBe(1);
+      expect(tightContext.canonicalEntities[0]!.canonicalName).toBe("Su Ming");
+    });
+  });
+
+  describe("Canonicalization Bypass Prevention & Unparented Minor References", () => {
+    it("does NOT promote or create canonical entities when relationships reference unparented minor references", () => {
+      let bible = emptyStoryBible();
+      bible.canonicalEntities = [
+        {
+          id: "ent_000000000000000000000001",
+          canonicalName: "Su Ming",
+          originalName: "",
+          type: "character",
+          aliases: [],
+          aliasNarrationRules: [],
+          description: "Hero",
+          firstAppearance: 1,
+          lastKnownAppearance: 1,
+          provenance: [{ chapter: 1, kind: "extraction", origin: "automatic" }],
+          origin: "automatic",
+          mergedFromIds: [],
+          notes: "",
+          canonicalNameLocked: false,
+          status: "unknown",
+        },
+      ];
+      bible.minorReferences = [
+        {
+          id: "ref_rusty_dagger",
+          name: "Rusty Dagger",
+          type: "item",
+          disposition: "minor_reference",
+          confidence: 0.9,
+          parentEntityId: undefined, // unparented minor reference
+          firstSeenChapter: 1,
+          lastSeenChapter: 1,
+          occurrenceCount: 1,
+          source: "automatic",
+          status: "minor",
+          aliases: [],
+          sourceEvidence: [{ chapter: 1 }],
+        },
+      ];
+
+      // Chapter 2 update: relationship references the unparented minor reference
+      const ch2Update = update(2, {
+        relationships: [
+          {
+            subject: "Rusty Dagger",
+            relationship: "held_by",
+            object: "Su Ming",
+            firstSeenChapter: 2,
+            lastSeenChapter: 2,
+            confidence: 0.8,
+          },
+        ],
+      });
+
+      const updated = mergeStoryBible(bible, ch2Update, 2);
+
+      // Rusty Dagger must NEVER be created as a canonical entity!
+      expect(updated.canonicalEntities.some((e) => e.canonicalName === "Rusty Dagger")).toBe(false);
+      expect(updated.canonicalEntities.length).toBe(1);
+      expect(updated.canonicalEntities[0]!.canonicalName).toBe("Su Ming");
+
+      // Rusty Dagger must remain in minorReferences
+      expect(updated.minorReferences.some((r) => r.name === "Rusty Dagger")).toBe(true);
+      // Canonical relationship between an unparented minor reference and an entity is safely dropped
+      expect(updated.canonicalRelationships.length).toBe(0);
+    });
+
+    it("does NOT create canonical entities when timeline events reference unparented minor references", () => {
+      let bible = emptyStoryBible();
+      bible.minorReferences = [
+        {
+          id: "ref_iron_key",
+          name: "Iron Key",
+          type: "item",
+          disposition: "minor_reference",
+          confidence: 0.9,
+          parentEntityId: undefined,
+          firstSeenChapter: 1,
+          lastSeenChapter: 1,
+          occurrenceCount: 1,
+          source: "automatic",
+          status: "minor",
+          aliases: [],
+          sourceEvidence: [{ chapter: 1 }],
+        },
+      ];
+
+      const chUpdate = update(2, {
+        timelineEvents: [
+          {
+            entity: "Iron Key",
+            type: "revelation",
+            summary: "Iron Key unlocked the ancient vault",
+            chapter: 2,
+            confidence: 0.9,
+          },
+        ],
+      });
+
+      const updated = mergeStoryBible(bible, chUpdate, 2);
+
+      // Iron Key must NOT be created as a canonical entity
+      expect(updated.canonicalEntities.some((e) => e.canonicalName === "Iron Key")).toBe(false);
+      expect(updated.canonicalEntities.length).toBe(0);
+      expect(updated.minorReferences.some((r) => r.name === "Iron Key")).toBe(true);
+      // Timeline event referencing unparented minor ref is safely omitted from canonical timeline
+      expect(updated.entityTimeline.length).toBe(0);
+    });
+
+    it("attaches relationships referencing parented minor references to the canonical parent entity", () => {
+      let bible = emptyStoryBible();
+      bible.canonicalEntities = [
+        {
+          id: "ent_000000000000000000000001",
+          canonicalName: "Nong Family",
+          originalName: "",
+          type: "organization",
+          aliases: [],
+          aliasNarrationRules: [],
+          description: "Main clan",
+          firstAppearance: 1,
+          lastKnownAppearance: 1,
+          provenance: [{ chapter: 1, kind: "extraction", origin: "automatic" }],
+          origin: "automatic",
+          mergedFromIds: [],
+          notes: "",
+          canonicalNameLocked: false,
+          status: "unknown",
+        },
+        {
+          id: "ent_000000000000000000000002",
+          canonicalName: "Li Clan",
+          originalName: "",
+          type: "organization",
+          aliases: [],
+          aliasNarrationRules: [],
+          description: "Allied clan",
+          firstAppearance: 1,
+          lastKnownAppearance: 1,
+          provenance: [{ chapter: 1, kind: "extraction", origin: "automatic" }],
+          origin: "automatic",
+          mergedFromIds: [],
+          notes: "",
+          canonicalNameLocked: false,
+          status: "unknown",
+        },
+      ];
+      bible.minorReferences = [
+        {
+          id: "ref_nong_villa",
+          name: "Nong Family Villa",
+          type: "location",
+          disposition: "minor_reference",
+          confidence: 0.9,
+          parentEntityId: "ent_000000000000000000000001",
+          firstSeenChapter: 1,
+          lastSeenChapter: 1,
+          occurrenceCount: 1,
+          source: "automatic",
+          status: "minor",
+          aliases: [],
+          sourceEvidence: [{ chapter: 1 }],
+        },
+      ];
+
+      // Relationship mentions Nong Family Villa and Li Clan
+      const chUpdate = update(2, {
+        relationships: [
+          {
+            subject: "Nong Family Villa",
+            relationship: "hosts_meeting_with",
+            object: "Li Clan",
+            firstSeenChapter: 2,
+            lastSeenChapter: 2,
+            confidence: 0.85,
+          },
+        ],
+      });
+
+      const updated = mergeStoryBible(bible, chUpdate, 2);
+
+      // Nong Family Villa must NOT be promoted to canonicalEntities
+      expect(updated.canonicalEntities.some((e) => e.canonicalName === "Nong Family Villa")).toBe(false);
+      expect(updated.canonicalEntities.length).toBe(2);
+
+      // Relationship must be attached to the parent entity ent_000000000000000000000001
+      expect(updated.canonicalRelationships.length).toBe(1);
+      expect(updated.canonicalRelationships[0]!.sourceEntityId).toBe("ent_000000000000000000000001");
+      expect(updated.canonicalRelationships[0]!.targetEntityId).toBe("ent_000000000000000000000002");
+    });
+
+    it("ensures demoted entities referenced in subsequent chapters are never resurrected as canonical", async () => {
+      const root = await mkdtemp(join(tmpdir(), "granularity-resurrect-"));
+      const slug = "resurrect-story";
+
+      const pathsCh1 = storyPaths(root, slug, 1);
+      const pathsCh2 = storyPaths(root, slug, 2);
+      await atomicWriteJson(pathsCh1.storyConfig, {
+        slug,
+        title: "Resurrect Test Story",
+        pipeline: { storyBible: { provider: "openai", model: "gpt-4o" } },
+      });
+
+      let bible = emptyStoryBible();
+      bible.canonicalEntities = [
+        {
+          id: "ent_000000000000000000000001",
+          canonicalName: "Nong Family",
+          originalName: "",
+          type: "organization",
+          aliases: [],
+          aliasNarrationRules: [],
+          description: "Main clan",
+          firstAppearance: 1,
+          lastKnownAppearance: 1,
+          provenance: [{ chapter: 1, kind: "extraction", origin: "automatic" }],
+          origin: "automatic",
+          mergedFromIds: [],
+          notes: "",
+          canonicalNameLocked: false,
+          status: "unknown",
+        },
+        {
+          id: "ent_000000000000000000000002",
+          canonicalName: "Nong Family Villa",
+          originalName: "",
+          type: "location",
+          aliases: [],
+          aliasNarrationRules: [],
+          description: "Villa location",
+          firstAppearance: 1,
+          lastKnownAppearance: 1,
+          provenance: [{ chapter: 1, kind: "extraction", origin: "automatic" }],
+          origin: "automatic",
+          mergedFromIds: [],
+          notes: "",
+          canonicalNameLocked: false,
+          status: "unknown",
+        },
+      ];
+      await atomicWriteJson(pathsCh1.bible, bible);
+
+      // 1. Demote Nong Family Villa
+      const demoteRes = await demoteCanonicalEntity(root, slug, "ent_000000000000000000000002", {
+        parentEntityId: "ent_000000000000000000000001",
+        reason: "Sub-location under Nong Family",
+      });
+      expect(demoteRes.status).toBe("demoted");
+
+      // 2. Chapter 2 update mentions Nong Family Villa in relationship and timeline
+      const ch1Update = update(1, { chapterSummary: "Ch1 intro" });
+      const ch2Update = update(2, {
+        relationships: [
+          {
+            subject: "Nong Family Villa",
+            relationship: "located_near",
+            object: "Nong Family",
+            firstSeenChapter: 2,
+            lastSeenChapter: 2,
+            confidence: 0.9,
+          },
+        ],
+        timelineEvents: [
+          {
+            entity: "Nong Family Villa",
+            type: "revelation",
+            summary: "Meeting held at villa",
+            chapter: 2,
+            confidence: 0.9,
+          },
+        ],
+      });
+
+      await atomicWriteJson(pathsCh1.bibleUpdate, ch1Update);
+      await atomicWriteJson(pathsCh1.chapterMeta, { chapter: 1, stages: { storyBible: { status: "complete" } } });
+      await atomicWriteJson(pathsCh2.bibleUpdate, ch2Update);
+      await atomicWriteJson(pathsCh2.chapterMeta, { chapter: 2, stages: { storyBible: { status: "complete" } } });
+
+      // 3. Rebuild before Chapter 3
+      const { rebuildStoryBibleBeforeChapter } = await import("../src/story-bible/rebuild.js");
+      const rebuilt = await rebuildStoryBibleBeforeChapter(root, slug, 3);
+
+      // Nong Family Villa must NOT be resurrected into canonicalEntities!
+      expect(rebuilt.canonicalEntities.some((e) => e.canonicalName === "Nong Family Villa")).toBe(false);
+      expect(rebuilt.canonicalEntities.some((e) => e.id === "ent_000000000000000000000002")).toBe(false);
+      // Must remain strictly in minorReferences
+      expect(rebuilt.minorReferences.some((r) => r.name === "Nong Family Villa")).toBe(true);
+
+      // Disjoint invariant: no duplicate names between canonical entities and minor references
+      const canonicalNames = new Set(rebuilt.canonicalEntities.map((e) => e.canonicalName));
+      for (const ref of rebuilt.minorReferences) {
+        expect(canonicalNames.has(ref.name)).toBe(false);
+      }
+    });
   });
 
   describe("Server Catalog & Operations Integration", () => {

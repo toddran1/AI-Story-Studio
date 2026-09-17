@@ -105,6 +105,7 @@ function mergeCanonicalHistory(existing: StoryBible, update: StoryBibleUpdate, c
   const relationships = structuredClone(existing.canonicalRelationships);
   const timeline = structuredClone(existing.entityTimeline);
   const minorReferences = structuredClone(existing.minorReferences ?? []);
+  let minorReferences = structuredClone(existing.minorReferences ?? []);
 
   const ensure = (name: string, type: EntityType = "concept", originalName = "", description = "", aliases: string[] = [], status = "unknown", confidence?: number) => {
     const keys = new Set([name, originalName, ...aliases].map(normalizeName).filter(Boolean));
@@ -206,20 +207,33 @@ function mergeCanonicalHistory(existing: StoryBible, update: StoryBibleUpdate, c
   }
 
   const resolveEntityOrParent = (name: string) => {
+  const resolveEntityOrParent = (name: string): CanonicalEntity | undefined => {
     const norm = normalizeName(name);
+    if (!norm) return undefined;
     const existing = entities.find((c) => [c.canonicalName, c.originalName, ...c.aliases].some((v) => normalizeName(v) === norm));
     if (existing) return existing;
     const ref = minorReferences.find((r) => normalizeName(r.name) === norm || (r.originalName && normalizeName(r.originalName) === norm));
     if (ref?.parentEntityId) {
       const parent = entities.find((e) => e.id === ref.parentEntityId);
       if (parent) return parent;
+    const ref = minorReferences.find((r) => normalizeName(r.name) === norm || (r.originalName && normalizeName(r.originalName) === norm) || (r.aliases ?? []).some((a) => normalizeName(a) === norm));
+    if (ref) {
+      if (ref.parentEntityId) {
+        const parent = entities.find((e) => e.id === ref.parentEntityId);
+        if (parent) return parent;
+      }
+      return undefined;
     }
+    const isDemoted = overlay?.demotions?.some((d) => normalizeName(d.name) === norm || d.entityId === norm);
+    if (isDemoted) return undefined;
+
     return ensure(name);
   };
 
   for (const raw of update.relationships) {
     const source = resolveEntityOrParent(raw.subject);
     const target = resolveEntityOrParent(raw.object);
+    if (!source || !target || source.id === target.id) continue;
     const key = `${source.id}\0${normalizeName(raw.relationship)}\0${target.id}`;
     let relation = relationships.find((item) => `${item.sourceEntityId}\0${normalizeName(item.type)}\0${item.targetEntityId}` === key);
     const provenance = { chapter, kind: "relationship" as const, confidence: raw.confidence, origin: "automatic" as const };
@@ -238,10 +252,16 @@ function mergeCanonicalHistory(existing: StoryBible, update: StoryBibleUpdate, c
 
   for (const raw of update.timelineEvents) {
     const entity = resolveEntityOrParent(raw.entity);
+    if (!entity) continue;
     const related = raw.relatedEntity ? resolveEntityOrParent(raw.relatedEntity) : undefined;
     addTimeline(timeline, entity.id, chapter, raw.type, raw.summary, related?.id, raw.status, raw.confidence);
     if (raw.status && raw.status !== entity.status) entity.status = raw.status;
   }
+
+  const canonicalNameMap = new Set(
+    entities.flatMap((e) => [e.canonicalName, e.originalName, ...e.aliases].map(normalizeName)).filter(Boolean),
+  );
+  minorReferences = minorReferences.filter((ref) => !canonicalNameMap.has(normalizeName(ref.name)));
 
   return { entities, relationships, timeline, minorReferences };
 }

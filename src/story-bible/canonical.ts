@@ -203,6 +203,10 @@ export async function applyCanonicalOverlay(root: string, slug: string, input: S
   bible.canonicalRelationships = deduplicateRelationships(bible.canonicalRelationships);
   bible.entityTimeline = uniqueObjects(bible.entityTimeline);
   bible.merges = overlay.merges;
+  const canonicalNames = new Set(
+    bible.canonicalEntities.flatMap((e) => [e.canonicalName, e.originalName, ...e.aliases].map(normalizeEntityName)).filter(Boolean)
+  );
+  bible.minorReferences = bible.minorReferences.filter((ref) => !canonicalNames.has(normalizeEntityName(ref.name)));
   return { bible: storyBibleSchema.parse(bible), overlay };
 }
 

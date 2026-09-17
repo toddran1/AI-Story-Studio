@@ -23,6 +23,18 @@ export function retrieveRelevantContext(bible: StoryBible, chapterText: string, 
       return key.length >= 3 && normalizedText.includes(key);
     });
   }).slice(0, 10);
+  result.minorReferences = (prior.minorReferences ?? [])
+    .filter((ref) => {
+      const refNames = [ref.name, ref.originalName, ...(ref.aliases ?? [])].filter(Boolean);
+      const isMentioned = refNames.some((name) => {
+        const key = normalizeEntityName(name!);
+        return key.length >= 3 && normalizedText.includes(key);
+      });
+      if (!isMentioned) return false;
+      if (!ref.parentEntityId) return true;
+      return selectedIds.has(ref.parentEntityId);
+    })
+    .slice(0, 10);
   result.canonicalEntities = selectedEntities.map((item) => ({ ...item, provenance: item.provenance.slice(-20) })); result.canonicalRelationships = relations.filter((item) => selectedIds.has(item.sourceEntityId) && selectedIds.has(item.targetEntityId)).map((item) => ({ ...item, provenance: item.provenance.slice(-20) })); result.entityTimeline = prior.entityTimeline.filter((item) => selectedIds.has(item.entityId)).sort((a, b) => b.chapter - a.chapter).slice(0, options.maxTimelineEvents ?? 120).sort((a, b) => a.chapter - b.chapter);
   for (const key of ["characters", "locations", "factions", "abilities", "classes", "ranks", "items", "creatures", "systemTerms"] as const) result[key] = result[key].filter((item) => names.has(normalizeEntityName(item.canonicalEnglishName)) || names.has(normalizeEntityName(item.originalName))) as never;
   result.relationships = result.relationships.filter((item) => names.has(normalizeEntityName(item.subject)) || names.has(normalizeEntityName(item.object))).slice(0, options.maxRelationships ?? 100);
@@ -33,13 +45,16 @@ export function retrieveRelevantContext(bible: StoryBible, chapterText: string, 
   const length = () => JSON.stringify(result).length;
   while (length() > maxCharacters && result.entityTimeline.length) result.entityTimeline.shift();
   while (length() > maxCharacters && result.canonicalRelationships.length) result.canonicalRelationships.pop();
+  while (length() > maxCharacters && result.minorReferences?.length) result.minorReferences.pop();
   while (length() > maxCharacters && result.translationTerms.length) result.translationTerms.pop();
   while (length() > maxCharacters && Object.keys(result.chapterSummaries).length) delete result.chapterSummaries[Object.keys(result.chapterSummaries)[0]!];
   if (length() > maxCharacters) { for (const key of ["characters", "locations", "factions", "abilities", "classes", "ranks", "items", "creatures", "systemTerms"] as const) result[key] = [] as never; result.relationships = []; }
   for (const entity of result.canonicalEntities) { entity.provenance = entity.provenance.slice(-1); entity.description = entity.description.slice(0, 240); entity.notes = entity.notes.slice(0, 240); entity.aliases = entity.aliases.slice(0, 12).map((value) => value.slice(0, 120)); entity.canonicalName = entity.canonicalName.slice(0, 120); entity.originalName = entity.originalName.slice(0, 120); entity.preferredNarrationName = entity.preferredNarrationName?.slice(0, 120); if (entity.localizedNaming) entity.localizedNaming = { ...entity.localizedNaming, fullName: entity.localizedNaming.fullName?.slice(0, 120), shortName: entity.localizedNaming.shortName?.slice(0, 120), notes: entity.localizedNaming.notes?.slice(0, 240) }; entity.aliasNarrationRules = entity.aliasNarrationRules.filter((rule) => entity.aliases.some((alias) => normalizeEntityName(alias) === normalizeEntityName(rule.alias))).slice(0, 12).map((rule) => ({ ...rule, alias: rule.alias.slice(0, 120), replacement: rule.replacement?.slice(0, 120) })); entity.status = entity.status.slice(0, 120); }
+  if (length() > maxCharacters) { for (const key of ["characters", "locations", "factions", "abilities", "classes", "ranks", "items", "creatures", "systemTerms"] as const) result[key] = [] as never; result.relationships = []; result.minorReferences = []; }
   for (const entity of result.canonicalEntities) { entity.provenance = (entity.provenance ?? []).slice(-1); entity.description = (entity.description ?? "").slice(0, 240); entity.notes = (entity.notes ?? "").slice(0, 240); entity.aliases = (entity.aliases ?? []).slice(0, 12).map((value) => value.slice(0, 120)); entity.canonicalName = (entity.canonicalName ?? "").slice(0, 120); entity.originalName = (entity.originalName ?? "").slice(0, 120); entity.preferredNarrationName = entity.preferredNarrationName?.slice(0, 120); if (entity.localizedNaming) entity.localizedNaming = { ...entity.localizedNaming, fullName: entity.localizedNaming.fullName?.slice(0, 120), shortName: entity.localizedNaming.shortName?.slice(0, 120), notes: entity.localizedNaming.notes?.slice(0, 240) }; entity.aliasNarrationRules = (entity.aliasNarrationRules ?? []).filter((rule) => (entity.aliases ?? []).some((alias) => normalizeEntityName(alias) === normalizeEntityName(rule.alias))).slice(0, 12).map((rule) => ({ ...rule, alias: rule.alias.slice(0, 120), replacement: rule.replacement?.slice(0, 120) })); entity.status = (entity.status ?? "unknown").slice(0, 120); }
   while (length() > maxCharacters && result.canonicalEntities.length) { const removed = result.canonicalEntities.pop()!; result.canonicalRelationships = result.canonicalRelationships.filter((item) => item.sourceEntityId !== removed.id && item.targetEntityId !== removed.id); result.entityTimeline = result.entityTimeline.filter((item) => item.entityId !== removed.id && item.relatedEntityId !== removed.id); }
   if (length() > maxCharacters) { result.canonicalRelationships = []; result.entityTimeline = []; result.translationTerms = []; result.chapterSummaries = {}; }
+  if (length() > maxCharacters) { result.canonicalRelationships = []; result.entityTimeline = []; result.translationTerms = []; result.minorReferences = []; result.chapterSummaries = {}; }
   // Sound-only metadata is excluded before budgeting as well as fingerprinting.
   const parsed = storyBibleSchema.parse(result); const actual = JSON.stringify(parsed).length;
   if (actual > maxCharacters) throw new Error(`Story context budget ${maxCharacters} is smaller than the minimum serializable context (${actual})`);
