@@ -1,4 +1,5 @@
 import { join } from "node:path";
+import { visualReferenceExtensionSchema } from "../domain/visual-profile.js";
 
 export function storyPaths(root: string, slug: string, chapter: number) {
   const story = join(root, "stories", slug);
@@ -35,14 +36,13 @@ export function sceneVersionImagePath(root: string, slug: string, chapter: numbe
   return join(storyPaths(root, slug, chapter).scenesDirectory, `${sceneId}-v${versionNumber}.png`);
 }
 
-const ALLOWED_REF_EXTENSIONS = new Set(["png", "jpg", "jpeg", "webp"]);
-
 export function visualProfileRefPath(root: string, slug: string, entityId: string, refId: string, ext = "png") {
   if (!/^ent_[a-f0-9]{24}$/.test(entityId)) throw new Error("Invalid entity ID");
   if (!/^[a-zA-Z0-9_-]+$/.test(refId)) throw new Error("Invalid reference image ID");
-  const normalizedExt = ext.toLowerCase().replace(/^\./, "");
-  if (!ALLOWED_REF_EXTENSIONS.has(normalizedExt)) throw new Error(`Invalid reference image extension: ${ext}`);
-  return join(storyPaths(root, slug, 1).visualProfilesDirectory, entityId, `${refId}.${normalizedExt}`);
+  const normalizedExt = (ext ?? "").trim().toLowerCase().replace(/^\./, "");
+  const parsedExt = visualReferenceExtensionSchema.safeParse(normalizedExt);
+  if (!parsedExt.success) throw new Error(`Invalid reference image extension: ${ext}`);
+  return join(storyPaths(root, slug, 1).visualProfilesDirectory, entityId, `${refId}.${parsedExt.data}`);
 }
 
 export function videoExportPaths(root: string, slug: string, from: number, to: number) {

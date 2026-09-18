@@ -46,7 +46,21 @@ import { planStoredScenes, updateStoredSceneManifest } from "../../src/scenes/ma
 import { generateStoredArtwork, reviewStoredArtwork, reviewStoredArtworkVersion } from "../../src/artwork/generator.js";
 import { ImageProvider } from "../../src/artwork/provider.js";
 import { OpenAIImageProvider } from "../../src/artwork/openai-image.provider.js";
-import { loadVisualProfiles, getVisualProfile as loadVisualProfileEntity, updateVisualProfile, deleteVisualProfile, deleteVisualReferenceImage, addVisualReferenceImage, generateStyleSheet, handleEntityMerge, handleEntityDemote } from "../../src/visual-canon/profiles.js";
+import {
+  loadVisualProfiles,
+  getVisualProfile as loadVisualProfileEntity,
+  updateVisualProfile,
+  deleteVisualProfile,
+  deleteVisualReferenceImage,
+  addVisualReferenceImage,
+  generateStyleSheet,
+  handleEntityMerge,
+  handleEntityDemote,
+  prepareVisualCanonMerge,
+  commitVisualCanonMerge,
+  finalizeVisualCanonMerge,
+  rollbackPreparedVisualCanonMerge,
+} from "../../src/visual-canon/profiles.js";
 import { loadStoryArtDirection, saveStoryArtDirection, createPreset, updatePreset, deletePreset, duplicatePreset, setDefaultPreset } from "../../src/visual-canon/art-direction.js";
 import { visualProfileSchema } from "../../src/domain/visual-profile.js";
 import { storyArtDirectionSchema, artDirectionPresetSchema } from "../../src/domain/art-direction.js";
@@ -715,7 +729,38 @@ export class StudioOperations {
       return { entityId: id, locale: input.locale ?? defaultLocale(story.outputLanguage), model: config, suggestions: result.suggestions };
     });
   }
-  async mergeCanonicalEntities(slug: string, raw: unknown) { slugSchema.parse(slug); const input = z.object({ targetEntityId: z.string(), sourceEntityIds: z.array(z.string()).min(1).max(50), reason: z.string().trim().min(1).max(1000) }).strict().parse(raw); return withStoryLock(this.root, slug, "canonical entity merge", async () => { const base = await getStoryBible(this.root, slug, { includeCanonicalOverlay: false }); const result = await mergeCanonicalEntities(this.root, slug, base, input.targetEntityId, input.sourceEntityIds, input.reason); await handleEntityMerge(this.root, slug, input.targetEntityId, input.sourceEntityIds).catch(() => undefined); await recordActivity(this.root, slug, "bible.entities.merged", `Merged ${input.sourceEntityIds.length} duplicate entity record(s)`); return { merge: result.merge, entity: result.bible.canonicalEntities.find((item) => item.id === input.targetEntityId) }; }); }
+  private async executeCanonicalEntityMerge(
+    slug: string,
+    targetEntityId: string,
+    sourceEntityIds: string[],
+    reason: string,
+  ) {
+    const prepared = await prepareVisualCanonMerge(this.root, slug, targetEntityId, sourceEntityIds);
+    const base = await getStoryBible(this.root, slug, { includeCanonicalOverlay: false });
+    const result = await mergeCanonicalEntities(this.root, slug, base, targetEntityId, sourceEntityIds, reason);
+    try {
+      await commitVisualCanonMerge(this.root, slug, prepared);
+    } catch (commitErr) {
+      await rollbackPreparedVisualCanonMerge(prepared);
+      throw commitErr;
+    }
+    await finalizeVisualCanonMerge(prepared);
+    return result;
+  }
+
+  async mergeCanonicalEntities(slug: string, raw: unknown) {
+    slugSchema.parse(slug);
+    const input = z.object({
+      targetEntityId: z.string(),
+      sourceEntityIds: z.array(z.string()).min(1).max(50),
+      reason: z.string().trim().min(1).max(1000),
+    }).strict().parse(raw);
+    return withStoryLock(this.root, slug, "canonical entity merge", async () => {
+      const result = await this.executeCanonicalEntityMerge(slug, input.targetEntityId, input.sourceEntityIds, input.reason);
+      await recordActivity(this.root, slug, "bible.entities.merged", `Merged ${input.sourceEntityIds.length} duplicate entity record(s)`);
+      return { merge: result.merge, entity: result.bible.canonicalEntities.find((item) => item.id === input.targetEntityId) };
+    });
+  }
   async undoCanonicalMerge(slug: string, mergeId: string) { slugSchema.parse(slug); return withStoryLock(this.root, slug, "undo canonical entity merge", async () => { const base = await getStoryBible(this.root, slug, { includeCanonicalOverlay: false }); await undoCanonicalMerge(this.root, slug, base, mergeId); await recordActivity(this.root, slug, "bible.merge.undone", "Undid a canonical entity merge"); return { status: "undone" }; }); }
   async resolveContinuity(slug: string, id: string, raw: unknown) {
     slugSchema.parse(slug); const input = z.object({ resolution: z.enum(["accepted_new", "kept_existing", "intentional", "corrected", "merged", "dismissed"]), note: z.string().trim().max(2000).optional() }).strict().parse(raw);
@@ -725,8 +770,7 @@ export class StudioOperations {
       const base = await getStoryBible(this.root, slug, { includeCanonicalOverlay: false });
       if (input.resolution === "merged") {
         if (current.type !== "identity_alias_ambiguity" || current.entityIds.length < 2) throw new Error("Only identity or alias findings can be resolved by merging entities");
-        await mergeCanonicalEntities(this.root, slug, base, current.entityIds[0]!, current.entityIds.slice(1), input.note || `Resolved continuity finding ${id}`);
-        await handleEntityMerge(this.root, slug, current.entityIds[0]!, current.entityIds.slice(1)).catch(() => undefined);
+        await this.executeCanonicalEntityMerge(slug, current.entityIds[0]!, current.entityIds.slice(1), input.note || `Resolved continuity finding ${id}`);
       } else if (input.resolution === "accepted_new") {
         if (current.type !== "status_conflict" || current.entityIds.length !== 1) throw new Error("This finding requires a manual Story Bible correction before it can be accepted");
         const chapter = Math.max(...current.chapters); const latest = base.entityTimeline.filter((event) => event.entityId === current.entityIds[0] && event.chapter === chapter).at(-1); const status = latest?.status ?? (latest?.type === "appearance" ? "alive" : undefined);
@@ -764,7 +808,7 @@ export class StudioOperations {
       force: z.boolean().optional(),
     }).passthrough().parse(raw ?? {});
     const result = await demoteCanonicalEntity(this.root, slug, id, input);
-    await handleEntityDemote(this.root, slug, id).catch(() => undefined);
+    await handleEntityDemote(this.root, slug, id);
     invalidateCatalogCache(this.root, slug);
     await recordActivity(this.root, slug, "bible.entity.demoted", `Demoted canonical entity ${id} to minor reference`);
     return result;

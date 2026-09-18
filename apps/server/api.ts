@@ -23,6 +23,7 @@ import { durableJobStatusSchema } from "../../src/queue/types.js";
 import { QueueConflictError, QueueNotFoundError } from "../../src/queue/repository.js";
 import { productionForceSchema } from "../../src/production/types.js";
 import { createErrorDiagnostic } from "../../src/errors/diagnostic.js";
+import { findVisualReferenceFile, mimeForVisualReferenceExtension } from "../../src/visual-canon/assets.js";
 
 const MAX_BODY_BYTES = 50_000_000;
 const MAX_JSON_BYTES = 1_000_000;
@@ -213,31 +214,18 @@ export function createApiHandler(operations: StudioOperations) {
         const refId = visualProfileRefImageMatch[3]!;
         const requestedExt = visualProfileRefImageMatch[4];
 
-        let filePath: string | undefined;
-        let effectiveExt: string | undefined;
+        const match = await findVisualReferenceFile(
+          operations.root,
+          storySlug,
+          entityId,
+          refId,
+          requestedExt,
+        );
 
-        if (requestedExt) {
-          const candidate = visualProfileRefPath(operations.root, storySlug, entityId, refId, requestedExt);
-          if (await exists(candidate)) {
-            filePath = candidate;
-            effectiveExt = requestedExt.toLowerCase();
-          }
-        } else {
-          for (const ext of ["png", "jpg", "jpeg", "webp"]) {
-            const candidate = visualProfileRefPath(operations.root, storySlug, entityId, refId, ext);
-            if (await exists(candidate)) {
-              filePath = candidate;
-              effectiveExt = ext;
-              break;
-            }
-          }
-        }
-
-        if (!filePath || !effectiveExt || !(await exists(filePath))) {
+        if (!match) {
           return send(response, 404, { error: "Reference image not found" });
         }
-        const mime = effectiveExt === "webp" ? "image/webp" : effectiveExt === "png" ? "image/png" : "image/jpeg";
-        return sendFile(request, response, filePath, mime);
+        return sendFile(request, response, match.path, mimeForVisualReferenceExtension(match.ext));
       }
       const qaMatch = /^\/api\/stories\/([a-z0-9-]+)\/qa$/.exec(url.pathname);
       if (qaMatch && request.method === "GET") return send(response, 200, await getQaDashboard(operations.root, qaMatch[1]!));

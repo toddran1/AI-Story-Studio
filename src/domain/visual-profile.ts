@@ -18,6 +18,9 @@ export type VisualRole = z.infer<typeof visualRoleSchema>;
 export const visualReferenceSourceSchema = z.enum(["generated", "uploaded", "style_sheet"]);
 export type VisualReferenceSource = z.infer<typeof visualReferenceSourceSchema>;
 
+export const visualReferenceExtensionSchema = z.enum(["png", "jpg", "jpeg", "webp"]);
+export type VisualReferenceExtension = z.infer<typeof visualReferenceExtensionSchema>;
+
 export const visualReferenceImageSchema = z.object({
   id: z.string().min(1),
   entityId: z.string().regex(/^ent_[a-f0-9]{24}$/),

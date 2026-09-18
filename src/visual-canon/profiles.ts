@@ -18,6 +18,14 @@ import { storyPaths, visualProfileRefPath } from "../storage/paths.js";
 import { exists, readJsonIfExists } from "../storage/story-files.js";
 import { fingerprint } from "../utils/hash.js";
 import { loadStoryArtDirection, resolveActiveArtDirection } from "./art-direction.js";
+import {
+  deleteControlledVisualReferenceFiles,
+  findVisualReferenceFile,
+  isVisualReferenceExtension,
+  normalizeVisualReferenceExtension,
+  resolveVisualReferencePath,
+} from "./assets.js";
+
 
 const visualProfilesFileSchema = z.record(z.string(), visualProfileSchema);
 
@@ -132,23 +140,13 @@ export async function deleteVisualReferenceImage(
     return { profile, deleted: false };
   }
 
-  const [removedRef] = profile.references.splice(refIndex, 1);
+  profile.references.splice(refIndex, 1);
   profile.revision += 1;
   profile.updatedAt = new Date().toISOString();
   await saveVisualProfiles(root, slug, profiles);
 
-  // Safely remove file on disk
-  if (removedRef?.imagePath) {
-    await rm(removedRef.imagePath, { force: true }).catch(() => undefined);
-  }
-  for (const ext of ["png", "jpg", "jpeg", "webp"]) {
-    try {
-      const candidate = visualProfileRefPath(root, slug, entityId, refId, ext);
-      await rm(candidate, { force: true }).catch(() => undefined);
-    } catch {
-      // ignore
-    }
-  }
+  // Safely remove file on disk strictly using controlled paths - NEVER arbitrary imagePath
+  await deleteControlledVisualReferenceFiles(root, slug, entityId, refId);
 
   return { profile, deleted: true };
 }
@@ -171,6 +169,8 @@ export async function addVisualReferenceImage(
   canonicalEntitySchema.shape.id.parse(entityId);
   const fileBytes = options.data ?? options.buffer;
   if (!fileBytes) throw new Error("Image data buffer is required");
+  const ext = normalizeVisualReferenceExtension(options.ext ?? "png");
+
   const profiles = await loadVisualProfiles(root, slug);
   let profile = profiles[entityId];
   if (!profile) {
@@ -178,8 +178,7 @@ export async function addVisualReferenceImage(
   }
 
   const refId = `ref_${randomUUID().slice(0, 12)}`;
-  const ext = (options.ext ?? "png").toLowerCase().replace(/^\./, "");
-  const filePath = visualProfileRefPath(root, slug, entityId, refId, ext);
+  const filePath = resolveVisualReferencePath(root, slug, entityId, refId, ext);
 
   await mkdir(dirname(filePath), { recursive: true });
   await atomicWrite(filePath, fileBytes);
@@ -329,12 +328,20 @@ export async function generateStyleSheet(
   });
 }
 
-export async function handleEntityMerge(
+export interface PreparedVisualCanonMerge {
+  targetEntityId: string;
+  sourceEntityIds: string[];
+  preparedProfiles: Record<string, VisualEntityProfile>;
+  migratedTargetPaths: string[];
+  migratedSourceDirs: string[];
+}
+
+export async function prepareVisualCanonMerge(
   root: string,
   slug: string,
   targetEntityId: string,
   sourceEntityIds: string[],
-): Promise<void> {
+): Promise<PreparedVisualCanonMerge> {
   canonicalEntitySchema.shape.id.parse(targetEntityId);
   for (const id of sourceEntityIds) {
     canonicalEntitySchema.shape.id.parse(id);
@@ -347,11 +354,20 @@ export async function handleEntityMerge(
     .map((id) => profiles[id])
     .filter((p): p is VisualEntityProfile => Boolean(p));
 
-  if (!sources.length) return;
+  if (!sources.length) {
+    return {
+      targetEntityId,
+      sourceEntityIds,
+      preparedProfiles: profiles,
+      migratedTargetPaths: [],
+      migratedSourceDirs: [],
+    };
+  }
 
   const targetDir = join(storyPaths(root, slug, 1).visualProfilesDirectory, targetEntityId);
   await mkdir(targetDir, { recursive: true });
 
+  const migratedTargetPaths: string[] = [];
   const migratedSourceDirs: string[] = [];
 
   const migrateRef = async (
@@ -367,31 +383,22 @@ export async function handleEntityMerge(
     }
     existingIds.add(finalRefId);
 
-    let ext = "png";
+    let hintExt: string | undefined;
     if (ref.imagePath) {
       const match = /\.([a-zA-Z0-9]+)$/.exec(ref.imagePath);
-      if (match) ext = match[1]!.toLowerCase();
-    }
-
-    let sourcePath = ref.imagePath;
-    let fileExists = await exists(sourcePath);
-    if (!fileExists) {
-      for (const candidateExt of ["png", "jpg", "jpeg", "webp"]) {
-        const candidate = visualProfileRefPath(root, slug, sourceEntityId, ref.id, candidateExt);
-        if (await exists(candidate)) {
-          sourcePath = candidate;
-          fileExists = true;
-          ext = candidateExt;
-          break;
-        }
+      if (match && isVisualReferenceExtension(match[1]!)) {
+        hintExt = match[1]!;
       }
     }
 
-    const targetPath = visualProfileRefPath(root, slug, targetEntityId, finalRefId, ext);
+    const found = await findVisualReferenceFile(root, slug, sourceEntityId, ref.id, hintExt);
+    const ext = found?.ext ?? (hintExt ? normalizeVisualReferenceExtension(hintExt) : "png");
+    const targetPath = resolveVisualReferencePath(root, slug, targetEntityId, finalRefId, ext);
 
-    if (fileExists) {
-      const bytes = await readFile(sourcePath);
+    if (found) {
+      const bytes = await readFile(found.path);
       await atomicWrite(targetPath, bytes);
+      migratedTargetPaths.push(targetPath);
     }
 
     const updatedProvenance = {
@@ -411,89 +418,150 @@ export async function handleEntityMerge(
   };
 
   const now = new Date().toISOString();
+  const preparedProfiles = { ...profiles };
 
-  if (!target) {
-    const primary = sources[0]!;
-    const remainingSources = sources.slice(1);
+  try {
+    if (!target) {
+      const primary = sources[0]!;
+      const remainingSources = sources.slice(1);
 
-    const existingIds = new Set<string>();
-    const migratedRefs: VisualReferenceImage[] = [];
+      const existingIds = new Set<string>();
+      const migratedRefs: VisualReferenceImage[] = [];
 
-    for (const ref of primary.references) {
-      migratedRefs.push(await migrateRef(ref, primary.entityId, existingIds));
-    }
-    migratedSourceDirs.push(join(storyPaths(root, slug, 1).visualProfilesDirectory, primary.entityId));
-
-    for (const src of remainingSources) {
-      for (const ref of src.references) {
-        migratedRefs.push(await migrateRef(ref, src.entityId, existingIds));
+      for (const ref of primary.references) {
+        migratedRefs.push(await migrateRef(ref, primary.entityId, existingIds));
       }
-      migratedSourceDirs.push(join(storyPaths(root, slug, 1).visualProfilesDirectory, src.entityId));
-    }
+      migratedSourceDirs.push(join(storyPaths(root, slug, 1).visualProfilesDirectory, primary.entityId));
 
-    const combinedNotes = [primary.notes, ...remainingSources.map((s) => s.notes).filter(Boolean)].filter(Boolean).join("\n");
-    const combinedNegative = [primary.negativePrompt, ...remainingSources.map((s) => s.negativePrompt).filter(Boolean)].filter(Boolean).join(", ");
-    const combinedVariants = [...primary.variants];
-    for (const src of remainingSources) {
-      for (const v of src.variants) {
-        if (!combinedVariants.some((existing) => existing.name.toLowerCase() === v.name.toLowerCase())) {
-          combinedVariants.push(v);
+      for (const src of remainingSources) {
+        for (const ref of src.references) {
+          migratedRefs.push(await migrateRef(ref, src.entityId, existingIds));
+        }
+        migratedSourceDirs.push(join(storyPaths(root, slug, 1).visualProfilesDirectory, src.entityId));
+      }
+
+      const combinedNotes = [primary.notes, ...remainingSources.map((s) => s.notes).filter(Boolean)].filter(Boolean).join("\n");
+      const combinedNegative = [primary.negativePrompt, ...remainingSources.map((s) => s.negativePrompt).filter(Boolean)].filter(Boolean).join(", ");
+      const combinedVariants = [...primary.variants];
+      for (const src of remainingSources) {
+        for (const v of src.variants) {
+          if (!combinedVariants.some((existing) => existing.name.toLowerCase() === v.name.toLowerCase())) {
+            combinedVariants.push(v);
+          }
         }
       }
-    }
 
-    profiles[targetEntityId] = visualProfileSchema.parse({
-      ...primary,
-      id: `vprof_${randomUUID()}`,
-      entityId: targetEntityId,
-      notes: combinedNotes,
-      negativePrompt: combinedNegative,
-      variants: combinedVariants,
-      references: migratedRefs,
-      revision: primary.revision + 1,
-      updatedAt: now,
-    });
+      preparedProfiles[targetEntityId] = visualProfileSchema.parse({
+        ...primary,
+        id: `vprof_${randomUUID()}`,
+        entityId: targetEntityId,
+        notes: combinedNotes,
+        negativePrompt: combinedNegative,
+        variants: combinedVariants,
+        references: migratedRefs,
+        revision: primary.revision + 1,
+        updatedAt: now,
+      });
 
-    for (const src of sources) {
-      delete profiles[src.entityId];
-    }
-  } else {
-    const existingIds = new Set<string>(target.references.map((r) => r.id));
-    const allRefs = [...target.references];
-
-    for (const src of sources) {
-      for (const ref of src.references) {
-        const migrated = await migrateRef(ref, src.entityId, existingIds);
-        allRefs.push(migrated);
+      for (const src of sources) {
+        delete preparedProfiles[src.entityId];
       }
-      migratedSourceDirs.push(join(storyPaths(root, slug, 1).visualProfilesDirectory, src.entityId));
+    } else {
+      const existingIds = new Set<string>(target.references.map((r) => r.id));
+      const allRefs = [...target.references];
 
-      if (src.notes && !target.notes.includes(src.notes)) {
-        target.notes = [target.notes, src.notes].filter(Boolean).join("\n");
-      }
-      if (src.negativePrompt && !target.negativePrompt.includes(src.negativePrompt)) {
-        target.negativePrompt = [target.negativePrompt, src.negativePrompt].filter(Boolean).join(", ");
-      }
-      for (const v of src.variants) {
-        if (!target.variants.some((existing) => existing.name.toLowerCase() === v.name.toLowerCase())) {
-          target.variants.push(v);
+      for (const src of sources) {
+        for (const ref of src.references) {
+          const migrated = await migrateRef(ref, src.entityId, existingIds);
+          allRefs.push(migrated);
         }
+        migratedSourceDirs.push(join(storyPaths(root, slug, 1).visualProfilesDirectory, src.entityId));
+
+        if (src.notes && !target.notes.includes(src.notes)) {
+          target.notes = [target.notes, src.notes].filter(Boolean).join("\n");
+        }
+        if (src.negativePrompt && !target.negativePrompt.includes(src.negativePrompt)) {
+          target.negativePrompt = [target.negativePrompt, src.negativePrompt].filter(Boolean).join(", ");
+        }
+        for (const v of src.variants) {
+          if (!target.variants.some((existing) => existing.name.toLowerCase() === v.name.toLowerCase())) {
+            target.variants.push(v);
+          }
+        }
+        delete preparedProfiles[src.entityId];
       }
-      delete profiles[src.entityId];
+
+      target.references = allRefs;
+      target.updatedAt = now;
+      target.revision += 1;
+      preparedProfiles[targetEntityId] = visualProfileSchema.parse(target);
     }
-
-    target.references = allRefs;
-    target.updatedAt = now;
-    target.revision += 1;
-    profiles[targetEntityId] = visualProfileSchema.parse(target);
+  } catch (err) {
+    for (const p of migratedTargetPaths) {
+      await rm(p, { force: true }).catch(() => undefined);
+    }
+    throw err;
   }
 
-  await saveVisualProfiles(root, slug, profiles);
+  return {
+    targetEntityId,
+    sourceEntityIds,
+    preparedProfiles,
+    migratedTargetPaths,
+    migratedSourceDirs,
+  };
+}
 
-  // Clean up source directories only after metadata and target files are committed
-  for (const srcDir of migratedSourceDirs) {
-    await rm(srcDir, { recursive: true, force: true }).catch(() => undefined);
+export async function rollbackPreparedVisualCanonMerge(
+  prepared: PreparedVisualCanonMerge,
+): Promise<void> {
+  for (const p of prepared.migratedTargetPaths) {
+    await rm(p, { force: true }).catch(() => undefined);
   }
+}
+
+export async function commitVisualCanonMerge(
+  root: string,
+  slug: string,
+  prepared: PreparedVisualCanonMerge,
+): Promise<void> {
+  await saveVisualProfiles(root, slug, prepared.preparedProfiles);
+}
+
+export async function finalizeVisualCanonMerge(
+  prepared: PreparedVisualCanonMerge,
+): Promise<{ cleanedDirs: string[]; errors: string[] }> {
+  const cleanedDirs: string[] = [];
+  const errors: string[] = [];
+
+  for (const srcDir of prepared.migratedSourceDirs) {
+    try {
+      await rm(srcDir, { recursive: true, force: true });
+      cleanedDirs.push(srcDir);
+    } catch (err: any) {
+      const msg = `Failed to clean up source directory '${srcDir}': ${err?.message ?? String(err)}`;
+      errors.push(msg);
+      console.warn(`[VisualCanon] ${msg}`);
+    }
+  }
+
+  return { cleanedDirs, errors };
+}
+
+export async function handleEntityMerge(
+  root: string,
+  slug: string,
+  targetEntityId: string,
+  sourceEntityIds: string[],
+): Promise<void> {
+  const prepared = await prepareVisualCanonMerge(root, slug, targetEntityId, sourceEntityIds);
+  try {
+    await commitVisualCanonMerge(root, slug, prepared);
+  } catch (err) {
+    await rollbackPreparedVisualCanonMerge(prepared);
+    throw err;
+  }
+  await finalizeVisualCanonMerge(prepared);
 }
 
 export async function handleEntityDemote(root: string, slug: string, entityId: string): Promise<void> {
