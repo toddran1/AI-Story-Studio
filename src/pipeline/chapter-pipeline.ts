@@ -23,6 +23,7 @@ import { narrationDeliveryProfile, stripDeliveryCues } from "../narration/tts-di
 import { STORY_BIBLE_PROMPT_VERSION } from "../story-bible/prompts.js";
 import { extractStoryBible } from "../story-bible/extractor.js";
 import { QA_PROMPT_VERSION } from "../qa/prompts.js";
+import { computeQaDependencyFingerprint, loadQaDeterministicDependencies } from "../qa/freshness.js";
 import { validateChapterQuality } from "../qa/validator.js";
 import { buildQaState } from "../qa/review.js";
 import { migrateQaState } from "../qa/findings.js";
@@ -190,9 +191,11 @@ export class ChapterPipeline {
     if (options.stopAfter === "narration") { await persist(); return chapter; }
 
     const qaConfig = options.story.pipeline.qa;
-    const qaFp = fingerprint({
+    const qaDeterministicDeps = await loadQaDeterministicDependencies(options.root, options.story.slug);
+    const qaFp = computeQaDependencyFingerprint({
       source: ingestionFp, translation: fingerprint(english), narration: fingerprint(narration),
       context: priorContext, config: qaConfig, narrationSettings: narrationBehavior, prompt: QA_PROMPT_VERSION, mode: options.story.qaMode,
+      ...qaDeterministicDeps,
     });
     const qaResult = await runStage("qa", qaFp, paths.qa, {
       provider: qaConfig.provider, model: qaConfig.model, promptVersion: QA_PROMPT_VERSION,
@@ -215,6 +218,7 @@ export class ChapterPipeline {
         baseScore: { score: result.value.score, originalScore: result.value.originalScore },
         mode: options.story.qaMode,
         acceptedContinuity: deterministic.acceptedContinuity,
+        dependencyFingerprint: qaFp,
       });
       await atomicWriteJson(paths.qa, state);
       chapter.stages.qa.usage = result.usage;
@@ -232,7 +236,8 @@ export class ChapterPipeline {
         await persist();
         // QA failure must not replace the last known-good canonical snapshot with
         // the pre-chapter context. The rejected chapter can be retried later.
-        throw new QualityGateError(`Chapter ${options.chapter} failed QA`, quality);
+        // The gate diagnostic must carry only active open findings, never resolved history.
+        throw new QualityGateError(`Chapter ${options.chapter} failed QA`, { ...quality, issues: activeQaIssues(quality) }, { dependencyFingerprint: qaFp });
       }
     }
     if (options.stopAfter === "qa") { await persist(); return chapter; }

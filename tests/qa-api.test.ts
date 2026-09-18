@@ -11,8 +11,10 @@ import { chapterSchema } from "../src/domain/chapter.js";
 import { emptyStoryBible, storyBibleSchema } from "../src/domain/story-bible.js";
 import { Story } from "../src/domain/story.js";
 import { qaStateSchema } from "../src/domain/qa.js";
+import { diagnosticIsHistorical } from "../src/errors/diagnostic.js";
 import { LLMRouter } from "../src/llm/router.js";
 import { buildQaState } from "../src/qa/review.js";
+import { computeStoredQaDependencyFingerprint } from "../src/qa/freshness.js";
 import { atomicWrite, atomicWriteJson } from "../src/storage/atomic-write.js";
 import { storyPaths } from "../src/storage/paths.js";
 import { readJsonIfExists } from "../src/storage/story-files.js";
@@ -52,18 +54,21 @@ async function fixture(options: {
   });
   const translation = options.translation ?? "The keeper crossed the quiet courtyard and counted the small blue flames.";
   const narration = options.narration ?? translation;
-  await atomicWriteJson(paths.chapterMeta, chapter);
   await atomicWrite(paths.original, "守灯人穿过庭院。".repeat(50));
   await atomicWrite(paths.english, translation);
   await atomicWrite(paths.narration, narration);
   await atomicWriteJson(paths.storyContext, {});
   if (options.bibleEntities) await atomicWriteJson(paths.bible, storyBibleSchema.parse({ ...emptyStoryBible(), canonicalEntities: options.bibleEntities }));
+  // Record the same authoritative dependency fingerprint the pipeline would,
+  // so freshness checks see this fixture as current.
+  const qaFingerprint = await computeStoredQaDependencyFingerprint(root, story, 1);
+  await atomicWriteJson(paths.chapterMeta, chapterSchema.parse({ ...chapter, stages: { ...chapter.stages, qa: { status: "complete" as const, fingerprint: qaFingerprint, outputFingerprint: "out" } } }));
   let state;
   if (options.detections) {
-    state = buildQaState(undefined, options.detections, { chapter: 1, translation, narration, now: NOW }).state;
+    state = buildQaState(undefined, options.detections, { chapter: 1, translation, narration, now: NOW, dependencyFingerprint: qaFingerprint }).state;
     await atomicWriteJson(paths.qa, state);
   }
-  return { root, story, paths, state, translation, narration };
+  return { root, story, paths, state, translation, narration, qaFingerprint };
 }
 
 const openaiQa = (qaResponse?: unknown) => new MockLLM("openai", undefined, qaResponse);
@@ -82,6 +87,30 @@ describe("chapter QA state endpoint", () => {
     expect(result.counts).toEqual({ open: 1, resolved: 0, safeFixesAvailable: 0 });
     expect(result.state.findings[0]!.id).toBe(state!.findings[0]!.id);
     expect(result.qaStale).toBe(false);
+    await operations.close();
+  });
+
+  it("derives qaStale from the authoritative dependency fingerprint", async () => {
+    const { root, story, paths, qaFingerprint } = await fixture({ detections: [detection()] });
+    const { operations } = operationsWith(root, openaiQa());
+    const current = await operations.getChapterQa(story.slug, 1);
+    expect(current.freshness).toBe("current");
+    expect(current.qaStale).toBe(false);
+    expect(current.currentFingerprint).toBe(qaFingerprint);
+    expect(current.stats?.needsVerification).toBe(0);
+    // A failure diagnostic recorded now becomes historical once a dependency changes.
+    expect(diagnosticIsHistorical({ qaDependencyFingerprint: qaFingerprint! }, current.currentFingerprint)).toBe(false);
+    // Change a QA dependency (the narration text) without re-running QA.
+    await atomicWrite(paths.narration, "The keeper crossed the noisy courtyard and counted the small blue flames.");
+    const stale = await operations.getChapterQa(story.slug, 1);
+    expect(stale.freshness).toBe("needs_recheck");
+    expect(stale.qaStale).toBe(true);
+    expect(stale.currentFingerprint).not.toBe(qaFingerprint);
+    expect(stale.stats?.needsVerification).toBe(1);
+    expect(diagnosticIsHistorical({ qaDependencyFingerprint: qaFingerprint! }, stale.currentFingerprint)).toBe(true);
+    const dashboard = await getQaDashboard(root, story.slug);
+    expect(dashboard.counts.needsVerification).toBe(1);
+    expect(dashboard.chapters[0]).toMatchObject({ stale: true, needsVerification: 1 });
     await operations.close();
   });
 
@@ -230,7 +259,7 @@ describe("dashboard and legacy compatibility", () => {
     const { operations } = operationsWith(root, openaiQa());
     await operations.dismissQaFinding(story.slug, 1, state!.findings[0]!.id, {});
     const dashboard = await getQaDashboard(root, story.slug);
-    expect(dashboard.counts).toEqual({ pass: 1, warn: 0, fail: 0 });
+    expect(dashboard.counts).toEqual({ pass: 1, warn: 0, fail: 0, needsVerification: 0 });
     expect(dashboard.categories).toEqual({});
     expect(dashboard.chapters[0]).toMatchObject({ chapter: 1, status: "pass", issues: [] });
     await operations.close();

@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
+import { isQaIssueActive } from "../domain/qa.js";
 import { QualityGateError } from "../pipeline/errors.js";
 import { classifyQueueFailure } from "../queue/failure.js";
 import { failureCategorySchema } from "../queue/types.js";
@@ -18,8 +19,20 @@ export const errorDiagnosticSchema = z.object({
   code: z.string().min(1).optional(),
   technicalDetails: z.string().min(1).optional(),
   issues: z.array(z.object({ category: z.string(), severity: z.string(), message: z.string(), evidence: z.string().optional() })).optional(),
+  /** QA dependency fingerprint in effect when a quality gate failed; used to tell historical failures from current ones. */
+  qaDependencyFingerprint: z.string().min(1).optional(),
 });
 export type ErrorDiagnostic = z.infer<typeof errorDiagnosticSchema>;
+
+/**
+ * A QA failure diagnostic is historical once the chapter's current QA
+ * dependency fingerprint differs from the one recorded at failure time.
+ * Undefined when the comparison cannot be made (no provenance either side).
+ */
+export function diagnosticIsHistorical(diagnostic: Pick<ErrorDiagnostic, "qaDependencyFingerprint">, currentFingerprint?: string): boolean | undefined {
+  if (!diagnostic.qaDependencyFingerprint || !currentFingerprint) return undefined;
+  return diagnostic.qaDependencyFingerprint !== currentFingerprint;
+}
 
 export function createErrorDiagnostic(error: unknown, context: { chapter?: number; stage?: string; summary?: string } = {}): ErrorDiagnostic {
   const chain = errorChain(error); const classified = classifyQueueFailure(error); const quality = chain.find((value) => value instanceof QualityGateError) as QualityGateError | undefined;
@@ -32,12 +45,16 @@ export function createErrorDiagnostic(error: unknown, context: { chapter?: numbe
   const summary = safeText(context.summary ?? (quality
     ? `${chapter ? `Chapter ${chapter} ` : ""}failed quality review`
     : details[0] ?? "An unexpected error occurred"));
+  // Only active open findings gate a chapter; resolved/reviewed history must
+  // never appear in a failure diagnostic even on legacy results.
+  const activeIssues = quality?.result.issues.filter(isQaIssueActive).slice(0, 20);
   return errorDiagnosticSchema.parse({
     id: `ERR-${randomUUID().slice(0, 8).toUpperCase()}`, timestamp: new Date().toISOString(), summary,
     category: classified.category, retryable: classified.retryable, recommendedAction: safeText(classified.recommendedAction),
     chapter, stage, provider, model, code,
     technicalDetails: combined && combined !== summary ? combined : undefined,
-    issues: quality?.result.issues.slice(0, 20).map((issue) => ({ category: issue.category, severity: issue.severity, message: safeText(issue.message), evidence: safeText(issue.evidence) })),
+    issues: activeIssues?.length ? activeIssues.map((issue) => ({ category: issue.category, severity: issue.severity, message: safeText(issue.message), evidence: safeText(issue.evidence) })) : undefined,
+    qaDependencyFingerprint: quality?.dependencyFingerprint,
   });
 }
 

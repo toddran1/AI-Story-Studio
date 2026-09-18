@@ -1,4 +1,4 @@
-export type ErrorDiagnostic = { id:string;timestamp:string;summary:string;category:"transient"|"rate_limit"|"configuration"|"content_qa"|"permanent";retryable:boolean;recommendedAction:string;chapter?:number;stage?:string;provider?:string;model?:string;code?:string;technicalDetails?:string;issues?:Array<{category:string;severity:string;message:string;evidence?:string}> };
+export type ErrorDiagnostic = { id:string;timestamp:string;summary:string;category:"transient"|"rate_limit"|"configuration"|"content_qa"|"permanent";retryable:boolean;recommendedAction:string;chapter?:number;stage?:string;provider?:string;model?:string;code?:string;technicalDetails?:string;issues?:Array<{category:string;severity:string;message:string;evidence?:string}>;qaDependencyFingerprint?:string };
 export type ApiValidationIssue = { path: string; message: string; code?: string };
 export class ApiError extends Error { constructor(message: string, public readonly diagnostic?: ErrorDiagnostic, public readonly validation?: ApiValidationIssue[]) { super(formatApiError(message, diagnostic, validation)); this.name = "ApiError"; } }
 export function formatDiagnostic(diagnostic: ErrorDiagnostic) { return `${diagnostic.summary}\nNext: ${diagnostic.recommendedAction}\nReference: ${diagnostic.id}`; }
@@ -353,19 +353,25 @@ export type Model = { provider: "openai" | "gemini" | "kimi"; model: string };
 export type FishTtsConfig = { provider: "fish"; model: string; referenceId?: string; secondaryReferenceId?: string; voiceMode: "narrator-only" | "same-voice-dialogue" | "narrator-dialogue"; deliveryIntensity: "none" | "restrained" | "expressive"; qualityGuard: boolean; speed: number; format: "mp3"; sampleRate: number; bitrate: number; normalize: boolean; maxCharsPerRequest: number };
 export type StoryCard = { slug: string; title: string; author?: string; description: string; tags: string[]; sourceType: string; sourceUrl?: string; sourceLanguage: string; outputLanguage: string; importedChapters: number; processedChapters: number; latestProcessedChapter?: number; qa: Counts; progress: number; coverUrl?: string; updatedAt: string; recentActivity?: { type: string; message: string; at: string }; projectBytes: number; hasAudiobook: boolean; hasVideo: boolean };
 export type Counts = { pass: number; warn: number; fail: number };
-export type ChapterRow = { chapter: number; originalTitle?: string; translation: string; narration: string; qa?: "pass" | "warn" | "fail"; qaScore?: number; qaStale?: boolean; tts: string; audioMastering: string; alignment: string; subtitles: string; durationSeconds?: number; audioAvailable: boolean; audioStale?: boolean; videoAvailable?: boolean; videoStale?: boolean };
+export type ChapterRow = { chapter: number; originalTitle?: string; translation: string; narration: string; qa?: "pass" | "warn" | "fail"; qaScore?: number; qaStale?: boolean; qaNeedsVerification?: number; tts: string; audioMastering: string; alignment: string; subtitles: string; durationSeconds?: number; audioAvailable: boolean; audioStale?: boolean; videoAvailable?: boolean; videoStale?: boolean };
 export type QaResult = { status: "pass" | "warn" | "fail"; score: number; originalScore?: number; issues: Array<{ category: string; severity: "warn" | "fail"; message: string; evidence: string; review?: { disposition: "dismissed" | "manually_fixed"; reviewedAt: string } }>; checks: Record<string, "pass" | "warn" | "fail"> };
 export type QaFindingStatus = "open" | "fixed_manual" | "fixed_ai" | "dismissed" | "obsolete";
 export type QaFinding = {
   id: string; category: string; severity: "warn" | "fail"; message: string; evidence: string; suggestedFix?: string;
   status: QaFindingStatus; resolution?: { action: "manual_fix" | "ai_fix" | "dismiss" | "obsolete"; reason?: string; resolvedAt: string };
-  reopenedAt?: string; firstDetectedAt?: string; lastVerifiedAt?: string;
+  reopenedAt?: string; firstDetectedAt?: string; lastVerifiedAt?: string; verifiedAgainstFingerprint?: string;
   provenance?: { chapter?: number; stage?: string; entityIds?: string[]; excerptKey?: string; continuityIds?: string[] };
   origin: "llm" | "deterministic"; safeToFix?: boolean; confidence?: number;
 };
 export type QaState = QaResult & { findings: QaFinding[]; mode?: "production" | "thorough" };
 export type QaCounts = { open: number; resolved: number; safeFixesAvailable: number };
-export type ChapterQaDetail = { chapter: number; state: QaState; counts: QaCounts; qaStale: boolean };
+export type QaFindingStats = {
+  current: { critical: number; warnings: number; open: number; score: number; status: "pass" | "warn" | "fail" };
+  history: { fixedManual: number; fixedAi: number; dismissed: number; obsolete: number; total: number };
+  needsVerification: number;
+};
+export type QaFreshness = "missing" | "current" | "needs_recheck" | "failed";
+export type ChapterQaDetail = { chapter: number; state: QaState; counts: QaCounts; qaStale: boolean; stats?: QaFindingStats; freshness?: QaFreshness; currentFingerprint?: string };
 export type QaRecheckSummary = QaCounts & { verified: number; respected: number; reopened: number; newFindings: number; obsoleted: number; mode: "changed" | "full"; fellBackToFull: boolean };
 export type QaExceptionMatchKind = "terminology" | "entity" | "rule" | "other";
 export type QaException = { id: string; category: string; matchKind: QaExceptionMatchKind; value: string; reason?: string; createdAt: string };

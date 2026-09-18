@@ -8,11 +8,13 @@ import { qaResultSchema } from "../src/domain/qa.js";
 import { QualityGateError } from "../src/pipeline/errors.js";
 import { PipelineOptions } from "../src/pipeline/chapter-pipeline.js";
 import { buildProductionPlan, isProductionStageForced, requiredProductionStages, resolveProductionOptions } from "../src/production/planner.js";
+import { computeStoredQaDependencyFingerprint } from "../src/qa/freshness.js";
 import { planProduction, ProductionDependencies, runProduction } from "../src/production/orchestrator.js";
 import { productionManifestSchema } from "../src/production/types.js";
 import { atomicWrite, atomicWriteJson } from "../src/storage/atomic-write.js";
 import { storyPaths } from "../src/storage/paths.js";
 import { readJsonIfExists } from "../src/storage/story-files.js";
+import { fileFingerprint } from "../src/utils/file-fingerprint.js";
 import { fingerprint } from "../src/utils/hash.js";
 import { VideoProcessor } from "../src/video/renderer.js";
 import { VideoExportProcessor } from "../src/video/video-export.js";
@@ -35,6 +37,19 @@ describe("production planning", () => {
   it("forces dependency descendants without treating sibling exports as dependents", () => { expect(isProductionStageForced("audio", "audiobook")).toBe(true); expect(isProductionStageForced("video", "videoExport")).toBe(true); expect(isProductionStageForced("video", "audiobook")).toBe(false); expect(isProductionStageForced("audiobook", "videoExport")).toBe(false); expect(isProductionStageForced("continuity", "continuity")).toBe(true); expect(isProductionStageForced("continuity", "tts")).toBe(false); });
   it("reports actual reusable stage files without provider calls", async () => { const { root, story } = await fixture(1); await writeCompleteChapter(root, 1); const first = await buildProductionPlan({ root, story, chapters: [1], outputs: ["audio"], artwork: false }); expect(first.counts.audioMastering).toEqual({ required: 0, reusable: 1 }); await atomicWrite(storyPaths(root, story.slug, 1).audio, Buffer.alloc(0)); const changed = await buildProductionPlan({ root, story, chapters: [1], outputs: ["audio"], artwork: false }); expect(changed.counts.audioMastering.required).toBe(1); });
   it("keeps dry-run free of pipeline and refresh calls", async () => { const { root, story, chapters } = await fixture(1); let refreshes = 0; const pipeline = new ProductionPipeline(); const result = await runProduction({ root, story, from: 1, to: 1, outputs: ["audio"], dryRun: true, refresh: true }, { ...dependencies(pipeline, chapters), refresh: async () => { refreshes++; } }); expect(result.manifest.status).toBe("planned"); expect(pipeline.calls).toHaveLength(0); expect(refreshes).toBe(0); });
+  it("reuses the QA stage only when the recorded dependency fingerprint matches the current one", async () => {
+    const { root, story } = await fixture(1); await writeCompleteChapter(root, 1); const paths = storyPaths(root, story.slug, 1);
+    const qaFingerprint = await computeStoredQaDependencyFingerprint(root, story, 1);
+    const metadata = chapterSchema.parse(await readJsonIfExists(paths.chapterMeta));
+    metadata.stages.qa = { status: "complete", fingerprint: qaFingerprint, outputFingerprint: (await fileFingerprint(paths.qa))! };
+    await atomicWriteJson(paths.chapterMeta, metadata);
+    const current = await buildProductionPlan({ root, story, chapters: [1], outputs: ["audio"], artwork: false });
+    expect(current.counts.qa).toEqual({ required: 0, reusable: 1 });
+    // Same qa.json bytes, but a QA dependency changed: the stage must rerun.
+    await atomicWrite(paths.narration, "A completely retold narration.");
+    const changed = await buildProductionPlan({ root, story, chapters: [1], outputs: ["audio"], artwork: false });
+    expect(changed.counts.qa).toEqual({ required: 1, reusable: 0 });
+  });
 });
 
 describe("production execution", () => {

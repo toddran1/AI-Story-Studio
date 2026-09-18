@@ -67,11 +67,14 @@ export const qaFindingSchema = z.object({
   fingerprint: z.string(),
   firstDetectedAt: z.string().datetime().optional(),
   lastVerifiedAt: z.string().datetime().optional(),
+  /** QA dependency fingerprint this finding's status was last verified against. */
+  verifiedAgainstFingerprint: z.string().optional(),
   provenance: z.object({
     chapter: z.number().int().positive().optional(),
     stage: z.string().optional(),
     entityIds: z.array(z.string()).optional(),
     excerptKey: z.string().optional(),
+    relation: z.string().optional(),
     continuityIds: z.array(z.string()).optional(),
   }).optional(),
   origin: z.enum(["llm", "deterministic"]),

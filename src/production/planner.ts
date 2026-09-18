@@ -1,6 +1,7 @@
 import { stat } from "node:fs/promises";
 import { Chapter, StageName, chapterSchema } from "../domain/chapter.js";
 import { Story } from "../domain/story.js";
+import { computeStoredQaDependencyFingerprint, DeterministicQaDependencies, loadQaDeterministicDependencies } from "../qa/freshness.js";
 import { sceneManifestSchema } from "../scenes/types.js";
 import { sceneImagePath, storyPaths } from "../storage/paths.js";
 import { readJsonIfExists } from "../storage/story-files.js";
@@ -28,11 +29,16 @@ export async function buildProductionPlan(options: { root: string; story: Story;
   if (!options.chapters.length) throw new Error("Production requires at least one chapter"); const stages = requiredProductionStages(options.outputs, options.artwork, options.alignment); const counts: ProductionPlan["counts"] = {};
   for (const stage of stages) counts[stage] = { required: 0, reusable: 0 };
   let imageOperations = 0; let imagesPendingPlanning = 0; const requiredChapters: number[] = []; const chapterRequirements: Record<string, ProductionStage[]> = {};
+  let qaDeterministicDeps: DeterministicQaDependencies | undefined;
+  const currentQaFingerprint = async (chapter: number) => {
+    qaDeterministicDeps ??= await loadQaDeterministicDependencies(options.root, options.story.slug);
+    return computeStoredQaDependencyFingerprint(options.root, options.story, chapter, qaDeterministicDeps);
+  };
   for (const number of options.chapters) {
     const paths = storyPaths(options.root, options.story.slug, number); const raw = await readJsonIfExists<Chapter>(paths.chapterMeta); const chapter = raw ? chapterSchema.safeParse(raw) : undefined;
     let chapterRequired = false; const requiredStages: ProductionStage[] = [];
     for (const stage of stages.filter((value): value is StageName => !["audiobook", "videoExport", "refresh"].includes(value))) {
-      const reusable = !isProductionStageForced(options.force, stage) && chapter?.success === true && await stageLooksReusable(chapter.data, stage, paths);
+      const reusable = !isProductionStageForced(options.force, stage) && chapter?.success === true && await stageLooksReusable(chapter.data, stage, paths, stage === "qa" ? () => currentQaFingerprint(number) : undefined);
       counts[stage]![reusable ? "reusable" : "required"]++;
       if (!reusable) { chapterRequired = true; requiredStages.push(stage); }
     }
@@ -58,13 +64,24 @@ export function isProductionStageForced(force: ProductionForce | undefined, stag
   return dependents[normalized]?.includes(stage) ?? false;
 }
 
-async function stageLooksReusable(chapter: Chapter, stage: StageName, paths: ReturnType<typeof storyPaths>) {
+async function stageLooksReusable(chapter: Chapter, stage: StageName, paths: ReturnType<typeof storyPaths>, currentQaFingerprint?: () => Promise<string | undefined>) {
   const state = chapter.stages[stage]; if (state.status !== "complete") return false;
   const files: Partial<Record<StageName, string[]>> = { ingestion: [paths.original], translation: [paths.english], narration: [paths.narration], qa: [paths.qa], storyBible: [paths.bibleUpdate], continuity: [paths.continuityAnalysis], tts: [paths.audioRaw], audioMastering: [paths.audio], alignment: [paths.alignment], subtitles: [paths.subtitlesSrt, paths.subtitlesVtt, paths.subtitlesDocument], scenePlanning: [paths.scenesManifest], video: [paths.video] };
   if (stage === "artwork") return chapter.scenes?.generated === chapter.scenes?.total;
   const selected = files[stage] ?? []; if (!(await Promise.all(selected.map(nonEmpty))).every(Boolean)) return false;
-  if (!state.outputFingerprint) return true;
-  const actual = selected.length === 1 ? await fileFingerprint(selected[0]!) : await filesFingerprint(selected); return actual === state.outputFingerprint;
+  if (state.outputFingerprint) {
+    const actual = selected.length === 1 ? await fileFingerprint(selected[0]!) : await filesFingerprint(selected);
+    if (actual !== state.outputFingerprint) return false;
+  }
+  // QA reuse additionally requires the recorded input dependency fingerprint to
+  // match the current effective one: a byte-identical qa.json is still stale
+  // when the text, context, naming, pronunciation, exceptions, or settings it
+  // was evaluated against have changed.
+  if (stage === "qa" && currentQaFingerprint) {
+    const current = await currentQaFingerprint();
+    if (!current || state.fingerprint !== current) return false;
+  }
+  return true;
 }
 async function nonEmpty(path: string) { try { return (await stat(path)).size > 0; } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return false; throw error; } }
 function unique<T>(items: readonly T[]) { return [...new Set(items)]; }

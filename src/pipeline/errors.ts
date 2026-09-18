@@ -36,7 +36,11 @@ export class TTSError extends AppError {}
 export class StorageError extends AppError {}
 export class PipelineError extends AppError {}
 export class QualityGateError extends PipelineError {
-  constructor(message: string, public readonly result: import("../domain/qa.js").QaResult) { super(message); }
+  readonly dependencyFingerprint?: string;
+  constructor(message: string, public readonly result: import("../domain/qa.js").QaResult, options: { dependencyFingerprint?: string } = {}) {
+    super(message);
+    this.dependencyFingerprint = options.dependencyFingerprint;
+  }
 }
 export class BatchValidationError extends AppError {}
 export class BatchError extends AppError {}

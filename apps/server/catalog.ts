@@ -3,7 +3,8 @@ import { join } from "node:path";
 import { z } from "zod";
 import { Chapter, chapterSchema } from "../../src/domain/chapter.js";
 import { isQaIssueActive, QaResult, qaResultSchema, qaStateSchema } from "../../src/domain/qa.js";
-import { migrateQaState, openFindings } from "../../src/qa/findings.js";
+import { migrateQaState, openFindings, qaFindingStats } from "../../src/qa/findings.js";
+import { deriveChapterQaFreshness, loadQaDeterministicDependencies } from "../../src/qa/freshness.js";
 import { Story, storySchema } from "../../src/domain/story.js";
 import { StoryBible, emptyStoryBible, storyBibleSchema } from "../../src/domain/story-bible.js";
 import { SourceManifest, sourceManifestSchema } from "../../src/source/types.js";
@@ -46,7 +47,7 @@ export function invalidateCatalogCache(root: string, slug: string) { const key =
 
 export type ChapterSummary = {
   chapter: number; originalTitle?: string; translation: string; narration: string; qa?: QaResult["status"];
-  qaScore?: number; qaIssues?: QaResult["issues"]; qaStale: boolean; tts: string; audioMastering: string; continuity: string; alignment: string; subtitles: string; scenePlanning: string; artwork: string; video: string; audioAvailable: boolean; audioStale: boolean; videoAvailable: boolean; videoStale: boolean; durationSeconds?: number;
+  qaScore?: number; qaIssues?: QaResult["issues"]; qaStale: boolean; qaNeedsVerification?: number; tts: string; audioMastering: string; continuity: string; alignment: string; subtitles: string; scenePlanning: string; artwork: string; video: string; audioAvailable: boolean; audioStale: boolean; videoAvailable: boolean; videoStale: boolean; durationSeconds?: number;
 };
 
 export async function listStories(root: string, warnings: string[] = []) {
@@ -137,10 +138,11 @@ export async function getChapter(root: string, slug: string, chapter: number) {
   const videoStale = videoAvailable && (!fresh || metadata?.stages.video.status !== "complete");
   const narration = await readTextIfExists(paths.narration); const ttsScript = (await readTextIfExists(paths.narrationTts)) ?? narration;
   const speech = ttsScript && story ? normalizeSpeechForProvider(ttsScript, story.outputLanguage, story.narrationSettings).normalized : undefined;
+  const qaFreshness = story && qaRaw ? await deriveChapterQaFreshness(root, story, chapter, metadata?.stages.qa) : undefined;
   return {
     chapter, navigation, metadata, stale: !fresh || metadata?.stages.ingestion.status !== "complete", original: await readTextIfExists(paths.original),
     translation: await readTextIfExists(paths.english), narration, spokenText: speech?.text, speechTransformations: speech?.transformations ?? [],
-    qa: qaRaw ? qaResultSchema.parse(qaRaw) : undefined, qaStale: Boolean(qaRaw) && (!fresh || metadata?.stages.qa.status !== "complete"), storyContext, storyContextStale: storyContext !== undefined && !fresh, audioAvailable, audioStale,
+    qa: qaRaw ? qaResultSchema.parse(qaRaw) : undefined, qaStale: Boolean(qaRaw) && (qaFreshness ? qaFreshness.freshness !== "current" : !fresh || metadata?.stages.qa.status !== "complete"), qaFingerprint: qaFreshness?.currentFingerprint, storyContext, storyContextStale: storyContext !== undefined && !fresh, audioAvailable, audioStale,
     alignment: alignment?.success ? alignment.data : undefined, alignmentStale: Boolean(alignment?.success) && (!fresh || metadata?.stages.alignment.status !== "complete"),
     subtitleDocument: subtitleDocument?.success ? subtitleDocument.data : undefined,
     audioUrl: audioAvailable ? `/api/stories/${slug}/chapters/${chapter}/audio` : undefined,
@@ -158,10 +160,15 @@ export async function getQaDashboard(root: string, slug: string) {
   for (const chapter of chapters) {
     if (!chapter.qa) continue; const qaIssues = chapter.qaIssues ?? [];
     const activeIssues = qaIssues.filter(isQaIssueActive);
-    items.push({ chapter: chapter.chapter, title: chapter.originalTitle, status: chapter.qa, score: chapter.qaScore, issues: activeIssues, stale: chapter.qaStale });
-    for (const category of new Set(activeIssues.map((issue) => issue.category))) issues[category] = (issues[category] ?? 0) + 1;
+    items.push({
+      chapter: chapter.chapter, title: chapter.originalTitle, status: chapter.qa, score: chapter.qaScore,
+      // Current gating issues; when stale, needsVerification carries how many
+      // previous findings still await verification against current inputs.
+      issues: activeIssues, stale: chapter.qaStale, needsVerification: chapter.qaNeedsVerification ?? 0,
+    });
+    if (!chapter.qaStale) for (const category of new Set(activeIssues.map((issue) => issue.category))) issues[category] = (issues[category] ?? 0) + 1;
   }
-  return { counts: countQa(chapters), categories: issues, chapters: items };
+  return { counts: { ...countQa(chapters), needsVerification: items.reduce((sum, item) => sum + item.needsVerification, 0) }, categories: issues, chapters: items };
 }
 
 export async function getStoryBible(root: string, slug: string, options: { includeCanonicalOverlay?: boolean } = {}): Promise<StoryBible> {
@@ -329,6 +336,8 @@ async function loadChapterIndex(root: string, slug: string): Promise<ChapterInde
 }
 
 async function loadSummaries(root: string, slug: string, numbers: number[], index: ChapterIndex): Promise<ChapterSummary[]> {
+  const story = await loadStory(storyPaths(root, slug, 1).storyConfig).catch(() => undefined);
+  const qaDeterministicDeps = story ? await loadQaDeterministicDependencies(root, slug) : undefined;
   return mapLimit(numbers, 16, async (chapter) => {
     const chapterPaths = storyPaths(root, slug, chapter); const raw = await readJsonIfExists<Chapter>(chapterPaths.chapterMeta); const parsed = raw ? chapterSchema.safeParse(raw) : undefined;
     const metadata = parsed?.success ? parsed.data : undefined; const fresh = isCurrent(metadata, index.manifestByChapter.get(chapter), Boolean(index.manifest));
@@ -338,6 +347,10 @@ async function loadSummaries(root: string, slug: string, numbers: number[], inde
     // Issue lists are open findings only: resolved (fixed/dismissed) and
     // obsolete findings keep their evidence in qa.json but never count here.
     const qaIssues: QaResult["issues"] | undefined = qa ? openFindings(qa).map(({ category, severity, message, evidence }) => ({ category, severity, message, evidence })) : undefined;
+    // Authoritative QA freshness: the recorded dependency fingerprint must
+    // match the current effective one; anything else needs a recheck.
+    const qaFreshness = story && qa ? await deriveChapterQaFreshness(root, story, chapter, metadata?.stages.qa, qaDeterministicDeps) : undefined;
+    const qaStats = qa ? qaFindingStats(qa, qaFreshness?.currentFingerprint) : undefined;
     const tts = fresh ? metadata?.stages.tts.status ?? "pending" : "pending";
     const audioMastering = fresh ? metadata?.stages.audioMastering.status ?? "pending" : "pending"; const continuity = fresh ? metadata?.stages.continuity.status ?? "pending" : "pending"; const alignment = fresh ? metadata?.stages.alignment.status ?? "pending" : "pending"; const subtitles = fresh ? metadata?.stages.subtitles.status ?? "pending" : "pending"; const scenePlanning = fresh ? metadata?.stages.scenePlanning.status ?? "pending" : "pending"; const artwork = fresh ? metadata?.stages.artwork.status ?? "pending" : "pending"; const video = fresh ? metadata?.stages.video.status ?? "pending" : "pending";
     const [audioFileExists, rawAudioFileExists, translationFileExists, narrationFileExists, videoFileExists] = await Promise.all([exists(chapterPaths.audio), exists(chapterPaths.audioRaw), exists(chapterPaths.english), exists(chapterPaths.narration), exists(chapterPaths.video)]);
@@ -350,7 +363,7 @@ async function loadSummaries(root: string, slug: string, numbers: number[], inde
     const videoStatus = fresh && metadata?.stages.video.status === "complete" ? "complete" : videoFileExists ? "stale" : metadata?.stages.video.status ?? "pending";
     return { chapter, originalTitle: metadata?.originalTitle ?? index.titles.get(chapter), translation: translationStatus,
       narration: narrationStatus, qa: qa?.status,
-      qaScore: qa?.score, qaIssues, qaStale: Boolean(qa) && (!fresh || metadata?.stages.qa.status !== "complete"), tts, audioMastering: audioMasteringStatus, continuity, alignment, subtitles, scenePlanning, artwork, video: videoStatus,
+      qaScore: qa?.score, qaIssues, qaStale: Boolean(qa) && (qaFreshness ? qaFreshness.freshness !== "current" : !fresh || metadata?.stages.qa.status !== "complete"), qaNeedsVerification: qaStats?.needsVerification, tts, audioMastering: audioMasteringStatus, continuity, alignment, subtitles, scenePlanning, artwork, video: videoStatus,
       durationSeconds: audioAvailable ? metadata?.audio?.durationSeconds : undefined,
       audioAvailable, audioStale, videoAvailable: videoFileExists, videoStale };
   });

@@ -10,9 +10,11 @@ import { storyPaths } from "../storage/paths.js";
 import { fileFingerprint } from "../utils/file-fingerprint.js";
 import { fingerprint } from "../utils/hash.js";
 import {
-  anchorFromIssue, computeFindingId, deriveIssues, FindingAnchor, findingFingerprint,
-  matchEntityIds, migrateQaState, normalizeExcerptKey, normalizeQaText, openFindings, qaCounts, recomputeQaSummary,
+  anchorFromIssue, computeFindingId, deriveIssues, extractNameRelation, FindingAnchor, findingFingerprint,
+  migrateQaState, normalizeExcerptKey, normalizeQaText, openFindings, qaCounts, recomputeQaSummary,
 } from "./findings.js";
+import { computeQaDependencyFingerprint, loadQaDeterministicDependencies } from "./freshness.js";
+import { QA_PROMPT_VERSION } from "./prompts.js";
 import { validateChapterQuality } from "./validator.js";
 import { runDeterministicQaChecks, type AcceptedContinuity } from "./deterministic.js";
 import { exceptionsPromptSection, filterExceptedFindings, listQaExceptions } from "./exceptions.js";
@@ -28,6 +30,8 @@ export type FreshQaDetection = {
   confidence?: number;
   /** Pre-resolved entity anchors (deterministic checks); merged into the computed anchor. */
   entityIds?: string[];
+  /** Deterministic rule identity (rule kind + matched token); part of the finding identity. */
+  ruleKey?: string;
   /** Continuity findings this detection relates to; recorded in provenance. */
   continuityIds?: string[];
 };
@@ -52,13 +56,20 @@ function previousAnchor(finding: QaFinding): FindingAnchor {
     excerptKey: finding.provenance?.excerptKey,
     messageKey: normalizeQaText(finding.message),
     paragraphBucket: undefined,
+    relation: finding.provenance?.relation ?? extractNameRelation(finding),
   };
 }
 
+/**
+ * Reattachment requires more than a bare shared entity: a shared entity plus
+ * strong excerpt overlap or the same wrong>right name relation, or strong
+ * excerpt overlap alone.
+ */
 function anchorsSimilar(previous: QaFinding, anchor: FindingAnchor): boolean {
   const prior = previousAnchor(previous);
-  if (prior.entityIds?.length && anchor.entityIds?.length && prior.entityIds.some((id) => anchor.entityIds!.includes(id))) return true;
-  return excerptOverlap(prior.excerptKey, anchor.excerptKey) >= 0.6;
+  if (excerptOverlap(prior.excerptKey, anchor.excerptKey) >= 0.6) return true;
+  const sharedEntity = Boolean(prior.entityIds?.length && anchor.entityIds?.length && prior.entityIds.some((id) => anchor.entityIds!.includes(id)));
+  return sharedEntity && Boolean(prior.relation && anchor.relation && prior.relation === anchor.relation);
 }
 
 /** True when the finding's anchored entities/excerpt no longer appear in the current content. */
@@ -90,10 +101,45 @@ export function anchorAbsentFromContent(finding: QaFinding, content: string, ent
   return false;
 }
 
+/** For naming findings: the wrong term the issue names is no longer present in the current text. */
+function wrongTermAbsent(finding: QaFinding, content: string): boolean {
+  if (finding.category !== "names") return false;
+  const relation = finding.provenance?.relation ?? extractNameRelation(finding);
+  const wrong = relation?.split(">")[0] ?? "";
+  if (wrong.length < 2) return false;
+  const normalized = normalizeQaText(content);
+  return normalized.length > 0 && !normalized.includes(wrong);
+}
+
+/** True when the content a recheck actually evaluated plausibly covers the finding's anchored region. */
+function anchorCoveredByEvaluation(finding: QaFinding, evaluatedContent: string, entities: StoryBible["canonicalEntities"]): boolean {
+  const normalized = normalizeQaText(evaluatedContent);
+  if (!normalized) return false;
+  const entityIds = finding.provenance?.entityIds ?? [];
+  const names = entities.filter((entity) => entityIds.includes(entity.id))
+    .flatMap((entity) => [entity.canonicalName, entity.originalName, ...entity.aliases, entity.preferredNarrationName ?? ""])
+    .map((name) => normalizeQaText(name)).filter(Boolean);
+  if (names.some((name) => normalized.includes(name))) return true;
+  const excerptKey = finding.provenance?.excerptKey;
+  if (excerptKey) {
+    const tokens = excerptKey.split(" ").filter(Boolean);
+    const window = Math.min(4, tokens.length);
+    for (let index = 0; index + window <= tokens.length; index++) {
+      if (normalized.includes(tokens.slice(index, index + window).join(" "))) return true;
+    }
+  }
+  return false;
+}
+
 /**
  * Merge fresh detections into the previous state. Match by computed finding id
- * first, then by same-category anchor similarity (shared entities or >=0.6
- * excerpt token overlap) so LLM-reworded detections reconcile.
+ * first, then by same-category anchor similarity (shared entity plus excerpt
+ * overlap or shared wrong-term relation, or strong excerpt overlap alone) so
+ * LLM-reworded detections reconcile. When a dependency fingerprint is supplied
+ * (a verification pass ran), every touched finding is stamped with it, and an
+ * unmatched open finding is retired to obsolete only when the dependencies
+ * changed since its last verification, the evaluated content covered its
+ * anchored region, and its anchor (or wrong term) is gone from current content.
  */
 export function reconcileQaState(
   previous: QaState | undefined,
@@ -104,6 +150,10 @@ export function reconcileQaState(
     canonicalEntities?: StoryBible["canonicalEntities"];
     paragraphs?: string[];
     content?: string;
+    /** QA dependency fingerprint this reconciliation verifies against. */
+    dependencyFingerprint?: string;
+    /** Content the verification actually evaluated (subset for changed-only rechecks). */
+    evaluatedContent?: string;
   } = {},
 ): { findings: QaFinding[]; outcome: ReconcileOutcome } {
   const now = options.now ?? new Date().toISOString();
@@ -112,10 +162,14 @@ export function reconcileQaState(
   const outcome: ReconcileOutcome = { verified: 0, respected: 0, reopened: 0, newFindings: 0, obsoleted: 0 };
   const findings = (previous?.findings ?? []).map((finding) => ({ ...finding }));
   const unmatched = new Map(findings.map((finding) => [finding.id, finding]));
+  const stampVerification = (finding: QaFinding) => {
+    if (options.dependencyFingerprint) finding.verifiedAgainstFingerprint = options.dependencyFingerprint;
+  };
 
   const applyMatch = (prior: QaFinding, detection: FreshQaDetection) => {
     unmatched.delete(prior.id);
     prior.lastVerifiedAt = now;
+    stampVerification(prior);
     if (prior.status === "open") {
       prior.message = detection.message;
       prior.evidence = detection.evidence;
@@ -144,6 +198,7 @@ export function reconcileQaState(
   for (const detection of freshDetections) {
     const anchor = anchorFromIssue(detection, { canonicalEntities: entities, paragraphs: options.paragraphs });
     if (detection.entityIds?.length) anchor.entityIds = [...new Set([...(anchor.entityIds ?? []), ...detection.entityIds])];
+    if (detection.ruleKey) anchor.ruleKey = detection.ruleKey;
     const id = computeFindingId(detection.category, chapter, anchor);
     const exact = unmatched.get(id);
     if (exact) { applyMatch(exact, detection); continue; }
@@ -160,10 +215,12 @@ export function reconcileQaState(
       fingerprint: findingFingerprint(detection),
       firstDetectedAt: now,
       lastVerifiedAt: now,
+      ...(options.dependencyFingerprint ? { verifiedAgainstFingerprint: options.dependencyFingerprint } : {}),
       provenance: {
         ...(chapter > 0 ? { chapter } : {}),
         ...(anchor.entityIds?.length ? { entityIds: anchor.entityIds } : {}),
         ...(anchor.excerptKey ? { excerptKey: anchor.excerptKey } : {}),
+        ...(anchor.relation ? { relation: anchor.relation } : {}),
         ...(detection.continuityIds?.length ? { continuityIds: detection.continuityIds } : {}),
       },
       origin: detection.origin ?? "llm",
@@ -175,19 +232,37 @@ export function reconcileQaState(
 
   for (const prior of unmatched.values()) {
     if (prior.status === "open") {
-      if (options.content && anchorAbsentFromContent(prior, options.content, entities)) {
+      // Evidence-based retirement: dependencies changed since this finding was
+      // last verified, the verification covered its anchored region, the
+      // finding was not re-detected, and its anchor (or wrong term) is gone
+      // from the current content. Legacy callers without a dependency
+      // fingerprint keep the previous content-absence behavior.
+      const dependenciesChanged = options.dependencyFingerprint === undefined || prior.verifiedAgainstFingerprint !== options.dependencyFingerprint;
+      const covered = options.evaluatedContent === undefined || options.evaluatedContent === options.content
+        || anchorCoveredByEvaluation(prior, options.evaluatedContent, entities);
+      const anchorGone = options.content !== undefined
+        && (anchorAbsentFromContent(prior, options.content, entities) || wrongTermAbsent(prior, options.content));
+      if (dependenciesChanged && covered && anchorGone) {
         prior.status = "obsolete";
-        prior.resolution = { action: "obsolete", resolvedAt: now };
+        prior.resolution = {
+          action: "obsolete", resolvedAt: now,
+          ...(options.dependencyFingerprint ? { reason: "Verified absent after the QA dependency fingerprint changed" } : {}),
+        };
         prior.lastVerifiedAt = now;
+        stampVerification(prior);
         outcome.obsoleted++;
+        continue;
       }
       // Otherwise an open finding stays open: the LLM declining to re-report a
       // warn/fail is not proof the problem was fixed.
+      stampVerification(prior);
     } else if (prior.status === "fixed_manual" || prior.status === "fixed_ai") {
       prior.lastVerifiedAt = now;
+      stampVerification(prior);
       outcome.verified++;
     } else if (prior.status === "dismissed") {
       prior.lastVerifiedAt = now;
+      stampVerification(prior);
       outcome.respected++;
     }
   }
@@ -277,6 +352,8 @@ export function buildQaState(
     baseScore?: { score: number; originalScore?: number };
     mode?: "production" | "thorough";
     acceptedContinuity?: AcceptedContinuity[];
+    dependencyFingerprint?: string;
+    evaluatedContent?: string;
   },
 ): { state: QaState; outcome: ReconcileOutcome } {
   const paragraphs = combinedQaParagraphs(options.translation, options.narration).map((paragraph) => paragraph.text);
@@ -305,6 +382,8 @@ export function buildQaState(
     canonicalEntities: options.canonicalEntities,
     paragraphs,
     content: `${options.translation}\n\n${options.narration}`,
+    dependencyFingerprint: options.dependencyFingerprint,
+    evaluatedContent: options.evaluatedContent,
   });
   const summary = recomputeQaSummary(findings, options.baseScore ?? previous);
   const state = qaStateSchema.parse({
@@ -471,9 +550,10 @@ export async function recheckChapterQa(deps: {
   }
   const previousFindingsContext = previous && previous.findings.length ? compactFindingsContext(previous) : undefined;
 
-  const [deterministic, exceptions] = await Promise.all([
+  const [deterministic, exceptions, deterministicDeps] = await Promise.all([
     runDeterministicQaChecks({ root, story, chapter, source, translation, narration }),
     listQaExceptions(root, story.slug),
+    loadQaDeterministicDependencies(root, story.slug),
   ]);
   const config = story.pipeline.qa;
   const result = await validateChapterQuality(provider, config, {
@@ -486,12 +566,28 @@ export async function recheckChapterQa(deps: {
     recheck: { mode, changedContent },
   });
 
+  // The same authoritative dependency fingerprint the pipeline records, so a
+  // recheck-produced stage compares current against a pipeline-produced one.
+  const dependencyFingerprint = computeQaDependencyFingerprint({
+    source: fingerprint({ source, sourceLanguage: story.sourceLanguage, outputLanguage: story.outputLanguage }),
+    translation: fingerprint(translation),
+    narration: fingerprint(narration),
+    context: contextRaw ?? emptyStoryBible(),
+    config,
+    narrationSettings: { profanityMode: story.narrationSettings.profanityMode, includeChapterTitle: story.narrationSettings.includeChapterTitle },
+    prompt: QA_PROMPT_VERSION,
+    mode: story.qaMode,
+    ...deterministicDeps,
+  });
+  const fullContent = `${translation}\n\n${narration}`;
   const detections = filterExceptedFindings([...deterministic.detections, ...result.value.issues], exceptions);
   const { state, outcome } = buildQaState(previous, detections, {
     chapter, canonicalEntities: context.canonicalEntities, translation, narration, now: deps.now,
     baseScore: { score: result.value.score, originalScore: result.value.originalScore },
     mode: story.qaMode,
     acceptedContinuity: deterministic.acceptedContinuity,
+    dependencyFingerprint,
+    evaluatedContent: mode === "full" ? fullContent : changedContent,
   });
   await atomicWriteJson(paths.qa, state);
 
@@ -500,9 +596,8 @@ export async function recheckChapterQa(deps: {
   if (!outputFingerprint) throw new Error(`Chapter ${chapter} QA result could not be persisted`);
   metadata.stages.qa = {
     status: "complete",
-    fingerprint: fingerprint({ source, translation, narration, config,
-      narrationSettings: { profanityMode: story.narrationSettings.profanityMode, includeChapterTitle: story.narrationSettings.includeChapterTitle } }),
-    outputFingerprint, provider: config.provider, model: config.model, promptVersion: "qa-only-v1",
+    fingerprint: dependencyFingerprint,
+    outputFingerprint, provider: config.provider, model: config.model, promptVersion: QA_PROMPT_VERSION,
     completedAt: new Date().toISOString(), usage: result.usage,
   };
   metadata.updatedAt = new Date().toISOString();

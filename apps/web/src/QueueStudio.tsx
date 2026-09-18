@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { api, post, QueueEvent, QueueJob, QueuePage, QueueWorkItem } from "./api.js";
+import { api, post, ChapterQaDetail, QueueEvent, QueueJob, QueuePage, QueueWorkItem } from "./api.js";
 import { pretty } from "./format.js";
 
 type JobDetail = { job: QueueJob; workItems: QueuePage<QueueWorkItem>; events: QueueEvent[] };
@@ -34,9 +34,29 @@ export function QueueStudioPage({ navigate }: { navigate: (path: string) => void
 export function NeedsReviewPage({ navigate }: { navigate: (path: string) => void }) {
   const [data, setData] = useState<QueuePage<QueueWorkItem>>(); const [page, setPage] = useState(1); const [error, setError] = useState(""); const load = () => api<QueuePage<QueueWorkItem>>(`/queue/review?page=${page}&pageSize=40`).then(setData).catch((value) => setError(message(value))); useEffect(() => { void load(); }, [page]);
   const act = async (item: QueueWorkItem, action: "retry" | "resolve" | "skip", body: unknown = {}) => { try { setError(""); await post(`/queue/items/${item.id}/${action}`, body); await load(); } catch (value) { setError(message(value)); } };
-  return <section className="page review-queue-page"><div className="section-heading"><div><span className="eyebrow">Intervention desk</span><h2>Needs review</h2><p>Nothing is silently skipped. Resolve, retry, or explicitly set an independent visual stage aside.</p></div><button className="button" onClick={() => navigate("/queue")}>Production queue</button></div>{error && <div className="error-box">{error}</div>}{data?.items.length ? <div className="review-queue-list">{data.items.map((item) => <article key={item.id}><div className="review-marker"><span>{String(item.chapter).padStart(4, "0")}</span><i /></div><div><span className="eyebrow">{item.story} · {pretty(item.currentStage ?? "pipeline")}</span><h3>Chapter {item.chapter} · {pretty(item.errorCategory ?? item.status)}</h3><p>{item.lastError ?? "Manual review was requested for this chapter."}</p><small>{item.attemptCount} of {item.maxAttempts} attempts{item.lastAttemptAt ? ` · last tried ${new Date(item.lastAttemptAt).toLocaleString()}` : ""}</small><b>{recommend(item.errorCategory)}</b></div><div className="review-actions"><button onClick={() => navigate(`/stories/${item.story}/chapters/${item.chapter}`)}>Open chapter</button><button onClick={() => void act(item, "retry")}>Retry chapter</button>{retryStage(item.currentStage) && <button onClick={() => void act(item, "retry", { stage: retryStage(item.currentStage) })}>Retry {pretty(item.currentStage!)}</button>}<button onClick={() => void act(item, "resolve")}>Verify resolved</button>{["subtitles", "scenePlanning", "artwork", "video"].includes(item.currentStage ?? "") && <button className="danger" onClick={() => void act(item, "skip")}>Skip explicitly</button>}</div></article>)}</div> : <div className="queue-invitation wide"><span>✓</span><h3>No chapters need intervention</h3><p>Provider retries and quality checks are clear.</p></div>}{data && data.pages > 1 && <div className="pagination"><button disabled={page === 1} onClick={() => setPage(page - 1)}>Previous</button><span>Page {page} / {data.pages}</span><button disabled={page === data.pages} onClick={() => setPage(page + 1)}>Next</button></div>}</section>;
+  return <section className="page review-queue-page"><div className="section-heading"><div><span className="eyebrow">Intervention desk</span><h2>Needs review</h2><p>Nothing is silently skipped. Resolve, retry, or explicitly set an independent visual stage aside.</p></div><button className="button" onClick={() => navigate("/queue")}>Production queue</button></div>{error && <div className="error-box">{error}</div>}{data?.items.length ? <div className="review-queue-list">{data.items.map((item) => <article key={item.id}><div className="review-marker"><span>{String(item.chapter).padStart(4, "0")}</span><i /></div><div><span className="eyebrow">{item.story} · {pretty(item.currentStage ?? "pipeline")}</span><h3>Chapter {item.chapter} · {pretty(item.errorCategory ?? item.status)}</h3><p>{item.lastError ?? "Manual review was requested for this chapter."}</p><small>{item.attemptCount} of {item.maxAttempts} attempts{item.lastAttemptAt ? ` · last tried ${new Date(item.lastAttemptAt).toLocaleString()}` : ""}</small><QaFailureNotice item={item} /><b>{recommend(item.errorCategory)}</b></div><div className="review-actions"><button onClick={() => navigate(`/stories/${item.story}/chapters/${item.chapter}`)}>Open chapter</button><button onClick={() => void act(item, "retry")}>Retry chapter</button>{retryStage(item.currentStage) && <button onClick={() => void act(item, "retry", { stage: retryStage(item.currentStage) })}>Retry {pretty(item.currentStage!)}</button>}<button onClick={() => void act(item, "resolve")}>Verify resolved</button>{["subtitles", "scenePlanning", "artwork", "video"].includes(item.currentStage ?? "") && <button className="danger" onClick={() => void act(item, "skip")}>Skip explicitly</button>}</div></article>)}</div> : <div className="queue-invitation wide"><span>✓</span><h3>No chapters need intervention</h3><p>Provider retries and quality checks are clear.</p></div>}{data && data.pages > 1 && <div className="pagination"><button disabled={page === 1} onClick={() => setPage(page - 1)}>Previous</button><span>Page {page} / {data.pages}</span><button disabled={page === data.pages} onClick={() => setPage(page + 1)}>Next</button></div>}</section>;
 }
 
 function retryStage(stage?: string) { return ({ storyBible: "story-bible", audioMastering: "audio", scenePlanning: "scenes", videoExport: "video-export" } as Record<string, string>)[stage ?? ""] ?? (["ingestion", "translation", "narration", "qa", "continuity", "tts", "alignment", "subtitles", "artwork", "video", "audiobook"].includes(stage ?? "") ? stage : undefined); }
 function recommend(category?: string) { return category === "configuration" ? "Fix configuration, then retry and resume the job." : category === "content_qa" ? "Review narration and QA evidence before retrying." : category === "rate_limit" ? "The provider cooldown will expire automatically." : "Inspect the source and chapter artifacts before retrying."; }
+
+/**
+ * State awareness for QA-related queue failures: compares the failed work
+ * item against the chapter's CURRENT QA state (via the chapter QA endpoint's
+ * authoritative freshness), so a stale failure reads as history instead of a
+ * current blocker.
+ */
+function QaFailureNotice({ item }: { item: QueueWorkItem }) {
+  const [state, setState] = useState<ChapterQaDetail>();
+  useEffect(() => {
+    if (item.errorCategory !== "content_qa") return;
+    let cancelled = false;
+    api<ChapterQaDetail>(`/stories/${item.story}/chapters/${item.chapter}/qa`).then((detail) => { if (!cancelled) setState(detail); }).catch(() => undefined);
+    return () => { cancelled = true; };
+  }, [item.id, item.story, item.chapter, item.errorCategory]);
+  if (item.errorCategory !== "content_qa" || !state) return null;
+  if (!state.qaStale && state.state.status === "pass") return <p className="qa-failure-notice">Chapter QA is current and passing now — this failure is historical.</p>;
+  if (state.qaStale) return <p className="qa-failure-notice">Previous production attempt failed quality review. The chapter or its QA dependencies have changed since this failure. Recheck QA before retrying production.</p>;
+  return null;
+}
 function message(value: unknown) { return value instanceof Error ? value.message : String(value); }

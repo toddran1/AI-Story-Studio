@@ -296,9 +296,10 @@ function QaPage({ slug, navigate }: { slug: string; navigate: (path: string) => 
   if (error) return <LoadFailure error={error} />; if (!data) return <Loading />;
   const chapters = data.chapters.filter((item: any) => status === "all" || item.status === status);
   return <section className="page"><div className="section-heading"><div><h2>Quality review</h2><p>Every concern is linked back to its chapter and evidence.</p></div></div><div className="qa-summary">{(["pass", "warn", "fail"] as const).map((key) => <button onClick={() => setStatus(key)} className={`qa-count ${key}`} key={key}><span>{key}</span><b>{data.counts[key]}</b><i /></button>)}</div>
+    {data.counts.needsVerification > 0 && <p className="qa-unverified-label">{data.counts.needsVerification} previous finding{data.counts.needsVerification === 1 ? "" : "s"} need verification — recheck the affected chapters to make their QA current.</p>}
     <div className="category-strip">{Object.entries(data.categories).map(([key, value]) => <span key={key}>{pretty(key)} <b>{String(value)}</b></span>)}</div>
     <QaExceptionsPanel slug={slug} />
-    <div className="review-list">{chapters.map((item: any) => { const warnings = item.issues.filter((issue: any) => issue.severity === "warn").length; const failures = item.issues.filter((issue: any) => issue.severity === "fail").length; return <button key={item.chapter} onClick={() => navigate(`/stories/${slug}/chapters/${item.chapter}?tab=quality`)}><div><span className="mono">CH {String(item.chapter).padStart(4, "0")}</span><h3>{item.title ?? `Chapter ${item.chapter}`}</h3><p>{item.stale ? "Retained QA result — source metadata changed; review before reuse." : item.issues[0]?.message ?? "No issues detected."}</p></div><div className="qa-row-status">{item.stale && <Status status="warn" label="retained" />}{warnings > 0 && <Status status="warn" label={`${warnings} warning${warnings === 1 ? "" : "s"}`} />}{failures > 0 && <Status status="fail" label={`${failures} failure${failures === 1 ? "" : "s"}`} />}<Status status={item.status} label={`${Math.round(item.score * 100)} score`} /></div></button>; })}</div>
+    <div className="review-list">{chapters.map((item: any) => { const warnings = item.issues.filter((issue: any) => issue.severity === "warn").length; const failures = item.issues.filter((issue: any) => issue.severity === "fail").length; return <button key={item.chapter} onClick={() => navigate(`/stories/${slug}/chapters/${item.chapter}?tab=quality`)}><div><span className="mono">CH {String(item.chapter).padStart(4, "0")}</span><h3>{item.title ?? `Chapter ${item.chapter}`}</h3><p>{item.stale ? (item.needsVerification ? `QA needs recheck — ${item.needsVerification} previous finding${item.needsVerification === 1 ? "" : "s"} need verification.` : "QA needs recheck — the chapter or its QA dependencies changed since this review.") : item.issues[0]?.message ?? "No issues detected."}</p></div><div className="qa-row-status">{item.stale ? <Status status="warn" label="needs verification" /> : <>{warnings > 0 && <Status status="warn" label={`${warnings} warning${warnings === 1 ? "" : "s"}`} />}{failures > 0 && <Status status="fail" label={`${failures} failure${failures === 1 ? "" : "s"}`} />}</>}<Status status={item.status} label={`${Math.round(item.score * 100)} score`} /></div></button>; })}</div>
   </section>;
 }
 
@@ -1865,6 +1866,21 @@ function JobConsole({ job, onUpdate, onClose, navigate }: { job: Job; onUpdate: 
   const stage = diagnostic?.stage ?? job.progress?.stage ?? job.progress?.event?.stage ?? job.progress?.type?.replace("chapter.", "");
   const chapter = diagnostic?.chapter ?? job.progress?.chapter;
   const detail = job.progress?.event?.detail;
+  // QA-related failures carry the failure-time dependency fingerprint; compare
+  // it against the chapter's current QA state so stale failures read as history.
+  const qaRelated = Boolean(diagnostic && diagnostic.chapter && (diagnostic.category === "content_qa" || diagnostic.issues?.length));
+  const [qaComparison, setQaComparison] = useState<{ historical?: boolean; nowCurrent: boolean }>();
+  useEffect(() => {
+    if (!qaRelated || !diagnostic?.chapter) { setQaComparison(undefined); return; }
+    let cancelled = false;
+    api<ChapterQaDetail>(`/stories/${job.story}/chapters/${diagnostic.chapter}/qa`).then((qaDetail) => {
+      if (cancelled) return;
+      const historical = diagnostic.qaDependencyFingerprint && qaDetail.currentFingerprint
+        ? diagnostic.qaDependencyFingerprint !== qaDetail.currentFingerprint : undefined;
+      setQaComparison({ historical, nowCurrent: !qaDetail.qaStale && qaDetail.state.status === "pass" });
+    }).catch(() => undefined);
+    return () => { cancelled = true; };
+  }, [job.id, job.story, qaRelated, diagnostic?.id, diagnostic?.chapter, diagnostic?.qaDependencyFingerprint]);
   const pause = async () => { try { setActionError(""); await post(`/jobs/${job.id}/pause`, {}); } catch (error) { setActionError(message(error)); } };
   const retry = async () => {
     if (retrying) return;
@@ -1918,7 +1934,11 @@ function JobConsole({ job, onUpdate, onClose, navigate }: { job: Job; onUpdate: 
         {modelBadge && <span>{modelBadge}</span>}
       </div>
       {isSceneJob && diagnostic.summary && <p className="incident-reason">{diagnostic.summary}</p>}
-      {diagnostic.issues?.length ? <ul>{diagnostic.issues.slice(0, 3).map((issue, index) => <li key={`${issue.category}-${index}`}><b>{pretty(issue.category)}</b>{issue.message}</li>)}</ul> : null}
+      {qaRelated && qaComparison?.historical === true && !qaComparison.nowCurrent && <p className="incident-historical">Previous production attempt failed quality review. The chapter or its QA dependencies have changed since this failure. Recheck QA before retrying production.</p>}
+      {qaRelated && qaComparison?.nowCurrent && <p className="incident-historical">Chapter QA is current and passing now — this failure is historical.</p>}
+      {diagnostic.issues?.length ? (qaComparison?.historical || qaComparison?.nowCurrent
+        ? <details><summary>Issues reported by this attempt</summary><ul>{diagnostic.issues.slice(0, 3).map((issue, index) => <li key={`${issue.category}-${index}`}><b>{pretty(issue.category)}</b>{issue.message}</li>)}</ul></details>
+        : <ul>{diagnostic.issues.slice(0, 3).map((issue, index) => <li key={`${issue.category}-${index}`}><b>{pretty(issue.category)}</b>{issue.message}</li>)}</ul>) : null}
       <div className="incident-next"><small>Recommended next step</small><p>{diagnostic.recommendedAction}</p></div>
       <details><summary>Technical details</summary><p>{diagnostic.technicalDetails ?? "No additional provider details were supplied."}</p><small>{new Date(diagnostic.timestamp).toLocaleString()} · {diagnostic.id} · Job {job.id.slice(0, 8)}</small></details>
     </div> : <p>{actionError || job.error || (chapter ? `Chapter ${chapter} · ${pretty(stage ?? "working")}${detail ? ` — ${detail}` : ""}` : pretty(job.status))}</p>}
@@ -1963,35 +1983,41 @@ export function QaDetail({ slug, chapter, onJob, onEditManually, onChanged }: { 
   const resolveManual = async (finding: QaFinding) => { try { setError(""); setNote(""); setBusy(`resolve:${finding.id}`); await post(`/stories/${slug}/chapters/${chapter}/qa/findings/${finding.id}/resolve-manual`, {}); setBusy(""); setNote("Finding marked as fixed manually. A future recheck will verify it."); await load(); onChanged(); } catch (value) { setBusy(""); setError(message(value)); } };
   const reopen = async (finding: QaFinding) => { try { setError(""); setNote(""); setBusy(`reopen:${finding.id}`); await post(`/stories/${slug}/chapters/${chapter}/qa/findings/${finding.id}/reopen`, {}); setBusy(""); await load(); onChanged(); } catch (value) { setBusy(""); setError(message(value)); } };
   if (error && !data) return <div className="qa-detail"><ErrorBox text={error} /></div>; if (!data) return <Loading />;
+  const stale = data.qaStale;
   const openFindingsList = data.state.findings.filter((finding) => finding.status === "open");
   const resolvedFindings = data.state.findings.filter((finding) => finding.status !== "open");
   const critical = openFindingsList.filter((finding) => finding.severity === "fail").length;
   const warnings = openFindingsList.filter((finding) => finding.severity === "warn").length;
+  const needsVerification = data.stats?.needsVerification ?? (stale ? data.state.findings.filter((finding) => finding.status !== "obsolete").length : 0);
+  const unverified = (finding: QaFinding) => stale && finding.verifiedAgainstFingerprint !== data.currentFingerprint;
   const summaryParts = recheckSummary ? [recheckSummary.verified ? `✓ ${recheckSummary.verified} fix${recheckSummary.verified === 1 ? "" : "es"} verified` : "", recheckSummary.respected ? `✓ ${recheckSummary.respected} dismissal${recheckSummary.respected === 1 ? "" : "s"} respected` : "", recheckSummary.reopened ? `⚠ ${recheckSummary.reopened} returned` : "", recheckSummary.newFindings ? `${recheckSummary.newFindings} new issue${recheckSummary.newFindings === 1 ? "" : "s"}` : ""].filter(Boolean) : [];
   return <div className="qa-detail stateful">
-    {data.qaStale && <ArtifactStatusNotice status="stale" reason="This QA result was produced from older chapter text or settings. Findings remain visible and actionable; recheck QA to make it current." />}
-    <div className="qa-attention-head"><div><h3>{openFindingsList.length ? `${openFindingsList.length} issue${openFindingsList.length === 1 ? "" : "s"} need${openFindingsList.length === 1 ? "s" : ""} attention` : "No open issues"}</h3><div className="qa-attention-counts">{critical > 0 && <Status status="fail" label={`${critical} critical`} />}{warnings > 0 && <Status status="warn" label={`${warnings} warning${warnings === 1 ? "" : "s"}`} />}{!openFindingsList.length && <Status status="pass" label="Chapter is clear" />}</div></div>
+    {stale && <ArtifactStatusNotice status="stale" reason="The chapter or its QA dependencies changed since this review. Previous findings are awaiting verification — recheck QA to make this result current." />}
+    <div className="qa-attention-head"><div><h3>{stale ? "QA needs recheck" : openFindingsList.length ? `${openFindingsList.length} issue${openFindingsList.length === 1 ? "" : "s"} need${openFindingsList.length === 1 ? "s" : ""} attention` : "No open issues"}</h3><div className="qa-attention-counts">{stale
+      ? <Status status="warn" label={needsVerification ? `${needsVerification} previous finding${needsVerification === 1 ? "" : "s"} need${needsVerification === 1 ? "s" : ""} verification` : "Previous result is out of date"} />
+      : <>{critical > 0 && <Status status="fail" label={`${critical} critical`} />}{warnings > 0 && <Status status="warn" label={`${warnings} warning${warnings === 1 ? "" : "s"}`} />}{!openFindingsList.length && <Status status="pass" label="Chapter is clear" />}</>}</div></div>
       <div className="qa-attention-actions">
-        {data.counts.safeFixesAvailable > 0 && <button className="button primary" disabled={Boolean(busy)} onClick={() => void safeFixes()}>{busy === "safeFixes" ? "Fixing…" : `Fix ${data.counts.safeFixesAvailable} safe issue${data.counts.safeFixesAvailable === 1 ? "" : "s"}`}</button>}
-        <div className="qa-recheck-split"><button className="button" disabled={Boolean(busy)} onClick={() => void recheck("changed")}>{busy === "recheck" ? "Rechecking…" : "Recheck QA"}</button><details className="qa-recheck-menu"><summary aria-label="Recheck options">▾</summary><div><button disabled={Boolean(busy)} onClick={() => void recheck("changed")}>Recheck changed content</button><button disabled={Boolean(busy)} onClick={() => void recheck("full")}>Full chapter recheck</button></div></details></div>
+        {data.counts.safeFixesAvailable > 0 && !stale && <button className="button primary" disabled={Boolean(busy)} onClick={() => void safeFixes()}>{busy === "safeFixes" ? "Fixing…" : `Fix ${data.counts.safeFixesAvailable} safe issue${data.counts.safeFixesAvailable === 1 ? "" : "s"}`}</button>}
+        <div className="qa-recheck-split"><button className={`button${stale ? " primary" : ""}`} disabled={Boolean(busy)} onClick={() => void recheck("changed")}>{busy === "recheck" ? "Rechecking…" : "Recheck QA"}</button><details className="qa-recheck-menu"><summary aria-label="Recheck options">▾</summary><div><button disabled={Boolean(busy)} onClick={() => void recheck("changed")}>Recheck changed content</button><button disabled={Boolean(busy)} onClick={() => void recheck("full")}>Full chapter recheck</button></div></details></div>
       </div>
     </div>
     {error && <ErrorBox text={error} />}
     {note && <div className="naming-notice">{note}</div>}
     {recheckSummary && <div className="naming-notice qa-recheck-summary"><b>Recheck complete{recheckSummary.fellBackToFull ? " (full recheck — changed content could not be isolated)" : ""}</b><span>{summaryParts.length ? summaryParts.join(" · ") : "No changes to findings"}{` — Needs attention: ${recheckSummary.open}`}</span></div>}
+    {stale && openFindingsList.length > 0 && <p className="qa-unverified-label">{openFindingsList.length} previous open finding{openFindingsList.length === 1 ? "" : "s"} — awaiting QA verification, not yet confirmed against the current chapter.</p>}
     <div className="issues">
-      {openFindingsList.map((finding) => <QaFindingCard key={finding.id} finding={finding} busy={busy} expanded={expanded} onToggle={toggleExpanded} onFixAi={() => void fixWithAi(finding)} onEdit={onEditManually} onResolve={() => void resolveManual(finding)} onDismiss={() => setDismissTarget(finding)} />)}
-      {!openFindingsList.length && <Empty title="Nothing needs attention" text="Every finding for this chapter is resolved. Recheck QA after editing the manuscript to verify it stays clear." />}
+      {openFindingsList.map((finding) => <QaFindingCard key={finding.id} finding={finding} busy={busy} expanded={expanded} pendingVerification={unverified(finding)} onToggle={toggleExpanded} onFixAi={() => void fixWithAi(finding)} onEdit={onEditManually} onResolve={() => void resolveManual(finding)} onDismiss={() => setDismissTarget(finding)} />)}
+      {!openFindingsList.length && !stale && <Empty title="Nothing needs attention" text="Every finding for this chapter is resolved. Recheck QA after editing the manuscript to verify it stays clear." />}
     </div>
-    {resolvedFindings.length > 0 && <QaResolvedFindings findings={resolvedFindings} busy={busy} expanded={expanded} onToggle={toggleExpanded} onReopen={(finding) => void reopen(finding)} />}
+    {resolvedFindings.length > 0 && <QaResolvedFindings findings={resolvedFindings} busy={busy} expanded={expanded} currentFingerprint={data.currentFingerprint} onToggle={toggleExpanded} onReopen={(finding) => void reopen(finding)} />}
     {dismissTarget && <DismissFindingDialog slug={slug} chapter={chapter} finding={dismissTarget} busy={Boolean(busy)} onClose={() => setDismissTarget(undefined)} onDone={async (remembered) => { setDismissTarget(undefined); setNote(remembered ? "Finding dismissed and remembered as a story-level exception." : "Finding dismissed. A future recheck will respect this decision."); await load(); onChanged(); }} onError={(value) => { setDismissTarget(undefined); setError(value); }} />}
   </div>;
 }
 
-export function QaFindingCard({ finding, busy, expanded, onToggle, onFixAi, onEdit, onResolve, onDismiss }: { finding: QaFinding; busy: string; expanded: string[]; onToggle: (key: string) => void; onFixAi: () => void; onEdit: () => void; onResolve: () => void; onDismiss: () => void }) {
+export function QaFindingCard({ finding, busy, expanded, pendingVerification = false, onToggle, onFixAi, onEdit, onResolve, onDismiss }: { finding: QaFinding; busy: string; expanded: string[]; pendingVerification?: boolean; onToggle: (key: string) => void; onFixAi: () => void; onEdit: () => void; onResolve: () => void; onDismiss: () => void }) {
   const evidenceLong = finding.evidence.length > 240; const evidenceKey = `evidence:${finding.id}`; const detailsKey = `details:${finding.id}`;
   return <article>
-    <div className="qa-issue-heading"><span className="qa-category">{pretty(finding.category)}</span><div className="qa-issue-badges"><Status status={finding.severity} label={finding.severity === "fail" ? "Critical" : "Warning"} /><span className="qa-origin-badge">{finding.origin === "llm" ? "AI" : "Deterministic"}</span>{finding.safeToFix === true && <span className="qa-safe-badge">Safe fix</span>}{finding.reopenedAt && <span className="qa-reviewed">Returned after fix</span>}</div></div>
+    <div className="qa-issue-heading"><span className="qa-category">{pretty(finding.category)}</span><div className="qa-issue-badges"><Status status={finding.severity} label={finding.severity === "fail" ? "Critical" : "Warning"} /><span className="qa-origin-badge">{finding.origin === "llm" ? "AI" : "Deterministic"}</span>{finding.safeToFix === true && <span className="qa-safe-badge">Safe fix</span>}{finding.reopenedAt && <span className="qa-reviewed">Returned after fix</span>}{pendingVerification && <span className="qa-reviewed">Awaiting QA verification</span>}</div></div>
     <h3>{finding.message}</h3>
     <blockquote>{evidenceLong && !expanded.includes(evidenceKey) ? `${finding.evidence.slice(0, 240)}…` : finding.evidence}{evidenceLong && <button className="qa-inline-toggle" onClick={() => onToggle(evidenceKey)}>{expanded.includes(evidenceKey) ? "Show less" : "Show more"}</button>}</blockquote>
     {finding.suggestedFix && <p className="qa-suggested-fix"><b>Suggested fix</b>{finding.suggestedFix}</p>}
@@ -2001,11 +2027,12 @@ export function QaFindingCard({ finding, busy, expanded, onToggle, onFixAi, onEd
   </article>;
 }
 
-export function QaResolvedFindings({ findings, busy, expanded, onToggle, onReopen, defaultOpen = false }: { findings: QaFinding[]; busy: string; expanded: string[]; onToggle: (key: string) => void; onReopen: (finding: QaFinding) => void; defaultOpen?: boolean }) {
+export function QaResolvedFindings({ findings, busy, expanded, currentFingerprint, onToggle, onReopen, defaultOpen = false }: { findings: QaFinding[]; busy: string; expanded: string[]; currentFingerprint?: string; onToggle: (key: string) => void; onReopen: (finding: QaFinding) => void; defaultOpen?: boolean }) {
   const [open, setOpen] = useState(defaultOpen);
+  const verification = (finding: QaFinding) => currentFingerprint === undefined ? "" : finding.verifiedAgainstFingerprint === currentFingerprint ? " · verified" : " · awaiting QA verification";
   return <div className="qa-resolved"><button className="qa-resolved-toggle" onClick={() => setOpen((value) => !value)}>{open ? "▾" : "▸"} Resolved issues ({findings.length})</button>
     {open && <div className="issues resolved-list">{findings.map((finding) => { const detailKey = `resolved:${finding.id}`; return <article key={finding.id} className="resolved">
-      <div className="qa-issue-heading"><span className="qa-category">{pretty(finding.category)}</span><div className="qa-issue-badges"><span className="qa-reviewed">{QA_FINDING_OUTCOME[finding.status] ?? pretty(finding.status)}</span><Status status={finding.severity} label={finding.severity === "fail" ? "Critical" : "Warning"} /></div></div>
+      <div className="qa-issue-heading"><span className="qa-category">{pretty(finding.category)}</span><div className="qa-issue-badges"><span className="qa-reviewed">{`${QA_FINDING_OUTCOME[finding.status] ?? pretty(finding.status)}${verification(finding)}`}</span><Status status={finding.severity} label={finding.severity === "fail" ? "Critical" : "Warning"} /></div></div>
       <h3>{finding.message}</h3>
       <div className="qa-finding-actions"><button className="qa-inline-toggle" onClick={() => onToggle(detailKey)}>{expanded.includes(detailKey) ? "Hide resolution" : "Resolution detail"}</button><button className="button" disabled={Boolean(busy)} onClick={() => onReopen(finding)}>{busy === `reopen:${finding.id}` ? "Reopening…" : "Reopen"}</button></div>
       {expanded.includes(detailKey) && <small className="qa-provenance">{finding.resolution ? `${QA_FINDING_OUTCOME[finding.status] ?? pretty(finding.status)} · resolved ${new Date(finding.resolution.resolvedAt).toLocaleString()}${finding.resolution.reason ? ` · reason: ${finding.resolution.reason}` : ""}` : "No resolution detail recorded."}{` · Finding ${finding.id}`}</small>}

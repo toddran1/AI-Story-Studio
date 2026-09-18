@@ -95,7 +95,8 @@ import { fingerprint } from "../../src/utils/hash.js";
 import { fileFingerprint } from "../../src/utils/file-fingerprint.js";
 import { NovelProviderId, novelProviderIdSchema, storyNovelSourceSchema } from "../../src/source/novel-provider.js";
 import { activeQaIssues, qaExceptionSchema, qaResultSchema, type QaFinding } from "../../src/domain/qa.js";
-import { migrateQaState, openFindings, qaCounts } from "../../src/qa/findings.js";
+import { migrateQaState, openFindings, qaCounts, qaFindingStats } from "../../src/qa/findings.js";
+import { deriveChapterQaFreshness } from "../../src/qa/freshness.js";
 import { resolveQaFindingsByIndex, recheckChapterQa, transitionQaFinding, type QaFindingTransition } from "../../src/qa/review.js";
 import { addQaException, listQaExceptions, removeQaException } from "../../src/qa/exceptions.js";
 import { applyNarrationNamingPreferences } from "../../src/narration/naming-preferences.js";
@@ -498,11 +499,17 @@ export class StudioOperations {
   async getChapterQa(slug: string, chapter: number) {
     slugSchema.parse(slug); if (!Number.isSafeInteger(chapter) || chapter < 1) throw new ConfigurationError("Chapter must be a positive integer");
     const paths = storyPaths(this.root, slug, chapter);
-    const [qaRaw, chapterRaw] = await Promise.all([readJsonIfExists(paths.qa), readJsonIfExists<Chapter>(paths.chapterMeta)]);
+    const [qaRaw, chapterRaw, story] = await Promise.all([readJsonIfExists(paths.qa), readJsonIfExists<Chapter>(paths.chapterMeta), loadStory(paths.storyConfig)]);
     if (!qaRaw) throw new Error(`Chapter ${chapter} does not have a QA result`);
     const state = migrateQaState(qaRaw, { chapter });
     const metadata = chapterRaw ? chapterSchema.parse(chapterRaw) : undefined;
-    return { chapter, state, counts: qaCounts(state), qaStale: metadata?.stages.qa.status !== "complete" };
+    // Authoritative freshness: compares the recorded dependency fingerprint
+    // against the current effective one, not just the stage status.
+    const qaFreshness = await deriveChapterQaFreshness(this.root, story, chapter, metadata?.stages.qa);
+    return {
+      chapter, state, counts: qaCounts(state), stats: qaFindingStats(state, qaFreshness.currentFingerprint),
+      freshness: qaFreshness.freshness, qaStale: qaFreshness.freshness !== "current", currentFingerprint: qaFreshness.currentFingerprint,
+    };
   }
 
   /** Persist a single-finding transition and only the QA artifacts it affects. Caller holds the story lock. */

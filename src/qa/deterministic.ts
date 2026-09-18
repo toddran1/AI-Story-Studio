@@ -23,9 +23,9 @@ function containsName(text: string, name: string): boolean {
 /** Conservative required-rendering violations in narration only. */
 function namingDetections(entities: CanonicalEntity[], narration: string): FreshQaDetection[] {
   const detections: FreshQaDetection[] = [];
-  const flag = (entity: CanonicalEntity, written: string, required: string, reason: string, safeToFix: boolean) => {
+  const flag = (entity: CanonicalEntity, written: string, required: string, reason: string, safeToFix: boolean, ruleKey: string) => {
     detections.push({
-      category: "names", severity: "warn", origin: "deterministic", safeToFix, entityIds: [entity.id],
+      category: "names", severity: "warn", origin: "deterministic", safeToFix, entityIds: [entity.id], ruleKey,
       message: `Narration uses "${written}" for ${entity.canonicalName}, but the authorized narration rendering is "${required}" (${reason}), which never appears in the narration.`,
       evidence: `Narration contains "${written}" but never "${required}".`,
     });
@@ -41,7 +41,7 @@ function namingDetections(entities: CanonicalEntity[], narration: string): Fresh
       const used = identity.find((name) => containsName(narration, name));
       if (used && !containsName(narration, preferred)) {
         const unambiguous = !preferred.includes(" ") && !used.includes(" ") && !naming;
-        flag(entity, used, preferred, "Preferred Narration Name", unambiguous);
+        flag(entity, used, preferred, "Preferred Narration Name", unambiguous, `names:preferred:${normalizeQaText(used)}`);
         continue;
       }
     }
@@ -50,7 +50,7 @@ function namingDetections(entities: CanonicalEntity[], narration: string): Fresh
       const required = rule.behavior === "custom" ? rule.replacement : entity.preferredNarrationName;
       if (!required || !containsName(narration, rule.alias)) continue;
       if (normalizeQaText(rule.alias) === normalizeQaText(required)) continue;
-      if (!containsName(narration, required)) flag(entity, rule.alias, required, rule.behavior === "custom" ? "custom alias rule" : "alias rule prefers the authorized narration name", false);
+      if (!containsName(narration, required)) flag(entity, rule.alias, required, rule.behavior === "custom" ? "custom alias rule" : "alias rule prefers the authorized narration name", false, `names:alias:${normalizeQaText(rule.alias)}`);
     }
   }
   return detections;
@@ -70,6 +70,7 @@ function duplicateParagraphDetections(translation: string, narration: string): F
       if (first === undefined) { seen.set(key, index); return; }
       detections.push({
         category: "completeness", severity: "warn", origin: "deterministic", safeToFix: false,
+        ruleKey: `completeness:duplicate-paragraph:${key.slice(0, 48)}`,
         message: `The ${artifact} repeats a paragraph verbatim (paragraphs ${first + 1} and ${index + 1}); this is usually a duplication defect.`,
         evidence: `Paragraph ${index + 1} duplicates paragraph ${first + 1}: "${paragraph.slice(0, 160)}${paragraph.length > 160 ? "…" : ""}"`,
       });
@@ -105,6 +106,7 @@ function speechReadinessDetections(story: Story, narration: string): FreshQaDete
   }
   const detections: FreshQaDetection[] = [...flagged].map(([written, kind]) => ({
     category: "narrationFidelity" as const, severity: "warn" as const, origin: "deterministic" as const, safeToFix: false,
+    ruleKey: `narrationFidelity:speech:${kind}:${written}`,
     message: `Narration contains the ${kind} "${written}", which speech normalization does not rewrite; the TTS engine may read it unnaturally.`,
     evidence: `"${written}" appears in the narration without a speech-normalization transformation.`,
   }));
@@ -125,6 +127,7 @@ function speechReadinessDetections(story: Story, narration: string): FreshQaDete
   for (const [written, kind] of unhandled) {
     detections.push({
       category: "narrationFidelity", severity: "warn", origin: "deterministic", safeToFix: false,
+      ruleKey: `narrationFidelity:vocalization:${kind}:${written}`,
       message: `TTS vocalization may synthesize unnaturally: the ${kind} "${written}" is left in the spoken text unchanged.`,
       evidence: `"${written}" appears in the narration without a speech-normalization rewrite.`,
       suggestedFix: `Enable automatic vocalization handling with the safe_normalize fallback, or accept the literal "${written}" rendering.`,
@@ -148,6 +151,7 @@ function pronunciationDetections(entities: CanonicalEntity[], narration: string,
       if (entity.originalName && normalizeQaText(entity.originalName) !== normalizeQaText(entity.canonicalName)) {
         detections.push({
           category: "names", severity: "warn", origin: "deterministic", safeToFix: false, entityIds: [entity.id],
+          ruleKey: `names:pronunciation-missing:${entity.id}`,
           message: `${entity.canonicalName} (${entity.id}) is spoken in the narration but has no pronunciation guidance; TTS will guess at "${entity.canonicalName}".`,
           evidence: `Narration names ${entity.canonicalName}; the entity has original name "${entity.originalName}" and no pronunciation record.`,
         });
@@ -155,6 +159,7 @@ function pronunciationDetections(entities: CanonicalEntity[], narration: string,
     } else if (entity.pronunciation.needsReview) {
       detections.push({
         category: "names", severity: "warn", origin: "deterministic", safeToFix: false, entityIds: [entity.id],
+        ruleKey: `names:pronunciation-review:${entity.id}`,
         message: `The pronunciation for ${entity.canonicalName} (${entity.id}) is marked needsReview; confirm it before producing audio for this chapter.`,
         evidence: `Narration names ${entity.canonicalName}; pronunciation mode "${entity.pronunciation.mode}" has needsReview=true.`,
       });
@@ -163,7 +168,7 @@ function pronunciationDetections(entities: CanonicalEntity[], narration: string,
   return detections;
 }
 
-async function loadAcceptedContinuity(root: string, slug: string): Promise<AcceptedContinuity[]> {
+export async function loadAcceptedContinuity(root: string, slug: string): Promise<AcceptedContinuity[]> {
   const raw = await readJsonIfExists(storyPaths(root, slug, 1).continuityReview);
   if (!raw) return [];
   const parsed = continuityReviewSchema.safeParse(raw);

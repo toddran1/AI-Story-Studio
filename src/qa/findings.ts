@@ -34,11 +34,44 @@ export function matchEntityIds(text: string, entities: StoryBible["canonicalEnti
   return matched;
 }
 
+const RENAME_RELATION = /\brenames?\s+["“]?(.+?)["”]?\s+(?:to|as|into)\s+["“]?(.+?)["”]?\s*(?:[.,;:!?)]|$)/i;
+const CALLS_RELATION = /\bcalls?\s+["“]?(.+?)["”]?\s+by the name\s+["“]?(.+?)["”]?\s*(?:[.,;:!?)]|$)/i;
+const SHOULD_BE_RELATION = /["“]([^"”]{1,80})["”]\s+should be\s+["“]?(.+?)["”]?\s*(?:[.,;:!?)]|$)/i;
+const USES_FOR_RELATION = /\buses?\s+["“]([^"”]{1,80})["”]\s+for\s+["“]?(.+?)["”]?\s*(?:[.,;:(]|$)/i;
+const CONTAINS_NEVER_RELATION = /contains\s+["“]([^"”]{1,80})["”]\s+but\s+never\s+["“]?(.+?)["”]?\s*(?:[.,;)]|$)/i;
+
+/**
+ * Stable semantic discriminator for naming-style issues: the normalized
+ * "wrong>right" name pair, when the issue states one. Pure message rewording
+ * that keeps the same wrong term keeps the same relation.
+ */
+export function extractNameRelation(issue: { message: string; evidence: string }): string | undefined {
+  const attempts: [string, RegExp, 1 | 2][] = [
+    [issue.message, RENAME_RELATION, 2],
+    [issue.message, CALLS_RELATION, 2],
+    [issue.message, SHOULD_BE_RELATION, 1],
+    [issue.message, USES_FOR_RELATION, 1],
+    [issue.evidence, CONTAINS_NEVER_RELATION, 1],
+  ];
+  for (const [text, pattern, wrongGroup] of attempts) {
+    const match = pattern.exec(text);
+    if (!match) continue;
+    const wrong = normalizeQaText(match[wrongGroup] ?? "");
+    const right = normalizeQaText(match[wrongGroup === 1 ? 2 : 1] ?? "");
+    if (wrong.length >= 2) return right ? `${wrong}>${right}` : wrong;
+  }
+  return undefined;
+}
+
 export type FindingAnchor = {
   entityIds?: string[];
   excerptKey?: string;
   messageKey: string;
   paragraphBucket?: number;
+  /** Normalized "wrong>right" name relation, when the issue states one. */
+  relation?: string;
+  /** Deterministic rule identity (rule kind + matched token). */
+  ruleKey?: string;
 };
 
 export function anchorFromIssue(
@@ -59,31 +92,40 @@ export function anchorFromIssue(
     excerptKey: excerptKey || undefined,
     messageKey: normalizeExcerptKey(issue.message),
     paragraphBucket,
+    relation: extractNameRelation(issue),
   };
 }
 
 /**
- * Content-derived stable finding identity. Message wording is deliberately
+ * Content-derived stable finding identity (v2). Message wording is deliberately
  * excluded so an LLM-reworded re-detection maps to the same finding. Entity
- * IDs anchor the issue when nameable (stable across passage-level text edits);
- * otherwise the normalized excerpt key anchors the passage (so the same
- * category of issue at a different passage gets a different id); the
- * normalized message is the last-resort fallback.
+ * IDs anchor the issue when nameable, disambiguated by the wrong>right name
+ * relation or the deterministic rule identity so two genuinely different naming
+ * problems about the same entity get different ids; otherwise the normalized
+ * excerpt key anchors the passage; the normalized message is the last resort.
  */
 export function computeFindingId(category: QaCategory, chapter: number, anchor: FindingAnchor): string {
+  const hasEntities = Boolean(anchor.entityIds?.length);
   const key = fingerprint({
-    v: 1,
+    v: 2,
     category,
     chapter,
-    entities: anchor.entityIds?.length ? [...anchor.entityIds].sort() : undefined,
-    excerpt: anchor.entityIds?.length ? undefined : anchor.excerptKey || undefined,
-    message: anchor.entityIds?.length || anchor.excerptKey ? undefined : anchor.messageKey,
+    entities: hasEntities ? [...anchor.entityIds!].sort() : undefined,
+    relation: anchor.relation || undefined,
+    rule: anchor.ruleKey || undefined,
+    excerpt: hasEntities || anchor.relation ? undefined : anchor.excerptKey || undefined,
+    message: hasEntities || anchor.relation || anchor.ruleKey || anchor.excerptKey ? undefined : anchor.messageKey,
   });
   return `qaf_${key.slice(0, 24)}`;
 }
 
 export function findingFingerprint(finding: { category: QaCategory; severity: "warn" | "fail"; message: string; evidence: string }): string {
   return fingerprint({ v: 1, category: finding.category, severity: finding.severity, message: finding.message, evidence: finding.evidence });
+}
+
+/** Verification is separate from lifecycle: a finding is verified-current only against the fingerprint it was last evaluated with. */
+export function findingVerification(finding: Pick<QaFinding, "verifiedAgainstFingerprint">, currentFingerprint: string): "current" | "needs_recheck" {
+  return finding.verifiedAgainstFingerprint === currentFingerprint ? "current" : "needs_recheck";
 }
 
 /** Issues[] is a compatibility projection of findings: everything except obsolete, with review dispositions. */
@@ -104,6 +146,8 @@ export function deriveIssues(findings: QaFinding[]): QaState["issues"] {
 /**
  * Backward-compatible parse of any qa.json: legacy files (issues with optional
  * review dispositions) gain findings; new files re-derive issues from findings.
+ * Existing finding ids and fields are kept as-is; missing optional fields
+ * (verifiedAgainstFingerprint, provenance.relation) are simply absent.
  */
 export function migrateQaState(raw: unknown, options: { chapter?: number } = {}): QaState {
   const parsed = qaStateSchema.parse(raw);
@@ -122,7 +166,11 @@ export function migrateQaState(raw: unknown, options: { chapter?: number } = {})
       status,
       ...(issue.review ? { resolution: { action: issue.review.disposition === "dismissed" ? "dismiss" as const : "manual_fix" as const, resolvedAt: issue.review.reviewedAt } } : {}),
       fingerprint: findingFingerprint(issue),
-      provenance: chapter > 0 ? { chapter, excerptKey: anchor.excerptKey } : { excerptKey: anchor.excerptKey },
+      provenance: {
+        ...(chapter > 0 ? { chapter } : {}),
+        ...(anchor.excerptKey ? { excerptKey: anchor.excerptKey } : {}),
+        ...(anchor.relation ? { relation: anchor.relation } : {}),
+      },
       origin: "llm",
     };
   });
@@ -132,36 +180,68 @@ export function migrateQaState(raw: unknown, options: { chapter?: number } = {})
 export const openFindings = (state: Pick<QaState, "findings">) => state.findings.filter((finding) => finding.status === "open");
 export const resolvedFindings = (state: Pick<QaState, "findings">) => state.findings.filter((finding) => finding.status !== "open");
 
-export function qaCounts(state: Pick<QaState, "findings">) {
+/** Findings that currently gate the chapter; diagnostics must use these, never resolved history. */
+export const activeQaFindings = (state: Pick<QaState, "findings">) => openFindings(state);
+
+/** Deterministic current score: severity-weighted deduction from a clean 1.0, based on open findings only. */
+export function qaScoreFromOpenFindings(open: QaFinding[]): number {
+  const deduction = open.reduce((sum, finding) => sum + (finding.severity === "fail" ? 0.3 : 0.1), 0);
+  return Math.round(Math.max(0, 1 - deduction) * 1000) / 1000;
+}
+
+export type QaFindingStats = {
+  current: { critical: number; warnings: number; open: number; score: number; status: QaStatus };
+  history: { fixedManual: number; fixedAi: number; dismissed: number; obsolete: number; total: number };
+  /** Non-obsolete findings whose verification predates the current dependency fingerprint. */
+  needsVerification: number;
+};
+
+/** Single counting entry point: current gating state, resolution history, and staleness. */
+export function qaFindingStats(state: Pick<QaState, "findings">, currentFingerprint?: string): QaFindingStats {
   const open = openFindings(state);
+  const count = (status: QaFinding["status"]) => state.findings.filter((finding) => finding.status === status).length;
   return {
-    open: open.length,
-    resolved: state.findings.length - open.length,
-    safeFixesAvailable: open.filter((finding) => finding.safeToFix === true).length,
+    current: {
+      critical: open.filter((finding) => finding.severity === "fail").length,
+      warnings: open.filter((finding) => finding.severity === "warn").length,
+      open: open.length,
+      score: qaScoreFromOpenFindings(open),
+      status: open.reduce<QaStatus>((worst, finding) => severityRank[finding.severity] > severityRank[worst] ? finding.severity : worst, "pass"),
+    },
+    history: { fixedManual: count("fixed_manual"), fixedAi: count("fixed_ai"), dismissed: count("dismissed"), obsolete: count("obsolete"), total: state.findings.length },
+    needsVerification: currentFingerprint
+      ? state.findings.filter((finding) => finding.status !== "obsolete" && findingVerification(finding, currentFingerprint) === "needs_recheck").length
+      : 0,
+  };
+}
+
+export function qaCounts(state: Pick<QaState, "findings">) {
+  const stats = qaFindingStats(state);
+  return {
+    open: stats.current.open,
+    resolved: stats.history.total - stats.current.open,
+    safeFixesAvailable: openFindings(state).filter((finding) => finding.safeToFix === true).length,
   };
 }
 
 /**
  * Recompute checks/status/score from OPEN findings only. Resolved findings
- * retain evidence but never gate the chapter, matching resolveQaIssues.
+ * retain evidence but never gate the chapter; resolution history never enters
+ * the current score, so two chapters with identical open findings score the
+ * same regardless of how much history they carry.
  */
 export function recomputeQaSummary(
   findings: QaFinding[],
   base?: { score?: number; originalScore?: number },
 ): { status: QaStatus; score: number; originalScore: number; checks: QaState["checks"] } {
-  const open = findings.filter((finding) => finding.status === "open");
+  const stats = qaFindingStats({ findings });
   const checks = {} as QaState["checks"];
   const categories: QaCategory[] = ["completeness", "names", "numbers", "terminology", "dialogue", "storyConsistency", "narrationFidelity"];
+  const open = findings.filter((finding) => finding.status === "open");
   for (const category of categories) {
     checks[category] = open.filter((finding) => finding.category === category)
       .reduce<QaStatus>((worst, finding) => severityRank[finding.severity] > severityRank[worst] ? finding.severity : worst, "pass");
   }
-  const status = Object.values(checks).reduce<QaStatus>((worst, current) => severityRank[current] > severityRank[worst] ? current : worst, "pass");
   const originalScore = base?.originalScore ?? base?.score ?? 1;
-  const weight = (finding: QaFinding) => finding.severity === "fail" ? 2 : 1;
-  const active = findings.filter((finding) => finding.status !== "obsolete");
-  const totalWeight = active.reduce((sum, finding) => sum + weight(finding), 0);
-  const activeWeight = open.reduce((sum, finding) => sum + weight(finding), 0);
-  const score = totalWeight ? Math.min(1, Math.max(originalScore, 1 - (1 - originalScore) * activeWeight / totalWeight)) : originalScore;
-  return { status, score, originalScore, checks };
+  return { status: stats.current.status, score: stats.current.score, originalScore, checks };
 }
