@@ -1,4 +1,4 @@
-import { FormEvent, ReactNode, useDeferredValue, useEffect, useRef, useState } from "react";
+import { Component, ErrorInfo, FormEvent, ReactNode, useDeferredValue, useEffect, useRef, useState } from "react";
 import { api, AudioDashboard, ChapterDetail, ChapterQaDetail, ChapterRow, CostAnalytics, Counts, del, ErrorDiagnostic, formatDiagnostic, Job, Model, OutputItem, post, put, ProductionManifest, ProductionPlan, QaException, QaExceptionMatchKind, QaFinding, QaRecheckSummary, QaResult, Scene, ScenesDashboard, StoryCard, StoryConfig, StoryDashboard, VideoDashboard } from "./api.js";
 import { ArtifactStatusNotice } from "./ArtifactStatusNotice.js";
 import { pretty } from "./format.js";
@@ -21,6 +21,87 @@ import "./entity-sheet-actions.css";
 import "./stage-execution.css";
 import "./scenes.css";
 
+export type ErrorBoundaryProps = {
+  children: ReactNode;
+  fallback?: (error: Error, reset: () => void) => ReactNode;
+  navigate?: (path: string) => void;
+};
+
+export type ErrorBoundaryState = {
+  error: Error | null;
+};
+
+export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundaryState> {
+  override state: ErrorBoundaryState = { error: null };
+
+  static getDerivedStateFromError(error: Error): ErrorBoundaryState {
+    return { error };
+  }
+
+  override componentDidCatch(error: Error, errorInfo: ErrorInfo) {
+    console.error("Studio render error caught by boundary:", error, errorInfo);
+  }
+
+  reset = () => {
+    this.setState({ error: null });
+  };
+
+  override render() {
+    if (this.state.error) {
+      if (this.props.fallback) {
+        return this.props.fallback(this.state.error, this.reset);
+      }
+      return (
+        <section className="page error-boundary-page" role="alert" style={{ padding: "2rem", maxWidth: "800px" }}>
+          <div className="section-heading">
+            <div>
+              <span className="eyebrow" style={{ color: "#ef4444" }}>Unexpected View Error</span>
+              <h2>Something went wrong in this view</h2>
+              <p>An error occurred while displaying this page. Your data is safe on disk.</p>
+            </div>
+          </div>
+          <div className="error-box" style={{ margin: "1.5rem 0", padding: "1rem", background: "rgba(239, 68, 68, 0.1)", border: "1px solid rgba(239, 68, 68, 0.3)", borderRadius: "8px" }}>
+            <p style={{ margin: 0, fontWeight: 500 }}>{this.state.error.message || String(this.state.error)}</p>
+          </div>
+          <div style={{ display: "flex", gap: "0.75rem", alignItems: "center" }}>
+            <button
+              type="button"
+              className="button primary"
+              onClick={() => {
+                this.reset();
+                location.reload();
+              }}
+            >
+              Reload Page
+            </button>
+            {this.props.navigate && (
+              <button
+                type="button"
+                className="button"
+                onClick={() => {
+                  this.reset();
+                  this.props.navigate!("/");
+                }}
+              >
+                Return to Library
+              </button>
+            )}
+          </div>
+          {this.state.error.stack && (
+            <details style={{ marginTop: "2rem", opacity: 0.7, fontSize: "0.85rem" }}>
+              <summary style={{ cursor: "pointer" }}>Error details & stack trace</summary>
+              <pre style={{ overflowX: "auto", padding: "1rem", background: "rgba(0,0,0,0.3)", borderRadius: "4px", marginTop: "0.5rem" }}>
+                {this.state.error.stack}
+              </pre>
+            </details>
+          )}
+        </section>
+      );
+    }
+    return this.props.children;
+  }
+}
+
 type Route = { page: string; story?: string; chapter?: number };
 
 export function App() {
@@ -34,32 +115,32 @@ export function App() {
     <Sidebar stories={stories} active={route.story} navigate={navigate} />
     <main className="canvas" key={`${route.page}:${route.story ?? ""}:${route.chapter ?? ""}:${jobRefreshVersion}`}>
       <Topbar title={active?.title ?? pageTitle(route.page)} subtitle={active ? `${active.sourceLanguage} → ${active.outputLanguage}` : "Local production workspace"} />
-      {route.page === "stories" && <LibraryPage stories={stories} error={storiesError} navigate={navigate} />}
-      {route.page === "new" && <NewStoryPage navigate={navigate} />}
-      {route.page === "app-settings" && <GlobalSettingsPage />}
-      {route.page === "queue" && <QueueStudioPage navigate={navigate} />}
-      {route.page === "review" && <NeedsReviewPage navigate={navigate} />}
-      {route.page === "manage" && route.story && <ManageStoryPage slug={route.story} navigate={navigate} />}
-      {route.page === "story" && route.story && <StoryPage slug={route.story} navigate={navigate} onJob={updateJob} />}
-      {route.page === "chapter" && route.story && route.chapter && <ChapterPage slug={route.story} chapter={route.chapter} navigate={navigate} onJob={updateJob} />}
-      {route.page === "qa" && route.story && <QaPage slug={route.story} navigate={navigate} />}
-      {route.page === "preview" && route.story && <PreviewPage slug={route.story} onJob={updateJob} />}
-      {route.page === "bible" && route.story && <BiblePage slug={route.story} navigate={navigate} />}
-      {route.page === "names" && route.story && <NamesLocalizationPage slug={route.story} navigate={navigate} onJob={updateJob} />}
-      {route.page === "continuity" && route.story && <ContinuityPage slug={route.story} navigate={navigate} />}
-      {route.page === "summaries" && route.story && <SummariesPage slug={route.story} onJob={updateJob} />}
-      {route.page === "audio" && route.story && <AudioPage slug={route.story} onJob={updateJob} />}
-      {route.page === "video" && route.story && <VideoPage slug={route.story} onJob={updateJob} />}
-      {route.page === "scenes" && route.story && <ScenesPage slug={route.story} onJob={updateJob} />}
-      {route.page === "scenes" && route.story && <ScenesPage slug={route.story} onJob={updateJob} navigate={navigate} />}
-      {route.page === "production" && route.story && <ProductionPage slug={route.story} activeJob={job?.type === "production" ? job : undefined} onJob={updateJob} navigate={navigate} />}
-      {route.page === "costs" && route.story && <CostsPage slug={route.story} />}
-      {route.page === "outputs" && route.story && <OutputsPage slug={route.story} />}
-      {route.page === "voice" && route.story && <VoicePage slug={route.story} onJob={updateJob} />}
-      {route.page === "settings" && route.story && <SettingsPage slug={route.story} onJob={updateJob} />}
-      {route.page === "import" && <ChapterImportPage storySlug={route.story} stories={stories} navigate={navigate} />}
+      <ErrorBoundary key={`${route.page}:${route.story ?? ""}:${route.chapter ?? ""}`} navigate={navigate}>
+        {route.page === "stories" && <LibraryPage stories={stories} error={storiesError} navigate={navigate} />}
+        {route.page === "new" && <NewStoryPage navigate={navigate} />}
+        {route.page === "app-settings" && <GlobalSettingsPage />}
+        {route.page === "queue" && <QueueStudioPage navigate={navigate} />}
+        {route.page === "review" && <NeedsReviewPage navigate={navigate} />}
+        {route.page === "manage" && route.story && <ManageStoryPage slug={route.story} navigate={navigate} />}
+        {route.page === "story" && route.story && <StoryPage slug={route.story} navigate={navigate} onJob={updateJob} />}
+        {route.page === "chapter" && route.story && route.chapter && <ChapterPage slug={route.story} chapter={route.chapter} navigate={navigate} onJob={updateJob} />}
+        {route.page === "qa" && route.story && <QaPage slug={route.story} navigate={navigate} />}
+        {route.page === "preview" && route.story && <PreviewPage slug={route.story} onJob={updateJob} />}
+        {route.page === "bible" && route.story && <BiblePage slug={route.story} navigate={navigate} />}
+        {route.page === "names" && route.story && <NamesLocalizationPage slug={route.story} navigate={navigate} onJob={updateJob} />}
+        {route.page === "continuity" && route.story && <ContinuityPage slug={route.story} navigate={navigate} />}
+        {route.page === "summaries" && route.story && <SummariesPage slug={route.story} onJob={updateJob} />}
+        {route.page === "audio" && route.story && <AudioPage slug={route.story} onJob={updateJob} />}
+        {route.page === "video" && route.story && <VideoPage slug={route.story} onJob={updateJob} />}
+        {route.page === "scenes" && route.story && <ScenesPage slug={route.story} onJob={updateJob} navigate={navigate} />}
+        {route.page === "production" && route.story && <ProductionPage slug={route.story} activeJob={job?.type === "production" ? job : undefined} onJob={updateJob} navigate={navigate} />}
+        {route.page === "costs" && route.story && <CostsPage slug={route.story} />}
+        {route.page === "outputs" && route.story && <OutputsPage slug={route.story} />}
+        {route.page === "voice" && route.story && <VoicePage slug={route.story} onJob={updateJob} />}
+        {route.page === "settings" && route.story && <SettingsPage slug={route.story} onJob={updateJob} />}
+        {route.page === "import" && <ChapterImportPage storySlug={route.story} stories={stories} navigate={navigate} />}
+      </ErrorBoundary>
     </main>
-    {job && <JobConsole job={job} onUpdate={updateJob} onClose={() => { latestJob.current = undefined; setJob(undefined); }} />}
     {job && <JobConsole job={job} onUpdate={updateJob} navigate={navigate} onClose={() => { latestJob.current = undefined; setJob(undefined); }} />}
   </div>;
 }
@@ -643,19 +724,19 @@ function newBibleValue(category: string) { const chapters = { firstSeenChapter: 
 function bibleEntryTitle(value: any) { return value.canonicalEnglishName ?? value.canonicalEnglish ?? `${value.subject} → ${value.object}`; }
 
 function getSceneProductionState(scene: Scene): { label: string; cls: string } {
-  if (scene.artwork.review === "approved" && (scene.imageUrl || scene.artwork.versions?.some((v) => v.id === scene.artwork.approvedVersionId))) {
+  if (scene.artwork?.review === "approved" && (scene.imageUrl || scene.artwork?.versions?.some((v) => v.id === scene.artwork.approvedVersionId))) {
     return { label: "Video Ready", cls: "state-video-ready" };
   }
-  if (scene.artwork.review === "approved") {
+  if (scene.artwork?.review === "approved") {
     return { label: "Approved", cls: "state-approved" };
   }
-  if (scene.artwork.review === "needs-regeneration" || (scene.artwork.status === "complete" && scene.artwork.review === "unreviewed")) {
+  if (scene.artwork?.review === "needs-regeneration" || (scene.artwork?.status === "complete" && scene.artwork?.review === "unreviewed")) {
     return { label: "Needs Review", cls: "state-needs-review" };
   }
-  if (scene.artwork.status === "running") {
+  if (scene.artwork?.status === "running") {
     return { label: "Generating", cls: "state-generating" };
   }
-  if (scene.artwork.status === "complete") {
+  if (scene.artwork?.status === "complete") {
     return { label: "Generated", cls: "state-generated" };
   }
   if (scene.visualPrompt) {
@@ -664,9 +745,9 @@ function getSceneProductionState(scene: Scene): { label: string; cls: string } {
   return { label: "Planned", cls: "state-planned" };
 }
 
-function ScenesPage({ slug, onJob, navigate }: { slug: string; onJob: (job: Job) => void; navigate?: (path: string) => void }) {
-  const [data, setData] = useState<ScenesDashboard>();
-  const [draft, setDraft] = useState<Scene[]>([]);
+export function ScenesPage({ slug, onJob, navigate, initialData }: { slug: string; onJob: (job: Job) => void; navigate?: (path: string) => void; initialData?: ScenesDashboard }) {
+  const [data, setData] = useState<ScenesDashboard | undefined>(initialData);
+  const [draft, setDraft] = useState<Scene[]>(() => (initialData?.manifest?.scenes ? structuredClone(initialData.manifest.scenes) : []));
   const [rangeMode, setRangeMode] = useState<"single" | "range">("single");
   const [range, setRange] = useState({ from: "", to: "" });
   const [rangeError, setRangeError] = useState("");
@@ -948,7 +1029,7 @@ function ScenesPage({ slug, onJob, navigate }: { slug: string; onJob: (job: Job)
 
       {data.manifest ? (
         <>
-          {(data.manifestStale || data.chapters.find((item) => item.chapter === data.selectedChapter)?.sceneStatus === "stale") && (
+          {(data.manifestStale || data.chapters?.find((item) => item.chapter === data.selectedChapter)?.sceneStatus === "stale") && (
             <ArtifactStatusNotice
               status="stale"
               reason="This scene plan was generated from older inputs or settings. Scenes and artwork remain visible below; plan scenes again to make the manifest current."
@@ -962,7 +1043,7 @@ function ScenesPage({ slug, onJob, navigate }: { slug: string; onJob: (job: Job)
                 <button
                   key={scene.id}
                   style={{ flexGrow: Math.max(1, scene.endSeconds - scene.startSeconds) }}
-                  className={`${scene.importance} ${scene.artwork.review}`}
+                  className={`${scene.importance ?? "standard"} ${scene.artwork?.review ?? "unreviewed"}`}
                   onClick={() => document.getElementById(scene.id)?.scrollIntoView({ behavior: "smooth" })}
                   title={`${scene.id}: ${state.label}`}
                 >
@@ -1020,13 +1101,13 @@ function ScenesPage({ slug, onJob, navigate }: { slug: string; onJob: (job: Job)
           <div className="scene-cards">
             {filteredScenes.map((scene, index) => {
               const state = getSceneProductionState(scene);
-              const versions = scene.artwork.versions ?? [];
-              const selectedVerId = selectedVersionByScene[scene.id] || scene.artwork.approvedVersionId || (versions.length ? versions.at(-1)!.id : undefined);
+              const versions = scene.artwork?.versions ?? [];
+              const selectedVerId = selectedVersionByScene[scene.id] || scene.artwork?.approvedVersionId || (versions.length ? versions.at(-1)!.id : undefined);
               const displayedVersion = versions.find((v) => v.id === selectedVerId);
               const displayImageUrl = displayedVersion ? (scene.versionUrls?.[String(displayedVersion.versionNumber)] || displayedVersion.imageUrl || scene.imageUrl) : scene.imageUrl;
 
               return (
-                <article id={scene.id} key={scene.id} className={`scene-card ${scene.importance}`}>
+                <article id={scene.id} key={scene.id} className={`scene-card ${scene.importance ?? "standard"}`}>
                   <div className="scene-frame">
                     {displayImageUrl ? (
                       <img src={displayImageUrl} alt={scene.summary} />
@@ -1045,7 +1126,7 @@ function ScenesPage({ slug, onJob, navigate }: { slug: string; onJob: (job: Job)
                         <span className="eyebrow">{scene.id}</span>
                         <h3>{formatTime(scene.startSeconds)} — {formatTime(scene.endSeconds)}</h3>
                       </div>
-                      <Stage value={scene.artwork.status} />
+                      <Stage value={scene.artwork?.status ?? "pending"} />
                     </header>
 
                     {/* Versions Switcher Bar */}
@@ -1053,7 +1134,7 @@ function ScenesPage({ slug, onJob, navigate }: { slug: string; onJob: (job: Job)
                       <div className="version-tabs-bar">
                         <div className="version-tabs">
                           {versions.map((ver) => {
-                            const isApproved = scene.artwork.approvedVersionId === ver.id;
+                            const isApproved = scene.artwork?.approvedVersionId === ver.id;
                             const isSelected = selectedVerId === ver.id;
                             return (
                               <button
@@ -1070,7 +1151,7 @@ function ScenesPage({ slug, onJob, navigate }: { slug: string; onJob: (job: Job)
                         </div>
                         {displayedVersion && (
                           <div className="version-approve-action">
-                            {scene.artwork.approvedVersionId === displayedVersion.id ? (
+                            {scene.artwork?.approvedVersionId === displayedVersion.id ? (
                               <span style={{ color: "#4caf50", fontWeight: 600 }}>✓ Approved Canon Version</span>
                             ) : (
                               <button
@@ -1129,7 +1210,7 @@ function ScenesPage({ slug, onJob, navigate }: { slug: string; onJob: (job: Job)
                       <div>
                         <Field label="Characters">
                           <input
-                            value={scene.characters.join(", ")}
+                            value={(scene.characters ?? []).join(", ")}
                             onChange={(event) =>
                               edit(scene.id, {
                                 characters: event.target.value
@@ -1140,10 +1221,13 @@ function ScenesPage({ slug, onJob, navigate }: { slug: string; onJob: (job: Job)
                             }
                           />
                         </Field>
-                        {scene.characters.length > 0 && (
+                        {(scene.characters ?? []).length > 0 && (
                           <div className="entity-chip-list">
-                            {scene.characters.map((charName) => {
-                              const profile = data.visualProfiles?.find(
+                            {(scene.characters ?? []).map((charName) => {
+                              const profileList = Array.isArray(data.visualProfiles)
+                                ? data.visualProfiles
+                                : Object.values(data.visualProfiles ?? {});
+                              const profile = profileList.find(
                                 (p) => p.entityId === charName || scene.entityIds?.includes(p.entityId)
                               );
                               return (

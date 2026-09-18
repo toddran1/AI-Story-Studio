@@ -1,6 +1,6 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import { App, CanonicalEntitySheet, chapterPageSize, EntityStatusField, paginateRows, QaFindingCard, QaResolvedFindings, shouldRefreshAfterJob } from "../apps/web/src/App.js";
+import { App, CanonicalEntitySheet, chapterPageSize, EntityStatusField, ErrorBoundary, paginateRows, QaFindingCard, QaResolvedFindings, ScenesPage, shouldRefreshAfterJob } from "../apps/web/src/App.js";
 import type { QaFinding } from "../apps/web/src/api.js";
 import { pretty } from "../apps/web/src/format.js";
 import { ChapterImportPage, savedStorySourceUrl } from "../apps/web/src/ChapterImportPage.js";
@@ -211,5 +211,122 @@ describe("web UI", () => {
     // Locked canonical entities cannot be demoted
     expect(html).toContain("🔒 Locked entities cannot be converted");
     expect(html).not.toContain("Convert to minor reference");
+  });
+
+  it("renders ErrorBoundary with fallback UI when an error occurs", () => {
+    const boundary = new ErrorBoundary({ children: "content", navigate: () => undefined });
+    expect(boundary.render()).toBe("content");
+
+    const derivedState = ErrorBoundary.getDerivedStateFromError(new Error("Database connection timed out"));
+    expect(derivedState.error?.message).toBe("Database connection timed out");
+
+    boundary.state = derivedState;
+    const html = renderToStaticMarkup(boundary.render() as any);
+    expect(html).toContain("Something went wrong in this view");
+    expect(html).toContain("Database connection timed out");
+    expect(html).toContain("Reload Page");
+    expect(html).toContain("Return to Library");
+  });
+
+  it("renders ScenesPage safely whether visualProfiles is an array, an object, or undefined", () => {
+    const mockDashboardBase = {
+      settings: { enabled: true },
+      artwork: { enabled: true },
+      planner: { provider: "mock", model: "mock" },
+      selectedChapter: 1,
+      chapters: [{ chapter: 1, title: "Chapter 1", durationSeconds: 60, sceneStatus: "complete", artworkStatus: "complete" }],
+      counts: { chapters: 1, planned: 1, artworkReady: 1 },
+      artDirection: { preset: "cinematic", artStyle: "Photorealistic" },
+      manifest: {
+        version: 1,
+        chapter: 1,
+        durationSeconds: 60,
+        planningFingerprint: "fp",
+        manualRevision: 0,
+        manuallyEdited: false,
+        updatedAt: new Date().toISOString(),
+        scenes: [
+          {
+            id: "scene-001",
+            summary: "Hero arrives at the gate",
+            startSeconds: 0,
+            endSeconds: 30,
+            characters: ["Hero", "Guardian"],
+            entityIds: ["ent_hero_001"],
+            location: "Citadel Gate",
+            visualPrompt: "A dark castle gate with glowing blue runes",
+            importance: "major",
+            artwork: { status: "complete", review: "approved", versions: [] },
+          },
+        ],
+      },
+    };
+
+    // Case 1: visualProfiles as an array
+    const htmlArray = renderToStaticMarkup(
+      <ScenesPage
+        slug="demo-story"
+        onJob={() => undefined}
+        navigate={() => undefined}
+        initialData={{
+          ...mockDashboardBase,
+          visualProfiles: [
+            {
+              entityId: "Hero",
+              canonicalName: "Hero",
+              status: "approved",
+              updatedAt: new Date().toISOString(),
+              views: [],
+            },
+          ] as any,
+        }}
+      />
+    );
+    expect(htmlArray).toContain("Hero arrives at the gate");
+    expect(htmlArray).toContain("Citadel Gate");
+    expect(htmlArray).toContain("Hero");
+    expect(htmlArray).toContain("(approved)");
+
+    // Case 2: visualProfiles as an Object / Record (the original bug format)
+    const htmlRecord = renderToStaticMarkup(
+      <ScenesPage
+        slug="demo-story"
+        onJob={() => undefined}
+        navigate={() => undefined}
+        initialData={{
+          ...mockDashboardBase,
+          visualProfiles: {
+            Hero: {
+              entityId: "Hero",
+              canonicalName: "Hero",
+              status: "approved",
+              updatedAt: new Date().toISOString(),
+              views: [],
+            },
+          } as any,
+        }}
+      />
+    );
+    expect(htmlRecord).toContain("Hero arrives at the gate");
+    expect(htmlRecord).toContain("Citadel Gate");
+    expect(htmlRecord).toContain("Hero");
+    expect(htmlRecord).toContain("(approved)");
+
+    // Case 3: Empty manifest (no scenes planned yet)
+    const htmlEmpty = renderToStaticMarkup(
+      <ScenesPage
+        slug="demo-story"
+        onJob={() => undefined}
+        navigate={() => undefined}
+        initialData={{
+          ...mockDashboardBase,
+          manifest: undefined,
+          visualProfiles: [],
+        }}
+      />
+    );
+    expect(htmlEmpty).toContain("Scene reel &amp; Visual Canon");
+    expect(htmlEmpty).toContain("No scene plan yet");
+    expect(htmlEmpty).toContain("Plan this chapter");
   });
 });

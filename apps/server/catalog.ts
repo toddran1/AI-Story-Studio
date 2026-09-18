@@ -415,7 +415,8 @@ export async function getVideoDashboard(root: string, slug: string) {
 
 export async function getVisualProfiles(root: string, slug: string) {
   slugSchema.parse(slug);
-  return await loadVisualProfiles(root, slug);
+  const profiles = await loadVisualProfiles(root, slug);
+  return Object.values(profiles);
 }
 
 export async function getVisualProfile(root: string, slug: string, entityId: string) {
@@ -516,7 +517,7 @@ export async function getScenesDashboard(root: string, slug: string, selectedCha
     },
     manifest,
     artDirection,
-    visualProfiles,
+    visualProfiles: Object.values(visualProfiles),
   };
 }
 

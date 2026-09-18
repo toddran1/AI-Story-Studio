@@ -905,7 +905,8 @@ export class StudioOperations {
 
   async getVisualProfiles(slug: string) {
     slugSchema.parse(slug);
-    return loadVisualProfiles(this.root, slug);
+    const profiles = await loadVisualProfiles(this.root, slug);
+    return Object.values(profiles);
   }
 
   async getVisualProfile(slug: string, entityId: string) {

@@ -383,7 +383,8 @@ export type StoryDashboard = { story: StoryConfig; counts: Counts & { chapters: 
 export type OutputItem = { id: string; group: "chapterAudio" | "audiobooks" | "chapterVideos" | "combinedVideos" | "subtitles" | "artwork"; chapter?: number; from?: number; to?: number; format: string; createdAt: string; bytes: number; durationSeconds?: number; url: string };
 
 export async function getVisualProfiles(slug: string): Promise<VisualEntityProfile[]> {
-  return api<VisualEntityProfile[]>(`/stories/${encodeURIComponent(slug)}/visual-profiles`);
+  const res = await api<VisualEntityProfile[] | Record<string, VisualEntityProfile>>(`/stories/${encodeURIComponent(slug)}/visual-profiles`);
+  return Array.isArray(res) ? res : Object.values(res ?? {});
 }
 
 export async function getVisualProfile(slug: string, entityId: string): Promise<VisualEntityProfile> {
