@@ -14,6 +14,7 @@ import { withStoryLock } from "../../src/storage/story-lock.js";
 import { loadStory } from "../../src/config/load-config.js";
 import { rebuildStoryBibleBeforeChapter, computeStaleExtractionChapters } from "../../src/story-bible/rebuild.js";
 import { exportManifestSchema } from "../../src/audio/audiobook.js";
+import { FfmpegTools } from "../../src/audio/ffmpeg.js";
 import { videoExportManifestSchema } from "../../src/video/video-export.js";
 import { SceneManifest, artworkSettingsSchema, sceneManifestSchema, sceneSettingsSchema } from "../../src/scenes/types.js";
 import { loadLatestProduction } from "../../src/production/manifest.js";
@@ -52,7 +53,7 @@ export async function listStories(root: string, warnings: string[] = []) {
     try {
       const paths = storyPaths(root, slug, 1); if (!(await exists(paths.storyConfig))) return undefined;
       const story = await loadStory(paths.storyConfig); const manifestRaw = await readJsonIfExists(paths.sourceManifest); const manifest = manifestRaw ? sourceManifestSchema.safeParse(manifestRaw) : undefined;
-      const chapters = await loadChapterSummaries(root, slug); const processed = chapters.filter((item) => item.audioMastering === "complete");
+      const chapters = await loadChapterSummaries(root, slug); const processed = chapters.filter((item) => item.audioAvailable || item.audioMastering === "complete");
       const activity = await readActivity(root, slug, 1); const storage = await cachedStorageUsage(root, slug); const cover = (await Promise.all(["cover.jpg", "cover.jpeg", "cover.png"].map(async (name) => await exists(join(paths.story, name)) ? name : undefined))).find(Boolean); let exportNames: string[] = [];
       try { exportNames = await readdir(join(paths.story, "exports")); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
       const availableExports = await currentExportBadges(root, slug, exportNames, chapters);
@@ -70,14 +71,14 @@ export async function getStoryOverview(root: string, slug: string) {
   slugSchema.parse(slug); const story = await loadStory(storyPaths(root, slug, 1).storyConfig);
   const chapters = await loadChapterSummaries(root, slug);
   return { story, counts: { chapters: chapters.length, minChapter: chapters[0]?.chapter, maxChapter: chapters.at(-1)?.chapter,
-    ...countQa(chapters), complete: chapters.filter((item) => item.audioMastering === "complete").length } };
+    ...countQa(chapters), complete: chapters.filter((item) => item.audioAvailable || item.audioMastering === "complete").length } };
 }
 
 export async function getStoryDashboard(root: string, slug: string) {
   slugSchema.parse(slug); const overview = await getStoryOverview(root, slug); const chapters = await loadChapterSummaries(root, slug); const latest = await loadLatestProduction(root, slug); const sourceRaw = await readJsonIfExists<SourceManifest>(storyPaths(root, slug, 1).sourceManifest); const source = sourceRaw ? sourceManifestSchema.safeParse(sourceRaw) : undefined;
   const completedStages = chapters.reduce((sum, chapter) => sum + [chapter.translation, chapter.narration, chapter.tts, chapter.audioMastering, chapter.continuity, chapter.alignment, chapter.subtitles, chapter.scenePlanning, chapter.artwork, chapter.video].filter((status) => status === "complete").length, 0);
   const current = latest?.story === slug && latest.storyFingerprint === fingerprint(overview.story) ? publicProductionManifest(latest, slug) : undefined;
-  return { ...overview, source: source?.success ? { type: source.data.type, origin: "url" in source.data.origin ? { url: source.data.origin.url } : { name: source.data.origin.name }, importedAt: source.data.importedAt, chapterCount: source.data.chapters.length } : undefined, progress: { processed: chapters.filter((item) => item.translation === "complete").length, audio: chapters.filter((item) => item.audioMastering === "complete").length, artwork: chapters.filter((item) => item.artwork === "complete").length, video: chapters.filter((item) => item.video === "complete").length }, latestProduction: current, currentProfile: current?.options.profile, estimatedRemainingStages: Math.max(0, chapters.length * 10 - completedStages) };
+  return { ...overview, source: source?.success ? { type: source.data.type, origin: "url" in source.data.origin ? { url: source.data.origin.url } : { name: source.data.origin.name }, importedAt: source.data.importedAt, chapterCount: source.data.chapters.length } : undefined, progress: { processed: chapters.filter((item) => item.translation === "complete").length, audio: chapters.filter((item) => item.audioAvailable || item.audioMastering === "complete").length, artwork: chapters.filter((item) => item.artwork === "complete").length, video: chapters.filter((item) => item.video === "complete").length }, latestProduction: current, currentProfile: current?.options.profile, estimatedRemainingStages: Math.max(0, chapters.length * 10 - completedStages) };
 }
 
 export async function getChapterPage(root: string, slug: string, options: { page: number; pageSize: number; filter: z.infer<typeof chapterFilterSchema>; query?: string }) {
@@ -93,7 +94,7 @@ export async function getChapterPage(root: string, slug: string, options: { page
   let chapters = await loadSummaries(root, slug, numbers, index);
   if (options.filter === "unprocessed") chapters = chapters.filter((item) => item.translation !== "complete");
   else if (options.filter === "warn" || options.filter === "fail") chapters = chapters.filter((item) => item.qa === options.filter);
-  else if (options.filter === "complete") chapters = chapters.filter((item) => item.audioMastering === "complete");
+  else if (options.filter === "complete") chapters = chapters.filter((item) => item.audioAvailable || item.audioMastering === "complete");
   const total = chapters.length; const pages = Math.max(1, Math.ceil(total / pageSize)); const safePage = Math.min(page, pages);
   return { items: chapters.slice((safePage - 1) * pageSize, safePage * pageSize), page: safePage, pageSize, total, pages };
 }
@@ -312,9 +313,11 @@ async function loadSummaries(root: string, slug: string, numbers: number[], inde
     const [audioFileExists, translationFileExists, narrationFileExists, videoFileExists] = await Promise.all([exists(chapterPaths.audio), exists(chapterPaths.english), exists(chapterPaths.narration), exists(chapterPaths.video)]); const audioStale = audioFileExists && audioMastering !== "complete"; const videoStale = videoFileExists && video !== "complete";
     const translationStatus = fresh && metadata?.stages.translation.status === "complete" ? "complete" : translationFileExists ? "stale" : "pending";
     const narrationStatus = fresh && metadata?.stages.narration.status === "complete" ? "complete" : narrationFileExists ? "stale" : "pending";
+    const audioMasteringStatus = fresh && metadata?.stages.audioMastering.status === "complete" ? "complete" : audioFileExists ? "stale" : metadata?.stages.audioMastering.status ?? "pending";
+    const videoStatus = fresh && metadata?.stages.video.status === "complete" ? "complete" : videoFileExists ? "stale" : metadata?.stages.video.status ?? "pending";
     return { chapter, originalTitle: metadata?.originalTitle ?? index.titles.get(chapter), translation: translationStatus,
       narration: narrationStatus, qa: qa?.status,
-      qaScore: qa?.score, qaIssues, qaStale: Boolean(qa) && (!fresh || metadata?.stages.qa.status !== "complete"), tts, audioMastering, continuity, alignment, subtitles, scenePlanning, artwork, video,
+      qaScore: qa?.score, qaIssues, qaStale: Boolean(qa) && (!fresh || metadata?.stages.qa.status !== "complete"), tts, audioMastering: audioMasteringStatus, continuity, alignment, subtitles, scenePlanning, artwork, video: videoStatus,
       durationSeconds: audioFileExists ? metadata?.audio?.durationSeconds : undefined,
       audioAvailable: audioFileExists, audioStale, videoAvailable: videoFileExists, videoStale };
   });
@@ -339,11 +342,30 @@ export async function getAudioDashboard(root: string, slug: string) {
     return { ...manifest, downloadUrl: `/api/stories/${slug}/exports/${parsed.data.from}-${parsed.data.to}.${parsed.data.format}` };
   }))
     .filter((item): item is NonNullable<typeof item> => Boolean(item)).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-  const available = chapters.filter((item) => item.audioAvailable && item.durationSeconds);
+  const unprobed = chapters.filter((item) => item.audioAvailable && !item.durationSeconds);
+  if (unprobed.length > 0) {
+    const tools = new FfmpegTools();
+    await mapLimit(unprobed, 4, async (item) => {
+      try {
+        const paths = storyPaths(root, slug, item.chapter);
+        const probe = await tools.probe(paths.audio);
+        item.durationSeconds = probe.durationSeconds;
+        const raw = await readJsonIfExists<Chapter>(paths.chapterMeta);
+        if (raw) {
+          const meta = chapterSchema.parse(raw);
+          meta.audio = probe;
+          await atomicWriteJson(paths.chapterMeta, meta).catch(() => {});
+        }
+      } catch {
+        // ignore probe failure for dashboard listing
+      }
+    });
+  }
+  const available = chapters.filter((item) => item.audioAvailable);
   const current = available.filter((item) => !item.audioStale);
   return { settings: story.audio, chapters: chapters.map(({ chapter, originalTitle, audioMastering, durationSeconds, audioAvailable, audioStale }) => ({ chapter, title: originalTitle, status: audioStale ? "stale" : audioMastering, durationSeconds, audioAvailable, audioStale })),
     counts: { total: chapters.length, mastered: available.length, current: current.length, stale: available.length - current.length },
-    totalDurationSeconds: available.reduce((sum, item) => sum + (item.durationSeconds ?? 0), 0) + story.audio.chapterGapSeconds * Math.max(0, available.length - 1), exports };
+    totalDurationSeconds: available.reduce((sum, item) => sum + (item.durationSeconds ?? 0), 0) + story.audio.chapterGapSeconds * Math.max(0, available.filter((item) => (item.durationSeconds ?? 0) > 0).length - 1), exports };
 }
 
 export async function getVideoDashboard(root: string, slug: string) {
@@ -351,7 +373,7 @@ export async function getVideoDashboard(root: string, slug: string) {
   const cover = (await Promise.all(["cover.jpg", "cover.jpeg", "cover.png"].map(async (name) => await exists(join(storyRoot, name)) ? name : undefined))).find(Boolean); let names: string[] = [];
   try { names = (await readdir(join(storyRoot, "exports"))).filter((name) => isVisibleManifest(name, ".mp4.json")); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
   const exports = (await mapLimit(names, 8, async (name) => { const raw = await readJsonIfExists(join(storyRoot, "exports", name)).catch((error) => { logger.warn({ event: "video.export_manifest_ignored", story: slug, manifest: name, error: error instanceof Error ? error.message : String(error) }, "Ignoring unreadable video export manifest"); return undefined; }); const parsed = raw ? videoExportManifestSchema.safeParse(raw) : undefined; if (!parsed?.success || parsed.data.story !== slug || !(await currentVideoExport(root, slug, parsed.data))) return undefined; const { output: _output, ...manifest } = parsed.data; return { ...manifest, downloadUrl: `/api/stories/${slug}/video-exports/${parsed.data.from}-${parsed.data.to}.mp4` }; })).filter((item): item is NonNullable<typeof item> => Boolean(item)).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-  return { settings: story.video, subtitleSettings: story.subtitles, background: { coverAvailable: Boolean(cover), coverName: cover, effectiveMode: story.video.backgroundMode === "gradient" || !cover ? "fallback" : story.video.backgroundMode }, counts: { total: chapters.length, mastered: chapters.filter((item) => item.audioMastering === "complete").length, subtitles: chapters.filter((item) => item.subtitles === "complete").length, videos: chapters.filter((item) => item.video === "complete").length }, chapters: chapters.map((item) => ({ chapter: item.chapter, title: item.originalTitle, durationSeconds: item.durationSeconds, subtitleStatus: item.subtitles, videoStatus: item.video, videoAvailable: item.videoAvailable })), exports };
+  return { settings: story.video, subtitleSettings: story.subtitles, background: { coverAvailable: Boolean(cover), coverName: cover, effectiveMode: story.video.backgroundMode === "gradient" || !cover ? "fallback" : story.video.backgroundMode }, counts: { total: chapters.length, mastered: chapters.filter((item) => item.audioAvailable || item.audioMastering === "complete").length, subtitles: chapters.filter((item) => item.subtitles === "complete").length, videos: chapters.filter((item) => item.video === "complete").length }, chapters: chapters.map((item) => ({ chapter: item.chapter, title: item.originalTitle, durationSeconds: item.durationSeconds, subtitleStatus: item.subtitles, videoStatus: item.video, videoAvailable: item.videoAvailable })), exports };
 }
 
 export async function getScenesDashboard(root: string, slug: string, selectedChapter?: number) {

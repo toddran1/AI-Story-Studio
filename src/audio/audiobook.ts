@@ -78,8 +78,19 @@ export async function selectExportChapters(root: string, story: Story, from: num
     // included in the audiobook fingerprint below, so stale masters remain safe
     // to cache and any later replacement still invalidates the edition.
     if (!actualFingerprint) throw new AudioError(`Chapter ${chapter} has no retained audio master to export`);
-    if (!metadata.audio) throw new AudioError(`Chapter ${chapter} audio timing metadata is unavailable`);
-    chapters.push({ chapter, title: metadata.translatedTitle ?? metadata.originalTitle ?? `Chapter ${chapter}`, path: paths.audio, durationSeconds: metadata.audio.durationSeconds, fingerprint: actualFingerprint });
+    let durationSeconds = metadata.audio?.durationSeconds;
+    if (!durationSeconds || durationSeconds <= 0) {
+      try {
+        const probed = await new FfmpegTools().probe(paths.audio);
+        durationSeconds = probed.durationSeconds;
+        metadata.audio = probed;
+        await atomicWriteJson(paths.chapterMeta, metadata).catch(() => {});
+      } catch {
+        // if probing fails, duration check below will handle it
+      }
+    }
+    if (!durationSeconds || durationSeconds <= 0) throw new AudioError(`Chapter ${chapter} audio timing metadata is unavailable`);
+    chapters.push({ chapter, title: metadata.translatedTitle ?? metadata.originalTitle ?? `Chapter ${chapter}`, path: paths.audio, durationSeconds, fingerprint: actualFingerprint });
   }
   return chapters;
 }

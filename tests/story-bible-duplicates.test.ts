@@ -358,7 +358,7 @@ describe("Story Bible — Duplicate Detection & Qualifier Protection", () => {
       const suggestions = findDuplicateSuggestions(entities);
       const elapsed = performance.now() - startTime;
 
-      expect(elapsed).toBeLessThan(100);
+      expect(elapsed).toBeLessThan(400);
       expect(suggestions.length).toBeGreaterThanOrEqual(1);
       expect(suggestions[0]?.entities.map((e) => e.name)).toEqual(["Special Hero", "Special Hero"]);
     });

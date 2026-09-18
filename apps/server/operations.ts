@@ -813,6 +813,12 @@ export class StudioOperations {
       for (let index = 0; index < selected.length; index++) {
         if (shutdown.isRequested) return { status: "paused", mastered, reused, total: selected.length };
         const chapter = selected[index]!.chapter; control.update({ type: "audio.chapter.started", chapter, index: index + 1, total: selected.length });
+        const retainedAudio = await exists(storyPaths(this.root, slug, chapter).audio);
+        if (!input.force && retainedAudio) {
+          reused++;
+          control.update({ type: "audio.chapter.completed", chapter, index: index + 1, total: selected.length, reused: true, retained: true });
+          continue;
+        }
         const result = await masterStoredChapter({ root: this.root, story, chapter, processor: this.audio, force: input.force }); result.reused ? reused++ : mastered++;
         control.update({ type: "audio.chapter.completed", chapter, index: index + 1, total: selected.length, reused: result.reused, durationSeconds: result.probe.durationSeconds });
       }

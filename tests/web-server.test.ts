@@ -280,7 +280,14 @@ describe("web service layer", () => {
     await operations.importInspection("stale-story", inspection.id, false, true);
     const invalidated = JSON.parse(await readFile(paths.chapterMeta, "utf8")); expect(invalidated.stages.ingestion.status).toBe("pending"); expect(invalidated.stages.tts.status).toBe("pending");
     expect(await getChapter(root, "stale-story", 101)).toMatchObject({ stale: true, audioAvailable: true, audioStale: true, audioUrl: "/api/stories/stale-story/chapters/101/audio" });
-    expect((await getChapterPage(root, "stale-story", { page: 1, pageSize: 50, filter: "all" })).items[0]).toMatchObject({ chapter: 101, translation: "pending", tts: "pending", audioAvailable: true, audioStale: true });
+    expect((await getChapterPage(root, "stale-story", { page: 1, pageSize: 50, filter: "all" })).items[0]).toMatchObject({ chapter: 101, translation: "pending", tts: "pending", audioAvailable: true, audioStale: true, audioMastering: "stale" });
+    expect(await getStoryOverview(root, "stale-story")).toMatchObject({ counts: { minChapter: 101, maxChapter: 101, complete: 1 } });
+    const audioDashboard = await getAudioDashboard(root, "stale-story");
+    expect(audioDashboard.counts).toEqual({ total: 1, mastered: 1, current: 0, stale: 1 });
+    expect(audioDashboard.chapters[0]).toMatchObject({ chapter: 101, audioAvailable: true, audioStale: true, status: "stale" });
+    const completePage = await getChapterPage(root, "stale-story", { page: 1, pageSize: 50, filter: "complete" });
+    expect(completePage.items).toHaveLength(1);
+    expect(completePage.items[0]!.chapter).toBe(101);
     inspection = await operations.inspectSource({ filename: "chapter.txt", file: Buffer.from("Replacement"), chapter: 102 }); await operations.importInspection("stale-story", inspection.id);
     const page = await getChapterPage(root, "stale-story", { page: 1, pageSize: 50, filter: "all" }); expect(page.items.map((item) => item.chapter)).toEqual([102]);
     await operations.close();
