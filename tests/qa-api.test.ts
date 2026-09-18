@@ -18,6 +18,7 @@ import { computeStoredQaDependencyFingerprint } from "../src/qa/freshness.js";
 import { atomicWrite, atomicWriteJson } from "../src/storage/atomic-write.js";
 import { storyPaths } from "../src/storage/paths.js";
 import { readJsonIfExists } from "../src/storage/story-files.js";
+import { exists, readJsonIfExists } from "../src/storage/story-files.js";
 import { fileFingerprint } from "../src/utils/file-fingerprint.js";
 import { MockLLM } from "./helpers.js";
 
@@ -306,6 +307,33 @@ describe("dashboard and legacy compatibility", () => {
     expect(result.qa.issues[0]?.review?.disposition).toBe("manually_fixed");
     const after = await readState(paths);
     expect(after.findings.find((finding) => finding.id === state!.findings[0]!.id)).toMatchObject({ status: "fixed_manual", resolution: { action: "manual_fix" } });
+    await operations.close();
+  });
+
+  it("resetChapterQa removes qa.json and resets stage to pending without modifying other stages", async () => {
+    const { root, story, paths } = await fixture({ detections: [detection()] });
+    const { operations } = operationsWith(root, openaiQa());
+    expect(await exists(paths.qa)).toBe(true);
+
+    const result = await operations.resetChapterQa(story.slug, 1);
+    expect(result.reset).toBe(true);
+    expect(result.deletedArtifacts).toContain("qa.json");
+    expect(await exists(paths.qa)).toBe(false);
+
+    // After reset, getChapterQa throws "does not have a QA result"
+    await expect(operations.getChapterQa(story.slug, 1)).rejects.toThrow(/does not have a QA result/i);
+    await operations.close();
+  });
+
+  it("resetQaBatch resets requested chapters across batch", async () => {
+    const { root, story, paths } = await fixture({ detections: [detection()] });
+    const { operations } = operationsWith(root, openaiQa());
+
+    const result = await operations.resetQaBatch(story.slug, { chapters: [1] });
+    expect(result.requested).toBe(1);
+    expect(result.reset).toBe(1);
+    expect(result.chapters).toEqual([1]);
+    expect(await exists(paths.qa)).toBe(false);
     await operations.close();
   });
 });

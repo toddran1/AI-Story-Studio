@@ -42,6 +42,14 @@ describe("story:qa argument parsing", () => {
     expect(() => parseQaArgs(["exceptions", "demo-story", "--remove", "nope"])).toThrow(/qax_/);
     expect(() => parseQaArgs(["bogus", "demo-story"])).toThrow(/Unknown qa action/);
   });
+  it("parses reset scope flags and rejects invalid combinations", () => {
+    expect(parseQaArgs(["reset", "demo-story", "--chapter", "3"])).toEqual({ action: "reset", story: "demo-story", chapter: 3 });
+    expect(parseQaArgs(["reset", "demo-story", "--from", "1", "--to", "5"])).toEqual({ action: "reset", story: "demo-story", from: 1, to: 5 });
+    expect(parseQaArgs(["reset", "demo-story", "--all"])).toEqual({ action: "reset", story: "demo-story", all: true });
+    expect(() => parseQaArgs(["reset", "demo-story"])).toThrow(/requires --chapter/i);
+    expect(() => parseQaArgs(["reset", "demo-story", "--chapter", "1", "--all"])).toThrow(/cannot be combined/i);
+    expect(() => parseQaArgs(["reset", "demo-story", "--from", "5", "--to", "2"])).toThrow(/greater than or equal/i);
+  });
 });
 
 const detections = [
@@ -164,6 +172,18 @@ describe("story:qa commands", () => {
       expect(reopened.get()).toContain(`reopened\t${id}`);
       after = await readState(paths);
       expect(after.findings.find((finding) => finding.id === id)).toMatchObject({ status: "open", resolution: { action: "dismiss" } });
+    } finally { await operations.close(); }
+  });
+
+  it("reset command resets QA data cleanly via CLI", async () => {
+    const { root, story, paths } = await fixture();
+    const operations = new StudioOperations(root, env);
+    try {
+      const out = collect();
+      await runQaCommand(parseQaArgs(["reset", story.slug, "--chapter", "1"]), { root, operations, llm: llmRouter(new MockLLM()), stdout: out.stdout });
+      expect(out.get()).toContain("Reset QA data for Chapter 1. Other stages were not changed.");
+      const meta = chapterSchema.parse(JSON.parse(await readFile(paths.chapterMeta, "utf8")));
+      expect(meta.stages.qa).toEqual({ status: "pending" });
     } finally { await operations.close(); }
   });
 });

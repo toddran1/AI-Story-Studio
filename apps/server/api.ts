@@ -164,6 +164,7 @@ export function createApiHandler(operations: StudioOperations) {
       if (chapterQaDismissMatch && request.method === "PUT") return send(response, 200, await operations.dismissQaFindings(chapterQaDismissMatch[1]!, chapterParam(chapterQaDismissMatch[2]!), await jsonBody(request)));
       const chapterQaStateMatch = /^\/api\/stories\/([a-z0-9-]+)\/chapters\/(\d+)\/qa$/.exec(url.pathname);
       if (chapterQaStateMatch && request.method === "GET") return send(response, 200, await operations.getChapterQa(chapterQaStateMatch[1]!, chapterParam(chapterQaStateMatch[2]!)));
+      if (chapterQaStateMatch && request.method === "DELETE") return send(response, 200, await operations.resetChapterQa(chapterQaStateMatch[1]!, chapterParam(chapterQaStateMatch[2]!)));
       const qaSafeFixesMatch = /^\/api\/stories\/([a-z0-9-]+)\/chapters\/(\d+)\/qa\/safe-fixes$/.exec(url.pathname);
       if (qaSafeFixesMatch && request.method === "POST") return send(response, 202, operations.startQaSafeFixes(qaSafeFixesMatch[1]!, chapterParam(qaSafeFixesMatch[2]!)));
       const qaFindingMatch = /^\/api\/stories\/([a-z0-9-]+)\/chapters\/(\d+)\/qa\/findings\/(qaf_[a-f0-9]{24})\/(fix-ai|resolve-manual|dismiss|reopen)$/.exec(url.pathname);
@@ -227,6 +228,8 @@ export function createApiHandler(operations: StudioOperations) {
         }
         return sendFile(request, response, match.path, mimeForVisualReferenceExtension(match.ext));
       }
+      const qaResetMatch = /^\/api\/stories\/([a-z0-9-]+)\/qa\/reset$/.exec(url.pathname);
+      if (qaResetMatch && request.method === "POST") return send(response, 200, await operations.resetQaBatch(qaResetMatch[1]!, await jsonBody(request)));
       const qaMatch = /^\/api\/stories\/([a-z0-9-]+)\/qa$/.exec(url.pathname);
       if (qaMatch && request.method === "GET") return send(response, 200, await getQaDashboard(operations.root, qaMatch[1]!));
       const qaExceptionsMatch = /^\/api\/stories\/([a-z0-9-]+)\/qa-exceptions$/.exec(url.pathname);

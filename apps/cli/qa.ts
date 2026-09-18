@@ -24,6 +24,8 @@ export type QaCommand =
   | { action: "dismiss"; story: string; chapter: number; id: string; reason?: string; remember?: { matchKind: string; value: string } }
   | { action: "reopen"; story: string; chapter: number; id: string }
   | { action: "resolve"; story: string; chapter: number; id: string };
+  | { action: "resolve"; story: string; chapter: number; id: string }
+  | { action: "reset"; story: string; chapter?: number; from?: number; to?: number; all?: boolean };
 
 function flag(values: string[], name: string) { return values.includes(name); }
 function option(values: string[], name: string) { const index = values.indexOf(name); return index >= 0 ? values[index + 1] : undefined; }
@@ -75,6 +77,41 @@ export function parseQaArgs(values: string[]): QaCommand {
     if (values.slice(2).some((value) => value !== "--remove" && value !== remove)) throw new Error("Exceptions accepts [--remove qax_...] or --add flags");
     return { action, story, remove };
   }
+  if (action === "reset") {
+    const chapterStr = option(values, "--chapter");
+    const fromStr = option(values, "--from");
+    const toStr = option(values, "--to");
+    const all = flag(values, "--all");
+
+    const hasChapter = chapterStr !== undefined || (Boolean(third) && /^\d+$/.test(third));
+    const hasRange = fromStr !== undefined || toStr !== undefined;
+    const modeCount = (hasChapter ? 1 : 0) + (hasRange ? 1 : 0) + (all ? 1 : 0);
+    if (modeCount > 1) {
+      throw new Error("Reset modes (--chapter, --from/--to, --all) cannot be combined");
+    }
+
+    if (all) {
+      return { action: "reset", story, all: true };
+    }
+    if (hasRange) {
+      if (fromStr === undefined || toStr === undefined) throw new Error("Range reset requires both --from and --to");
+      const from = Number(fromStr);
+      const to = Number(toStr);
+      if (!Number.isSafeInteger(from) || !Number.isSafeInteger(to) || from < 1 || to < from) {
+        throw new Error("Invalid chapter range: --to must be greater than or equal to --from and both >= 1");
+      }
+      return { action: "reset", story, from, to };
+    }
+    if (chapterStr !== undefined) {
+      const chapter = chapterArg(chapterStr);
+      return { action: "reset", story, chapter };
+    }
+    if (third && /^\d+$/.test(third)) {
+      const chapter = chapterArg(third);
+      return { action: "reset", story, chapter };
+    }
+    throw new Error("Reset requires --chapter <n>, --from <f> --to <t>, or --all");
+  }
   throw new Error(`Unknown qa action: ${action}`);
 }
 
@@ -92,6 +129,7 @@ function printSummary(story: string, chapter: number, summary: QaRecheckSummary,
 }
 
 type QaOperations = Pick<StudioOperations, "dismissQaFinding" | "reopenQaFinding" | "resolveQaFindingManually" | "listQaExceptions" | "addQaException" | "removeQaException" | "applyQaSafeFixes">;
+type QaOperations = Pick<StudioOperations, "dismissQaFinding" | "reopenQaFinding" | "resolveQaFindingManually" | "listQaExceptions" | "addQaException" | "removeQaException" | "applyQaSafeFixes" | "resetChapterQa" | "resetQaBatch">;
 
 async function main() {
   const command = parseQaArgs(process.argv.slice(2)); const env = loadEnvironment(); const root = resolveStudioRoot(env); const operations = new StudioOperations(root, env); const runtime = createPipelineRuntime(env);
@@ -99,6 +137,31 @@ async function main() {
 }
 
 export async function runQaCommand(command: QaCommand, d: { root: string; operations: QaOperations; llm: LLMRouter; stdout: (text: string) => unknown }) {
+  if (command.action === "reset") {
+    if (command.chapter !== undefined) {
+      const result = await d.operations.resetChapterQa(command.story, command.chapter);
+      if (result.reset) {
+        d.stdout(`Reset QA data for Chapter ${command.chapter}. Other stages were not changed.\n`);
+      } else {
+        d.stdout(`Chapter ${command.chapter} already has no QA data (QA not run). Other stages were not changed.\n`);
+      }
+      return;
+    }
+    const batchOptions = command.all
+      ? { all: true as const }
+      : command.from !== undefined && command.to !== undefined
+        ? { from: command.from, to: command.to }
+        : { all: true as const };
+    const result = await d.operations.resetQaBatch(command.story, batchOptions);
+    d.stdout(`Reset QA data for ${result.reset} of ${result.requested} chapter(s). Other stages were not changed.\n`);
+    if (result.failed > 0) {
+      d.stdout(`Failures (${result.failed}):\n`);
+      for (const fail of result.failures) {
+        d.stdout(`  Chapter ${fail.chapter}: ${fail.reason}\n`);
+      }
+    }
+    return;
+  }
   const paths = storyPaths(d.root, command.story, "chapter" in command ? command.chapter : 1);
   if (command.action === "show") {
     const raw = await readJsonIfExists(paths.qa);

@@ -99,6 +99,7 @@ import { migrateQaState, openFindings, qaCounts, qaFindingStats } from "../../sr
 import { deriveChapterQaFreshness } from "../../src/qa/freshness.js";
 import { resolveQaFindingsByIndex, recheckChapterQa, transitionQaFinding, type QaFindingTransition } from "../../src/qa/review.js";
 import { addQaException, listQaExceptions, removeQaException } from "../../src/qa/exceptions.js";
+import { resetChapterQa, resetChapterQaBatch, resetQaBatchOptionsSchema } from "../../src/qa/reset.js";
 import { applyNarrationNamingPreferences } from "../../src/narration/naming-preferences.js";
 import { loadNarrationNamingEntities } from "../../src/story-bible/narration-names.js";
 import { issueRepairTargets, repairQaText, repairTargets } from "../../src/qa/repair.js";
@@ -510,6 +511,28 @@ export class StudioOperations {
       chapter, state, counts: qaCounts(state), stats: qaFindingStats(state, qaFreshness.currentFingerprint),
       freshness: qaFreshness.freshness, qaStale: qaFreshness.freshness !== "current", currentFingerprint: qaFreshness.currentFingerprint,
     };
+  }
+
+  async resetChapterQa(slug: string, chapter: number) {
+    slugSchema.parse(slug);
+    if (!Number.isSafeInteger(chapter) || chapter < 1) throw new ConfigurationError("Chapter must be a positive integer");
+    const result = await resetChapterQa(this.root, slug, chapter);
+    if (result.reset) {
+      invalidateCatalogCache(this.root, slug);
+      await recordActivity(this.root, slug, "chapter.qa_reset", `Reset QA evaluation data for Chapter ${chapter}`);
+    }
+    return result;
+  }
+
+  async resetQaBatch(slug: string, raw: unknown) {
+    slugSchema.parse(slug);
+    const options = resetQaBatchOptionsSchema.parse(raw);
+    const result = await resetChapterQaBatch(this.root, slug, options);
+    if (result.reset > 0) {
+      invalidateCatalogCache(this.root, slug);
+      await recordActivity(this.root, slug, "qa.batch_reset", `Reset QA evaluation data for ${result.reset} chapter(s)`);
+    }
+    return result;
   }
 
   /** Persist a single-finding transition and only the QA artifacts it affects. Caller holds the story lock. */

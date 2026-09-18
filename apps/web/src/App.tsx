@@ -290,12 +290,180 @@ function SubtitleWorkspace({ data, cues, working, onCue, onAlign, onGenerate, on
   </div>;
 }
 
+function ResetQaDialog({ slug, defaultChapter, onClose, onDone }: { slug: string; defaultChapter?: number; onClose: () => void; onDone: (summary: string) => void }) {
+  const [scope, setScope] = useState<"chapter" | "range" | "all">(defaultChapter ? "chapter" : "all");
+  const [targetChapter, setTargetChapter] = useState(String(defaultChapter ?? 1));
+  const [fromChapter, setFromChapter] = useState("1");
+  const [toChapter, setToChapter] = useState("1");
+  const [totalChapters, setTotalChapters] = useState<number | undefined>();
+  const [typedConfirmation, setTypedConfirmation] = useState("");
+  const [working, setWorking] = useState(false);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    api<{ total: number }>(`/stories/${slug}/chapters?pageSize=1`).then((res) => {
+      if (res && typeof res.total === "number") {
+        setTotalChapters(res.total);
+        if (res.total >= 1) setToChapter(String(res.total));
+      }
+    }).catch(() => undefined);
+  }, [slug]);
+
+  const isMulti = scope === "all" || scope === "range";
+  const affectedCount = scope === "chapter"
+    ? 1
+    : scope === "all"
+      ? (totalChapters ?? "all")
+      : Math.max(0, Number(toChapter) - Number(fromChapter) + 1);
+
+  const canSubmit = !working && (
+    scope === "chapter"
+      ? Number.isInteger(Number(targetChapter)) && Number(targetChapter) >= 1
+      : typedConfirmation.trim() === "RESET QA"
+  );
+
+  const submit = async () => {
+    try {
+      setWorking(true);
+      setError("");
+      if (scope === "chapter") {
+        const ch = Number(targetChapter);
+        const res = await del<{ reset: boolean }>(`/stories/${slug}/chapters/${ch}/qa`);
+        onDone(res.reset ? `QA data reset for Chapter ${ch}. Other stages were not changed.` : `Chapter ${ch} already had no QA data.`);
+      } else {
+        const body = scope === "all" ? { all: true } : { from: Number(fromChapter), to: Number(toChapter) };
+        const res = await post<{ requested: number; reset: number; failed: number; failures: Array<{ chapter: number; reason: string }> }>(`/stories/${slug}/qa/reset`, body);
+        if (res.failed > 0) {
+          setError(`Reset completed with ${res.failed} failure(s): ${res.failures.map((f) => `Ch ${f.chapter}: ${f.reason}`).join("; ")}`);
+          setWorking(false);
+          return;
+        }
+        onDone(`QA data reset for ${res.reset} chapter${res.reset === 1 ? "" : "s"}. Other stages were not changed.`);
+      }
+    } catch (err) {
+      setWorking(false);
+      setError(message(err));
+    }
+  };
+
+  return (
+    <div className="stage-modal-backdrop" role="presentation">
+      <section className="stage-modal" role="dialog" aria-modal="true" aria-labelledby="reset-qa-title">
+        <header>
+          <div>
+            <span className="eyebrow">Maintenance</span>
+            <h3 id="reset-qa-title">Reset QA Data</h3>
+          </div>
+          <button className="button" onClick={onClose} disabled={working}>Close</button>
+        </header>
+        <p>
+          Permanently remove QA findings, scores, resolutions, verification history, and QA run state for the selected chapters.
+          Translation, narration, Story Bible, pronunciation settings, audio, scenes, artwork, video, and all other stages will remain unchanged.
+          The next QA run will evaluate these chapters from a clean QA state.
+        </p>
+        {error && <ErrorBox text={error} />}
+        <div className="stage-choices">
+          {defaultChapter && (
+            <label>
+              <input type="radio" name="scope" checked={scope === "chapter"} onChange={() => setScope("chapter")} />
+              <span>
+                <b>Current chapter only</b>
+                <small>Chapter {defaultChapter}</small>
+              </span>
+            </label>
+          )}
+          <label>
+            <input type="radio" name="scope" checked={scope === "all"} onChange={() => setScope("all")} />
+            <span>
+              <b>Entire book</b>
+              <small>{totalChapters ? `${totalChapters} chapters in project` : "All existing chapters"}</small>
+            </span>
+          </label>
+          <label>
+            <input type="radio" name="scope" checked={scope === "range"} onChange={() => setScope("range")} />
+            <span>
+              <b>Chapter range</b>
+              <small>Specify a starting and ending chapter number</small>
+            </span>
+          </label>
+        </div>
+
+        {scope === "chapter" && !defaultChapter && (
+          <label className="field">
+            <span>Chapter number</span>
+            <input type="number" min={1} value={targetChapter} onChange={(e) => setTargetChapter(e.target.value)} />
+          </label>
+        )}
+
+        {scope === "range" && (
+          <div style={{ display: "flex", gap: "12px", marginBottom: "16px" }}>
+            <label className="field" style={{ flex: 1 }}>
+              <span>From chapter</span>
+              <input type="number" min={1} value={fromChapter} onChange={(e) => setFromChapter(e.target.value)} />
+            </label>
+            <label className="field" style={{ flex: 1 }}>
+              <span>To chapter</span>
+              <input type="number" min={1} value={toChapter} onChange={(e) => setToChapter(e.target.value)} />
+            </label>
+          </div>
+        )}
+
+        {isMulti && (
+          <div className="naming-notice" style={{ marginTop: "12px", marginBottom: "12px" }}>
+            <p>
+              This will permanently delete QA data for <b>{affectedCount} chapter{affectedCount === 1 ? "" : "s"}</b>. Other production data will not be changed.
+            </p>
+            <label className="field" style={{ marginTop: "8px" }}>
+              <span>Type <code>RESET QA</code> to continue:</span>
+              <input
+                value={typedConfirmation}
+                placeholder="RESET QA"
+                onChange={(e) => setTypedConfirmation(e.target.value)}
+                disabled={working}
+              />
+            </label>
+          </div>
+        )}
+
+        <footer>
+          <small>
+            {isMulti
+              ? `Affected chapters: ${affectedCount}`
+              : `Chapter ${targetChapter} will return to QA-not-run`}
+          </small>
+          <button
+            className="button primary"
+            disabled={!canSubmit}
+            onClick={() => void submit()}
+          >
+            {working ? "Resetting QA…" : "Reset QA Data"}
+          </button>
+        </footer>
+      </section>
+    </div>
+  );
+}
+
 function QaPage({ slug, navigate }: { slug: string; navigate: (path: string) => void }) {
   const [data, setData] = useState<any>(); const [error, setError] = useState(""); const [status, setStatus] = useState("all");
   useEffect(() => { setData(undefined); setError(""); api(`/stories/${slug}/qa`).then(setData).catch((value) => setError(message(value))); }, [slug]);
+  const [resetModalOpen, setResetModalOpen] = useState(false);
+  const [banner, setBanner] = useState("");
+  const load = () => { setData(undefined); setError(""); api(`/stories/${slug}/qa`).then(setData).catch((value) => setError(message(value))); };
+  useEffect(() => { load(); }, [slug]);
   if (error) return <LoadFailure error={error} />; if (!data) return <Loading />;
   const chapters = data.chapters.filter((item: any) => status === "all" || item.status === status);
   return <section className="page"><div className="section-heading"><div><h2>Quality review</h2><p>Every concern is linked back to its chapter and evidence.</p></div></div><div className="qa-summary">{(["pass", "warn", "fail"] as const).map((key) => <button onClick={() => setStatus(key)} className={`qa-count ${key}`} key={key}><span>{key}</span><b>{data.counts[key]}</b><i /></button>)}</div>
+  return <section className="page">
+    <div className="section-heading">
+      <div><h2>Quality review</h2><p>Every concern is linked back to its chapter and evidence.</p></div>
+      <div className="section-heading-actions">
+        <button className="button" onClick={() => setResetModalOpen(true)}>Reset QA data</button>
+      </div>
+    </div>
+    {banner && <div className="naming-notice" style={{ marginBottom: "16px" }}>{banner}</div>}
+    {resetModalOpen && <ResetQaDialog slug={slug} onClose={() => setResetModalOpen(false)} onDone={(msg) => { setResetModalOpen(false); setBanner(msg); load(); }} />}
+    <div className="qa-summary">{(["pass", "warn", "fail"] as const).map((key) => <button onClick={() => setStatus(key)} className={`qa-count ${key}`} key={key}><span>{key}</span><b>{data.counts[key]}</b><i /></button>)}</div>
     {data.counts.needsVerification > 0 && <p className="qa-unverified-label">{data.counts.needsVerification} previous finding{data.counts.needsVerification === 1 ? "" : "s"} need verification — recheck the affected chapters to make their QA current.</p>}
     <div className="category-strip">{Object.entries(data.categories).map(([key, value]) => <span key={key}>{pretty(key)} <b>{String(value)}</b></span>)}</div>
     <QaExceptionsPanel slug={slug} />
@@ -1876,6 +2044,7 @@ export function JobConsole({ job, onUpdate, onClose, navigate, initialQaComparis
   // it against the chapter's current QA state so stale failures read as history.
   const qaRelated = Boolean(diagnostic && diagnostic.chapter && (diagnostic.category === "content_qa" || diagnostic.issues?.length));
   const [qaComparison, setQaComparison] = useState<{ status: "current" | "historical" | "unknown_legacy"; nowCurrent: boolean } | undefined>(initialQaComparison);
+  const [qaComparison, setQaComparison] = useState<{ status: "current" | "historical" | "unknown_legacy" | "reset_not_run"; nowCurrent: boolean } | undefined>(initialQaComparison);
   useEffect(() => {
     if (!qaRelated || !diagnostic?.chapter) { setQaComparison(undefined); return; }
     let cancelled = false;
@@ -1888,6 +2057,10 @@ export function JobConsole({ job, onUpdate, onClose, navigate, initialQaComparis
           : "historical";
       setQaComparison({ status, nowCurrent: !qaDetail.qaStale && qaDetail.state.status === "pass" });
     }).catch(() => undefined);
+    }).catch(() => {
+      if (cancelled) return;
+      setQaComparison({ status: "reset_not_run", nowCurrent: false });
+    });
     return () => { cancelled = true; };
   }, [job.id, job.story, qaRelated, diagnostic?.id, diagnostic?.chapter, diagnostic?.qaDependencyFingerprint]);
   const pause = async () => { try { setActionError(""); await post(`/jobs/${job.id}/pause`, {}); } catch (error) { setActionError(message(error)); } };
@@ -1960,6 +2133,10 @@ export function JobConsole({ job, onUpdate, onClose, navigate, initialQaComparis
         <p className="incident-historical">Previous QA failure. This production attempt predates QA freshness tracking, so its relationship to the chapter's current QA state cannot be verified. Recheck QA to verify current quality before retrying.</p>
       )}
       {diagnostic.issues?.length ? (qaComparison?.nowCurrent || qaComparison?.status === "historical" || qaComparison?.status === "unknown_legacy"
+      {qaRelated && qaComparison?.status === "reset_not_run" && (
+        <p className="incident-historical">This production attempt previously failed quality review. Current QA data has been reset and has not yet been rechecked.</p>
+      )}
+      {diagnostic.issues?.length ? (qaComparison?.nowCurrent || qaComparison?.status === "historical" || qaComparison?.status === "unknown_legacy" || qaComparison?.status === "reset_not_run"
         ? <details><summary>Issues reported by this attempt</summary><ul>{diagnostic.issues.slice(0, 3).map((issue, index) => <li key={`${issue.category}-${index}`}><b>{pretty(issue.category)}</b>{issue.message}</li>)}</ul></details>
         : <ul>{diagnostic.issues.slice(0, 3).map((issue, index) => <li key={`${issue.category}-${index}`}><b>{pretty(issue.category)}</b>{issue.message}</li>)}</ul>) : null}
       <div className="incident-next"><small>Recommended next step</small><p>{diagnostic.recommendedAction}</p></div>
@@ -1994,6 +2171,7 @@ function guessExceptionValue(messageText: string) {
 export function QaDetail({ slug, chapter, onJob, onEditManually, onChanged }: { slug: string; chapter: number; onJob: (job: Job) => void; onEditManually: () => void; onChanged: () => void }) {
   const [data, setData] = useState<ChapterQaDetail>(); const [error, setError] = useState(""); const [note, setNote] = useState(""); const [busy, setBusy] = useState("");
   const [dismissTarget, setDismissTarget] = useState<QaFinding>();
+  const [dismissTarget, setDismissTarget] = useState<QaFinding>(); const [resetOpen, setResetOpen] = useState(false);
   const [expanded, setExpanded] = useState<string[]>([]); const [recheckSummary, setRecheckSummary] = useState<QaRecheckSummary>();
   const watcher = useRef<(() => void) | undefined>(undefined);
   const load = async () => { const next = await api<ChapterQaDetail>(`/stories/${slug}/chapters/${chapter}/qa`); setData(next); };
@@ -2006,6 +2184,25 @@ export function QaDetail({ slug, chapter, onJob, onEditManually, onChanged }: { 
   const resolveManual = async (finding: QaFinding) => { try { setError(""); setNote(""); setBusy(`resolve:${finding.id}`); await post(`/stories/${slug}/chapters/${chapter}/qa/findings/${finding.id}/resolve-manual`, {}); setBusy(""); setNote("Finding marked as fixed manually. A future recheck will verify it."); await load(); onChanged(); } catch (value) { setBusy(""); setError(message(value)); } };
   const reopen = async (finding: QaFinding) => { try { setError(""); setNote(""); setBusy(`reopen:${finding.id}`); await post(`/stories/${slug}/chapters/${chapter}/qa/findings/${finding.id}/reopen`, {}); setBusy(""); await load(); onChanged(); } catch (value) { setBusy(""); setError(message(value)); } };
   if (error && !data) return <div className="qa-detail"><ErrorBox text={error} /></div>; if (!data) return <Loading />;
+  if (error && !data) {
+    const isNoQa = /does not have a QA result|no QA result|QA has not been run/i.test(error);
+    if (isNoQa) {
+      return <div className="qa-detail stateful">
+        <div className="qa-attention-head">
+          <div>
+            <h3>QA not run</h3>
+            <div className="qa-attention-counts"><Status status="pending" label="Not evaluated" /></div>
+          </div>
+          <div className="qa-attention-actions">
+            <button className="button primary" disabled={Boolean(busy)} onClick={() => void recheck("full")}>{busy === "recheck" ? "Running QA…" : "Run QA"}</button>
+          </div>
+        </div>
+        <Empty title="QA has not been run for this chapter" text="Run QA to evaluate terminology, pronunciation, continuity, and stylistic rules." />
+      </div>;
+    }
+    return <div className="qa-detail"><ErrorBox text={error} /></div>;
+  }
+  if (!data) return <Loading />;
   const stale = data.qaStale;
   const openFindingsList = data.state.findings.filter((finding) => finding.status === "open");
   const resolvedFindings = data.state.findings.filter((finding) => finding.status !== "open");
@@ -2022,6 +2219,7 @@ export function QaDetail({ slug, chapter, onJob, onEditManually, onChanged }: { 
       <div className="qa-attention-actions">
         {data.counts.safeFixesAvailable > 0 && !stale && <button className="button primary" disabled={Boolean(busy)} onClick={() => void safeFixes()}>{busy === "safeFixes" ? "Fixing…" : `Fix ${data.counts.safeFixesAvailable} safe issue${data.counts.safeFixesAvailable === 1 ? "" : "s"}`}</button>}
         <div className="qa-recheck-split"><button className={`button${stale ? " primary" : ""}`} disabled={Boolean(busy)} onClick={() => void recheck("changed")}>{busy === "recheck" ? "Rechecking…" : "Recheck QA"}</button><details className="qa-recheck-menu"><summary aria-label="Recheck options">▾</summary><div><button disabled={Boolean(busy)} onClick={() => void recheck("changed")}>Recheck changed content</button><button disabled={Boolean(busy)} onClick={() => void recheck("full")}>Full chapter recheck</button></div></details></div>
+        <div className="qa-recheck-split"><button className={`button${stale ? " primary" : ""}`} disabled={Boolean(busy)} onClick={() => void recheck("changed")}>{busy === "recheck" ? "Rechecking…" : "Recheck QA"}</button><details className="qa-recheck-menu"><summary aria-label="Recheck options">▾</summary><div><button disabled={Boolean(busy)} onClick={() => void recheck("changed")}>Recheck changed content</button><button disabled={Boolean(busy)} onClick={() => void recheck("full")}>Full chapter recheck</button><button disabled={Boolean(busy)} onClick={() => setResetOpen(true)}>Reset QA data…</button></div></details></div>
       </div>
     </div>
     {error && <ErrorBox text={error} />}
@@ -2034,6 +2232,7 @@ export function QaDetail({ slug, chapter, onJob, onEditManually, onChanged }: { 
     </div>
     {resolvedFindings.length > 0 && <QaResolvedFindings findings={resolvedFindings} busy={busy} expanded={expanded} currentFingerprint={data.currentFingerprint} onToggle={toggleExpanded} onReopen={(finding) => void reopen(finding)} />}
     {dismissTarget && <DismissFindingDialog slug={slug} chapter={chapter} finding={dismissTarget} busy={Boolean(busy)} onClose={() => setDismissTarget(undefined)} onDone={async (remembered) => { setDismissTarget(undefined); setNote(remembered ? "Finding dismissed and remembered as a story-level exception." : "Finding dismissed. A future recheck will respect this decision."); await load(); onChanged(); }} onError={(value) => { setDismissTarget(undefined); setError(value); }} />}
+    {resetOpen && <ResetQaDialog slug={slug} defaultChapter={chapter} onClose={() => setResetOpen(false)} onDone={async () => { setResetOpen(false); setData(undefined); setError(""); try { await load(); } catch (err) { setError(message(err)); } onChanged(); }} />}
   </div>;
 }
 
