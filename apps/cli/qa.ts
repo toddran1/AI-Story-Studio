@@ -23,7 +23,6 @@ export type QaCommand =
   | { action: "exceptions"; story: string; remove?: string; add?: { category: string; matchKind: string; value: string; reason?: string } }
   | { action: "dismiss"; story: string; chapter: number; id: string; reason?: string; remember?: { matchKind: string; value: string } }
   | { action: "reopen"; story: string; chapter: number; id: string }
-  | { action: "resolve"; story: string; chapter: number; id: string };
   | { action: "resolve"; story: string; chapter: number; id: string }
   | { action: "reset"; story: string; chapter?: number; from?: number; to?: number; all?: boolean };
 
@@ -128,7 +127,6 @@ function printSummary(story: string, chapter: number, summary: QaRecheckSummary,
   stdout(`open=${summary.open}${summary.open ? " (needs attention)" : ""} resolved=${summary.resolved} safeFixesAvailable=${summary.safeFixesAvailable}\n`);
 }
 
-type QaOperations = Pick<StudioOperations, "dismissQaFinding" | "reopenQaFinding" | "resolveQaFindingManually" | "listQaExceptions" | "addQaException" | "removeQaException" | "applyQaSafeFixes">;
 type QaOperations = Pick<StudioOperations, "dismissQaFinding" | "reopenQaFinding" | "resolveQaFindingManually" | "listQaExceptions" | "addQaException" | "removeQaException" | "applyQaSafeFixes" | "resetChapterQa" | "resetQaBatch">;
 
 async function main() {

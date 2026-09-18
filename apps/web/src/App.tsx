@@ -446,14 +446,12 @@ function ResetQaDialog({ slug, defaultChapter, onClose, onDone }: { slug: string
 
 function QaPage({ slug, navigate }: { slug: string; navigate: (path: string) => void }) {
   const [data, setData] = useState<any>(); const [error, setError] = useState(""); const [status, setStatus] = useState("all");
-  useEffect(() => { setData(undefined); setError(""); api(`/stories/${slug}/qa`).then(setData).catch((value) => setError(message(value))); }, [slug]);
   const [resetModalOpen, setResetModalOpen] = useState(false);
   const [banner, setBanner] = useState("");
   const load = () => { setData(undefined); setError(""); api(`/stories/${slug}/qa`).then(setData).catch((value) => setError(message(value))); };
   useEffect(() => { load(); }, [slug]);
   if (error) return <LoadFailure error={error} />; if (!data) return <Loading />;
   const chapters = data.chapters.filter((item: any) => status === "all" || item.status === status);
-  return <section className="page"><div className="section-heading"><div><h2>Quality review</h2><p>Every concern is linked back to its chapter and evidence.</p></div></div><div className="qa-summary">{(["pass", "warn", "fail"] as const).map((key) => <button onClick={() => setStatus(key)} className={`qa-count ${key}`} key={key}><span>{key}</span><b>{data.counts[key]}</b><i /></button>)}</div>
   return <section className="page">
     <div className="section-heading">
       <div><h2>Quality review</h2><p>Every concern is linked back to its chapter and evidence.</p></div>
@@ -2043,7 +2041,6 @@ export function JobConsole({ job, onUpdate, onClose, navigate, initialQaComparis
   // QA-related failures carry the failure-time dependency fingerprint; compare
   // it against the chapter's current QA state so stale failures read as history.
   const qaRelated = Boolean(diagnostic && diagnostic.chapter && (diagnostic.category === "content_qa" || diagnostic.issues?.length));
-  const [qaComparison, setQaComparison] = useState<{ status: "current" | "historical" | "unknown_legacy"; nowCurrent: boolean } | undefined>(initialQaComparison);
   const [qaComparison, setQaComparison] = useState<{ status: "current" | "historical" | "unknown_legacy" | "reset_not_run"; nowCurrent: boolean } | undefined>(initialQaComparison);
   useEffect(() => {
     if (!qaRelated || !diagnostic?.chapter) { setQaComparison(undefined); return; }
@@ -2056,7 +2053,6 @@ export function JobConsole({ job, onUpdate, onClose, navigate, initialQaComparis
           ? "current"
           : "historical";
       setQaComparison({ status, nowCurrent: !qaDetail.qaStale && qaDetail.state.status === "pass" });
-    }).catch(() => undefined);
     }).catch(() => {
       if (cancelled) return;
       setQaComparison({ status: "reset_not_run", nowCurrent: false });
@@ -2132,7 +2128,6 @@ export function JobConsole({ job, onUpdate, onClose, navigate, initialQaComparis
       {qaRelated && !qaComparison?.nowCurrent && qaComparison?.status === "unknown_legacy" && (
         <p className="incident-historical">Previous QA failure. This production attempt predates QA freshness tracking, so its relationship to the chapter's current QA state cannot be verified. Recheck QA to verify current quality before retrying.</p>
       )}
-      {diagnostic.issues?.length ? (qaComparison?.nowCurrent || qaComparison?.status === "historical" || qaComparison?.status === "unknown_legacy"
       {qaRelated && qaComparison?.status === "reset_not_run" && (
         <p className="incident-historical">This production attempt previously failed quality review. Current QA data has been reset and has not yet been rechecked.</p>
       )}
@@ -2170,7 +2165,6 @@ function guessExceptionValue(messageText: string) {
 
 export function QaDetail({ slug, chapter, onJob, onEditManually, onChanged }: { slug: string; chapter: number; onJob: (job: Job) => void; onEditManually: () => void; onChanged: () => void }) {
   const [data, setData] = useState<ChapterQaDetail>(); const [error, setError] = useState(""); const [note, setNote] = useState(""); const [busy, setBusy] = useState("");
-  const [dismissTarget, setDismissTarget] = useState<QaFinding>();
   const [dismissTarget, setDismissTarget] = useState<QaFinding>(); const [resetOpen, setResetOpen] = useState(false);
   const [expanded, setExpanded] = useState<string[]>([]); const [recheckSummary, setRecheckSummary] = useState<QaRecheckSummary>();
   const watcher = useRef<(() => void) | undefined>(undefined);

@@ -17,7 +17,6 @@ import { buildQaState } from "../src/qa/review.js";
 import { computeStoredQaDependencyFingerprint } from "../src/qa/freshness.js";
 import { atomicWrite, atomicWriteJson } from "../src/storage/atomic-write.js";
 import { storyPaths } from "../src/storage/paths.js";
-import { readJsonIfExists } from "../src/storage/story-files.js";
 import { exists, readJsonIfExists } from "../src/storage/story-files.js";
 import { fileFingerprint } from "../src/utils/file-fingerprint.js";
 import { MockLLM } from "./helpers.js";
