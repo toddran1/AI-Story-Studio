@@ -465,8 +465,6 @@ describe("Milestone 21: Visual Canon Backend Consistency & Asset Safety Hardenin
     expect(activities.some((a) => a.type === "bible.entities.merged")).toBe(false);
   });
 
-  // Scenario M: Visual Canon commit failure with failed Story Bible rollback throws structured ReconciliationError
-  it("Scenario M: Visual Canon commit failure with failed Story Bible rollback throws structured ReconciliationError", async () => {
   // Scenario M1 (Case B): Visual Canon commit failure with failed VC rollback still executes Bible undo and throws ReconciliationError
   it("Scenario M1 (Case B): Visual Canon commit failure with failed VC rollback still executes Bible undo and throws ReconciliationError", async () => {
     const operations = new StudioOperations(tempDir, loadEnvironment({}));
@@ -536,7 +534,6 @@ describe("Milestone 21: Visual Canon Backend Consistency & Asset Safety Hardenin
       await operations.mergeCanonicalEntities(slug, {
         targetEntityId: idTarget,
         sourceEntityIds: [idSource],
-        reason: "Testing double failure",
         reason: "Testing Case C",
       });
     } catch (err) {
@@ -564,8 +561,6 @@ describe("Milestone 21: Visual Canon Backend Consistency & Asset Safety Hardenin
     expect(activities.some((a) => a.type === "bible.entities.merged")).toBe(false);
   });
 
-  // Scenario M2: Visual Canon demote failure with failed restore throws structured ReconciliationError
-  it("Scenario M2: Demote failure with failed restore throws structured ReconciliationError", async () => {
   // Scenario M3 (Case D): Visual Canon commit failure with BOTH VC rollback and Story Bible undo failing records both failures
   it("Scenario M3 (Case D): Visual Canon commit failure with BOTH VC rollback and Story Bible undo failing records both failures", async () => {
     const operations = new StudioOperations(tempDir, loadEnvironment({}));
@@ -638,7 +633,6 @@ describe("Milestone 21: Visual Canon Backend Consistency & Asset Safety Hardenin
     let caughtError: any;
     try {
       await operations.demoteCanonicalEntity(slug, idTarget, {
-        reason: "Testing demotion double failure",
         reason: "Testing demotion double rollback failure",
       });
     } catch (err) {

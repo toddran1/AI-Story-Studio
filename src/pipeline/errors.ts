@@ -72,7 +72,6 @@ export class ReconciliationError extends AppError {
     }
   ) {
     super(message, options);
-    this.rollbackError = options?.rollbackError;
     this.rollbackFailures = options?.rollbackFailures;
     this.rollbackError = options?.rollbackError ?? options?.rollbackFailures?.[0]?.error;
     this.storySlug = options?.storySlug;
