@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { chapterSchema } from "../domain/chapter.js";
-import { QaCategory, QaFinding, QaState, qaStateSchema } from "../domain/qa.js";
+import { QaCategory, QaFinding, QaState, qaStateSchema, QaStatus } from "../domain/qa.js";
 import { Story } from "../domain/story.js";
 import { emptyStoryBible, StoryBible, storyBibleSchema } from "../domain/story-bible.js";
 import { LLMProvider } from "../llm/provider.js";
@@ -349,7 +349,7 @@ export function buildQaState(
     translation: string;
     narration: string;
     now?: string;
-    baseScore?: { score: number; originalScore?: number };
+    baseScore?: { score?: number; originalScore?: number; status?: QaStatus; originalStatus?: QaStatus };
     mode?: "production" | "thorough";
     acceptedContinuity?: AcceptedContinuity[];
     dependencyFingerprint?: string;
@@ -385,11 +385,18 @@ export function buildQaState(
     dependencyFingerprint: options.dependencyFingerprint,
     evaluatedContent: options.evaluatedContent,
   });
-  const summary = recomputeQaSummary(findings, options.baseScore ?? previous);
+  const base = {
+    score: options.baseScore?.score ?? previous?.score,
+    originalScore: previous?.originalScore ?? options.baseScore?.originalScore,
+    status: options.baseScore?.status ?? previous?.status,
+    originalStatus: previous?.originalStatus ?? options.baseScore?.originalStatus,
+  };
+  const summary = recomputeQaSummary(findings, base);
   const state = qaStateSchema.parse({
     status: summary.status,
     score: summary.score,
     originalScore: summary.originalScore,
+    originalStatus: summary.originalStatus,
     checks: summary.checks,
     issues: deriveIssues(findings),
     findings,
@@ -583,7 +590,7 @@ export async function recheckChapterQa(deps: {
   const detections = filterExceptedFindings([...deterministic.detections, ...result.value.issues], exceptions);
   const { state, outcome } = buildQaState(previous, detections, {
     chapter, canonicalEntities: context.canonicalEntities, translation, narration, now: deps.now,
-    baseScore: { score: result.value.score, originalScore: result.value.originalScore },
+    baseScore: { score: result.value.score, originalScore: result.value.originalScore, status: result.value.status, originalStatus: result.value.originalStatus },
     mode: story.qaMode,
     acceptedContinuity: deterministic.acceptedContinuity,
     dependencyFingerprint,

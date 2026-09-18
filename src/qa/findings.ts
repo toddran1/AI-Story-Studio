@@ -151,8 +151,10 @@ export function deriveIssues(findings: QaFinding[]): QaState["issues"] {
  */
 export function migrateQaState(raw: unknown, options: { chapter?: number } = {}): QaState {
   const parsed = qaStateSchema.parse(raw);
-  if (parsed.findings.length) return { ...parsed, issues: deriveIssues(parsed.findings) };
-  if (!parsed.issues.length) return parsed;
+  const originalScore = parsed.originalScore ?? parsed.score;
+  const originalStatus = parsed.originalStatus ?? parsed.status;
+  if (parsed.findings.length) return { ...parsed, originalScore, originalStatus, issues: deriveIssues(parsed.findings) };
+  if (!parsed.issues.length) return { ...parsed, originalScore, originalStatus };
   const chapter = options.chapter ?? 0;
   const findings: QaFinding[] = parsed.issues.map((issue) => {
     const anchor = anchorFromIssue(issue);
@@ -174,7 +176,7 @@ export function migrateQaState(raw: unknown, options: { chapter?: number } = {})
       origin: "llm",
     };
   });
-  return { ...parsed, findings, issues: deriveIssues(findings) };
+  return { ...parsed, originalScore, originalStatus, findings, issues: deriveIssues(findings) };
 }
 
 export const openFindings = (state: Pick<QaState, "findings">) => state.findings.filter((finding) => finding.status === "open");
@@ -232,8 +234,8 @@ export function qaCounts(state: Pick<QaState, "findings">) {
  */
 export function recomputeQaSummary(
   findings: QaFinding[],
-  base?: { score?: number; originalScore?: number },
-): { status: QaStatus; score: number; originalScore: number; checks: QaState["checks"] } {
+  base?: { score?: number; originalScore?: number; status?: QaStatus; originalStatus?: QaStatus },
+): { status: QaStatus; score: number; originalScore: number; originalStatus: QaStatus; checks: QaState["checks"] } {
   const stats = qaFindingStats({ findings });
   const checks = {} as QaState["checks"];
   const categories: QaCategory[] = ["completeness", "names", "numbers", "terminology", "dialogue", "storyConsistency", "narrationFidelity"];
@@ -242,6 +244,7 @@ export function recomputeQaSummary(
     checks[category] = open.filter((finding) => finding.category === category)
       .reduce<QaStatus>((worst, finding) => severityRank[finding.severity] > severityRank[worst] ? finding.severity : worst, "pass");
   }
-  const originalScore = base?.originalScore ?? base?.score ?? 1;
-  return { status: stats.current.status, score: stats.current.score, originalScore, checks };
+  const originalScore = base?.originalScore ?? base?.score ?? stats.current.score;
+  const originalStatus = base?.originalStatus ?? base?.status ?? stats.current.status;
+  return { status: stats.current.status, score: stats.current.score, originalScore, originalStatus, checks };
 }

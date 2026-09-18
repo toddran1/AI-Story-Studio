@@ -263,11 +263,12 @@ describe("score and count semantics", () => {
     expect(recomputeQaSummary(historical.findings, historical).score).toBe(recomputeQaSummary(onlyOpen.findings, onlyOpen).score);
     expect(recomputeQaSummary(historical.findings, historical).status).toBe("warn");
     expect(historical.score).toBe(onlyOpen.score);
-    // A clean pass scores 1, not the original LLM score.
+    // A clean pass scores 1, while preserving original historical score and status.
     const resolved = transitionQaFinding(onlyOpen, onlyOpen.findings[0]!.id, "manual_fix", { now: "2026-09-18T11:00:00.000Z" });
     expect(resolved.score).toBe(1);
     expect(resolved.status).toBe("pass");
-    expect(resolved.originalScore).toBe(1);
+    expect(resolved.originalScore).toBe(0.9);
+    expect(resolved.originalStatus).toBe("warn");
   });
 });
 

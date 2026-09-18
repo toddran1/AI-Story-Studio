@@ -215,7 +215,7 @@ export class ChapterPipeline {
       const previous = priorQaRaw ? migrateQaState(priorQaRaw, { chapter: options.chapter }) : undefined;
       const { state } = buildQaState(previous, filterExceptedFindings([...deterministic.detections, ...result.value.issues], exceptions), {
         chapter: options.chapter, canonicalEntities: priorContext.canonicalEntities, translation: english, narration,
-        baseScore: { score: result.value.score, originalScore: result.value.originalScore },
+        baseScore: { score: result.value.score, originalScore: result.value.originalScore, status: result.value.status, originalStatus: result.value.originalStatus },
         mode: options.story.qaMode,
         acceptedContinuity: deterministic.acceptedContinuity,
         dependencyFingerprint: qaFp,

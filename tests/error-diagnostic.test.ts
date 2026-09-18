@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createErrorDiagnostic, diagnosticIsHistorical } from "../src/errors/diagnostic.js";
+import { createErrorDiagnostic, diagnosticIsHistorical, compareQaDiagnosticFingerprint } from "../src/errors/diagnostic.js";
 import { QualityGateError } from "../src/pipeline/errors.js";
 
 const passingChecks = { completeness: "pass", names: "fail", numbers: "pass", terminology: "pass", dialogue: "pass", storyConsistency: "pass", narrationFidelity: "pass" } as const;
@@ -35,6 +35,14 @@ describe("structured error diagnostics", () => {
     expect(diagnosticIsHistorical({ qaDependencyFingerprint: "a" }, "b")).toBe(true);
     expect(diagnosticIsHistorical({}, "b")).toBeUndefined();
     expect(diagnosticIsHistorical({ qaDependencyFingerprint: "a" }, undefined)).toBeUndefined();
+  });
+
+  it("compareQaDiagnosticFingerprint categorizes current, historical, and legacy diagnostics", () => {
+    expect(compareQaDiagnosticFingerprint({ qaDependencyFingerprint: "fp-match" }, "fp-match")).toBe("current");
+    expect(compareQaDiagnosticFingerprint({ qaDependencyFingerprint: "fp-old" }, "fp-new")).toBe("historical");
+    expect(compareQaDiagnosticFingerprint({}, "fp-new")).toBe("unknown_legacy");
+    expect(compareQaDiagnosticFingerprint({ qaDependencyFingerprint: "fp-old" }, undefined)).toBe("unknown_legacy");
+    expect(compareQaDiagnosticFingerprint({}, undefined)).toBe("unknown_legacy");
   });
 
   it("redacts credentials from user-visible technical details", () => {

@@ -29,6 +29,20 @@ export type ErrorDiagnostic = z.infer<typeof errorDiagnosticSchema>;
  * dependency fingerprint differs from the one recorded at failure time.
  * Undefined when the comparison cannot be made (no provenance either side).
  */
+export type QaDiagnosticComparison = "current" | "historical" | "unknown_legacy";
+
+/**
+ * Compares a QA diagnostic failure fingerprint against the chapter's current QA dependency fingerprint.
+ * Distinguishes current failures, historical failures, and legacy failures where tracking was absent.
+ */
+export function compareQaDiagnosticFingerprint(
+  diagnostic: Pick<ErrorDiagnostic, "qaDependencyFingerprint">,
+  currentFingerprint?: string,
+): QaDiagnosticComparison {
+  if (!diagnostic.qaDependencyFingerprint || !currentFingerprint) return "unknown_legacy";
+  return diagnostic.qaDependencyFingerprint === currentFingerprint ? "current" : "historical";
+}
+
 export function diagnosticIsHistorical(diagnostic: Pick<ErrorDiagnostic, "qaDependencyFingerprint">, currentFingerprint?: string): boolean | undefined {
   if (!diagnostic.qaDependencyFingerprint || !currentFingerprint) return undefined;
   return diagnostic.qaDependencyFingerprint !== currentFingerprint;

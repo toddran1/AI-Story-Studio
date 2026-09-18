@@ -1854,7 +1854,13 @@ function ProductionPage({ slug, activeJob, onJob, navigate }: { slug: string; ac
   </section>;
 }
 
-function JobConsole({ job, onUpdate, onClose, navigate }: { job: Job; onUpdate: (job: Job) => void; onClose: () => void; navigate?: (path: string) => void }) {
+export function JobConsole({ job, onUpdate, onClose, navigate, initialQaComparison }: {
+  job: Job;
+  onUpdate: (job: Job) => void;
+  onClose: () => void;
+  navigate?: (path: string) => void;
+  initialQaComparison?: { status: "current" | "historical" | "unknown_legacy"; nowCurrent: boolean };
+}) {
   const [actionError, setActionError] = useState("");
   const [retrying, setRetrying] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -1869,15 +1875,18 @@ function JobConsole({ job, onUpdate, onClose, navigate }: { job: Job; onUpdate: 
   // QA-related failures carry the failure-time dependency fingerprint; compare
   // it against the chapter's current QA state so stale failures read as history.
   const qaRelated = Boolean(diagnostic && diagnostic.chapter && (diagnostic.category === "content_qa" || diagnostic.issues?.length));
-  const [qaComparison, setQaComparison] = useState<{ historical?: boolean; nowCurrent: boolean }>();
+  const [qaComparison, setQaComparison] = useState<{ status: "current" | "historical" | "unknown_legacy"; nowCurrent: boolean } | undefined>(initialQaComparison);
   useEffect(() => {
     if (!qaRelated || !diagnostic?.chapter) { setQaComparison(undefined); return; }
     let cancelled = false;
     api<ChapterQaDetail>(`/stories/${job.story}/chapters/${diagnostic.chapter}/qa`).then((qaDetail) => {
       if (cancelled) return;
-      const historical = diagnostic.qaDependencyFingerprint && qaDetail.currentFingerprint
-        ? diagnostic.qaDependencyFingerprint !== qaDetail.currentFingerprint : undefined;
-      setQaComparison({ historical, nowCurrent: !qaDetail.qaStale && qaDetail.state.status === "pass" });
+      const status: "current" | "historical" | "unknown_legacy" = !diagnostic.qaDependencyFingerprint || !qaDetail.currentFingerprint
+        ? "unknown_legacy"
+        : diagnostic.qaDependencyFingerprint === qaDetail.currentFingerprint
+          ? "current"
+          : "historical";
+      setQaComparison({ status, nowCurrent: !qaDetail.qaStale && qaDetail.state.status === "pass" });
     }).catch(() => undefined);
     return () => { cancelled = true; };
   }, [job.id, job.story, qaRelated, diagnostic?.id, diagnostic?.chapter, diagnostic?.qaDependencyFingerprint]);
@@ -1934,9 +1943,14 @@ function JobConsole({ job, onUpdate, onClose, navigate }: { job: Job; onUpdate: 
         {modelBadge && <span>{modelBadge}</span>}
       </div>
       {isSceneJob && diagnostic.summary && <p className="incident-reason">{diagnostic.summary}</p>}
-      {qaRelated && qaComparison?.historical === true && !qaComparison.nowCurrent && <p className="incident-historical">Previous production attempt failed quality review. The chapter or its QA dependencies have changed since this failure. Recheck QA before retrying production.</p>}
       {qaRelated && qaComparison?.nowCurrent && <p className="incident-historical">Chapter QA is current and passing now — this failure is historical.</p>}
-      {diagnostic.issues?.length ? (qaComparison?.historical || qaComparison?.nowCurrent
+      {qaRelated && !qaComparison?.nowCurrent && qaComparison?.status === "historical" && (
+        <p className="incident-historical">Previous production attempt failed quality review. The chapter or its QA dependencies have changed since this failure. Recheck QA before retrying production.</p>
+      )}
+      {qaRelated && !qaComparison?.nowCurrent && qaComparison?.status === "unknown_legacy" && (
+        <p className="incident-historical">Previous QA failure. This production attempt predates QA freshness tracking, so its relationship to the chapter's current QA state cannot be verified. Recheck QA to verify current quality before retrying.</p>
+      )}
+      {diagnostic.issues?.length ? (qaComparison?.nowCurrent || qaComparison?.status === "historical" || qaComparison?.status === "unknown_legacy"
         ? <details><summary>Issues reported by this attempt</summary><ul>{diagnostic.issues.slice(0, 3).map((issue, index) => <li key={`${issue.category}-${index}`}><b>{pretty(issue.category)}</b>{issue.message}</li>)}</ul></details>
         : <ul>{diagnostic.issues.slice(0, 3).map((issue, index) => <li key={`${issue.category}-${index}`}><b>{pretty(issue.category)}</b>{issue.message}</li>)}</ul>) : null}
       <div className="incident-next"><small>Recommended next step</small><p>{diagnostic.recommendedAction}</p></div>

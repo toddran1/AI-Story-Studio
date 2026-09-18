@@ -1,6 +1,6 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import { App, CanonicalEntitySheet, chapterPageSize, EntityStatusField, ErrorBoundary, paginateRows, QaFindingCard, QaResolvedFindings, ScenesPage, shouldRefreshAfterJob } from "../apps/web/src/App.js";
+import { App, CanonicalEntitySheet, chapterPageSize, EntityStatusField, ErrorBoundary, JobConsole, paginateRows, QaFindingCard, QaResolvedFindings, ScenesPage, shouldRefreshAfterJob } from "../apps/web/src/App.js";
 import type { QaFinding } from "../apps/web/src/api.js";
 import { pretty } from "../apps/web/src/format.js";
 import { ChapterImportPage, savedStorySourceUrl } from "../apps/web/src/ChapterImportPage.js";
@@ -328,5 +328,97 @@ describe("web UI", () => {
     expect(htmlEmpty).toContain("Scene reel &amp; Visual Canon");
     expect(htmlEmpty).toContain("No scene plan yet");
     expect(htmlEmpty).toContain("Plan this chapter");
+  });
+  describe("JobConsole QA failure diagnostics (current, historical, legacy)", () => {
+    const baseJob = {
+      id: "job-failed-qa-1",
+      story: "demo-story",
+      type: "production",
+      status: "failed" as const,
+      createdAt: "2026-09-18T10:00:00.000Z",
+      diagnostic: {
+        id: "ERR-TEST1234",
+        timestamp: "2026-09-18T10:00:00.000Z",
+        summary: "Chapter 3 failed quality review",
+        category: "content_qa" as const,
+        retryable: false,
+        recommendedAction: "Resolve findings or recheck",
+        chapter: 3,
+        stage: "qa",
+        issues: [{ category: "names", severity: "fail", message: "Protected entity renamed to Marcus" }],
+        qaDependencyFingerprint: "fp-failure",
+      },
+    };
+
+    it("renders confirmed current failure without historical notice, showing issues directly", () => {
+      const html = renderToStaticMarkup(
+        <JobConsole
+          job={baseJob}
+          onUpdate={() => undefined}
+          onClose={() => undefined}
+          initialQaComparison={{ status: "current", nowCurrent: false }}
+        />
+      );
+      expect(html).not.toContain("incident-historical");
+      expect(html).not.toContain("Issues reported by this attempt");
+      expect(html).toContain("Protected entity renamed to Marcus");
+    });
+
+    it("renders historical failure notice when fingerprints differ", () => {
+      const html = renderToStaticMarkup(
+        <JobConsole
+          job={baseJob}
+          onUpdate={() => undefined}
+          onClose={() => undefined}
+          initialQaComparison={{ status: "historical", nowCurrent: false }}
+        />
+      );
+      expect(html).toContain("Previous production attempt failed quality review");
+      expect(html).toContain("The chapter or its QA dependencies have changed since this failure");
+      expect(html).toContain("Issues reported by this attempt");
+      expect(html).toContain("Protected entity renamed to Marcus");
+    });
+
+    it("renders legacy failure notice when failure predates fingerprint tracking", () => {
+      const legacyJob = {
+        ...baseJob,
+        diagnostic: {
+          ...baseJob.diagnostic,
+          qaDependencyFingerprint: undefined,
+        },
+      };
+      const html = renderToStaticMarkup(
+        <JobConsole
+          job={legacyJob}
+          onUpdate={() => undefined}
+          onClose={() => undefined}
+          initialQaComparison={{ status: "unknown_legacy", nowCurrent: false }}
+        />
+      );
+      expect(html).toContain("Previous QA failure");
+      expect(html).toContain("This production attempt predates QA freshness tracking");
+      expect(html).toContain("Issues reported by this attempt");
+      expect(html).toContain("Protected entity renamed to Marcus");
+    });
+
+    it("renders now-passing notice when current QA is passing, even for legacy failures", () => {
+      const legacyJob = {
+        ...baseJob,
+        diagnostic: {
+          ...baseJob.diagnostic,
+          qaDependencyFingerprint: undefined,
+        },
+      };
+      const html = renderToStaticMarkup(
+        <JobConsole
+          job={legacyJob}
+          onUpdate={() => undefined}
+          onClose={() => undefined}
+          initialQaComparison={{ status: "unknown_legacy", nowCurrent: true }}
+        />
+      );
+      expect(html).toContain("Chapter QA is current and passing now — this failure is historical.");
+      expect(html).toContain("Issues reported by this attempt");
+    });
   });
 });

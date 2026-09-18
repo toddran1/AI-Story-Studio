@@ -40,6 +40,7 @@ export const generatedQaResultSchema = z.object({
 /** Persisted QA can additionally retain explicit human review decisions. */
 export const qaResultSchema = generatedQaResultSchema.extend({
   originalScore: z.number().min(0).max(1).optional(),
+  originalStatus: qaStatusSchema.optional(),
   issues: z.array(reviewedQaIssueSchema),
 });
 
@@ -154,11 +155,12 @@ export function resolveQaIssues(value: unknown, issueIndexes: number[], disposit
   }
   const status = Object.values(checks).reduce<QaStatus>((worst, current) => severityRank[current] > severityRank[worst] ? current : worst, "pass");
   const originalScore = parsed.originalScore ?? parsed.score;
+  const originalStatus = parsed.originalStatus ?? parsed.status;
   const weight = (issue: QaResult["issues"][number]) => issue.severity === "fail" ? 2 : 1;
   const totalWeight = issues.reduce((sum, issue) => sum + weight(issue), 0);
   const activeWeight = issues.filter(isQaIssueActive).reduce((sum, issue) => sum + weight(issue), 0);
   const score = totalWeight ? Math.min(1, Math.max(originalScore, 1 - (1 - originalScore) * activeWeight / totalWeight)) : originalScore;
-  return qaResultSchema.parse({ ...parsed, originalScore, score, issues, checks, status });
+  return qaResultSchema.parse({ ...parsed, originalScore, originalStatus, score, issues, checks, status });
 }
 
 export function dismissQaIssues(value: unknown, issueIndexes: number[], reviewedAt = new Date().toISOString()): QaResult {
