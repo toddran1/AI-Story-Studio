@@ -26,6 +26,7 @@ import {
   normalizeVisualReferenceExtension,
   resolveVisualReferencePath,
   visualReferenceExtensionForMime,
+  removeControlledVisualReferenceFile,
 } from "./assets.js";
 
 
@@ -225,9 +226,13 @@ export async function addVisualReferenceImage(
     try {
       const remove = options._cleanupFile ?? ((target: string) => rm(target, { force: true }));
       await remove(filePath);
+      await removeControlledVisualReferenceFile(root, slug, entityId, refId, ext);
     } catch (cleanupErr: unknown) {
       const cleanupMsg = cleanupErr instanceof Error ? cleanupErr.message : String(cleanupErr);
       console.warn(`[VisualCanon] Failed to clean up orphan reference file '${filePath}': ${cleanupMsg}`);
+      console.warn(
+        `[VisualCanon] Failed to clean up orphan reference asset: story='${slug}', entity='${entityId}', reference='${refId}', extension='${ext}': ${cleanupMsg}`
+      );
     }
     throw err;
   }

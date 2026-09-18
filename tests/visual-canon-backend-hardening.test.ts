@@ -31,6 +31,7 @@ import {
   deleteControlledVisualReferenceFiles,
   visualReferenceExtensionForMime,
 } from "../src/visual-canon/assets.js";
+import * as assetsModule from "../src/visual-canon/assets.js";
 import { loadStoryArtDirection } from "../src/visual-canon/art-direction.js";
 import { ImageProvider } from "../src/artwork/provider.js";
 import { visualProfileRefPath, storyPaths } from "../src/storage/paths.js";
@@ -975,6 +976,8 @@ describe("Milestone 21: Visual Canon Backend Consistency & Asset Safety Hardenin
 
   // Scenario T2: Cleanup failure after metadata save failure preserves primary metadata error and logs observable warning
   it("Scenario T2: cleanup failure after metadata save failure preserves primary metadata error and logs observable warning", async () => {
+  // Scenario T2: Cleanup failure after metadata save failure preserves primary metadata error and logs observable sanitized warning
+  it("Scenario T2: cleanup failure after metadata save failure preserves primary metadata error and logs observable sanitized warning", async () => {
     await updateVisualProfile(tempDir, slug, idTarget, { appearance: "Target" });
     const { reference: existingRef } = await addVisualReferenceImage(tempDir, slug, idTarget, {
       data: DUMMY_PNG,
@@ -988,6 +991,9 @@ describe("Milestone 21: Visual Canon Backend Consistency & Asset Safety Hardenin
     await chmod(storyDir, 0o555);
 
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const cleanupSpy = vi
+      .spyOn(assetsModule, "removeControlledVisualReferenceFile")
+      .mockRejectedValueOnce(new Error("Simulated disk failure unlinking reference file"));
 
     try {
       const err = await addVisualReferenceImage(tempDir, slug, idTarget, {
@@ -999,12 +1005,17 @@ describe("Milestone 21: Visual Canon Backend Consistency & Asset Safety Hardenin
         },
       }).catch((e) => e);
 
+      // Controlled cleanup helper was called with exact identifiers
+      expect(cleanupSpy).toHaveBeenCalledTimes(1);
+      expect(cleanupSpy).toHaveBeenCalledWith(tempDir, slug, idTarget, expect.stringMatching(/^ref_/), "png");
+
       // Primary metadata error is preserved
       expect(err).toBeInstanceOf(StorageError);
       expect((err as StorageError).cause).toBeDefined();
       expect(((err as StorageError).cause as NodeJS.ErrnoException).code).toBe("EACCES");
 
       // Observable warning was logged with file path and error details
+      // Observable warning was logged with safe identifiers and error details, NOT absolute path
       expect(warnSpy).toHaveBeenCalledTimes(1);
       expect(warnSpy).toHaveBeenCalledWith(
         expect.stringContaining("[VisualCanon] Failed to clean up orphan reference file")
@@ -1012,7 +1023,18 @@ describe("Milestone 21: Visual Canon Backend Consistency & Asset Safety Hardenin
       expect(warnSpy).toHaveBeenCalledWith(
         expect.stringContaining("Simulated disk failure unlinking")
       );
+      const warningMessage = String(warnSpy.mock.calls[0]?.[0]);
+      expect(warningMessage).toContain("[VisualCanon] Failed to clean up orphan reference asset");
+      expect(warningMessage).toContain(`story='${slug}'`);
+      expect(warningMessage).toContain(`entity='${idTarget}'`);
+      expect(warningMessage).toContain("extension='png'");
+      expect(warningMessage).toContain("Simulated disk failure unlinking reference file");
+
+      // Absolute filesystem path must NOT be leaked in the warning
+      expect(warningMessage).not.toContain(tempDir);
+      expect(warningMessage).not.toContain("/stories/");
     } finally {
+      cleanupSpy.mockRestore();
       warnSpy.mockRestore();
       await chmod(storyDir, 0o777);
     }

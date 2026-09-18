@@ -175,3 +175,17 @@ export async function deleteControlledVisualReferenceFiles(
   };
 }
 
+/**
+ * Removes a single newly-created controlled visual reference file (e.g. orphan cleanup).
+ */
+export async function removeControlledVisualReferenceFile(
+  root: string,
+  slug: string,
+  entityId: string,
+  refId: string,
+  ext: string
+): Promise<void> {
+  const filePath = resolveVisualReferencePath(root, slug, entityId, refId, ext);
+  await rm(filePath, { force: true });
+}
+
