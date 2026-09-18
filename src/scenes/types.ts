@@ -62,12 +62,12 @@ export const sceneManifestSchema = productionSceneManifestSchema.omit({ sourceTy
 
 export const plannedSceneSchema = z.object({
   summary: z.string().trim().min(1).max(1000), startSeconds: z.number().min(0), endSeconds: z.number().positive(),
-  characters: z.array(z.string().trim().min(1)).max(20).default([]), location: z.string().trim().max(300).optional(),
+  characters: z.array(z.string().trim().min(1)).max(20).default([]), location: z.string().trim().max(300).nullish(),
   visualPrompt: z.string().trim().min(1).max(8000), importance: sceneImportanceSchema.default("standard"),
 });
 export const plannedScenesSchema = z.object({ scenes: z.array(plannedSceneSchema).min(1).max(100) });
 export const summaryPlannedScenesSchema = z.object({ scenes: z.array(plannedSceneSchema.extend({
-  narrationStartWord: z.number().int().nonnegative().optional(), narrationEndWord: z.number().int().positive().optional(),
+  narrationStartWord: z.number().int().nonnegative().nullish(), narrationEndWord: z.number().int().positive().nullish(),
 })).min(1).max(100) });
 
 export const characterVisualProfileSchema = z.object({

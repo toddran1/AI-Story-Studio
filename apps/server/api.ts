@@ -71,6 +71,8 @@ export function createApiHandler(operations: StudioOperations) {
 
       const jobMatch = /^\/api\/jobs\/([a-f0-9-]+)$/.exec(url.pathname);
       if (jobMatch && request.method === "GET") { const job = operations.jobs.get(jobMatch[1]!); if (!job) return send(response, 404, { error: "Job not found" }); return send(response, 200, publicJob(job, operations.root)); }
+      const retryMatch = /^\/api\/jobs\/([a-f0-9-]+)\/retry$/.exec(url.pathname);
+      if (retryMatch && request.method === "POST") return send(response, 202, publicJob(await operations.retryJob(retryMatch[1]!), operations.root));
       const pauseMatch = /^\/api\/jobs\/([a-f0-9-]+)\/pause$/.exec(url.pathname);
       if (pauseMatch && request.method === "POST") return operations.jobs.pause(pauseMatch[1]!) ? send(response, 202, { status: "pause_requested" }) : send(response, 409, { error: "Job is not running or cannot be paused" });
       const eventMatch = /^\/api\/jobs\/([a-f0-9-]+)\/events$/.exec(url.pathname);
@@ -272,6 +274,11 @@ export function createApiHandler(operations: StudioOperations) {
       if (bibleEntryMatch && request.method === "DELETE") return send(response, 200, await operations.deleteBibleEntry(bibleEntryMatch[1]!, bibleEntryMatch[2]!));
       const settingsMatch = /^\/api\/stories\/([a-z0-9-]+)\/settings$/.exec(url.pathname);
       if (settingsMatch && request.method === "PUT") return send(response, 200, { story: await updateStorySettings(operations.root, settingsMatch[1]!, await jsonBody(request)) });
+      if (settingsMatch && request.method === "PUT") {
+        await updateStorySettings(operations.root, settingsMatch[1]!, await jsonBody(request));
+        const overview = await getStoryOverview(operations.root, settingsMatch[1]!);
+        return send(response, 200, { story: overview.story, effectiveRouting: overview.effectiveRouting });
+      }
       const novelSourcesMatch = /^\/api\/stories\/([a-z0-9-]+)\/sources$/.exec(url.pathname);
       if (novelSourcesMatch && request.method === "PUT") return send(response, 200, { story: await operations.updateNovelSourcePriorities(novelSourcesMatch[1]!, await jsonBody(request)) });
       const metadataTranslationJobMatch = /^\/api\/stories\/([a-z0-9-]+)\/jobs\/metadata-translation$/.exec(url.pathname);

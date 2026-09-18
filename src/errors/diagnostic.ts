@@ -14,6 +14,7 @@ export const errorDiagnosticSchema = z.object({
   chapter: z.number().int().positive().optional(),
   stage: z.string().min(1).optional(),
   provider: z.string().min(1).optional(),
+  model: z.string().min(1).optional(),
   code: z.string().min(1).optional(),
   technicalDetails: z.string().min(1).optional(),
   issues: z.array(z.object({ category: z.string(), severity: z.string(), message: z.string(), evidence: z.string().optional() })).optional(),
@@ -26,13 +27,15 @@ export function createErrorDiagnostic(error: unknown, context: { chapter?: numbe
   const combined = details.join(" Caused by: "); const parsed = parsePipelineContext(combined);
   const chapter = context.chapter ?? parsed.chapter; const stage = context.stage ?? parsed.stage ?? (quality ? "qa" : undefined);
   const code = chain.map((value) => typeof value.code === "string" ? value.code : undefined).find(Boolean);
+  const model = chain.map((value) => typeof value.model === "string" ? value.model : undefined).find(Boolean);
+  const provider = classified.provider ?? chain.map((value) => typeof value.provider === "string" ? value.provider : undefined).find(Boolean) ?? parsed.provider;
   const summary = safeText(context.summary ?? (quality
     ? `${chapter ? `Chapter ${chapter} ` : ""}failed quality review`
     : details[0] ?? "An unexpected error occurred"));
   return errorDiagnosticSchema.parse({
     id: `ERR-${randomUUID().slice(0, 8).toUpperCase()}`, timestamp: new Date().toISOString(), summary,
     category: classified.category, retryable: classified.retryable, recommendedAction: safeText(classified.recommendedAction),
-    chapter, stage, provider: classified.provider ?? parsed.provider, code,
+    chapter, stage, provider, model, code,
     technicalDetails: combined && combined !== summary ? combined : undefined,
     issues: quality?.result.issues.slice(0, 20).map((issue) => ({ category: issue.category, severity: issue.severity, message: safeText(issue.message), evidence: safeText(issue.evidence) })),
   });

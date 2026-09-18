@@ -47,6 +47,7 @@ export function App() {
       {route.page === "audio" && route.story && <AudioPage slug={route.story} onJob={updateJob} />}
       {route.page === "video" && route.story && <VideoPage slug={route.story} onJob={updateJob} />}
       {route.page === "scenes" && route.story && <ScenesPage slug={route.story} onJob={updateJob} />}
+      {route.page === "scenes" && route.story && <ScenesPage slug={route.story} onJob={updateJob} navigate={navigate} />}
       {route.page === "production" && route.story && <ProductionPage slug={route.story} activeJob={job?.type === "production" ? job : undefined} onJob={updateJob} navigate={navigate} />}
       {route.page === "costs" && route.story && <CostsPage slug={route.story} />}
       {route.page === "outputs" && route.story && <OutputsPage slug={route.story} />}
@@ -55,6 +56,7 @@ export function App() {
       {route.page === "import" && <ChapterImportPage storySlug={route.story} stories={stories} navigate={navigate} />}
     </main>
     {job && <JobConsole job={job} onUpdate={updateJob} onClose={() => { latestJob.current = undefined; setJob(undefined); }} />}
+    {job && <JobConsole job={job} onUpdate={updateJob} navigate={navigate} onClose={() => { latestJob.current = undefined; setJob(undefined); }} />}
   </div>;
 }
 
@@ -631,7 +633,7 @@ function BibleFields({ category, value, onChange }: { category: string; value: a
 function newBibleValue(category: string) { const chapters = { firstSeenChapter: 1, lastSeenChapter: 1 }; if (category === "relationships") return { subject: "", relationship: "", object: "", ...chapters }; if (category === "translationTerms") return { original: "", canonicalEnglish: "", notes: "", ...chapters }; return { canonicalEnglishName: "", originalName: "", description: "", ...(category === "characters" ? { aliases: [], pronouns: [] } : {}), ...chapters }; }
 function bibleEntryTitle(value: any) { return value.canonicalEnglishName ?? value.canonicalEnglish ?? `${value.subject} → ${value.object}`; }
 
-function ScenesPage({ slug, onJob }: { slug: string; onJob: (job: Job) => void }) {
+function ScenesPage({ slug, onJob, navigate }: { slug: string; onJob: (job: Job) => void; navigate?: (path: string) => void }) {
   const [data, setData] = useState<ScenesDashboard>(); const [draft, setDraft] = useState<Scene[]>([]); const [range, setRange] = useState({ from: "", to: "" }); const [error, setError] = useState(""); const [estimate, setEstimate] = useState<number>(); const [saving, setSaving] = useState(false); const watcher = useRef<(() => void) | undefined>(undefined);
   const load = async (chapter?: number) => { const next = await api<ScenesDashboard>(`/stories/${slug}/scenes${chapter ? `?chapter=${chapter}` : ""}`); setData(next); setDraft(structuredClone(next.manifest?.scenes ?? [])); if (!range.from && next.selectedChapter) setRange({ from: String(next.selectedChapter), to: String(next.selectedChapter) }); };
   useEffect(() => { setData(undefined); setError(""); void load().catch((value) => setError(message(value))); return () => watcher.current?.(); }, [slug]);
@@ -641,16 +643,34 @@ function ScenesPage({ slug, onJob }: { slug: string; onJob: (job: Job) => void }
   const review = async (scene: Scene, value: Scene["artwork"]["review"]) => { if (!data?.selectedChapter) return; try { await post(`/stories/${slug}/chapters/${data.selectedChapter}/scenes/${scene.id}/review`, { review: value }); await load(data.selectedChapter); } catch (cause) { setError(message(cause)); } };
   const edit = (id: string, patch: Partial<Scene>) => setDraft((current) => current.map((scene) => scene.id === id ? { ...scene, ...patch } : scene));
   if (error && !data) return <LoadFailure error={error} />; if (!data) return <Loading />;
+  const plannerNotReady = Boolean(data.scenePlannerRouting && !data.scenePlannerRouting.ready);
   return <section className="page scenes-page">
-    <div className="section-heading"><div><span className="eyebrow">Visual development</span><h2>Scene reel</h2><p>Plan the chapter’s visual rhythm, direct each frame, then approve the artwork that enters video.</p></div><div className="scene-count"><b>{data.counts.planned}</b><span>chapters planned</span><small>{data.counts.artworkReady} with artwork</small></div></div>
-    <div className="scene-toolbar"><Field label="Chapter"><select value={data.selectedChapter ?? ""} onChange={(event) => chooseChapter(Number(event.target.value))}>{data.chapters.map((chapter) => <option key={chapter.chapter} value={chapter.chapter}>{String(chapter.chapter).padStart(4, "0")} · {chapter.title ?? "Untitled"}</option>)}</select></Field><Field label="Range from"><input inputMode="numeric" value={range.from} onChange={(event) => setRange({ ...range, from: event.target.value })} /></Field><Field label="Range to"><input inputMode="numeric" value={range.to} onChange={(event) => setRange({ ...range, to: event.target.value })} /></Field><div className="scene-actions"><button className="button" onClick={() => run("scenes")}>Plan scenes</button><button className="button" onClick={() => run("artwork", { dryRun: true })}>Estimate images</button><button className="button primary" onClick={() => run("artwork")}>Generate missing artwork</button></div>{estimate !== undefined && <div className="cost-estimate"><b>{estimate}</b><span>paid image request{estimate === 1 ? "" : "s"}</span><small>Dry run only—nothing generated.</small></div>}</div>
+    <div className="section-heading">
+      <div><span className="eyebrow">Visual development</span><h2>Scene reel</h2><p>Plan the chapter’s visual rhythm, direct each frame, then approve the artwork that enters video.</p></div>
+      <div className="scene-status-cluster">
+        <div className="scene-count"><b>{data.counts.planned}</b><span>chapters planned</span><small>{data.counts.artworkReady} with artwork</small></div>
+        <div className="scene-planner-badge" title={data.scenePlannerRouting?.reason}>
+          <span className="eyebrow">Planner</span>
+          <b>{data.scenePlannerRouting ? `${data.scenePlannerRouting.provider} · ${data.scenePlannerRouting.model}` : `${data.planner.provider} · ${data.planner.model}`}</b>
+          <span className={`routing-badge ${data.scenePlannerRouting?.source === "override" ? "override" : "inherited"}`}>
+            {data.scenePlannerRouting?.source === "override" ? "Book override" : "Studio default"}
+          </span>
+          <button type="button" className="button small text-btn" onClick={() => navigate?.(`/stories/${slug}/settings`) ?? (location.href = `/stories/${slug}/settings`)}>Settings</button>
+        </div>
+      </div>
+    </div>
+    {plannerNotReady && <div className="scene-preflight-alert" role="alert">
+      <div><Status status="fail" label="Scene Planner Not Configured" /><p>{data.scenePlannerRouting?.reason ?? "Scene planner provider or model is not configured."}</p></div>
+      <button type="button" className="button primary" onClick={() => navigate?.(`/stories/${slug}/settings`) ?? (location.href = `/stories/${slug}/settings`)}>Configure Scene Planner →</button>
+    </div>}
+    <div className="scene-toolbar"><Field label="Chapter"><select value={data.selectedChapter ?? ""} onChange={(event) => chooseChapter(Number(event.target.value))}>{data.chapters.map((chapter) => <option key={chapter.chapter} value={chapter.chapter}>{String(chapter.chapter).padStart(4, "0")} · {chapter.title ?? "Untitled"}</option>)}</select></Field><Field label="Range from"><input inputMode="numeric" value={range.from} onChange={(event) => setRange({ ...range, from: event.target.value })} /></Field><Field label="Range to"><input inputMode="numeric" value={range.to} onChange={(event) => setRange({ ...range, to: event.target.value })} /></Field><div className="scene-actions"><button className="button" disabled={plannerNotReady} title={plannerNotReady ? data.scenePlannerRouting?.reason : undefined} onClick={() => run("scenes")}>Plan scenes</button><button className="button" onClick={() => run("artwork", { dryRun: true })}>Estimate images</button><button className="button primary" onClick={() => run("artwork")}>Generate missing artwork</button></div>{estimate !== undefined && <div className="cost-estimate"><b>{estimate}</b><span>paid image request{estimate === 1 ? "" : "s"}</span><small>Dry run only—nothing generated.</small></div>}</div>
     {error && <ErrorBox text={error} />}
     {data.manifest ? <>
       {(data.manifestStale || data.chapters.find((item) => item.chapter === data.selectedChapter)?.sceneStatus === "stale") && <ArtifactStatusNotice status="stale" reason="This scene plan was generated from older inputs or settings. Scenes and artwork remain visible below; plan scenes again to make the manifest current." />}
       <div className="filmstrip" aria-label="Scene timing preview">{draft.map((scene) => <button key={scene.id} style={{ flexGrow: Math.max(1, scene.endSeconds - scene.startSeconds) }} className={`${scene.importance} ${scene.artwork.review}`} onClick={() => document.getElementById(scene.id)?.scrollIntoView({ behavior: "smooth" })}><i />{scene.imageUrl ? <img src={scene.imageUrl} alt="" /> : <span>{scene.id.replace("scene-", "")}</span>}<small>{formatTime(scene.startSeconds)}–{formatTime(scene.endSeconds)}</small></button>)}</div>
       <div className="scene-reel-head"><div><h3>Chapter {data.manifest.chapter} direction</h3><p>{data.manifest.manuallyEdited ? `Manual revision ${data.manifest.manualRevision}` : "Planner draft"} · {formatDuration(data.manifest.durationSeconds)}</p></div><button className="button primary" disabled={saving} onClick={save}>{saving ? "Saving…" : "Save scene edits"}</button></div>
       <div className="scene-cards">{draft.map((scene, index) => <article id={scene.id} key={scene.id} className={`scene-card ${scene.importance}`}><div className="scene-frame">{scene.imageUrl ? <img src={scene.imageUrl} alt={scene.summary} /> : <div><span>{String(index + 1).padStart(2, "0")}</span><small>Frame pending</small></div>}<span className={`review-flag ${scene.artwork.review}`}>{pretty(scene.artwork.review)}</span></div><div className="scene-copy"><header><div><span className="eyebrow">{scene.id}</span><h3>{formatTime(scene.startSeconds)} — {formatTime(scene.endSeconds)}</h3></div><Stage value={scene.artwork.status} /></header><Field label="Summary"><textarea value={scene.summary} onChange={(event) => edit(scene.id, { summary: event.target.value })} /></Field><div className="scene-fields"><Field label="Start seconds"><input type="number" step="0.001" min="0" value={scene.startSeconds} onChange={(event) => edit(scene.id, { startSeconds: Number(event.target.value) })} /></Field><Field label="End seconds"><input type="number" step="0.001" min="0" value={scene.endSeconds} onChange={(event) => edit(scene.id, { endSeconds: Number(event.target.value) })} /></Field><Field label="Importance"><select value={scene.importance} onChange={(event) => edit(scene.id, { importance: event.target.value as Scene["importance"] })}><option value="transition">Transition</option><option value="standard">Standard</option><option value="major">Major</option></select></Field></div><div className="scene-fields two"><Field label="Characters"><input value={scene.characters.join(", ")} onChange={(event) => edit(scene.id, { characters: event.target.value.split(",").map((value) => value.trim()).filter(Boolean) })} /></Field><Field label="Location"><input value={scene.location ?? ""} onChange={(event) => edit(scene.id, { location: event.target.value || undefined })} /></Field></div><Field label="Artwork prompt"><textarea className="prompt-editor" value={scene.visualPrompt} onChange={(event) => edit(scene.id, { visualPrompt: event.target.value })} /></Field><div className="scene-review"><button onClick={() => review(scene, "approved")} disabled={!scene.imageUrl}>Approve</button><button onClick={() => review(scene, "rejected")} disabled={!scene.imageUrl}>Reject</button><button onClick={() => review(scene, "needs-regeneration")} disabled={!scene.imageUrl}>Needs regeneration</button><button className="regenerate" onClick={() => run("artwork", { scene: scene.id, force: true })}>Regenerate frame</button></div>{scene.artwork.error && <small className="scene-error">{scene.artwork.error}</small>}</div></article>)}</div>
-    </> : <Empty title="No scene plan yet" text="Choose one mastered chapter and plan its visual sequence. No artwork is generated during planning." action={<button className="button primary" onClick={() => run("scenes")}>Plan this chapter</button>} />}
+    </> : <Empty title="No scene plan yet" text="Choose one mastered chapter and plan its visual sequence. No artwork is generated during planning." action={<button className="button primary" disabled={plannerNotReady} onClick={() => run("scenes")}>Plan this chapter</button>} />}
   </section>;
 }
 
@@ -705,13 +725,145 @@ export function chapterPageSize(search: string) { const value = Number(new URLSe
 export function paginateRows<T>(items: readonly T[], page: number, pageSize: number) { const pages = Math.max(1, Math.ceil(items.length / pageSize)); const currentPage = Math.min(Math.max(1, page), pages); return { items: items.slice((currentPage - 1) * pageSize, currentPage * pageSize), page: currentPage, pages, total: items.length }; }
 function formatSpeechAbbreviations(value: Record<string, string> | undefined) { return Object.entries(value ?? {}).map(([written, spoken]) => `${written} = ${spoken}`).join("\n"); }
 function parseSpeechAbbreviations(value: string) { return Object.fromEntries(value.split("\n").map((line) => line.split("=")).map(([written, spoken]) => [written?.trim(), spoken?.trim()] as const).filter(([written, spoken]) => Boolean(written && spoken))); }
-
-function SettingsPage({ slug, onJob }: { slug: string; onJob: (job: Job) => void }) { const [story, setStory] = useState<StoryConfig>(); const [saved, setSaved] = useState(false); const [saving, setSaving] = useState(false); const [translating, setTranslating] = useState(false); const [error, setError] = useState(""); useEffect(() => { setStory(undefined); setError(""); api<any>("/stories/" + slug).then((x) => setStory(x.story)).catch((value) => setError(message(value))); }, [slug]); if (error && !story) return <LoadFailure error={error} />; if (!story) return <Loading />;
-  const save = async (event: FormEvent) => { event.preventDefault(); if (saving) return; setSaving(true); setError(""); setSaved(false); try { const response = await put<any>(`/stories/${slug}/settings`, { title: story.title, author: story.author, description: story.description, tags: story.tags, notes: story.notes, sourceLanguage: story.sourceLanguage, outputLanguage: story.outputLanguage, recentChapterSummaries: story.context.recentChapterSummaries, qaMode: story.qaMode, narrationSettings: story.narrationSettings, translation: story.pipeline.translation, narration: story.pipeline.narration, qa: story.pipeline.qa, scenePlanner: story.pipeline.scenePlanner, tts: { provider: story.pipeline.tts.provider, model: story.pipeline.tts.model, referenceId: story.pipeline.tts.referenceId, secondaryReferenceId: story.pipeline.tts.secondaryReferenceId, voiceMode: story.pipeline.tts.voiceMode, deliveryIntensity: story.pipeline.tts.deliveryIntensity, qualityGuard: story.pipeline.tts.qualityGuard, speed: story.pipeline.tts.speed }, audio: story.audio, subtitles: story.subtitles, video: story.video, scenes: story.scenes, artwork: story.artwork }); setStory(response.story); setSaved(true); setTimeout(() => setSaved(false), 2500); } catch (e) { setError(message(e)); } finally { setSaving(false); } };
-  const translateMetadata = async () => { if (translating) return; try { setTranslating(true); setError(""); const savedStory = await put<any>(`/stories/${slug}/settings`, { title: story.title, author: story.author, description: story.description, tags: story.tags, notes: story.notes, sourceLanguage: story.sourceLanguage, outputLanguage: story.outputLanguage, recentChapterSummaries: story.context.recentChapterSummaries, qaMode: story.qaMode, narrationSettings: story.narrationSettings, translation: story.pipeline.translation, narration: story.pipeline.narration, qa: story.pipeline.qa, scenePlanner: story.pipeline.scenePlanner, tts: { provider: story.pipeline.tts.provider, model: story.pipeline.tts.model, referenceId: story.pipeline.tts.referenceId, secondaryReferenceId: story.pipeline.tts.secondaryReferenceId, voiceMode: story.pipeline.tts.voiceMode, deliveryIntensity: story.pipeline.tts.deliveryIntensity, qualityGuard: story.pipeline.tts.qualityGuard, speed: story.pipeline.tts.speed }, audio: story.audio, subtitles: story.subtitles, video: story.video, scenes: story.scenes, artwork: story.artwork }); setStory(savedStory.story); const job = await post<Job>(`/stories/${slug}/jobs/metadata-translation`, {}); onJob(job); watchJob(job.id, async (next) => { onJob(next); if (next.status === "completed") { const value = await api<any>(`/stories/${slug}`); setStory(value.story); setSaved(true); setTimeout(() => setSaved(false), 2500); setTranslating(false); } else if (next.status === "failed" || next.status === "paused") { setError(next.error ?? "Metadata translation did not finish"); setTranslating(false); } }, (value) => { setError(message(value)); setTranslating(false); }); } catch (value) { setError(message(value)); setTranslating(false); } };
-  const model = (key: "translation" | "narration" | "qa" | "scenePlanner", value: Model) => setStory({ ...story, pipeline: { ...story.pipeline, [key]: value } });
-  const audio = (key: keyof StoryConfig["audio"], value: string | number) => setStory({ ...story, audio: { ...story.audio, [key]: value } });
-  const metadataAtSourceLanguage = Boolean(story.metadataTranslationSource && languagesMatch(story.metadataTranslationSource.language, story.outputLanguage));
+function SettingsPage({ slug, onJob }: { slug: string; onJob: (job: Job) => void }) {
+  const [story, setStory] = useState<StoryConfig>();
+  const [effectiveRouting, setEffectiveRouting] = useState<Record<string, ResolvedModelRouting>>();
+  const [saved, setSaved] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [translating, setTranslating] = useState(false);
+  const [error, setError] = useState("");
+  useEffect(() => {
+    setStory(undefined);
+    setError("");
+    api<any>("/stories/" + slug).then((x) => {
+      setStory(x.story);
+      setEffectiveRouting(x.effectiveRouting);
+    }).catch((value) => setError(message(value)));
+  }, [slug]);
+  if (error && !story) return <LoadFailure error={error} />;
+  if (!story) return <Loading />;
+  const save = async (event: FormEvent) => {
+    event.preventDefault();
+    if (saving) return;
+    setSaving(true);
+    setError("");
+    setSaved(false);
+    try {
+      const response = await put<any>(`/stories/${slug}/settings`, {
+        title: story.title,
+        author: story.author,
+        description: story.description,
+        tags: story.tags,
+        notes: story.notes,
+        sourceLanguage: story.sourceLanguage,
+        outputLanguage: story.outputLanguage,
+        recentChapterSummaries: story.context.recentChapterSummaries,
+        qaMode: story.qaMode,
+        narrationSettings: story.narrationSettings,
+        translation: story.pipeline.translation,
+        narration: story.pipeline.narration,
+        qa: story.pipeline.qa,
+        storyBible: story.pipeline.storyBible,
+        scenePlanner: story.pipeline.scenePlanner,
+        pipelineOverrides: story.pipelineOverrides,
+        tts: {
+          provider: story.pipeline.tts.provider,
+          model: story.pipeline.tts.model,
+          referenceId: story.pipeline.tts.referenceId,
+          secondaryReferenceId: story.pipeline.tts.secondaryReferenceId,
+          voiceMode: story.pipeline.tts.voiceMode,
+          deliveryIntensity: story.pipeline.tts.deliveryIntensity,
+          qualityGuard: story.pipeline.tts.qualityGuard,
+          speed: story.pipeline.tts.speed,
+        },
+        audio: story.audio,
+        subtitles: story.subtitles,
+        video: story.video,
+        scenes: story.scenes,
+        artwork: story.artwork,
+      });
+      setStory(response.story);
+      if (response.effectiveRouting) setEffectiveRouting(response.effectiveRouting);
+      setSaved(true);
+      setTimeout(() => setSaved(false), 2500);
+    } catch (e) {
+      setError(message(e));
+    } finally {
+      setSaving(false);
+    }
+  };
+  const translateMetadata = async () => {
+    if (translating) return;
+    try {
+      setTranslating(true);
+      setError("");
+      const savedStory = await put<any>(`/stories/${slug}/settings`, {
+        title: story.title,
+        author: story.author,
+        description: story.description,
+        tags: story.tags,
+        notes: story.notes,
+        sourceLanguage: story.sourceLanguage,
+        outputLanguage: story.outputLanguage,
+        recentChapterSummaries: story.context.recentChapterSummaries,
+        qaMode: story.qaMode,
+        narrationSettings: story.narrationSettings,
+        translation: story.pipeline.translation,
+        narration: story.pipeline.narration,
+        qa: story.pipeline.qa,
+        storyBible: story.pipeline.storyBible,
+        scenePlanner: story.pipeline.scenePlanner,
+        pipelineOverrides: story.pipelineOverrides,
+        tts: {
+          provider: story.pipeline.tts.provider,
+          model: story.pipeline.tts.model,
+          referenceId: story.pipeline.tts.referenceId,
+          secondaryReferenceId: story.pipeline.tts.secondaryReferenceId,
+          voiceMode: story.pipeline.tts.voiceMode,
+          deliveryIntensity: story.pipeline.tts.deliveryIntensity,
+          qualityGuard: story.pipeline.tts.qualityGuard,
+          speed: story.pipeline.tts.speed,
+        },
+        audio: story.audio,
+        subtitles: story.subtitles,
+        video: story.video,
+        scenes: story.scenes,
+        artwork: story.artwork,
+      });
+      setStory(savedStory.story);
+      if (savedStory.effectiveRouting) setEffectiveRouting(savedStory.effectiveRouting);
+      const job = await post<Job>(`/stories/${slug}/jobs/metadata-translation`, {});
+      onJob(job);
+      watchJob(job.id, async (next) => {
+        onJob(next);
+        if (next.status === "completed") {
+          const value = await api<any>(`/stories/${slug}`);
+          setStory(value.story);
+          if (value.effectiveRouting) setEffectiveRouting(value.effectiveRouting);
+          setSaved(true);
+          setTimeout(() => setSaved(false), 2500);
+          setTranslating(false);
+        } else if (next.status === "failed" || next.status === "paused") {
+          setError(next.error ?? "Metadata translation did not finish");
+          setTranslating(false);
+        }
+      }, (value) => {
+        setError(message(value));
+        setTranslating(false);
+      });
+    } catch (value) {
+      setError(message(value));
+      setTranslating(false);
+    }
+  };
+  const model = (key: "translation" | "narration" | "qa" | "storyBible" | "scenePlanner", value: Model) =>
+    setStory({ ...story, pipeline: { ...story.pipeline, [key]: value } });
+  const audio = (key: keyof StoryConfig["audio"], value: string | number) =>
+    setStory({ ...story, audio: { ...story.audio, [key]: value } });
+  const metadataAtSourceLanguage = Boolean(
+    story.metadataTranslationSource && languagesMatch(story.metadataTranslationSource.language, story.outputLanguage)
+  );
+  const stages = ["translation", "narration", "qa", "storyBible", "scenePlanner"] as const;
   return <section className="page settings-page">
     <div className="section-heading"><div><h2>Story settings</h2><p>Credentials remain in the server environment and are never sent here.</p></div>{saved && <Status status="pass" label="Changes saved" />}</div>
     <form onSubmit={save}>
@@ -726,7 +878,66 @@ function SettingsPage({ slug, onJob }: { slug: string; onJob: (job: Job) => void
         <Field label="Tags · comma separated"><input value={story.tags.join(", ")} onChange={(event) => setStory({ ...story, tags: event.target.value.split(",").map((item) => item.trim()).filter(Boolean).slice(0, 30) })} /></Field>
         <div className="metadata-translation"><div><span>LOCALIZE READER METADATA</span><b>{story.sourceLanguage} → {story.outputLanguage}</b><small>{metadataAtSourceLanguage ? "Restore the preserved original title, author, description, and tags." : "Uses the selected translation model. The original source metadata is retained for later retranslation."}</small></div><button type="button" className="button" disabled={translating || (languagesMatch(story.sourceLanguage, story.outputLanguage) && !metadataAtSourceLanguage)} onClick={() => void translateMetadata()}>{translating ? "Translating…" : metadataAtSourceLanguage ? "Restore original metadata" : "Translate metadata"}</button></div>
       </div>
-      <div className="settings-group"><h3>Model profile</h3>{(["translation", "narration", "qa"] as const).map((key) => <ModelEditor key={key} label={pretty(key)} value={story.pipeline[key]} onChange={(value) => model(key, value)} />)}
+      <div className="settings-group model-profile-group">
+        <h3>Model profile</h3>
+        <p className="field-note">Inherits Studio defaults unless an override is configured for this book.</p>
+        {stages.map((key) => {
+          const isOverridden = Boolean(story.pipelineOverrides?.[key]);
+          const routing = effectiveRouting?.[key];
+          const currentModel = story.pipeline[key] ?? { provider: routing?.provider ?? "openai", model: routing?.model ?? "" };
+          return <div key={key} className={`stage-routing-card ${isOverridden ? "overridden" : "inherited"}`}>
+            <div className="stage-routing-header">
+              <div>
+                <b>{pretty(key)}</b>
+                <span className={`routing-badge ${isOverridden ? "override" : "inherited"}`}>
+                  {isOverridden ? "Book override" : "Inherited from Studio defaults"}
+                </span>
+              </div>
+              {isOverridden ? (
+                <button
+                  type="button"
+                  className="button small text-btn"
+                  onClick={() =>
+                    setStory({
+                      ...story,
+                      pipelineOverrides: { ...(story.pipelineOverrides ?? {}), [key]: false },
+                    })
+                  }
+                >
+                  Reset to Studio default
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  className="button small text-btn"
+                  onClick={() =>
+                    setStory({
+                      ...story,
+                      pipelineOverrides: { ...(story.pipelineOverrides ?? {}), [key]: true },
+                      pipeline: {
+                        ...story.pipeline,
+                        [key]: {
+                          provider: routing?.provider ?? currentModel.provider,
+                          model: routing?.model ?? currentModel.model,
+                        },
+                      },
+                    })
+                  }
+                >
+                  Use book override
+                </button>
+              )}
+            </div>
+            {isOverridden ? (
+              <ModelEditor label="" value={currentModel} onChange={(value) => model(key, value)} />
+            ) : (
+              <div className="inherited-routing-info">
+                <span className="mono">{routing ? `${routing.provider} · ${routing.model}` : `${currentModel.provider} · ${currentModel.model}`}</span>
+                {routing && !routing.ready && <small className="field-note error">{routing.reason}</small>}
+              </div>
+            )}
+          </div>;
+        })}
         <Field label="QA mode"><select value={story.qaMode ?? "production"} onChange={(event) => setStory({ ...story, qaMode: event.target.value as StoryConfig["qaMode"] })}><option value="production">Production — material issues only</option><option value="thorough">Thorough — also style and polish</option></select></Field>
         <label className={`narration-policy ${story.narrationSettings.profanityMode === "soften-strong" ? "active" : ""}`}>
           <div><span>NARRATION ONLY</span><b>Soften strong profanity</b><small>Uses milder wording for harsh terms while keeping the scene's meaning and intensity. Ass, hell, and damn remain allowed. Original and translation stay unchanged.</small></div>
@@ -803,15 +1014,91 @@ function ProductionPage({ slug, activeJob, onJob, navigate }: { slug: string; ac
   </section>;
 }
 
-function JobConsole({ job, onUpdate, onClose }: { job: Job; onUpdate: (job: Job) => void; onClose: () => void }) { const [actionError, setActionError] = useState(""); const [copied, setCopied] = useState(false); useEffect(() => { if (isTerminalJob(job)) return; return watchJob(job.id, onUpdate, (value) => setActionError(message(value))); }, [job.id]); const diagnostic: ErrorDiagnostic | undefined = job.diagnostic ?? job.progress?.diagnostic; const stage = diagnostic?.stage ?? job.progress?.stage ?? job.progress?.event?.stage ?? job.progress?.type?.replace("chapter.", ""); const chapter = diagnostic?.chapter ?? job.progress?.chapter; const detail = job.progress?.event?.detail;
+function JobConsole({ job, onUpdate, onClose, navigate }: { job: Job; onUpdate: (job: Job) => void; onClose: () => void; navigate?: (path: string) => void }) {
+  const [actionError, setActionError] = useState("");
+  const [retrying, setRetrying] = useState(false);
+  const [copied, setCopied] = useState(false);
+  useEffect(() => {
+    if (isTerminalJob(job)) return;
+    return watchJob(job.id, onUpdate, (value) => setActionError(message(value)));
+  }, [job.id]);
+  const diagnostic: ErrorDiagnostic | undefined = job.diagnostic ?? job.progress?.diagnostic;
+  const stage = diagnostic?.stage ?? job.progress?.stage ?? job.progress?.event?.stage ?? job.progress?.type?.replace("chapter.", "");
+  const chapter = diagnostic?.chapter ?? job.progress?.chapter;
+  const detail = job.progress?.event?.detail;
   const pause = async () => { try { setActionError(""); await post(`/jobs/${job.id}/pause`, {}); } catch (error) { setActionError(message(error)); } };
-  const copyDiagnostic = async () => { if (!diagnostic) return; const text = `${formatDiagnostic(diagnostic)}\n${diagnostic.technicalDetails ? `Details: ${diagnostic.technicalDetails}\n` : ""}Job: ${job.id}\nTime: ${diagnostic.timestamp}`; try { await navigator.clipboard.writeText(text); setCopied(true); setTimeout(() => setCopied(false), 1600); } catch { setActionError("Could not copy the diagnostic. Select the technical details and copy them manually."); } };
+  const retry = async () => {
+    if (retrying) return;
+    setRetrying(true);
+    setActionError("");
+    try {
+      let nextJob: Job;
+      try {
+        nextJob = await post<Job>(`/jobs/${job.id}/retry`, {});
+      } catch {
+        if (job.type === "scenes") {
+          const ch = chapter ?? (job.progress as any)?.chapter ?? 1;
+          nextJob = await post<Job>(`/stories/${job.story}/jobs/scenes`, { from: ch, to: ch });
+        } else {
+          throw new Error("Could not retry this job automatically.");
+        }
+      }
+      onUpdate(nextJob);
+    } catch (error) {
+      setActionError(message(error));
+    } finally {
+      setRetrying(false);
+    }
+  };
+  const copyDiagnostic = async () => {
+    if (!diagnostic) return;
+    const text = `${formatDiagnostic(diagnostic)}\n${diagnostic.technicalDetails ? `Details: ${diagnostic.technicalDetails}\n` : ""}Job: ${job.id}\nTime: ${diagnostic.timestamp}`;
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1600);
+    } catch {
+      setActionError("Could not copy the diagnostic. Select the technical details and copy them manually.");
+    }
+  };
+  const isSceneJob = job.type === "scenes" || stage === "scenePlanning" || stage === "scenes";
   const label = ({ batch: "Processing chapters", preview: "Rendering comparison", metadataTranslation: "Translating reader metadata", qaRepair: "Repairing selected QA findings", summary: "Building story recap", audio: "Mastering chapter audio", audiobook: "Building audiobook", alignment: "Aligning narration to audio", subtitles: "Timing subtitles", video: "Rendering chapter video", videoExport: "Building combined video", scenes: "Planning chapter scenes", artwork: "Generating scene artwork", production: "Producing finished story" } as Record<string, string>)[job.type] ?? "Working";
-  return <aside className={`job-console ${job.status}`} role={job.status === "failed" ? "alert" : "status"}><div className="job-head"><div><span className="live-dot" /><b>{label}</b></div><span className="mono">{job.status}</span></div><div className="job-progress"><i /><i /><i /><i /><i /></div>{diagnostic ? <div className="incident"><h3>{diagnostic.summary}</h3><div className="incident-meta">{chapter && <span>Chapter {chapter}</span>}{stage && <span>{pretty(stage)}</span>}<span>{pretty(diagnostic.category)}</span>{diagnostic.provider && <span>{diagnostic.provider}</span>}</div>{diagnostic.issues?.length ? <ul>{diagnostic.issues.slice(0, 3).map((issue, index) => <li key={`${issue.category}-${index}`}><b>{pretty(issue.category)}</b>{issue.message}</li>)}</ul> : null}<div className="incident-next"><small>Recommended next step</small><p>{diagnostic.recommendedAction}</p></div><details><summary>Technical details</summary><p>{diagnostic.technicalDetails ?? "No additional provider details were supplied."}</p><small>{new Date(diagnostic.timestamp).toLocaleString()} · {diagnostic.id} · Job {job.id.slice(0, 8)}</small></details></div> : <p>{actionError || job.error || (chapter ? `Chapter ${chapter} · ${pretty(stage ?? "working")}${detail ? ` — ${detail}` : ""}` : pretty(job.status))}</p>}<div className="job-actions">{diagnostic && <button onClick={() => void copyDiagnostic()}>{copied ? "Copied" : "Copy details"}</button>}{diagnostic?.chapter && <a href={`/stories/${job.story}/chapters/${diagnostic.chapter}`}>Open chapter</a>}{job.status === "running" && ["batch", "audio", "audiobook", "subtitles", "video", "scenes", "artwork", "production"].includes(job.type) && <button onClick={() => void pause()}>Pause after chapter</button>}{["completed", "failed", "paused"].includes(job.status) && <button onClick={onClose}>Close</button>}</div>{actionError && diagnostic && <p className="incident-action-error">{actionError}</p>}</aside>;
+  const modelBadge = [diagnostic?.provider, diagnostic?.model].filter(Boolean).join(" · ");
+  return <aside className={`job-console ${job.status}`} role={job.status === "failed" ? "alert" : "status"}>
+    <div className="job-head">
+      <div><span className="live-dot" /><b>{label}</b></div>
+      <span className="mono">{job.status}</span>
+    </div>
+    <div className="job-progress"><i /><i /><i /><i /><i /></div>
+    {diagnostic ? <div className="incident">
+      <h3>{isSceneJob ? "Scene planning failed" : diagnostic.summary}</h3>
+      <div className="incident-meta">
+        {chapter && <span>Chapter {chapter}</span>}
+        {stage && <span>{pretty(stage)}</span>}
+        <span>{pretty(diagnostic.category)}</span>
+        {modelBadge && <span>{modelBadge}</span>}
+      </div>
+      {isSceneJob && diagnostic.summary && <p className="incident-reason">{diagnostic.summary}</p>}
+      {diagnostic.issues?.length ? <ul>{diagnostic.issues.slice(0, 3).map((issue, index) => <li key={`${issue.category}-${index}`}><b>{pretty(issue.category)}</b>{issue.message}</li>)}</ul> : null}
+      <div className="incident-next"><small>Recommended next step</small><p>{diagnostic.recommendedAction}</p></div>
+      <details><summary>Technical details</summary><p>{diagnostic.technicalDetails ?? "No additional provider details were supplied."}</p><small>{new Date(diagnostic.timestamp).toLocaleString()} · {diagnostic.id} · Job {job.id.slice(0, 8)}</small></details>
+    </div> : <p>{actionError || job.error || (chapter ? `Chapter ${chapter} · ${pretty(stage ?? "working")}${detail ? ` — ${detail}` : ""}` : pretty(job.status))}</p>}
+    <div className="job-actions">
+      {diagnostic && <button type="button" onClick={() => void copyDiagnostic()}>{copied ? "Copied" : "Copy details"}</button>}
+      {job.status === "failed" && <button type="button" className="button-retry" disabled={retrying} onClick={() => void retry()}>{retrying ? "Retrying…" : "Retry"}</button>}
+      {job.story && (
+        <button type="button" onClick={() => navigate?.(`/stories/${job.story}/settings`) ?? (location.href = `/stories/${job.story}/settings`)}>Open model settings</button>
+      )}
+      {diagnostic?.chapter && <a href={`/stories/${job.story}/chapters/${diagnostic.chapter}`}>Open chapter</a>}
+      {job.status === "running" && ["batch", "audio", "audiobook", "subtitles", "video", "scenes", "artwork", "production"].includes(job.type) && <button type="button" onClick={() => void pause()}>Pause after chapter</button>}
+      {["completed", "failed", "paused"].includes(job.status) && <button type="button" onClick={onClose}>Close</button>}
+    </div>
+    {actionError && diagnostic && <p className="incident-action-error">{actionError}</p>}
+  </aside>;
 }
 
 function PresetEditor({ label, value, onChange }: { label: string; value: any; onChange: (value: any) => void }) { return <div className="preset"><span className="eyebrow">{label}</span>{(["translation", "narration", "qa"] as const).map((key) => <ModelEditor key={key} label={pretty(key)} value={value[key]} onChange={(next) => onChange({ ...value, [key]: next })} />)}</div>; }
-function ModelEditor({ label, value, onChange }: { label: string; value: Model; onChange: (value: Model) => void }) { return <div className="model-editor"><label>{label}</label><select value={value.provider} onChange={(e) => onChange({ ...value, provider: e.target.value as Model["provider"] })}><option value="openai">OpenAI</option><option value="gemini">Gemini</option><option value="kimi">Kimi</option></select><input value={value.model} onChange={(e) => onChange({ ...value, model: e.target.value })} /></div>; }
+function ModelEditor({ label, value, onChange }: { label: string; value: Model; onChange: (value: Model) => void }) { return <div className="model-editor">{label ? <label>{label}</label> : null}<select value={value.provider} onChange={(e) => onChange({ ...value, provider: e.target.value as Model["provider"] })}><option value="openai">OpenAI</option><option value="gemini">Gemini</option><option value="kimi">Kimi</option></select><input value={value.model} onChange={(e) => onChange({ ...value, model: e.target.value })} /></div>; }
 function PreviewResult({ choice, result, onChoose }: { choice: "a" | "b"; result: any; onChoose: () => void }) { const qa = result[choice === "a" ? "qaA" : "qaB"]; return <article className="preview-result"><div className="preview-result-head"><span className="option-letter">{choice.toUpperCase()}</span><Status status={qa.status} label={`${Math.round(qa.score * 100)} score`} /></div><Manuscript title="Translation" text={result[choice === "a" ? "translationA" : "translationB"]} compact /><Manuscript title="Narration" text={result[choice === "a" ? "narrationA" : "narrationB"]} compact />{result[choice === "a" ? "audioA" : "audioB"] && <AudioDeck src={`/api/stories/${result.manifest.story}/previews/${result.manifest.id}/audio-${choice}`} title={`Option ${choice.toUpperCase()} sample`} />}<button className="button primary" onClick={onChoose}>Use option {choice.toUpperCase()}</button></article>; }
 function Manuscript({ title, text, compact }: { title: string; text?: string; compact?: boolean }) { return <article className={`manuscript ${compact ? "compact" : ""}`}><header><span>{title}</span><small className="mono">{text?.split(/\s+/).filter(Boolean).length ?? 0} words</small></header><div>{text ? text.split(/\n\n+/).map((paragraph, index) => <p key={index}>{paragraph}</p>) : <p className="empty-line">This stage has not produced text yet.</p>}</div></article>; }
 function CompareTextEditor({ title, value, savedValue, saving, onChange, onSave }: { title: string; value: string; savedValue?: string; saving: boolean; onChange: (value: string) => void; onSave: () => void }) { const changed = value !== (savedValue ?? ""); return <article className="manuscript compare-text-editor"><header><span>{title}</span><small className="mono">{value.split(/\s+/).filter(Boolean).length} words</small></header><textarea aria-label={`Edit ${title}`} value={value} onChange={(event) => onChange(event.target.value)} /><footer><span>{changed ? "Unsaved correction" : "Current version"}</span><button className="button primary" disabled={!value.trim() || !changed || saving} onClick={onSave}>{saving ? "Saving…" : `Save ${title}`}</button></footer></article>; }

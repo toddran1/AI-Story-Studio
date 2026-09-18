@@ -6,6 +6,24 @@ export const ttsProviderNameSchema = z.enum(["fish"]);
 export type LLMProviderName = z.infer<typeof llmProviderNameSchema>;
 export type TTSProviderName = z.infer<typeof ttsProviderNameSchema>;
 
+export type ProviderCapability =
+  | "text_generation"
+  | "structured_output"
+  | "image_generation"
+  | "tts"
+  | "vision";
+
+export const PROVIDER_CAPABILITIES: Record<string, ReadonlySet<ProviderCapability>> = {
+  openai: new Set(["text_generation", "structured_output", "image_generation", "vision"]),
+  gemini: new Set(["text_generation", "structured_output", "vision"]),
+  kimi: new Set(["text_generation", "structured_output"]),
+  fish: new Set(["tts"]),
+};
+
+export function providerHasCapability(provider: string, capability: ProviderCapability): boolean {
+  return PROVIDER_CAPABILITIES[provider]?.has(capability) ?? false;
+}
+
 export const stageModelConfigSchema = z.object({
   provider: llmProviderNameSchema,
   model: z.string().min(1),

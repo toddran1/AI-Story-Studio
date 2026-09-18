@@ -1,4 +1,4 @@
-export type ErrorDiagnostic = { id:string;timestamp:string;summary:string;category:"transient"|"rate_limit"|"configuration"|"content_qa"|"permanent";retryable:boolean;recommendedAction:string;chapter?:number;stage?:string;provider?:string;code?:string;technicalDetails?:string;issues?:Array<{category:string;severity:string;message:string;evidence?:string}> };
+export type ErrorDiagnostic = { id:string;timestamp:string;summary:string;category:"transient"|"rate_limit"|"configuration"|"content_qa"|"permanent";retryable:boolean;recommendedAction:string;chapter?:number;stage?:string;provider?:string;model?:string;code?:string;technicalDetails?:string;issues?:Array<{category:string;severity:string;message:string;evidence?:string}> };
 export type ApiValidationIssue = { path: string; message: string; code?: string };
 export class ApiError extends Error { constructor(message: string, public readonly diagnostic?: ErrorDiagnostic, public readonly validation?: ApiValidationIssue[]) { super(formatApiError(message, diagnostic, validation)); this.name = "ApiError"; } }
 export function formatDiagnostic(diagnostic: ErrorDiagnostic) { return `${diagnostic.summary}\nNext: ${diagnostic.recommendedAction}\nReference: ${diagnostic.id}`; }
@@ -27,6 +27,15 @@ export function post<T>(path: string, body: unknown) { return api<T>(path, { met
 export function put<T>(path: string, body: unknown) { return api<T>(path, { method: "PUT", body: JSON.stringify(body) }); }
 export function del<T>(path: string) { return api<T>(path, { method: "DELETE", body: JSON.stringify({}) }); }
 
+export type ResolvedModelRouting = {
+  provider: "openai" | "gemini" | "kimi";
+  model: string;
+  source: "override" | "studio_default" | "environment_fallback";
+  stage: string;
+  ready: boolean;
+  reason?: string;
+};
+
 export type StoryConfig = {
   slug: string; title: string; author?: string; description: string; tags: string[]; notes: string; defaultProductionProfile: "audio" | "audiobook" | "story-video" | "everything"; sourceLanguage: string; outputLanguage: string; source: { type: string; url?: string };
   metadataTranslationSource?: { title: string; author?: string; description?: string; tags?: string[]; language: string }; metadataTranslatedAt?: string;
@@ -37,6 +46,7 @@ export type StoryConfig = {
   audio: AudioSettings;
   subtitles: SubtitleSettings; video: VideoSettings; scenes: SceneSettings; artwork: ArtworkSettings;
   pipeline: { translation: Model; narration: Model; qa: Model; storyBible: Model; scenePlanner: Model; tts: FishTtsConfig };
+  pipelineOverrides?: Record<string, boolean>;
   productionProfiles: Record<string, { outputs: Array<"audio" | "audiobook" | "video">; artwork: boolean; repairQa: boolean; audiobookFormat: "mp3" | "m4b" }>;
 };
 export type AudioSettings = { loudnessTarget: number; truePeak: number; segmentGapSeconds: number; chapterGapSeconds: number; format: "mp3"; bitrate: "64k" | "96k" | "128k" | "160k" | "192k" | "256k" | "320k"; sampleRate: 32000 | 44100 | 48000 };
@@ -47,7 +57,7 @@ export type ArtworkSettings = { provider: "openai"; model: string; stylePrompt: 
 export type SceneArtwork = { status: "pending" | "running" | "complete" | "failed"; review: "unreviewed" | "approved" | "rejected" | "needs-regeneration"; provider?: string; model?: string; fingerprint?: string; imageFingerprint?: string; generatedAt?: string; error?: string };
 export type Scene = { id: string; summary: string; startSeconds: number; endSeconds: number; characters: string[]; location?: string; visualPrompt: string; importance: "transition" | "standard" | "major"; artwork: SceneArtwork; imageUrl?: string };
 export type SceneManifest = { version: 1; chapter: number; durationSeconds: number; planningFingerprint: string; manualRevision: number; manuallyEdited: boolean; updatedAt: string; scenes: Scene[] };
-export type ScenesDashboard = { settings: SceneSettings; artwork: ArtworkSettings; planner: Model; selectedChapter?: number; chapters: Array<{ chapter: number; title?: string; durationSeconds?: number; sceneStatus: string; artworkStatus: string }>; counts: { chapters: number; planned: number; artworkReady: number }; manifest?: SceneManifest; manifestStale?: boolean };
+export type ScenesDashboard = { settings: SceneSettings; artwork: ArtworkSettings; planner: Model; scenePlannerRouting?: ResolvedModelRouting; selectedChapter?: number; chapters: Array<{ chapter: number; title?: string; durationSeconds?: number; sceneStatus: string; artworkStatus: string }>; counts: { chapters: number; planned: number; artworkReady: number }; manifest?: SceneManifest; manifestStale?: boolean };
 export type AudioDashboard = { settings: AudioSettings; chapters: Array<{ chapter: number; title?: string; status: string; durationSeconds?: number; audioAvailable: boolean; audioStale: boolean }>; counts: { total: number; mastered: number; current: number; stale: number }; totalDurationSeconds: number; exports: Array<{ fingerprint: string; from: number; to: number; format: "mp3" | "m4b"; createdAt: string; durationSeconds: number; downloadUrl: string }> };
 export type VideoDashboard = { settings: VideoSettings; subtitleSettings: SubtitleSettings; background: { coverAvailable: boolean; coverName?: string; effectiveMode: string }; counts: { total: number; mastered: number; subtitles: number; videos: number }; chapters: Array<{ chapter: number; title?: string; durationSeconds?: number; subtitleStatus: string; videoStatus: string; videoAvailable: boolean; videoStale?: boolean }>; exports: Array<{ fingerprint: string; from: number; to: number; createdAt: string; durationSeconds: number; downloadUrl: string }> };
 export type Model = { provider: "openai" | "gemini" | "kimi"; model: string };

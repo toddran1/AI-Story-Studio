@@ -1,6 +1,7 @@
-import { StageModelConfig } from "../domain/provider.js";
+import { StageModelConfig, providerHasCapability } from "../domain/provider.js";
 import { StoryBible } from "../domain/story-bible.js";
 import { LLMProvider } from "../llm/provider.js";
+import { ConfigurationError } from "../pipeline/errors.js";
 import { scenePlannerInstructions, SCENE_PLANNER_PROMPT_VERSION } from "./prompts.js";
 import { plannedScenesSchema, summaryPlannedScenesSchema, SceneSettings } from "./types.js";
 import { tokenizeNarration } from "../alignment/quality.js";
@@ -27,6 +28,10 @@ export type VisualPlanningInput = {
 export async function planVisualScenes(provider: LLMProvider, config: StageModelConfig, input: VisualPlanningInput) {
   if (!Number.isFinite(input.durationSeconds) || input.durationSeconds <= 0) throw new Error("Scene planning requires a positive audio duration");
   if (!Number.isInteger(input.targetSceneCount) || input.targetSceneCount < 1 || input.targetSceneCount > 100) throw new Error("Scene count must be between 1 and 100");
+  if (!providerHasCapability(config.provider, "structured_output")) {
+    throw new ConfigurationError(`Provider '${config.provider}' does not support required capability 'structured_output'`);
+  }
+  await provider.validateConfiguration();
   const summary = input.sourceType === "summary";
   const context = summary ? `\n\nSUMMARY ID: ${input.sourceId}\nSOURCE CHAPTERS: ${JSON.stringify(input.sourceChapters ?? [])}\nSUPPORTING CANONICAL SUMMARY:\n${input.canonicalSummary ?? "Unavailable"}\nCANONICAL / LOCALIZED IDENTITY MAP:\n${JSON.stringify(input.namingIdentities ?? [])}` : "";
   const generate = () => provider.generateStructured({ model: config.model,

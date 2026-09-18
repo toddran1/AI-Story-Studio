@@ -150,6 +150,7 @@ export class SummaryMediaService {
         planner: { provider: config.provider, model: config.model, promptVersion: "summary-scenes-v1" },
         manualRevision: 0, manuallyEdited: false, createdAt: summary.scenePlan?.createdAt ?? now, updatedAt: now,
         scenes: bindNarrationSpans(normalizeProductionSceneTiming(planned.value.scenes, estimate.durationSeconds), summary.narration.text).map((scene) => ({ ...scene,
+        scenes: bindNarrationSpans(normalizeProductionSceneTiming(planned.value.scenes.map((s) => ({ ...s, location: s.location ?? undefined })), estimate.durationSeconds), summary.narration.text).map((scene) => ({ ...scene,
           visualType: "image", entityIds: resolveVisualEntities(scene.characters, input.context.canonicalEntities).map((entity) => entity.id) })) };
       // Retain image provenance atomically with the new plan. A restart between
       // planning and artwork must never discard protected/approved image metadata.

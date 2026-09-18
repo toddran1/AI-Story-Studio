@@ -20,7 +20,9 @@ import { SceneManifest, artworkSettingsSchema, sceneManifestSchema, sceneSetting
 import { loadLatestProduction } from "../../src/production/manifest.js";
 import { ProductionManifest } from "../../src/production/types.js";
 import { applyManualBibleOverlay } from "../../src/studio/workflow.js";
-import { getStorageUsage, invalidateStoryForConfigChange, readActivity } from "../../src/studio/projects.js";
+import { getStorageUsage, invalidateStoryForConfigChange, loadGlobalSettings, readActivity } from "../../src/studio/projects.js";
+import { loadEnvironment } from "../../src/config/env.js";
+import { resolveModelRouting, resolveAllModelRoutings } from "../../src/config/model-routing.js";
 import { fingerprint } from "../../src/utils/hash.js";
 import { fileFingerprint } from "../../src/utils/file-fingerprint.js";
 import { logger } from "../../src/utils/logger.js";
@@ -70,7 +72,10 @@ export async function listStories(root: string, warnings: string[] = []) {
 export async function getStoryOverview(root: string, slug: string) {
   slugSchema.parse(slug); const story = await loadStory(storyPaths(root, slug, 1).storyConfig);
   const chapters = await loadChapterSummaries(root, slug);
-  return { story, counts: { chapters: chapters.length, minChapter: chapters[0]?.chapter, maxChapter: chapters.at(-1)?.chapter,
+  const env = loadEnvironment();
+  const globalDefaults = await loadGlobalSettings(root, env).catch(() => undefined);
+  const effectiveRouting = resolveAllModelRoutings(story, globalDefaults, env);
+  return { story, effectiveRouting, counts: { chapters: chapters.length, minChapter: chapters[0]?.chapter, maxChapter: chapters.at(-1)?.chapter,
     ...countQa(chapters), complete: chapters.filter((item) => item.audioAvailable || item.audioMastering === "complete").length } };
 }
 
@@ -256,7 +261,9 @@ export const settingsUpdateSchema = z.object({
   translation: z.object({ provider: z.enum(["openai", "gemini", "kimi"]), model: z.string().trim().min(1) }),
   narration: z.object({ provider: z.enum(["openai", "gemini", "kimi"]), model: z.string().trim().min(1) }),
   qa: z.object({ provider: z.enum(["openai", "gemini", "kimi"]), model: z.string().trim().min(1) }),
+  storyBible: z.object({ provider: z.enum(["openai", "gemini", "kimi"]), model: z.string().trim().min(1) }).optional(),
   scenePlanner: z.object({ provider: z.enum(["openai", "gemini", "kimi"]), model: z.string().trim().min(1) }).optional(),
+  pipelineOverrides: z.record(z.string(), z.boolean()).optional(),
   tts: z.object({ provider: ttsProviderNameSchema.optional(), model: z.string().trim().min(1).optional(), referenceId: z.string().trim().optional(), secondaryReferenceId: z.string().trim().optional(),
     voiceMode: z.enum(["narrator-only", "same-voice-dialogue", "narrator-dialogue"]).optional(), deliveryIntensity: z.enum(["none", "restrained", "expressive"]).optional(), qualityGuard: z.boolean().optional(), speed: z.number().min(0.5).max(2) }),
   audio: z.object({ loudnessTarget: z.number().min(-24).max(-12), truePeak: z.number().min(-6).max(-0.1), segmentGapSeconds: z.number().min(0).max(5),
@@ -274,10 +281,28 @@ export async function updateStorySettings(root: string, slug: string, input: unk
       context: { ...current.context, recentChapterSummaries: update.recentChapterSummaries },
       qaMode: update.qaMode ?? current.qaMode,
       narrationSettings: update.narrationSettings ?? current.narrationSettings,
-      audio: { ...current.audio, ...update.audio }, subtitles: { ...current.subtitles, ...update.subtitles }, video: { ...current.video, ...update.video }, scenes: { ...current.scenes, ...update.scenes }, artwork: { ...current.artwork, ...update.artwork }, pipeline: { ...current.pipeline, translation: update.translation, narration: update.narration, qa: update.qa, scenePlanner: update.scenePlanner ?? current.pipeline.scenePlanner,
-        tts: { ...current.pipeline.tts, provider: update.tts.provider ?? current.pipeline.tts.provider, model: update.tts.model ?? current.pipeline.tts.model, referenceId: update.tts.referenceId || undefined,
-          secondaryReferenceId: update.tts.secondaryReferenceId || undefined, voiceMode: update.tts.voiceMode ?? current.pipeline.tts.voiceMode,
-          deliveryIntensity: update.tts.deliveryIntensity ?? current.pipeline.tts.deliveryIntensity, qualityGuard: update.tts.qualityGuard ?? current.pipeline.tts.qualityGuard, speed: update.tts.speed } } });
+      audio: { ...current.audio, ...update.audio }, subtitles: { ...current.subtitles, ...update.subtitles }, video: { ...current.video, ...update.video }, scenes: { ...current.scenes, ...update.scenes }, artwork: { ...current.artwork, ...update.artwork },
+      pipeline: {
+        ...current.pipeline,
+        translation: update.translation,
+        narration: update.narration,
+        qa: update.qa,
+        storyBible: update.storyBible ?? current.pipeline.storyBible,
+        scenePlanner: update.scenePlanner ?? current.pipeline.scenePlanner,
+        tts: {
+          ...current.pipeline.tts,
+          provider: update.tts.provider ?? current.pipeline.tts.provider,
+          model: update.tts.model ?? current.pipeline.tts.model,
+          referenceId: update.tts.referenceId || undefined,
+          secondaryReferenceId: update.tts.secondaryReferenceId || undefined,
+          voiceMode: update.tts.voiceMode ?? current.pipeline.tts.voiceMode,
+          deliveryIntensity: update.tts.deliveryIntensity ?? current.pipeline.tts.deliveryIntensity,
+          qualityGuard: update.tts.qualityGuard ?? current.pipeline.tts.qualityGuard,
+          speed: update.tts.speed,
+        },
+      },
+      pipelineOverrides: { ...(current.pipelineOverrides ?? {}), ...(update.pipelineOverrides ?? {}) },
+    });
     await invalidateStoryForConfigChange(root, slug, current, story); await atomicWriteJson(paths.storyConfig, story); await atomicWriteJson(paths.pipelineConfig, story.pipeline); return story;
   });
 }
@@ -389,9 +414,19 @@ export async function getVideoDashboard(root: string, slug: string) {
 export async function getScenesDashboard(root: string, slug: string, selectedChapter?: number) {
   slugSchema.parse(slug); const story = await loadStory(storyPaths(root, slug, 1).storyConfig); const chapters = await loadChapterSummaries(root, slug); const chapterNumber = selectedChapter ?? chapters[0]?.chapter;
   if (chapterNumber !== undefined && !chapters.some((item) => item.chapter === chapterNumber)) throw new Error(`Chapter ${chapterNumber} was not found`);
+  const env = loadEnvironment();
+  const globalDefaults = await loadGlobalSettings(root, env).catch(() => undefined);
+  const scenePlannerRouting = resolveModelRouting({
+    stage: "scenePlanner",
+    story,
+    globalSettings: globalDefaults,
+    env,
+    requiredCapability: "structured_output",
+  });
   let manifest: (SceneManifest & { scenes: Array<SceneManifest["scenes"][number] & { imageUrl?: string }> }) | undefined;
   if (chapterNumber !== undefined) { const raw = await readJsonIfExists<SceneManifest>(storyPaths(root, slug, chapterNumber).scenesManifest); const parsed = raw ? sceneManifestSchema.safeParse(raw) : undefined; if (parsed?.success) { const scenes = await mapLimit(parsed.data.scenes, 8, async (scene) => ({ ...scene, imageUrl: scene.artwork.status === "complete" && await exists(sceneImagePath(root, slug, chapterNumber, scene.id)) ? `/api/stories/${slug}/chapters/${chapterNumber}/scenes/${scene.id}.png` : undefined })); manifest = { ...parsed.data, scenes }; } }
   return { settings: story.scenes, artwork: story.artwork, planner: story.pipeline.scenePlanner, selectedChapter: chapterNumber, chapters: chapters.map((item) => ({ chapter: item.chapter, title: item.originalTitle, durationSeconds: item.durationSeconds, sceneStatus: item.scenePlanning, artworkStatus: item.artwork })), counts: { chapters: chapters.length, planned: chapters.filter((item) => item.scenePlanning === "complete").length, artworkReady: chapters.filter((item) => item.artwork === "complete").length }, manifest };
+  return { settings: story.scenes, artwork: story.artwork, planner: story.pipeline.scenePlanner, scenePlannerRouting, selectedChapter: chapterNumber, chapters: chapters.map((item) => ({ chapter: item.chapter, title: item.originalTitle, durationSeconds: item.durationSeconds, sceneStatus: item.scenePlanning, artworkStatus: item.artwork })), counts: { chapters: chapters.length, planned: chapters.filter((item) => item.scenePlanning === "complete").length, artworkReady: chapters.filter((item) => item.artwork === "complete").length }, manifest };
 }
 
 export function publicProductionManifest(manifest: ProductionManifest, slug: string): ProductionManifest {

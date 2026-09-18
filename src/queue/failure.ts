@@ -7,13 +7,19 @@ export function classifyQueueFailure(error: unknown): ClassifiedFailure {
   const values = errorChain(error); const message = values.map((value) => value.message).find(Boolean) ?? String(error);
   const status = values.map((value) => numeric(value.status ?? value.statusCode)).find((value) => value !== undefined);
   const retryAfterMs = values.map(retryAfter).find((value) => value !== undefined);
-  const provider = providerFrom(message);
+  const provider = values.map((v) => typeof v.provider === "string" ? v.provider : undefined).find(Boolean) ?? providerFrom(message);
   if (values.some((value) => value instanceof QualityGateError) || /quality gate|qa fail|continuity|invalid narration|model response/i.test(message))
     return { category: "content_qa", retryable: false, message, recommendedAction: "Review the chapter output, correct the content, then retry the affected stage.", provider };
-  if (status === 429 || /rate.?limit|too many requests|quota temporarily/i.test(message))
+  if (status === 401 || status === 403 || /authentication|invalid_api_key|unauthorized|forbidden/i.test(message))
+    return { category: "configuration", retryable: false, message, recommendedAction: "Check provider credentials in Studio Settings or .env.", provider };
+  if (status === 429 || /rate.?limit|too many requests|quota temporarily|insufficient_quota/i.test(message))
     return { category: "rate_limit", retryable: true, retryAfterMs, message, recommendedAction: "Wait for the provider cooldown; the chapter will retry automatically.", provider };
-  if (status !== undefined && status >= 500 || /timeout|timed out|network|ECONN|EAI_AGAIN|socket hang up|temporar(?:y|ily) unavailable|fetch failed/i.test(message))
-    return { category: "transient", retryable: true, retryAfterMs, message, recommendedAction: "No action is required unless retries are exhausted.", provider };
+  if ((status === 400 && /schema|structured|json_schema|response_format|strict/i.test(message)) || /structured-output.*rejected|structured output.*failed/i.test(message))
+    return { category: "configuration", retryable: false, message, recommendedAction: "The provider rejected the structured-output request. Inspect model compatibility or retry.", provider };
+  if (/unsupported_capability|does not support required capability/i.test(message))
+    return { category: "configuration", retryable: false, message, recommendedAction: "Choose a model that supports structured output.", provider };
+  if (status !== undefined && status >= 500 || status === 408 || status === 504 || /timeout|timed out|network|ECONN|EAI_AGAIN|socket hang up|temporar(?:y|ily) unavailable|fetch failed/i.test(message))
+    return { category: "transient", retryable: true, retryAfterMs, message, recommendedAction: "Retry the request.", provider };
   if (values.some((value) => value instanceof ConfigurationError) || /api key|credential|invalid model|voice|reference id|ffmpeg.*(?:unavailable|not found)|ffprobe.*(?:unavailable|not found)|whisper.*(?:unavailable|not found)|alignment (?:model|engine|executable)/i.test(message))
     return { category: "configuration", retryable: false, message, recommendedAction: "Fix the story or environment configuration, then resume the job.", provider };
   return { category: "permanent", retryable: false, message, recommendedAction: "Inspect the source and project artifacts before retrying.", provider };

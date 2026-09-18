@@ -79,3 +79,119 @@
 .voice-quality-note { border-top:1px solid var(--line); padding-top:12px; display:grid; gap:4px; }.voice-quality-note b { font-size:10px; }.voice-quality-note span { color:var(--muted); font:9px var(--mono); }.voice-quality-note button,.audio-download { width:max-content; border:0; background:none; color:var(--violet-soft); padding:4px 0; font-size:9px; cursor:pointer; text-decoration:none; }.audio-deck:has(.audio-download) { grid-template-columns:45px 1fr auto; }.audio-download { padding:8px 10px; border:1px solid var(--line-strong); border-radius:6px; }
 @media(max-width:900px){.dashboard-stats{grid-template-columns:repeat(2,1fr)}.manuscript-split.three{grid-template-columns:1fr}.voice-console{grid-template-columns:1fr}.bible-sections article{grid-template-columns:1fr 1fr}.entry-actions{grid-column:1/-1}.alignment-panel{grid-template-columns:1fr 1fr}.subtitle-actions{grid-column:1/-1;grid-template-columns:repeat(3,1fr)}}
 @media(max-width:720px){.main-nav{justify-content:flex-start;overflow-x:auto}.nav-item{min-width:58px}.production-controls{grid-template-columns:1fr}.production-options{grid-column:1}.dashboard-stats{grid-template-columns:1fr 1fr}.dashboard-actions .button{flex:1 1 45%}.bible-tools{width:100%}.output-grid{grid-template-columns:1fr}.output-grid article{grid-template-columns:38px 1fr}.output-grid article>div:last-child{grid-column:2}.editor-sheet{inset:74px 10px 72px;width:auto;overflow:auto}.alignment-panel{grid-template-columns:1fr}.subtitle-actions{grid-template-columns:1fr}.subtitle-editor-head{align-items:flex-start;gap:12px;flex-direction:column}.subtitle-cue-table{overflow:auto}.subtitle-cue-row{min-width:640px}}
+
+.stage-routing-card {
+  border: 1px solid var(--line);
+  background: #15151b;
+  border-radius: 7px;
+  padding: 12px 14px;
+  display: grid;
+  gap: 8px;
+}
+.stage-routing-card.overridden {
+  border-color: rgba(119, 114, 232, .3);
+  background: rgba(119, 114, 232, .04);
+}
+.stage-routing-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+}
+.stage-routing-header > div {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.stage-routing-header b {
+  font-size: 11px;
+}
+.routing-badge {
+  font: 8px var(--mono);
+  text-transform: uppercase;
+  letter-spacing: .06em;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+.routing-badge.inherited {
+  background: rgba(255, 255, 255, .06);
+  color: #9897a2;
+  border: 1px solid var(--line);
+}
+.routing-badge.override {
+  background: rgba(119, 114, 232, .18);
+  color: var(--violet-soft);
+  border: 1px solid rgba(119, 114, 232, .4);
+}
+.inherited-routing-info {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 11px;
+  color: #cbc9d2;
+}
+.text-btn {
+  background: transparent;
+  border-color: var(--line);
+  padding: 4px 8px;
+  font-size: 9px;
+}
+.text-btn:hover {
+  background: #24242c;
+}
+.scene-status-cluster {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+.scene-planner-badge {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid var(--line);
+  background: #141418;
+  border-radius: 7px;
+  padding: 6px 10px;
+  font-size: 10px;
+}
+.scene-preflight-alert {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  border: 1px solid rgba(219, 93, 104, .35);
+  background: rgba(219, 93, 104, .09);
+  border-radius: 8px;
+  padding: 12px 16px;
+  margin-bottom: 16px;
+  gap: 16px;
+}
+.scene-preflight-alert p {
+  margin: 4px 0 0;
+  font-size: 10px;
+  color: #e99aa1;
+}
+.button-retry {
+  background: var(--violet);
+  color: #fff;
+  border: 1px solid var(--violet);
+  border-radius: 5px;
+  padding: 4px 10px;
+  font-size: 9px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.button-retry:hover:not(:disabled) {
+  background: #8580ee;
+}
+.button-retry:disabled {
+  opacity: .5;
+}
+.incident-reason {
+  color: #e1a3a9;
+  font-size: 10px;
+  margin: 4px 0 8px;
+  line-height: 1.4;
+}
+

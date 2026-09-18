@@ -67,6 +67,7 @@ const rawStorySchema = z.object({
     scenePlanner: stageModelConfigSchema,
     tts: ttsStageConfigSchema,
   }),
+  pipelineOverrides: z.record(z.string(), z.boolean()).default({}),
 });
 
 export const storySchema = z.preprocess((value) => {

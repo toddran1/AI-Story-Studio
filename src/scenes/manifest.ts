@@ -29,12 +29,25 @@ export async function planStoredScenes(options: { root: string; story: Story; ch
   const started = Date.now(); chapter.stages.scenePlanning = { status: "running", provider: config.provider, model: config.model, promptVersion: SCENE_PLANNER_PROMPT_VERSION, fingerprint: inputFingerprint, startedAt: new Date().toISOString() }; await persistChapter(paths.chapterMeta, chapter);
   try {
     const result = await withRetry(() => planScenes(options.provider, config, { chapter: options.chapter, title: chapter.translatedTitle ?? chapter.originalTitle, narration, durationSeconds: audioDurationSeconds, bible, settings: options.story.scenes }), retryConfigSchema.parse({}));
-    const scenes = normalizeSceneTiming(result.value.scenes.map((scene) => ({ ...scene, artwork: undefined as never })), audioDurationSeconds, options.story.scenes);
+    const scenes = normalizeSceneTiming(result.value.scenes.map((scene) => ({ ...scene, location: scene.location ?? undefined, artwork: undefined as never })), audioDurationSeconds, options.story.scenes);
     const previousById = new Map(cached?.success ? cached.data.scenes.map((scene) => [scene.id, scene]) : []);
     for (const scene of scenes) { const previous = previousById.get(scene.id); if (previous && sceneContentFingerprint(previous) === sceneContentFingerprint(scene)) scene.artwork = previous.artwork; }
     validateSceneCoverage(scenes, audioDurationSeconds, options.story.scenes); const now = new Date().toISOString(); const manifest = sceneManifestSchema.parse({ version: 1, chapter: options.chapter, durationSeconds: audioDurationSeconds, planningFingerprint: inputFingerprint, planner: { provider: config.provider, model: config.model, promptVersion: SCENE_PLANNER_PROMPT_VERSION }, manualRevision: 0, manuallyEdited: false, createdAt: cached?.success ? cached.data.createdAt : now, updatedAt: now, scenes });
     await atomicWriteJson(paths.scenesManifest, manifest); const outputFingerprint = await fileFingerprint(paths.scenesManifest); chapter.stages.scenePlanning = { ...chapter.stages.scenePlanning, status: "complete", outputFingerprint, completedAt: now, durationMs: Date.now() - started, usage: result.usage }; chapter.scenes = { total: scenes.length, generated: scenes.filter((scene) => scene.artwork.status === "complete").length, approved: scenes.filter((scene) => scene.artwork.review === "approved").length }; chapter.stages.artwork = { status: "pending" }; chapter.stages.video = { status: "pending" }; chapter.video = undefined; await persistChapter(paths.chapterMeta, chapter); return { manifest, reused: false };
-  } catch (error) { chapter.stages.scenePlanning = { ...chapter.stages.scenePlanning, status: "failed", durationMs: Date.now() - started, error: { message: error instanceof Error ? error.message : String(error) } }; await persistChapter(paths.chapterMeta, chapter); throw new SceneError(`Chapter ${options.chapter} scene planning failed: ${chapter.stages.scenePlanning.error?.message}`, { cause: error }); }
+  } catch (error) {
+    const errMessage = error instanceof Error ? error.message : String(error);
+    chapter.stages.scenePlanning = {
+      ...chapter.stages.scenePlanning,
+      status: "failed",
+      durationMs: Date.now() - started,
+      error: {
+        message: errMessage,
+        cause: (error as any)?.code ? `code=${(error as any).code}` : undefined,
+      },
+    };
+    await persistChapter(paths.chapterMeta, chapter);
+    throw new SceneError(`Chapter ${options.chapter} scene planning failed: ${errMessage}`, { cause: error });
+  }
 }
 
 export async function updateStoredSceneManifest(options: { root: string; story: Story; chapter: number; scenes: unknown }) {
