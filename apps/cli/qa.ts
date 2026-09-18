@@ -151,8 +151,15 @@ export async function runQaCommand(command: QaCommand, d: { root: string; operat
         ? { from: command.from, to: command.to }
         : { all: true as const };
     const result = await d.operations.resetQaBatch(command.story, batchOptions);
-    d.stdout(`Reset QA data for ${result.reset} of ${result.requested} chapter(s). Other stages were not changed.\n`);
-    if (result.failed > 0) {
+    if (result.failed === 0) {
+      if (result.reset === 0) {
+        d.stdout(`QA was already clean for all ${result.requested} chapter(s). Other stages were not changed.\n`);
+      } else {
+        const skippedNote = result.alreadyClean > 0 ? ` (${result.alreadyClean} already had no QA data)` : "";
+        d.stdout(`Reset QA data for ${result.reset} of ${result.requested} chapter(s)${skippedNote}. Other stages were not changed.\n`);
+      }
+    } else {
+      d.stdout(`Reset QA data: ${result.reset} reset, ${result.alreadyClean} already clean, ${result.failed} failed (${result.requested} total). Other stages were not changed.\n`);
       d.stdout(`Failures (${result.failed}):\n`);
       for (const fail of result.failures) {
         d.stdout(`  Chapter ${fail.chapter}: ${fail.reason}\n`);

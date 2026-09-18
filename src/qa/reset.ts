@@ -11,9 +11,11 @@ import { withStoryLock } from "../storage/story-lock.js";
 export interface ResetChapterQaResult {
   chapter: number;
   reset: boolean;
+  skipped: boolean;
+  reason?: "no_qa_data" | "already_clean";
   deletedArtifacts: string[];
   previousQaStatus?: string;
-  newQaStatus: "pending";
+  newQaStatus: "pending" | "not_run";
 }
 
 export interface ResetQaBatchOptions {
@@ -26,9 +28,13 @@ export interface ResetQaBatchOptions {
 export interface ResetQaBatchResult {
   requested: number;
   reset: number;
+  alreadyClean: number;
+  skipped: number;
   failed: number;
   failures: Array<{ chapter: number; reason: string }>;
   chapters: number[];
+  resetChapters: number[];
+  skippedChapters: number[];
 }
 
 export const resetQaBatchOptionsSchema = z.union([
@@ -78,6 +84,9 @@ export async function listStoryChapterNumbers(root: string, slug: string): Promi
  * Deletes ONLY QA-owned evaluation data (`qa.json`), resets ONLY `metadata.stages.qa`
  * to canonical `{ status: "pending" }`, and clears `metadata.quality`.
  *
+ * If a chapter exists in the source/story catalog but has no production metadata,
+ * it is treated as already clean (skipped) with zero writes.
+ *
  * NEVER triggers downstream invalidation. Translation, Narration, Story Bible,
  * Continuity, TTS, Audio Mastering, Alignment, Subtitles, Scene Planning,
  * Artwork, and Video remain byte-for-byte and structurally untouched.
@@ -86,23 +95,46 @@ export async function resetChapterQa(
   root: string,
   slug: string,
   chapter: number,
-  options: { skipLock?: boolean } = {},
+  options: { skipLock?: boolean; availableChapters?: number[] } = {},
 ): Promise<ResetChapterQaResult> {
   if (!Number.isSafeInteger(chapter) || chapter < 1) {
     throw new Error("Chapter must be a positive integer");
   }
 
   const execute = async (): Promise<ResetChapterQaResult> => {
-    const paths = storyPaths(root, slug, chapter);
-    const chapterRaw = await readJsonIfExists<Chapter>(paths.chapterMeta);
-    if (!chapterRaw) {
-      throw new Error(`Chapter ${chapter} has no production metadata`);
+    const availableChapters = options.availableChapters ?? (await listStoryChapterNumbers(root, slug));
+    if (!availableChapters.includes(chapter)) {
+      throw new Error(`Chapter ${chapter} does not exist in story '${slug}'`);
     }
 
-    const metadata = chapterSchema.parse(chapterRaw);
+    const paths = storyPaths(root, slug, chapter);
+    const chapterRaw = await readJsonIfExists<Chapter>(paths.chapterMeta);
     const qaRaw = await readJsonIfExists(paths.qa);
     const qaFileExists = Boolean(qaRaw) || (await exists(paths.qa));
 
+    if (!chapterRaw) {
+      if (!qaFileExists) {
+        return {
+          chapter,
+          reset: false,
+          skipped: true,
+          reason: "no_qa_data",
+          deletedArtifacts: [],
+          newQaStatus: "not_run",
+        };
+      }
+
+      await rm(paths.qa, { force: true });
+      return {
+        chapter,
+        reset: true,
+        skipped: false,
+        deletedArtifacts: ["qa.json"],
+        newQaStatus: "not_run",
+      };
+    }
+
+    const metadata = chapterSchema.parse(chapterRaw);
     const previousQaStatus = metadata.stages.qa?.status ?? (qaFileExists ? "complete" : undefined);
     const isAlreadyClean = !qaFileExists && metadata.stages.qa?.status === "pending" && !metadata.quality;
 
@@ -110,6 +142,8 @@ export async function resetChapterQa(
       return {
         chapter,
         reset: false,
+        skipped: true,
+        reason: "already_clean",
         deletedArtifacts: [],
         previousQaStatus: "pending",
         newQaStatus: "pending",
@@ -143,6 +177,7 @@ export async function resetChapterQa(
     return {
       chapter,
       reset: true,
+      skipped: false,
       deletedArtifacts: qaFileExists ? ["qa.json"] : [],
       previousQaStatus,
       newQaStatus: "pending",
@@ -174,38 +209,39 @@ export async function resetChapterQaBatch(
   } else if ("from" in parsed && "to" in parsed) {
     targetChapters = availableChapters.filter((ch) => ch >= parsed.from && ch <= parsed.to);
   } else if ("chapters" in parsed && parsed.chapters) {
-    const requested = new Set(parsed.chapters);
-    targetChapters = availableChapters.filter((ch) => requested.has(ch));
-    // If requested chapters were not in availableChapters, include them so error is reported accurately per chapter
-    for (const ch of parsed.chapters) {
-      if (!targetChapters.includes(ch)) {
-        targetChapters.push(ch);
-      }
-    }
-    targetChapters.sort((a, b) => a - b);
+    targetChapters = [...new Set(parsed.chapters)].sort((a, b) => a - b);
   }
 
   if (!targetChapters.length) {
     return {
       requested: 0,
       reset: 0,
+      alreadyClean: 0,
+      skipped: 0,
       failed: 0,
       failures: [],
       chapters: [],
+      resetChapters: [],
+      skippedChapters: [],
     };
   }
 
   return withStoryLock(root, slug, `reset QA batch (${targetChapters.length} chapters)`, async () => {
     let resetCount = 0;
+    let alreadyCleanCount = 0;
     const failures: Array<{ chapter: number; reason: string }> = [];
-    const successfulChapters: number[] = [];
+    const resetChapters: number[] = [];
+    const skippedChapters: number[] = [];
 
     for (const chapter of targetChapters) {
       try {
-        const result = await resetChapterQa(root, slug, chapter, { skipLock: true });
+        const result = await resetChapterQa(root, slug, chapter, { skipLock: true, availableChapters });
         if (result.reset) {
           resetCount++;
-          successfulChapters.push(chapter);
+          resetChapters.push(chapter);
+        } else {
+          alreadyCleanCount++;
+          skippedChapters.push(chapter);
         }
       } catch (err) {
         failures.push({
@@ -218,9 +254,13 @@ export async function resetChapterQaBatch(
     return {
       requested: targetChapters.length,
       reset: resetCount,
+      alreadyClean: alreadyCleanCount,
+      skipped: alreadyCleanCount,
       failed: failures.length,
       failures,
-      chapters: successfulChapters,
+      chapters: resetChapters,
+      resetChapters,
+      skippedChapters,
     };
   });
 }

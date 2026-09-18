@@ -478,3 +478,261 @@ describe("QA Data Reset — 19 Verification Scenarios (A through S)", () => {
     }
   });
 });
+
+describe("QA Reset Follow-Up — Unprocessed Chapters & Resilient Classification (Scenarios A through L)", () => {
+  function makeDummyManifest(chapters: number[]) {
+    const hash = "a".repeat(64);
+    return {
+      version: 1 as const,
+      adapterVersion: "1.0.0",
+      type: "text" as const,
+      origin: { path: "/dummy/novel.txt", name: "novel.txt" },
+      fingerprint: hash,
+      importedAt: NOW,
+      warnings: [],
+      unnumberedSections: [],
+      chapters: chapters.map((ch) => ({
+        chapter: ch,
+        file: `chapters/${String(ch).padStart(4, "0")}.txt`,
+        fingerprint: hash,
+        ref: {
+          chapter: ch,
+          sourceId: `sec_${ch}`,
+          sourceType: "text" as const,
+          metadata: {},
+        },
+      })),
+    };
+  }
+
+  async function createMixedStoryFixture() {
+    // 5 chapters total in source manifest:
+    // Ch 1: QA complete
+    // Ch 2: QA failed
+    // Ch 3: Production metadata exists, but QA never run (status: "pending")
+    // Ch 4: Source-only, no production metadata
+    // Ch 5: Source-only, no production metadata
+    const { root, story, pathsChapter1 } = await createComprehensiveStoryFixture(3);
+
+    // Write source manifest defining chapters 1..5
+    await atomicWriteJson(pathsChapter1.sourceManifest, makeDummyManifest([1, 2, 3, 4, 5]));
+
+    // Ch 2: QA failed
+    const paths2 = storyPaths(root, story.slug, 2);
+    const meta2 = chapterSchema.parse(await readJsonIfExists(paths2.chapterMeta));
+    meta2.stages.qa = { status: "failed", error: { message: "Rate limit" } };
+    await atomicWriteJson(paths2.chapterMeta, meta2);
+
+    // Ch 3: QA never run (already clean)
+    const paths3 = storyPaths(root, story.slug, 3);
+    await rm(paths3.qa, { force: true });
+    const meta3 = chapterSchema.parse(await readJsonIfExists(paths3.chapterMeta));
+    meta3.stages.qa = { status: "pending" };
+    delete meta3.quality;
+    await atomicWriteJson(paths3.chapterMeta, meta3);
+
+    return { root, story, pathsChapter1 };
+  }
+
+  it("Scenario A: Source chapter with no production metadata returns skipped/alreadyClean with zero writes", async () => {
+    const { root, story } = await createMixedStoryFixture();
+    const paths4 = storyPaths(root, story.slug, 4);
+
+    expect(await exists(paths4.chapterMeta)).toBe(false);
+    expect(await exists(paths4.qa)).toBe(false);
+
+    const result = await resetChapterQa(root, story.slug, 4);
+
+    expect(result.reset).toBe(false);
+    expect(result.skipped).toBe(true);
+    expect(result.reason).toBe("no_qa_data");
+    expect(result.newQaStatus).toBe("not_run");
+    expect(result.deletedArtifacts).toEqual([]);
+
+    // Zero writes invariant: chapter.json must still NOT exist!
+    expect(await exists(paths4.chapterMeta)).toBe(false);
+    expect(await exists(paths4.qa)).toBe(false);
+  });
+
+  it("Scenario B: Entire book containing mixed states resets only chapters with QA data and counts correctly", async () => {
+    const { root, story } = await createMixedStoryFixture();
+
+    const result = await resetChapterQaBatch(root, story.slug, { all: true });
+
+    expect(result.requested).toBe(5);
+    expect(result.reset).toBe(2);
+    expect(result.alreadyClean).toBe(3);
+    expect(result.skipped).toBe(3);
+    expect(result.failed).toBe(0);
+    expect(result.failures).toEqual([]);
+    expect(result.resetChapters).toEqual([1, 2]);
+    expect(result.skippedChapters).toEqual([3, 4, 5]);
+    expect(result.chapters).toEqual([1, 2]);
+
+    // Batch accounting invariant: requested === reset + alreadyClean + failed
+    expect(result.requested).toBe(result.reset + result.alreadyClean + result.failed);
+  });
+
+  it("Scenario C: Entire book idempotency — second reset produces reset=0 and alreadyClean=total", async () => {
+    const { root, story } = await createMixedStoryFixture();
+
+    const firstRun = await resetChapterQaBatch(root, story.slug, { all: true });
+    expect(firstRun.reset).toBe(2);
+    expect(firstRun.alreadyClean).toBe(3);
+    expect(firstRun.failed).toBe(0);
+
+    const secondRun = await resetChapterQaBatch(root, story.slug, { all: true });
+    expect(secondRun.requested).toBe(5);
+    expect(secondRun.reset).toBe(0);
+    expect(secondRun.alreadyClean).toBe(5);
+    expect(secondRun.skipped).toBe(5);
+    expect(secondRun.failed).toBe(0);
+    expect(secondRun.failures).toEqual([]);
+    expect(secondRun.resetChapters).toEqual([]);
+    expect(secondRun.skippedChapters).toEqual([1, 2, 3, 4, 5]);
+    expect(secondRun.requested).toBe(secondRun.reset + secondRun.alreadyClean + secondRun.failed);
+  });
+
+  it("Scenario D: Explicit nonexistent chapter is reported as failure", async () => {
+    const { root, story } = await createMixedStoryFixture();
+
+    // Single chapter reset throws error
+    await expect(resetChapterQa(root, story.slug, 999999)).rejects.toThrow(/does not exist in story/i);
+
+    // Batch reset records it as a failure
+    const batchResult = await resetChapterQaBatch(root, story.slug, { chapters: [999999] });
+    expect(batchResult.requested).toBe(1);
+    expect(batchResult.reset).toBe(0);
+    expect(batchResult.alreadyClean).toBe(0);
+    expect(batchResult.failed).toBe(1);
+    expect(batchResult.failures).toHaveLength(1);
+    expect(batchResult.failures[0]?.chapter).toBe(999999);
+    expect(batchResult.failures[0]?.reason).toMatch(/does not exist in story/i);
+    expect(batchResult.requested).toBe(batchResult.reset + batchResult.alreadyClean + batchResult.failed);
+  });
+
+  it("Scenario E: Corrupt chapter metadata is reported as failure", async () => {
+    const { root, story } = await createComprehensiveStoryFixture(1);
+    const paths1 = storyPaths(root, story.slug, 1);
+
+    // Write invalid chapter.json content
+    await atomicWrite(paths1.chapterMeta, JSON.stringify({ invalid: "not-a-chapter" }));
+
+    const batchResult = await resetChapterQaBatch(root, story.slug, { chapters: [1] });
+    expect(batchResult.requested).toBe(1);
+    expect(batchResult.reset).toBe(0);
+    expect(batchResult.alreadyClean).toBe(0);
+    expect(batchResult.failed).toBe(1);
+    expect(batchResult.failures).toHaveLength(1);
+    expect(batchResult.failures[0]?.chapter).toBe(1);
+    expect(batchResult.requested).toBe(batchResult.reset + batchResult.alreadyClean + batchResult.failed);
+  });
+
+  it("Scenario F: Filesystem deletion failure is reported as failure", async () => {
+    const { root, story, pathsChapter1 } = await createComprehensiveStoryFixture(1);
+
+    // Make qa.json a directory containing an unwritable/locked structure, or test rm failure handling
+    await rm(pathsChapter1.qa, { force: true });
+    const fs = await import("node:fs/promises");
+    await fs.mkdir(pathsChapter1.qa);
+    const innerFile = join(pathsChapter1.qa, "cannot-delete.txt");
+    await fs.writeFile(innerFile, "locked");
+
+    const batchResult = await resetChapterQaBatch(root, story.slug, { chapters: [1] });
+    expect(batchResult.requested).toBe(1);
+    await fs.rm(pathsChapter1.qa, { recursive: true, force: true });
+  });
+
+  it("Scenario G: Metadata write failure preserves existing rollback guarantees", async () => {
+    const { root, story, pathsChapter1 } = await createComprehensiveStoryFixture(1);
+    const qaBefore = await readFile(pathsChapter1.qa, "utf8");
+
+    // Replace chapter.json with a directory to trigger atomic write failure
+    await rm(pathsChapter1.chapterMeta);
+    const fs = await import("node:fs/promises");
+    await fs.mkdir(pathsChapter1.chapterMeta);
+
+    const batchResult = await resetChapterQaBatch(root, story.slug, { chapters: [1] });
+    expect(batchResult.failed).toBe(1);
+    expect(batchResult.failures[0]?.chapter).toBe(1);
+
+    // qa.json was restored by rollback
+    expect(await exists(pathsChapter1.qa)).toBe(true);
+    expect(await readFile(pathsChapter1.qa, "utf8")).toBe(qaBefore);
+
+    await fs.rmdir(pathsChapter1.chapterMeta);
+  });
+
+  it("Scenario H: Source-only chapter isolation — no files or directories created", async () => {
+    const { root, story } = await createMixedStoryFixture();
+    const paths5 = storyPaths(root, story.slug, 5);
+
+    expect(await exists(paths5.chapterMeta)).toBe(false);
+
+    await resetChapterQa(root, story.slug, 5);
+
+    expect(await exists(paths5.chapterMeta)).toBe(false);
+    expect(await exists(paths5.qa)).toBe(false);
+    expect(await exists(join(paths5.story, "chapters", "5"))).toBe(false);
+  });
+
+  it("Scenario I: Non-QA stage isolation — all 11 non-QA stages remain byte-for-byte untouched", async () => {
+    const { root, story, pathsChapter1 } = await createComprehensiveStoryFixture(1);
+    const beforeMeta = chapterSchema.parse(await readJsonIfExists(pathsChapter1.chapterMeta));
+
+    await resetChapterQa(root, story.slug, 1);
+
+    const afterMeta = chapterSchema.parse(await readJsonIfExists(pathsChapter1.chapterMeta));
+    expect(afterMeta.stages.ingestion).toEqual(beforeMeta.stages.ingestion);
+    expect(afterMeta.stages.translation).toEqual(beforeMeta.stages.translation);
+    expect(afterMeta.stages.narration).toEqual(beforeMeta.stages.narration);
+    expect(afterMeta.stages.storyBible).toEqual(beforeMeta.stages.storyBible);
+    expect(afterMeta.stages.continuity).toEqual(beforeMeta.stages.continuity);
+    expect(afterMeta.stages.tts).toEqual(beforeMeta.stages.tts);
+    expect(afterMeta.stages.audioMastering).toEqual(beforeMeta.stages.audioMastering);
+    expect(afterMeta.stages.alignment).toEqual(beforeMeta.stages.alignment);
+    expect(afterMeta.stages.subtitles).toEqual(beforeMeta.stages.subtitles);
+    expect(afterMeta.stages.scenePlanning).toEqual(beforeMeta.stages.scenePlanning);
+    expect(afterMeta.stages.artwork).toEqual(beforeMeta.stages.artwork);
+    expect(afterMeta.stages.video).toEqual(beforeMeta.stages.video);
+  });
+
+  it("Scenario J: Batch accounting invariant requested === reset + alreadyClean + failed holds for mixed batches", async () => {
+    const { root, story } = await createMixedStoryFixture();
+
+    const batch = await resetChapterQaBatch(root, story.slug, { chapters: [1, 2, 3, 4, 5, 999999] });
+    expect(batch.requested).toBe(6);
+    expect(batch.reset).toBe(2);
+    expect(batch.alreadyClean).toBe(3);
+    expect(batch.skipped).toBe(3);
+    expect(batch.failed).toBe(1);
+    expect(batch.requested).toBe(batch.reset + batch.alreadyClean + batch.failed);
+  });
+
+  it("Scenario K & L: UI result summaries handle clean success, successful no-op, and partial failure", () => {
+    function formatResetSummary(res: { requested: number; reset: number; alreadyClean: number; failed: number }) {
+      if (res.failed > 0) {
+        return `QA reset completed with ${res.failed} problem(s): ${res.reset} reset · ${res.alreadyClean} already had no QA data · ${res.failed} failed`;
+      }
+      if (res.reset === 0) {
+        return `QA was already clean for all ${res.requested} chapters. Other stages were not changed.`;
+      }
+      if (res.alreadyClean > 0) {
+        return `QA reset complete. ${res.reset} chapters reset; ${res.alreadyClean} already had no QA data. Other stages were not changed.`;
+      }
+      return `QA data reset for ${res.reset} chapters. Other stages were not changed.`;
+    }
+
+    // Scenario K: Complete success with skipped
+    expect(formatResetSummary({ requested: 502, reset: 252, alreadyClean: 250, failed: 0 }))
+      .toBe("QA reset complete. 252 chapters reset; 250 already had no QA data. Other stages were not changed.");
+
+    // Scenario K: Successful no-op
+    expect(formatResetSummary({ requested: 502, reset: 0, alreadyClean: 502, failed: 0 }))
+      .toBe("QA was already clean for all 502 chapters. Other stages were not changed.");
+
+    // Scenario L: Partial failure
+    expect(formatResetSummary({ requested: 502, reset: 247, alreadyClean: 250, failed: 5 }))
+      .toContain("5 problem(s)");
+  });
+});

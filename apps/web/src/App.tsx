@@ -299,6 +299,7 @@ function ResetQaDialog({ slug, defaultChapter, onClose, onDone }: { slug: string
   const [typedConfirmation, setTypedConfirmation] = useState("");
   const [working, setWorking] = useState(false);
   const [error, setError] = useState("");
+  const [batchResult, setBatchResult] = useState<{ requested: number; reset: number; alreadyClean: number; failed: number; failures: Array<{ chapter: number; reason: string }> } | undefined>();
 
   useEffect(() => {
     api<{ total: number }>(`/stories/${slug}/chapters?pageSize=1`).then((res) => {
@@ -326,19 +327,28 @@ function ResetQaDialog({ slug, defaultChapter, onClose, onDone }: { slug: string
     try {
       setWorking(true);
       setError("");
+      setBatchResult(undefined);
       if (scope === "chapter") {
         const ch = Number(targetChapter);
-        const res = await del<{ reset: boolean }>(`/stories/${slug}/chapters/${ch}/qa`);
+        const res = await del<{ reset: boolean; skipped?: boolean }>(`/stories/${slug}/chapters/${ch}/qa`);
         onDone(res.reset ? `QA data reset for Chapter ${ch}. Other stages were not changed.` : `Chapter ${ch} already had no QA data.`);
       } else {
         const body = scope === "all" ? { all: true } : { from: Number(fromChapter), to: Number(toChapter) };
-        const res = await post<{ requested: number; reset: number; failed: number; failures: Array<{ chapter: number; reason: string }> }>(`/stories/${slug}/qa/reset`, body);
+        const res = await post<{ requested: number; reset: number; alreadyClean: number; skipped: number; failed: number; failures: Array<{ chapter: number; reason: string }> }>(`/stories/${slug}/qa/reset`, body);
         if (res.failed > 0) {
-          setError(`Reset completed with ${res.failed} failure(s): ${res.failures.map((f) => `Ch ${f.chapter}: ${f.reason}`).join("; ")}`);
+          setBatchResult(res);
           setWorking(false);
           return;
         }
-        onDone(`QA data reset for ${res.reset} chapter${res.reset === 1 ? "" : "s"}. Other stages were not changed.`);
+        let summary = "";
+        if (res.reset === 0) {
+          summary = `QA was already clean for all ${res.requested} chapters. Other stages were not changed.`;
+        } else if (res.alreadyClean > 0) {
+          summary = `QA reset complete. ${res.reset} chapters reset; ${res.alreadyClean} already had no QA data. Other stages were not changed.`;
+        } else {
+          summary = `QA data reset for ${res.reset} chapter${res.reset === 1 ? "" : "s"}. Other stages were not changed.`;
+        }
+        onDone(summary);
       }
     } catch (err) {
       setWorking(false);
@@ -362,6 +372,22 @@ function ResetQaDialog({ slug, defaultChapter, onClose, onDone }: { slug: string
           The next QA run will evaluate these chapters from a clean QA state.
         </p>
         {error && <ErrorBox text={error} />}
+        {batchResult && (
+          <div className="naming-notice" style={{ borderLeft: "4px solid var(--color-danger, #d32f2f)", marginBottom: "16px" }}>
+            <b>QA reset completed with {batchResult.failed} problem{batchResult.failed === 1 ? "" : "s"}</b>
+            <p style={{ margin: "4px 0" }}>
+              {batchResult.reset} chapter{batchResult.reset === 1 ? "" : "s"} reset · {batchResult.alreadyClean} already had no QA data · {batchResult.failed} failed
+            </p>
+            <details style={{ marginTop: "8px" }}>
+              <summary style={{ cursor: "pointer" }}>Show {batchResult.failed} failure{batchResult.failed === 1 ? "" : "s"}</summary>
+              <ul style={{ maxHeight: "160px", overflowY: "auto", margin: "8px 0 0", paddingLeft: "20px" }}>
+                {batchResult.failures.map((f) => (
+                  <li key={f.chapter}>Chapter {f.chapter} — {f.reason}</li>
+                ))}
+              </ul>
+            </details>
+          </div>
+        )}
         <div className="stage-choices">
           {defaultChapter && (
             <label>
@@ -2226,7 +2252,7 @@ export function QaDetail({ slug, chapter, onJob, onEditManually, onChanged }: { 
     </div>
     {resolvedFindings.length > 0 && <QaResolvedFindings findings={resolvedFindings} busy={busy} expanded={expanded} currentFingerprint={data.currentFingerprint} onToggle={toggleExpanded} onReopen={(finding) => void reopen(finding)} />}
     {dismissTarget && <DismissFindingDialog slug={slug} chapter={chapter} finding={dismissTarget} busy={Boolean(busy)} onClose={() => setDismissTarget(undefined)} onDone={async (remembered) => { setDismissTarget(undefined); setNote(remembered ? "Finding dismissed and remembered as a story-level exception." : "Finding dismissed. A future recheck will respect this decision."); await load(); onChanged(); }} onError={(value) => { setDismissTarget(undefined); setError(value); }} />}
-    {resetOpen && <ResetQaDialog slug={slug} defaultChapter={chapter} onClose={() => setResetOpen(false)} onDone={async () => { setResetOpen(false); setData(undefined); setError(""); try { await load(); } catch (err) { setError(message(err)); } onChanged(); }} />}
+    {resetOpen && <ResetQaDialog slug={slug} defaultChapter={chapter} onClose={() => setResetOpen(false)} onDone={async (msg) => { setResetOpen(false); if (msg) setNote(msg); setData(undefined); setError(""); try { await load(); } catch (err) { setError(message(err)); } onChanged(); }} />}
   </div>;
 }
 
