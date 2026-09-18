@@ -111,7 +111,6 @@ export async function deleteControlledVisualReferenceFiles(
   slug: string,
   entityId: string,
   refId: string
-): Promise<{ deletedCount: number; wasMissing: boolean }> {
 ): Promise<ControlledDeletionResult> {
   let deletedCount = 0;
   const errors: VisualReferenceCleanupError[] = [];
@@ -120,8 +119,6 @@ export async function deleteControlledVisualReferenceFiles(
     const candidate = visualProfileRefPath(root, slug, entityId, refId, ext);
     let candidateExists = false;
     try {
-      const candidate = visualProfileRefPath(root, slug, entityId, refId, ext);
-      if (await exists(candidate)) {
       candidateExists = await exists(candidate);
     } catch {
       // Ignored for existence check
@@ -140,14 +137,11 @@ export async function deleteControlledVisualReferenceFiles(
           });
         }
       }
-    } catch {
-      // Ignored for individual candidates; non-critical
     }
   }
 
   return {
     deletedCount,
-    wasMissing: deletedCount === 0,
     wasMissing: deletedCount === 0 && errors.length === 0,
     errors,
   };

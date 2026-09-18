@@ -128,7 +128,6 @@ export async function deleteVisualReferenceImage(
   slug: string,
   entityId: string,
   refId: string,
-): Promise<{ profile: VisualEntityProfile; deleted: boolean }> {
 ): Promise<{ profile: VisualEntityProfile; deleted: boolean; cleanupWarnings?: string[] }> {
   canonicalEntitySchema.shape.id.parse(entityId);
   if (!/^[a-zA-Z0-9_-]+$/.test(refId)) throw new Error("Invalid reference image ID");
@@ -147,10 +146,8 @@ export async function deleteVisualReferenceImage(
   await saveVisualProfiles(root, slug, profiles);
 
   // Safely remove file on disk strictly using controlled paths - NEVER arbitrary imagePath
-  await deleteControlledVisualReferenceFiles(root, slug, entityId, refId);
   const cleanupResult = await deleteControlledVisualReferenceFiles(root, slug, entityId, refId);
 
-  return { profile, deleted: true };
   const cleanupWarnings = cleanupResult.errors.length > 0
     ? cleanupResult.errors.map(
         (e) => `Failed to delete physical reference file for format '${e.extension}': ${e.message}`
@@ -552,9 +549,6 @@ export async function finalizeVisualCanonMerge(
       await rm(srcDir, { recursive: true, force: true });
       cleanedDirs.push(srcDir);
     } catch (err: any) {
-      const msg = `Failed to clean up source directory '${srcDir}': ${err?.message ?? String(err)}`;
-      errors.push(msg);
-      console.warn(`[VisualCanon] ${msg}`);
       if (err?.code !== "ENOENT") {
         const msg = `Failed to clean up source directory '${srcDir}': ${err?.message ?? String(err)}`;
         errors.push(msg);
@@ -582,7 +576,6 @@ export async function handleEntityMerge(
   await finalizeVisualCanonMerge(prepared);
 }
 
-export async function handleEntityDemote(root: string, slug: string, entityId: string): Promise<void> {
 export interface PreparedVisualCanonDemote {
   entityId: string;
   hadProfile: boolean;
@@ -597,12 +590,6 @@ export async function prepareVisualCanonDemote(
 ): Promise<PreparedVisualCanonDemote> {
   canonicalEntitySchema.shape.id.parse(entityId);
   const profiles = await loadVisualProfiles(root, slug);
-  if (profiles[entityId]) {
-    profiles[entityId] = {
-      ...profiles[entityId]!,
-      status: "draft",
-      notes: `${profiles[entityId]!.notes}\n[Archived from demoted entity]`.trim(),
-      updatedAt: new Date().toISOString(),
   const existing = profiles[entityId];
   if (!existing) {
     return {

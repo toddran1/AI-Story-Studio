@@ -14,7 +14,6 @@ import { Environment } from "../../src/config/env.js";
 import { defaultStory, loadStory } from "../../src/config/load-config.js";
 import { Story, storySchema } from "../../src/domain/story.js";
 import { createPipelineRuntime } from "../../src/pipeline/create-pipeline.js";
-import { ConfigurationError } from "../../src/pipeline/errors.js";
 import { ConfigurationError, ReconciliationError } from "../../src/pipeline/errors.js";
 import { applyPreviewProfile } from "../../src/preview/profile.js";
 import { PreviewRunner } from "../../src/preview/preview-runner.js";
@@ -84,7 +83,6 @@ import { AlignmentEngine } from "../../src/alignment/types.js";
 import { alignStoredChapter } from "../../src/alignment/chapter-alignment.js";
 import { discardManualSubtitles, saveManualSubtitles } from "../../src/subtitles/chapter-subtitles.js";
 import { backfillCanonicalSnapshots, mergeCanonicalEntities, undoCanonicalMerge, updateCanonicalEntity } from "../../src/story-bible/canonical.js";
-import { analyzeStoryBible, applyCleanupRecommendations, demoteCanonicalEntity, promoteMinorReference, updateMinorReference } from "../../src/story-bible/granularity.js";
 import { analyzeStoryBible, applyCleanupRecommendations, demoteCanonicalEntity, promoteMinorReference, restorePreDemoteStoryBible, snapshotPreDemoteStoryBible, updateMinorReference } from "../../src/story-bible/granularity.js";
 import { continuityFindingSchema, resolveContinuityFinding } from "../../src/story-bible/continuity.js";
 import { PostgresUsageRepository } from "../../src/cost/repository.js";
@@ -769,8 +767,6 @@ export class StudioOperations {
     }
     await finalizeVisualCanonMerge(prepared);
     return result;
-    const cleanup = await finalizeVisualCanonMerge(prepared);
-    return { ...result, cleanup };
   }
 
   async mergeCanonicalEntities(slug: string, raw: unknown) {
@@ -838,7 +834,6 @@ export class StudioOperations {
     const snapshot = await snapshotPreDemoteStoryBible(this.root, slug);
 
     const result = await demoteCanonicalEntity(this.root, slug, id, input);
-    await handleEntityDemote(this.root, slug, id);
 
     try {
       await commitVisualCanonDemote(this.root, slug, preparedVisual);
