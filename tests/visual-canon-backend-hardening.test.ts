@@ -22,6 +22,7 @@ import * as profilesModule from "../src/visual-canon/profiles.js";
 import * as canonicalModule from "../src/story-bible/canonical.js";
 import * as granularityModule from "../src/story-bible/granularity.js";
 import { ReconciliationError } from "../src/pipeline/errors.js";
+import { ReconciliationError, StorageError } from "../src/pipeline/errors.js";
 import { readActivity } from "../src/studio/projects.js";
 import {
   normalizeVisualReferenceExtension,
@@ -975,43 +976,78 @@ describe("Milestone 21: Visual Canon Backend Consistency & Asset Safety Hardenin
 
   // Scenario T2: Cleanup failure after metadata save failure preserves primary metadata error
   it("Scenario T2: cleanup failure after metadata save failure preserves primary metadata error", async () => {
+  // Scenario T2: Cleanup failure after metadata save failure preserves primary metadata error and logs observable warning
+  it("Scenario T2: cleanup failure after metadata save failure preserves primary metadata error and logs observable warning", async () => {
     await updateVisualProfile(tempDir, slug, idTarget, { appearance: "Target" });
+    const { reference: existingRef } = await addVisualReferenceImage(tempDir, slug, idTarget, {
+      data: DUMMY_PNG,
+      role: "front",
+      ext: "png",
+    });
+    expect(await exists(existingRef.imagePath)).toBe(true);
 
     const storyDir = join(tempDir, "stories", slug);
     // Make story directory read-only so saving metadata fails
+    // Make story directory read-only so saving metadata fails, but entityDir is writable
     await chmod(storyDir, 0o555);
+
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
 
     try {
       const err = await addVisualReferenceImage(tempDir, slug, idTarget, {
         data: DUMMY_PNG,
         role: "expression_sheet",
         ext: "png",
+        _cleanupFile: async (filePath) => {
+          throw new Error(`Simulated disk failure unlinking ${filePath}`);
+        },
       }).catch((e) => e);
 
       // Primary error is preserved
       expect(err).toBeInstanceOf(Error);
       expect((err as NodeJS.ErrnoException).code).toBe("EACCES");
+      // Primary metadata error is preserved
+      expect(err).toBeInstanceOf(StorageError);
+      expect((err as StorageError).cause).toBeDefined();
+      expect(((err as StorageError).cause as NodeJS.ErrnoException).code).toBe("EACCES");
+
+      // Observable warning was logged with file path and error details
+      expect(warnSpy).toHaveBeenCalledTimes(1);
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining("[VisualCanon] Failed to clean up orphan reference file")
+      );
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining("Simulated disk failure unlinking")
+      );
     } finally {
+      warnSpy.mockRestore();
       await chmod(storyDir, 0o777);
     }
   });
 
   // Scenario U: Style Sheet format matches provider output contract and MIME mapping
   it("Scenario U: Style Sheet format matches provider output contract and MIME mapping", async () => {
+  // Scenario U: Style Sheet format adheres to PNG-only ImageProvider contract
+  it("Scenario U: Style Sheet format adheres to PNG-only ImageProvider contract", async () => {
     await updateVisualProfile(tempDir, slug, idTarget, { appearance: "Target Character" });
 
     const jpegProvider: ImageProvider = {
       name: "jpeg-provider",
+    const pngProvider: ImageProvider = {
+      name: "png-provider",
       version: "1.0",
       validateConfiguration: async () => {},
       generate: async () => ({
         data: DUMMY_PNG,
         mimeType: "image/jpeg" as any,
+        mimeType: "image/png",
       }),
     };
 
     const result = await generateStyleSheet(tempDir, slug, idTarget, jpegProvider, story);
     expect(result.reference.imagePath.endsWith(".jpg")).toBe(true);
+    const result = await generateStyleSheet(tempDir, slug, idTarget, pngProvider, story);
+    expect(result.reference.imagePath.endsWith(".png")).toBe(true);
     expect(result.reference.role).toBe("expression_sheet");
 
     expect(visualReferenceExtensionForMime("image/png")).toBe("png");
@@ -1044,6 +1080,44 @@ describe("Milestone 21: Visual Canon Backend Consistency & Asset Safety Hardenin
 
   // Scenario W: ENOENT cleanup remains benign while real filesystem inspection/removal errors remain observable
   it("Scenario W: ENOENT cleanup remains benign while real filesystem inspection/removal errors remain observable", async () => {
+  // Scenario W1: Missing Visual Profiles returns empty record
+  it("Scenario W1: missing Visual Profiles returns empty record", async () => {
+    const profiles = await loadVisualProfiles(tempDir, slug);
+    expect(profiles).toEqual({});
+  });
+
+  // Scenario W2: Valid Visual Profiles loads correctly
+  it("Scenario W2: valid Visual Profiles loads correctly", async () => {
+    await updateVisualProfile(tempDir, slug, idTarget, { appearance: "Valid Entity" });
+    const profiles = await loadVisualProfiles(tempDir, slug);
+    expect(profiles[idTarget]?.appearance).toBe("Valid Entity");
+  });
+
+  // Scenario W3: Invalid persisted Visual Profiles throws actionable error and does not overwrite
+  it("Scenario W3: invalid persisted Visual Profiles throws actionable error and does not overwrite", async () => {
+    const profilesPath = storyPaths(tempDir, slug, 1).visualProfiles;
+    const corruptedContent = JSON.stringify({ [idTarget]: { corrupted: true, invalidStructure: 123 } });
+    await writeFile(profilesPath, corruptedContent, "utf8");
+
+    await expect(loadVisualProfiles(tempDir, slug)).rejects.toThrow(
+      `Saved Visual Profiles for story '${slug}' are invalid and could not be loaded`
+    );
+
+    // Corrupted file on disk must remain untouched
+    const fileOnDisk = await readFile(profilesPath, "utf8");
+    expect(fileOnDisk).toBe(corruptedContent);
+
+    // Mutating operation must reject and not overwrite corrupted file
+    await expect(
+      updateVisualProfile(tempDir, slug, idTarget, { appearance: "Attempted Overwrite" })
+    ).rejects.toThrow(`Saved Visual Profiles for story '${slug}' are invalid and could not be loaded`);
+
+    const fileAfterAttempt = await readFile(profilesPath, "utf8");
+    expect(fileAfterAttempt).toBe(corruptedContent);
+  });
+
+  // Scenario X: ENOENT cleanup remains benign while real filesystem inspection/removal errors remain observable
+  it("Scenario X: ENOENT cleanup remains benign while real filesystem inspection/removal errors remain observable", async () => {
     const missingResult = await deleteControlledVisualReferenceFiles(tempDir, slug, idTarget, "ref_nonexistent");
     expect(missingResult.wasMissing).toBe(true);
     expect(missingResult.deletedCount).toBe(0);

@@ -37,6 +37,12 @@ export async function loadVisualProfiles(root: string, slug: string): Promise<Re
   if (!raw) return {};
   const parsed = visualProfilesFileSchema.safeParse(raw);
   return parsed.success ? parsed.data : {};
+  if (!parsed.success) {
+    throw new Error(
+      `Saved Visual Profiles for story '${slug}' are invalid and could not be loaded: ${parsed.error.message}`
+    );
+  }
+  return parsed.data;
 }
 
 export async function saveVisualProfiles(
@@ -176,6 +182,7 @@ export async function addVisualReferenceImage(
     source?: VisualReferenceSource;
     approved?: boolean;
     provenance?: Record<string, unknown>;
+    _cleanupFile?: (filePath: string) => Promise<void>;
   },
 ): Promise<{ profile: VisualEntityProfile; reference: VisualReferenceImage }> {
   await requireCanonicalStoryBibleEntity(root, slug, entityId);
@@ -220,6 +227,11 @@ export async function addVisualReferenceImage(
       await rm(filePath, { force: true });
     } catch {
       // Best-effort cleanup of orphan file must not mask primary persistence error
+      const remove = options._cleanupFile ?? ((target: string) => rm(target, { force: true }));
+      await remove(filePath);
+    } catch (cleanupErr: unknown) {
+      const cleanupMsg = cleanupErr instanceof Error ? cleanupErr.message : String(cleanupErr);
+      console.warn(`[VisualCanon] Failed to clean up orphan reference file '${filePath}': ${cleanupMsg}`);
     }
     throw err;
   }
@@ -330,6 +342,7 @@ export async function generateStyleSheet(
   const ext = result.mimeType
     ? visualReferenceExtensionForMime(result.mimeType)
     : normalizeVisualReferenceExtension((story.artwork as { outputFormat?: string }).outputFormat ?? "png");
+  const ext = "png";
 
   return addVisualReferenceImage(root, slug, entityId, {
     role: options.role ?? "expression_sheet",
