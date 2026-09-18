@@ -56,25 +56,6 @@ export function mimeForVisualReferenceExtension(ext: VisualReferenceExtension): 
   }
 }
 
-export function visualReferenceExtensionForMime(mime: string): VisualReferenceExtension {
-  if (!mime || typeof mime !== "string") {
-    throw new Error("Invalid reference image MIME type: empty value");
-  }
-  const cleaned = mime.trim().toLowerCase();
-  switch (cleaned) {
-    case "image/png":
-      return "png";
-    case "image/jpeg":
-    case "image/jpg":
-      return "jpg";
-    case "image/webp":
-      return "webp";
-    default:
-      throw new Error(
-        `Unsupported reference image MIME type '${mime}'. Supported MIME types: image/png, image/jpeg, image/webp.`
-      );
-  }
-}
 
 /**
  * Controlled asset discovery: searches strictly inside the entity's Visual Canon directory

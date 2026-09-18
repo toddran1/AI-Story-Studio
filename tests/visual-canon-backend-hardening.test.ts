@@ -29,7 +29,6 @@ import {
   mimeForVisualReferenceExtension,
   findVisualReferenceFile,
   deleteControlledVisualReferenceFiles,
-  visualReferenceExtensionForMime,
 } from "../src/visual-canon/assets.js";
 import * as assetsModule from "../src/visual-canon/assets.js";
 import { loadStoryArtDirection } from "../src/visual-canon/art-direction.js";
@@ -974,8 +973,6 @@ describe("Milestone 21: Visual Canon Backend Consistency & Asset Safety Hardenin
     }
   });
 
-  // Scenario T2: Cleanup failure after metadata save failure preserves primary metadata error and logs observable warning
-  it("Scenario T2: cleanup failure after metadata save failure preserves primary metadata error and logs observable warning", async () => {
   // Scenario T2: Cleanup failure after metadata save failure preserves primary metadata error and logs observable sanitized warning
   it("Scenario T2: cleanup failure after metadata save failure preserves primary metadata error and logs observable sanitized warning", async () => {
     await updateVisualProfile(tempDir, slug, idTarget, { appearance: "Target" });
@@ -1000,9 +997,6 @@ describe("Milestone 21: Visual Canon Backend Consistency & Asset Safety Hardenin
         data: DUMMY_PNG,
         role: "expression_sheet",
         ext: "png",
-        _cleanupFile: async (filePath) => {
-          throw new Error(`Simulated disk failure unlinking ${filePath}`);
-        },
       }).catch((e) => e);
 
       // Controlled cleanup helper was called with exact identifiers
@@ -1014,15 +1008,8 @@ describe("Milestone 21: Visual Canon Backend Consistency & Asset Safety Hardenin
       expect((err as StorageError).cause).toBeDefined();
       expect(((err as StorageError).cause as NodeJS.ErrnoException).code).toBe("EACCES");
 
-      // Observable warning was logged with file path and error details
       // Observable warning was logged with safe identifiers and error details, NOT absolute path
       expect(warnSpy).toHaveBeenCalledTimes(1);
-      expect(warnSpy).toHaveBeenCalledWith(
-        expect.stringContaining("[VisualCanon] Failed to clean up orphan reference file")
-      );
-      expect(warnSpy).toHaveBeenCalledWith(
-        expect.stringContaining("Simulated disk failure unlinking")
-      );
       const warningMessage = String(warnSpy.mock.calls[0]?.[0]);
       expect(warningMessage).toContain("[VisualCanon] Failed to clean up orphan reference asset");
       expect(warningMessage).toContain(`story='${slug}'`);
