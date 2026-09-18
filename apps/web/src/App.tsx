@@ -268,7 +268,7 @@ function BiblePage({ slug, navigate }: { slug: string; navigate: (path: string) 
   const merge = async (item: any) => { const [target, source] = item.entities; if (!confirm(`Merge ${source.name} into ${target.name}? All references and history will be preserved.`)) return; try { await post(`/stories/${slug}/story-bible/merges`, { targetEntityId: target.id, sourceEntityIds: [source.id], reason: `Approved duplicate suggestion: ${item.reason}` }); setDetail(undefined); await load(); } catch (value) { setError(message(value)); } };
   const undo = async (id: string) => { if (!confirm("Undo this merge and restore the source entities?")) return; try { await post(`/stories/${slug}/story-bible/merges/${id}/undo`, {}); setDetail(undefined); await load(); } catch (value) { setError(message(value)); } };
   const demote = async (entity: any) => {
-    if (!confirm(`Convert "${entity.canonicalName}" to a minor reference?\n\nIt will remain tracked under its parent without cluttering the canonical entity list.`)) return;
+    if (!confirm(`Convert "${entity.canonicalName}" to a minor reference?\n\nThis entity will become a minor reference and remain tracked under its parent context without cluttering the canonical entity list.\n\nManual or protected configurations may prevent conversion.`)) return;
     try {
       setError("");
       await post(`/stories/${slug}/story-bible/entities/${entity.id}/demote`, { disposition: "minor_reference", reason: "Converted via Canonical Entity Sheet" });
@@ -364,55 +364,253 @@ function canonicalDraft(entity: any) { const rules = new Map((entity.aliasNarrat
 function namingLabel(alias: string, entity: any) { const rule = (entity.aliasNarrationRules ?? []).find((item: any) => item.alias.toLocaleLowerCase() === alias.toLocaleLowerCase()); if (!rule || rule.behavior === "no_override") return "No override"; if (rule.behavior === "use_preferred") return entity.preferredNarrationName ? `Use ${entity.preferredNarrationName}` : "Use preferred name"; return `Custom → ${rule.replacement}`; }
 export function CanonicalEntitySheet({ detail, slug, navigate, onClose, onUndo, onEdit, onDemote }: any) {
   const entity = detail.entity;
-  const activeMerges = detail.merges.filter((item: any) => !item.undoneAt);
-  return <div className="editor-sheet entity-sheet">
-    <button className="entity-sheet-close" onClick={onClose} aria-label="Close entity">×</button>
-    <div className="entity-sheet-scroll">
-      <div className="editor-sheet-head"><div><span className="eyebrow">{pretty(entity.type)} · {entity.id}</span><h3>{entity.canonicalName}</h3></div></div>
-      <div className="entity-badges"><span>Ch. {entity.firstAppearance}—{entity.lastKnownAppearance}</span><span>{pretty(entity.origin)}</span>{entity.canonicalNameLocked && <span>Canonical name locked</span>}</div>
-      <p>{entity.description || "No description yet."}</p>
-      <div className="entity-origin-name"><span className="eyebrow">Original name</span><b>{entity.originalName || "Not recorded"}</b></div>
-      <div className="narration-margin-note"><span className="eyebrow">Preferred Narration Name</span><b>{entity.preferredNarrationName || "Canonical name"}</b><small>{entity.preferredNarrationName ? "Strong default for newly generated narration" : "No preferred narration name set"}</small></div>
-      <div className="narration-margin-note"><span className="eyebrow">Localized identity</span><b>{entity.localizedNaming?.fullName || entity.localizedNaming?.shortName || "Not configured"}</b><small>{entity.localizedNaming ? `${pretty(entity.localizedNaming.usageMode)} · ${entity.localizedNaming.locale}${entity.localizedNaming.shortName ? ` · short: ${entity.localizedNaming.shortName}` : ""}` : "Add locale-aware full and short forms without changing canonical identity"}</small></div>
-      <h4>Aliases</h4>
-      {entity.aliases.length ? <div className="alias-reading-list">{entity.aliases.map((alias: string) => <div key={alias}><b>{alias}</b><span>{namingLabel(alias, entity)}</span></div>)}</div> : <p>No aliases recorded.</p>}
-      {detail.relatedReferences?.length > 0 && (
-        <details className="related-references">
-          <summary>Related references ({detail.relatedReferences.length})</summary>
-          <div className="related-references-list">
-            {detail.relatedReferences.map((ref: any) => (
-              <div key={ref.id} className="related-ref-row">
-                <div>
-                  <b>{ref.name}</b>
-                  {ref.originalName && <small> · {ref.originalName}</small>}
-                </div>
-                <span>{pretty(ref.type)}</span>
-                <span className="mono">Ch. {ref.firstSeenChapter}—{ref.lastSeenChapter}</span>
-              </div>
-            ))}
+  const activeMerges = (detail.merges ?? []).filter((item: any) => !item.undoneAt);
+  const [descExpanded, setDescExpanded] = useState(false);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [onClose]);
+
+  const hasStatus = entity.status && entity.status !== "unknown";
+  const statusLabel = hasStatus ? pretty(entity.status) : undefined;
+  const typeLabel = pretty(entity.type);
+  const headerSubtitle = statusLabel ? `${typeLabel} · ${statusLabel}` : typeLabel;
+
+  const description = entity.description || "";
+  const isLongDescription = description.length > 220 || description.split("\n").length > 3;
+
+  const localizedDisplay = entity.localizedNaming?.fullName
+    ? [entity.localizedNaming.fullName, entity.localizedNaming.shortName].filter(Boolean).join(" · ")
+    : entity.localizedNaming?.shortName;
+
+  return (
+    <div className="editor-sheet entity-sheet" role="dialog" aria-modal="true" aria-labelledby="canonical-entity-title">
+      <header className="entity-sheet-header">
+        <div className="entity-sheet-title-group">
+          <h3 id="canonical-entity-title" className="entity-sheet-title">{entity.canonicalName}</h3>
+          <div className="entity-sheet-subtitle">
+            <span>{headerSubtitle}</span>
+            {entity.canonicalNameLocked && <span className="entity-locked-badge">🔒 Locked</span>}
           </div>
-        </details>
-      )}
-      <h4>Timeline</h4>
-      <div className="entity-history">{detail.timeline.map((item: any) => <button key={item.id} onClick={() => navigate(`/stories/${slug}/chapters/${item.chapter}`)}><b>Ch. {item.chapter}</b><span>{pretty(item.type)}</span><p>{item.summary}</p></button>)}</div>
-      <h4>Relationships</h4>
-      <div className="entity-history">{detail.relationships.map((item: any) => <div key={item.id}><b>{detail.relatedNames[item.sourceEntityId] ?? item.sourceEntityId}</b><span>{item.type} → {detail.relatedNames[item.targetEntityId] ?? item.targetEntityId}</span><small>Ch. {item.startChapter}{item.endChapter ? `—${item.endChapter}` : " · current"}</small></div>)}</div>
-      <h4>Provenance</h4>
-      <div className="provenance-grid">{entity.provenance.map((item: any, index: number) => <button key={`${item.chapter}-${index}`} onClick={() => navigate(`/stories/${slug}/chapters/${item.chapter}`)}>Chapter {item.chapter}<small>{pretty(item.kind)}{item.confidence !== undefined ? ` · ${Math.round(item.confidence * 100)}%` : ""}</small></button>)}</div>
+          {entity.originalName && (
+            <div className="entity-sheet-original-name" title="Original name">{entity.originalName}</div>
+          )}
+        </div>
+        <button className="entity-sheet-close" onClick={onClose} aria-label="Close entity">×</button>
+      </header>
+
+      <div className="entity-sheet-scroll">
+        <section className="entity-detail-section">
+          <span className="section-eyebrow">Description</span>
+          <p className={`entity-description ${descExpanded || !isLongDescription ? "expanded" : "clamped"}`}>
+            {description || "No description yet."}
+          </p>
+          {isLongDescription && (
+            <button
+              type="button"
+              className="entity-expand-toggle"
+              onClick={() => setDescExpanded(!descExpanded)}
+              aria-expanded={descExpanded}
+            >
+              {descExpanded ? "Show less" : "Show more"}
+            </button>
+          )}
+        </section>
+
+        <section className="entity-detail-section">
+          <span className="section-eyebrow">Naming</span>
+          <div className="compact-naming-grid">
+            <div className="compact-naming-row">
+              <div className="compact-naming-content">
+                <span className="compact-naming-label">Preferred narration name</span>
+                <span className="compact-naming-value">
+                  {entity.preferredNarrationName || <span className="unconfigured-label">Not configured</span>}
+                </span>
+              </div>
+              {!entity.preferredNarrationName && (
+                <button type="button" className="inline-action-link" onClick={onEdit}>Set →</button>
+              )}
+            </div>
+            <div className="compact-naming-row">
+              <div className="compact-naming-content">
+                <span className="compact-naming-label">Localized identity</span>
+                <span className="compact-naming-value">
+                  {localizedDisplay ? (
+                    <>
+                      {localizedDisplay}
+                      {entity.localizedNaming?.locale && (
+                        <small className="compact-naming-meta"> · {entity.localizedNaming.locale}</small>
+                      )}
+                    </>
+                  ) : (
+                    <span className="unconfigured-label">Not configured</span>
+                  )}
+                </span>
+              </div>
+              <button
+                type="button"
+                className="inline-action-link"
+                onClick={() => navigate(`/stories/${slug}/names?entity=${entity.id}`)}
+              >
+                {localizedDisplay ? "Configure →" : "Configure →"}
+              </button>
+            </div>
+          </div>
+        </section>
+
+        <section className="entity-detail-section">
+          <span className="section-eyebrow">Aliases</span>
+          {entity.aliases.length > 0 ? (
+            <div className="alias-chips">
+              {entity.aliases.map((alias: string) => {
+                const rule = (entity.aliasNarrationRules ?? []).find(
+                  (item: any) => item.alias.toLocaleLowerCase() === alias.toLocaleLowerCase()
+                );
+                const hasOverride = rule && rule.behavior !== "no_override";
+                return (
+                  <span key={alias} className="alias-chip" title={namingLabel(alias, entity)}>
+                    {alias}
+                    {hasOverride && <span className="alias-chip-badge">narration</span>}
+                  </span>
+                );
+              })}
+            </div>
+          ) : (
+            <p className="empty-text">No aliases recorded.</p>
+          )}
+        </section>
+
+        <section className="entity-detail-section">
+          <span className="section-eyebrow">Story Information</span>
+          <dl className="meta-compact-list">
+            <div className="meta-compact-row">
+              <dt>Type</dt>
+              <dd>{pretty(entity.type)}</dd>
+            </div>
+            {hasStatus && (
+              <div className="meta-compact-row">
+                <dt>Status</dt>
+                <dd>{pretty(entity.status)}</dd>
+              </div>
+            )}
+            <div className="meta-compact-row">
+              <dt>Appearances</dt>
+              <dd className="mono">Ch. {entity.firstAppearance}—{entity.lastKnownAppearance}</dd>
+            </div>
+            <div className="meta-compact-row">
+              <dt>Origin</dt>
+              <dd>{pretty(entity.origin)}{entity.canonicalNameLocked ? " · Locked" : ""}</dd>
+            </div>
+          </dl>
+        </section>
+
+        {detail.relatedReferences?.length > 0 && (
+          <details className="related-references">
+            <summary>Related references ({detail.relatedReferences.length})</summary>
+            <div className="related-references-list">
+              {detail.relatedReferences.map((ref: any) => (
+                <div key={ref.id} className="related-ref-row">
+                  <div>
+                    <b>{ref.name}</b>
+                    {ref.originalName && <small> · {ref.originalName}</small>}
+                  </div>
+                  <span>{pretty(ref.type)}</span>
+                  <span className="mono">Ch. {ref.firstSeenChapter}—{ref.lastSeenChapter}</span>
+                </div>
+              ))}
+            </div>
+          </details>
+        )}
+
+        {detail.timeline?.length > 0 && (
+          <section className="entity-detail-section">
+            <span className="section-eyebrow">Timeline</span>
+            <div className="entity-history">
+              {detail.timeline.map((item: any) => (
+                <button key={item.id} onClick={() => navigate(`/stories/${slug}/chapters/${item.chapter}`)}>
+                  <b>Ch. {item.chapter}</b>
+                  <span>{pretty(item.type)}</span>
+                  <p>{item.summary}</p>
+                </button>
+              ))}
+            </div>
+          </section>
+        )}
+
+        {detail.relationships?.length > 0 && (
+          <section className="entity-detail-section">
+            <span className="section-eyebrow">Relationships</span>
+            <div className="entity-history">
+              {detail.relationships.map((item: any) => (
+                <div key={item.id}>
+                  <b>{detail.relatedNames[item.sourceEntityId] ?? item.sourceEntityId}</b>
+                  <span>{item.type} → {detail.relatedNames[item.targetEntityId] ?? item.targetEntityId}</span>
+                  <small>Ch. {item.startChapter}{item.endChapter ? `—${item.endChapter}` : " · current"}</small>
+                </div>
+              ))}
+            </div>
+          </section>
+        )}
+
+        {entity.provenance?.length > 0 && (
+          <section className="entity-detail-section">
+            <span className="section-eyebrow">Provenance</span>
+            <div className="provenance-grid">
+              {entity.provenance.map((item: any, index: number) => (
+                <button key={`${item.chapter}-${index}`} onClick={() => navigate(`/stories/${slug}/chapters/${item.chapter}`)}>
+                  Chapter {item.chapter}
+                  <small>{pretty(item.kind)}{item.confidence !== undefined ? ` · ${Math.round(item.confidence * 100)}%` : ""}</small>
+                </button>
+              ))}
+            </div>
+          </section>
+        )}
+      </div>
+
+      <footer className="entity-sheet-actions" aria-label="Canonical entity actions">
+        <div className="entity-sheet-primary-actions">
+          <button className="button primary full-width" onClick={onEdit}>
+            Edit entity
+          </button>
+          <div className="entity-sheet-secondary-row">
+            <button className="button" onClick={() => navigate(`/stories/${slug}/names?entity=${entity.id}`)}>
+              Open localization
+            </button>
+            {detail.issues?.length > 0 && (
+              <button className="button warn-badge-button" onClick={() => navigate(`/stories/${slug}/continuity`)}>
+                {detail.issues.length} continuity issues
+              </button>
+            )}
+          </div>
+        </div>
+
+        {(onDemote || activeMerges.length > 0) && (
+          <div className="entity-sheet-management">
+            <span className="management-label">Entity Management</span>
+            <div className="management-action-list">
+              {onDemote && !entity.canonicalNameLocked && (
+                <button className="button management-button" onClick={onDemote}>
+                  Convert to minor reference
+                </button>
+              )}
+              {onDemote && entity.canonicalNameLocked && (
+                <span className="locked-demote-notice">🔒 Locked entities cannot be converted</span>
+              )}
+              {activeMerges.map((item: any) => (
+                <button className="button merge-undo" key={item.id} onClick={() => onUndo(item.id)}>
+                  Undo merge · {item.reason}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+      </footer>
     </div>
-    <footer className="entity-sheet-actions" aria-label="Canonical entity actions">
-      <div className="entity-sheet-secondary-actions">
-        {detail.issues.length > 0 && <button className="button" onClick={() => navigate(`/stories/${slug}/continuity`)}>{detail.issues.length} continuity issues</button>}
-        {activeMerges.map((item: any) => <button className="merge-undo" key={item.id} onClick={() => onUndo(item.id)}>Undo merge · {item.reason}</button>)}
-      </div>
-      <div className="production-head-actions"><button className="button" onClick={() => navigate(`/stories/${slug}/names?entity=${entity.id}`)}>Open localization</button><button className="button primary" onClick={onEdit}>Edit canonical record</button></div>
-      <div className="production-head-actions">
-        {onDemote && !entity.canonicalNameLocked && <button className="button" onClick={onDemote}>Convert to minor reference</button>}
-        <button className="button" onClick={() => navigate(`/stories/${slug}/names?entity=${entity.id}`)}>Open localization</button>
-        <button className="button primary" onClick={onEdit}>Edit canonical record</button>
-      </div>
-    </footer>
-  </div>;
+  );
 }
 
 export function EntityStatusField({ type, value, onChange }: { type: string; value: string | undefined; onChange: (value: string) => void }) {

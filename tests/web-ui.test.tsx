@@ -1,6 +1,6 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import { App, chapterPageSize, EntityStatusField, paginateRows, QaFindingCard, QaResolvedFindings, shouldRefreshAfterJob } from "../apps/web/src/App.js";
+import { App, CanonicalEntitySheet, chapterPageSize, EntityStatusField, paginateRows, QaFindingCard, QaResolvedFindings, shouldRefreshAfterJob } from "../apps/web/src/App.js";
 import type { QaFinding } from "../apps/web/src/api.js";
 import { pretty } from "../apps/web/src/format.js";
 import { ChapterImportPage, savedStorySourceUrl } from "../apps/web/src/ChapterImportPage.js";
@@ -96,5 +96,120 @@ describe("web UI", () => {
     Object.defineProperty(globalThis, "location", { value: { pathname: "/stories/demo-story/names", search: "" }, configurable: true });
     const html = renderToStaticMarkup(<NamesLocalizationPage slug="demo-story" onJob={() => undefined} navigate={() => undefined} />);
     expect(html).toContain("Names / Localization"); expect(html).toContain("Search any name"); expect(html).toContain("Select an entity to localize"); expect(html).toContain("Open Story Bible");
+  });
+  it("renders CanonicalEntitySheet with clean header, compact naming, alias chips, and single authoritative action controls", () => {
+    const sampleEntity = {
+      id: "ent_0123456789abcdef01234567",
+      type: "character",
+      canonicalName: "Dragon King Hall",
+      originalName: "龙王殿",
+      description: "A mysterious martial organization headquartered in the deep mountains with centuries of martial tradition.",
+      status: "active",
+      firstAppearance: 1,
+      lastKnownAppearance: 42,
+      canonicalNameLocked: false,
+      origin: "automatic",
+      aliases: ["Dragon King Temple", "Dragon King Guild"],
+      aliasNarrationRules: [{ alias: "Dragon King Temple", behavior: "use_preferred" }],
+      preferredNarrationName: "Dragon King Hall",
+      localizedNaming: { fullName: "Hall of the Dragon King", shortName: "Dragon Hall", locale: "en-US", usageMode: "primary" },
+      provenance: [{ chapter: 1, kind: "character_introduction", confidence: 0.95 }],
+    };
+    const sampleDetail = {
+      entity: sampleEntity,
+      timeline: [{ id: "evt_1", chapter: 1, type: "major_action", summary: "Founded the sect" }],
+      relationships: [],
+      relatedNames: {},
+      relatedReferences: [{ id: "ref_1", name: "Hall Disciple", originalName: "殿众", type: "character", firstSeenChapter: 1, lastSeenChapter: 5 }],
+      issues: [{ id: "iss_1", summary: "Status contradiction" }],
+      merges: [],
+    };
+    const html = renderToStaticMarkup(
+      <CanonicalEntitySheet
+        detail={sampleDetail}
+        slug="demo-story"
+        navigate={() => undefined}
+        onClose={() => undefined}
+        onUndo={() => undefined}
+        onEdit={() => undefined}
+        onDemote={() => undefined}
+      />
+    );
+    // Header
+    expect(html).toContain("Dragon King Hall");
+    expect(html).toContain("Character · Active");
+    expect(html).toContain("龙王殿");
+    expect(html).toContain('aria-label="Close entity"');
+
+    // No duplicate buttons: exactly one primary "Edit entity", one "Open localization", one "Convert to minor reference"
+    const editEntityMatches = (html.match(/Edit entity/g) || []).length;
+    expect(editEntityMatches).toBe(1);
+    expect(html).not.toContain("Edit canonical record");
+
+    const localizationMatches = (html.match(/Open localization/g) || []).length;
+    expect(localizationMatches).toBe(1);
+
+    const convertMatches = (html.match(/Convert to minor reference/g) || []).length;
+    expect(convertMatches).toBe(1);
+
+    // Compact naming & alias chips
+    expect(html).toContain("Preferred narration name");
+    expect(html).toContain("Hall of the Dragon King · Dragon Hall");
+    expect(html).toContain("Dragon King Temple");
+    expect(html).toContain("Dragon King Guild");
+    expect(html).toContain("narration");
+
+    // Action hierarchy
+    expect(html).toContain("Entity Management");
+  });
+  it("renders unconfigured naming states and long descriptions with collapsible preview toggle in CanonicalEntitySheet", () => {
+    const longDesc = "First line of long text.\nSecond line.\nThird line.\nFourth line.\nFifth line.\nSixth line of extended background lore that exceeds preview bounds.";
+    const unconfiguredEntity = {
+      id: "ent_0123456789abcdef01234568",
+      type: "organization",
+      canonicalName: "Iron Blood Guild",
+      originalName: "",
+      description: longDesc,
+      status: "unknown",
+      firstAppearance: 5,
+      lastKnownAppearance: 10,
+      canonicalNameLocked: true,
+      origin: "manual",
+      aliases: [],
+      aliasNarrationRules: [],
+      preferredNarrationName: undefined,
+      localizedNaming: undefined,
+      provenance: [],
+    };
+    const detail = {
+      entity: unconfiguredEntity,
+      timeline: [],
+      relationships: [],
+      relatedNames: {},
+      relatedReferences: [],
+      issues: [],
+      merges: [],
+    };
+    const html = renderToStaticMarkup(
+      <CanonicalEntitySheet
+        detail={detail}
+        slug="demo-story"
+        navigate={() => undefined}
+        onClose={() => undefined}
+        onUndo={() => undefined}
+        onEdit={() => undefined}
+        onDemote={() => undefined}
+      />
+    );
+    expect(html).toContain("Iron Blood Guild");
+    expect(html).toContain("🔒 Locked");
+    expect(html).toContain("Show more");
+    expect(html).toContain("Not configured");
+    expect(html).toContain("Set →");
+    expect(html).toContain("Configure →");
+    expect(html).toContain("No aliases recorded.");
+    // Locked canonical entities cannot be demoted
+    expect(html).toContain("🔒 Locked entities cannot be converted");
+    expect(html).not.toContain("Convert to minor reference");
   });
 });
