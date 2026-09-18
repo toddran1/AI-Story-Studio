@@ -63,6 +63,7 @@ import {
   rollbackPreparedVisualCanonMerge,
   prepareVisualCanonDemote,
   commitVisualCanonDemote,
+  rollbackPreparedVisualCanonDemote,
 } from "../../src/visual-canon/profiles.js";
 import { loadStoryArtDirection, saveStoryArtDirection, createPreset, updatePreset, deletePreset, duplicatePreset, setDefaultPreset } from "../../src/visual-canon/art-direction.js";
 import { visualProfileSchema } from "../../src/domain/visual-profile.js";
@@ -857,6 +858,7 @@ export class StudioOperations {
         );
       }
       invalidateCatalogCache(this.root, slug);
+      await rollbackPreparedVisualCanonDemote(this.root, slug, preparedVisual).catch(() => undefined);
       throw visualErr;
     }
 
