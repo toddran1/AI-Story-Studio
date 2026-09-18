@@ -13,11 +13,12 @@ import { AudioProbe } from "./ffmpeg.js";
 import { AudioMasteringProcessor } from "./mastering.js";
 
 export type AudioMasteringEvent = { status: "started" | "completed" | "reused"; chapter: number; state: StageState };
-
 export async function masterStoredChapter(options: { root: string; story: Story; chapter: number; processor: AudioMasteringProcessor; force?: boolean; onEvent?: (event: AudioMasteringEvent) => void }) {
   const paths = storyPaths(options.root, options.story.slug, options.chapter); const raw = await readJsonIfExists<Chapter>(paths.chapterMeta);
   if (!raw) throw new AudioError(`Chapter ${options.chapter} has no pipeline metadata; run TTS first`);
-  const chapter = chapterSchema.parse(raw); if (chapter.stages.tts.status !== "complete") throw new AudioError(`Chapter ${options.chapter} TTS is not complete`);
+  const chapter = chapterSchema.parse(raw);
+  const hasRawOrSegments = (await exists(paths.audioRaw)) || (await exists(paths.segments)) || (await exists(paths.audio));
+  if (chapter.stages.tts.status !== "complete" && !hasRawOrSegments) throw new AudioError(`Chapter ${options.chapter} TTS is not complete`);
   if (!(await exists(paths.audioRaw)) && await exists(paths.audio) && chapter.stages.audioMastering.status !== "complete") await atomicWrite(paths.audioRaw, await readFile(paths.audio));
   const inputs = await masteringInputs(paths.segments, paths.audioRaw); const fp = audioMasteringFingerprint(chapter.stages.tts.outputFingerprint, options.story.audio, options.processor.version, await inputFingerprints(inputs));
   const currentOutput = await fileFingerprint(paths.audio);

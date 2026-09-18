@@ -176,7 +176,9 @@ export function createApiHandler(operations: StudioOperations) {
       if (audioMatch && request.method === "GET") {
         const chapterNumber = chapterParam(audioMatch[2]!); const chapter = await getChapter(operations.root, audioMatch[1]!, chapterNumber);
         if (!chapter.audioAvailable) return send(response, 404, { error: "Chapter audio was not found" });
-        return sendFile(request, response, storyPaths(operations.root, audioMatch[1]!, chapterNumber).audio, "audio/mpeg");
+        const paths = storyPaths(operations.root, audioMatch[1]!, chapterNumber);
+        const audioFile = (await exists(paths.audio)) ? paths.audio : paths.audioRaw;
+        return sendFile(request, response, audioFile, "audio/mpeg");
       }
       const subtitleFileMatch = /^\/api\/stories\/([a-z0-9-]+)\/chapters\/(\d+)\/subtitles\.(srt|vtt)$/.exec(url.pathname);
       if (subtitleFileMatch && request.method === "GET") { const chapterNumber = chapterParam(subtitleFileMatch[2]!); const chapter = await getChapter(operations.root, subtitleFileMatch[1]!, chapterNumber); if (!chapter.subtitles) return send(response, 404, { error: "Chapter subtitles were not found" }); const paths = storyPaths(operations.root, subtitleFileMatch[1]!, chapterNumber); return sendFile(request, response, subtitleFileMatch[3] === "srt" ? paths.subtitlesSrt : paths.subtitlesVtt, subtitleFileMatch[3] === "srt" ? "application/x-subrip" : "text/vtt; charset=utf-8"); }

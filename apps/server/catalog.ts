@@ -121,8 +121,10 @@ export async function getChapter(root: string, slug: string, chapter: number) {
   const subtitlesText = await readTextIfExists(paths.subtitlesVtt);
   // A source replacement makes derived audio/video stale, but it must remain
   // playable and recoverable until the user explicitly regenerates it.
-  const audioAvailable = await exists(paths.audio);
-  const audioStale = audioAvailable && (!fresh || metadata?.stages.audioMastering.status !== "complete");
+  const audioFileExists = await exists(paths.audio);
+  const rawAudioExists = await exists(paths.audioRaw);
+  const audioAvailable = audioFileExists || rawAudioExists;
+  const audioStale = audioAvailable && (!fresh || metadata?.stages.audioMastering.status !== "complete" || !audioFileExists);
   const videoAvailable = await exists(paths.video);
   const videoStale = videoAvailable && (!fresh || metadata?.stages.video.status !== "complete");
   const narration = await readTextIfExists(paths.narration); const ttsScript = (await readTextIfExists(paths.narrationTts)) ?? narration;
@@ -231,7 +233,11 @@ export async function getContinuityReview(root: string, slug: string, status?: s
 
 export async function getOutputsLibrary(root: string, slug: string) {
   slugSchema.parse(slug); const [audio, video] = await Promise.all([getAudioDashboard(root, slug), getVideoDashboard(root, slug)]); const items: Array<Record<string, unknown>> = [];
-  for (const chapter of audio.chapters) if (chapter.audioAvailable) items.push(await outputItem(storyPaths(root, slug, chapter.chapter).audio, { id: `chapter-audio-${chapter.chapter}`, group: "chapterAudio", chapter: chapter.chapter, format: "mp3", url: `/api/stories/${slug}/chapters/${chapter.chapter}/audio` }));
+  for (const chapter of audio.chapters) if (chapter.audioAvailable) {
+    const paths = storyPaths(root, slug, chapter.chapter);
+    const audioPath = (await exists(paths.audio)) ? paths.audio : paths.audioRaw;
+    items.push(await outputItem(audioPath, { id: `chapter-audio-${chapter.chapter}`, group: "chapterAudio", chapter: chapter.chapter, format: "mp3", url: `/api/stories/${slug}/chapters/${chapter.chapter}/audio` }));
+  }
   for (const item of audio.exports) items.push(await outputItem(exportPaths(root, slug, item.from, item.to, item.format).output, { id: `audiobook-${item.fingerprint}`, group: "audiobooks", from: item.from, to: item.to, format: item.format, createdAt: item.createdAt, durationSeconds: item.durationSeconds, url: item.downloadUrl }));
   for (const chapter of video.chapters) if (chapter.videoAvailable) items.push(await outputItem(storyPaths(root, slug, chapter.chapter).video, { id: `chapter-video-${chapter.chapter}`, group: "chapterVideos", chapter: chapter.chapter, format: "mp4", url: `/api/stories/${slug}/chapters/${chapter.chapter}/video` }));
   for (const item of video.exports) items.push(await outputItem(videoExportPaths(root, slug, item.from, item.to).output, { id: `video-${item.fingerprint}`, group: "combinedVideos", from: item.from, to: item.to, format: "mp4", createdAt: item.createdAt, durationSeconds: item.durationSeconds, url: item.downloadUrl }));
@@ -310,16 +316,19 @@ async function loadSummaries(root: string, slug: string, numbers: number[], inde
     const qaIssues: QaResult["issues"] | undefined = qa ? openFindings(qa).map(({ category, severity, message, evidence }) => ({ category, severity, message, evidence })) : undefined;
     const tts = fresh ? metadata?.stages.tts.status ?? "pending" : "pending";
     const audioMastering = fresh ? metadata?.stages.audioMastering.status ?? "pending" : "pending"; const continuity = fresh ? metadata?.stages.continuity.status ?? "pending" : "pending"; const alignment = fresh ? metadata?.stages.alignment.status ?? "pending" : "pending"; const subtitles = fresh ? metadata?.stages.subtitles.status ?? "pending" : "pending"; const scenePlanning = fresh ? metadata?.stages.scenePlanning.status ?? "pending" : "pending"; const artwork = fresh ? metadata?.stages.artwork.status ?? "pending" : "pending"; const video = fresh ? metadata?.stages.video.status ?? "pending" : "pending";
-    const [audioFileExists, translationFileExists, narrationFileExists, videoFileExists] = await Promise.all([exists(chapterPaths.audio), exists(chapterPaths.english), exists(chapterPaths.narration), exists(chapterPaths.video)]); const audioStale = audioFileExists && audioMastering !== "complete"; const videoStale = videoFileExists && video !== "complete";
+    const [audioFileExists, rawAudioFileExists, translationFileExists, narrationFileExists, videoFileExists] = await Promise.all([exists(chapterPaths.audio), exists(chapterPaths.audioRaw), exists(chapterPaths.english), exists(chapterPaths.narration), exists(chapterPaths.video)]);
+    const audioAvailable = audioFileExists || rawAudioFileExists;
+    const audioStale = audioAvailable && (audioMastering !== "complete" || !audioFileExists);
+    const videoStale = videoFileExists && video !== "complete";
     const translationStatus = fresh && metadata?.stages.translation.status === "complete" ? "complete" : translationFileExists ? "stale" : "pending";
     const narrationStatus = fresh && metadata?.stages.narration.status === "complete" ? "complete" : narrationFileExists ? "stale" : "pending";
-    const audioMasteringStatus = fresh && metadata?.stages.audioMastering.status === "complete" ? "complete" : audioFileExists ? "stale" : metadata?.stages.audioMastering.status ?? "pending";
+    const audioMasteringStatus = fresh && metadata?.stages.audioMastering.status === "complete" ? "complete" : audioAvailable ? "stale" : metadata?.stages.audioMastering.status ?? "pending";
     const videoStatus = fresh && metadata?.stages.video.status === "complete" ? "complete" : videoFileExists ? "stale" : metadata?.stages.video.status ?? "pending";
     return { chapter, originalTitle: metadata?.originalTitle ?? index.titles.get(chapter), translation: translationStatus,
       narration: narrationStatus, qa: qa?.status,
       qaScore: qa?.score, qaIssues, qaStale: Boolean(qa) && (!fresh || metadata?.stages.qa.status !== "complete"), tts, audioMastering: audioMasteringStatus, continuity, alignment, subtitles, scenePlanning, artwork, video: videoStatus,
-      durationSeconds: audioFileExists ? metadata?.audio?.durationSeconds : undefined,
-      audioAvailable: audioFileExists, audioStale, videoAvailable: videoFileExists, videoStale };
+      durationSeconds: audioAvailable ? metadata?.audio?.durationSeconds : undefined,
+      audioAvailable, audioStale, videoAvailable: videoFileExists, videoStale };
   });
 }
 
@@ -348,7 +357,8 @@ export async function getAudioDashboard(root: string, slug: string) {
     await mapLimit(unprobed, 4, async (item) => {
       try {
         const paths = storyPaths(root, slug, item.chapter);
-        const probe = await tools.probe(paths.audio);
+        const filePath = (await exists(paths.audio)) ? paths.audio : paths.audioRaw;
+        const probe = await tools.probe(filePath);
         item.durationSeconds = probe.durationSeconds;
         const raw = await readJsonIfExists<Chapter>(paths.chapterMeta);
         if (raw) {
