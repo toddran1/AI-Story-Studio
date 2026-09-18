@@ -21,7 +21,6 @@ import {
 import * as profilesModule from "../src/visual-canon/profiles.js";
 import * as canonicalModule from "../src/story-bible/canonical.js";
 import * as granularityModule from "../src/story-bible/granularity.js";
-import { ReconciliationError } from "../src/pipeline/errors.js";
 import { ReconciliationError, StorageError } from "../src/pipeline/errors.js";
 import { readActivity } from "../src/studio/projects.js";
 import {
@@ -974,8 +973,6 @@ describe("Milestone 21: Visual Canon Backend Consistency & Asset Safety Hardenin
     }
   });
 
-  // Scenario T2: Cleanup failure after metadata save failure preserves primary metadata error
-  it("Scenario T2: cleanup failure after metadata save failure preserves primary metadata error", async () => {
   // Scenario T2: Cleanup failure after metadata save failure preserves primary metadata error and logs observable warning
   it("Scenario T2: cleanup failure after metadata save failure preserves primary metadata error and logs observable warning", async () => {
     await updateVisualProfile(tempDir, slug, idTarget, { appearance: "Target" });
@@ -987,7 +984,6 @@ describe("Milestone 21: Visual Canon Backend Consistency & Asset Safety Hardenin
     expect(await exists(existingRef.imagePath)).toBe(true);
 
     const storyDir = join(tempDir, "stories", slug);
-    // Make story directory read-only so saving metadata fails
     // Make story directory read-only so saving metadata fails, but entityDir is writable
     await chmod(storyDir, 0o555);
 
@@ -1003,9 +999,6 @@ describe("Milestone 21: Visual Canon Backend Consistency & Asset Safety Hardenin
         },
       }).catch((e) => e);
 
-      // Primary error is preserved
-      expect(err).toBeInstanceOf(Error);
-      expect((err as NodeJS.ErrnoException).code).toBe("EACCES");
       // Primary metadata error is preserved
       expect(err).toBeInstanceOf(StorageError);
       expect((err as StorageError).cause).toBeDefined();
@@ -1025,35 +1018,23 @@ describe("Milestone 21: Visual Canon Backend Consistency & Asset Safety Hardenin
     }
   });
 
-  // Scenario U: Style Sheet format matches provider output contract and MIME mapping
-  it("Scenario U: Style Sheet format matches provider output contract and MIME mapping", async () => {
   // Scenario U: Style Sheet format adheres to PNG-only ImageProvider contract
   it("Scenario U: Style Sheet format adheres to PNG-only ImageProvider contract", async () => {
     await updateVisualProfile(tempDir, slug, idTarget, { appearance: "Target Character" });
 
-    const jpegProvider: ImageProvider = {
-      name: "jpeg-provider",
     const pngProvider: ImageProvider = {
       name: "png-provider",
       version: "1.0",
       validateConfiguration: async () => {},
       generate: async () => ({
         data: DUMMY_PNG,
-        mimeType: "image/jpeg" as any,
         mimeType: "image/png",
       }),
     };
 
-    const result = await generateStyleSheet(tempDir, slug, idTarget, jpegProvider, story);
-    expect(result.reference.imagePath.endsWith(".jpg")).toBe(true);
     const result = await generateStyleSheet(tempDir, slug, idTarget, pngProvider, story);
     expect(result.reference.imagePath.endsWith(".png")).toBe(true);
     expect(result.reference.role).toBe("expression_sheet");
-
-    expect(visualReferenceExtensionForMime("image/png")).toBe("png");
-    expect(visualReferenceExtensionForMime("image/jpeg")).toBe("jpg");
-    expect(visualReferenceExtensionForMime("image/webp")).toBe("webp");
-    expect(() => visualReferenceExtensionForMime("image/gif")).toThrow("Unsupported reference image MIME type 'image/gif'");
   });
 
   // Scenario V1: Missing Art Direction loads defaults
@@ -1078,8 +1059,6 @@ describe("Milestone 21: Visual Canon Backend Consistency & Asset Safety Hardenin
     expect(fileOnDisk).toBe(corruptedContent);
   });
 
-  // Scenario W: ENOENT cleanup remains benign while real filesystem inspection/removal errors remain observable
-  it("Scenario W: ENOENT cleanup remains benign while real filesystem inspection/removal errors remain observable", async () => {
   // Scenario W1: Missing Visual Profiles returns empty record
   it("Scenario W1: missing Visual Profiles returns empty record", async () => {
     const profiles = await loadVisualProfiles(tempDir, slug);

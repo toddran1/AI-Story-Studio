@@ -36,7 +36,6 @@ export async function loadVisualProfiles(root: string, slug: string): Promise<Re
   const raw = await readJsonIfExists<unknown>(path);
   if (!raw) return {};
   const parsed = visualProfilesFileSchema.safeParse(raw);
-  return parsed.success ? parsed.data : {};
   if (!parsed.success) {
     throw new Error(
       `Saved Visual Profiles for story '${slug}' are invalid and could not be loaded: ${parsed.error.message}`
@@ -224,9 +223,6 @@ export async function addVisualReferenceImage(
     return { profile, reference };
   } catch (err) {
     try {
-      await rm(filePath, { force: true });
-    } catch {
-      // Best-effort cleanup of orphan file must not mask primary persistence error
       const remove = options._cleanupFile ?? ((target: string) => rm(target, { force: true }));
       await remove(filePath);
     } catch (cleanupErr: unknown) {
@@ -339,9 +335,6 @@ export async function generateStyleSheet(
     outputFormat: story.artwork.outputFormat,
   });
 
-  const ext = result.mimeType
-    ? visualReferenceExtensionForMime(result.mimeType)
-    : normalizeVisualReferenceExtension((story.artwork as { outputFormat?: string }).outputFormat ?? "png");
   const ext = "png";
 
   return addVisualReferenceImage(root, slug, entityId, {
