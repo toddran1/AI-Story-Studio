@@ -15,7 +15,11 @@ export async function loadStoryArtDirection(root: string, slug: string): Promise
   const raw = await readJsonIfExists<unknown>(path);
   if (!raw) return createDefaultArtDirection();
   const parsed = storyArtDirectionSchema.safeParse(raw);
-  if (!parsed.success) return createDefaultArtDirection();
+  if (!parsed.success) {
+    throw new Error(
+      `Saved Art Direction for story '${slug}' is invalid and could not be loaded: ${parsed.error.message}`
+    );
+  }
   return parsed.data;
 }
 

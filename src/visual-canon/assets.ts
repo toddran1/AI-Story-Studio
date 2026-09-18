@@ -56,6 +56,26 @@ export function mimeForVisualReferenceExtension(ext: VisualReferenceExtension): 
   }
 }
 
+export function visualReferenceExtensionForMime(mime: string): VisualReferenceExtension {
+  if (!mime || typeof mime !== "string") {
+    throw new Error("Invalid reference image MIME type: empty value");
+  }
+  const cleaned = mime.trim().toLowerCase();
+  switch (cleaned) {
+    case "image/png":
+      return "png";
+    case "image/jpeg":
+    case "image/jpg":
+      return "jpg";
+    case "image/webp":
+      return "webp";
+    default:
+      throw new Error(
+        `Unsupported reference image MIME type '${mime}'. Supported MIME types: image/png, image/jpeg, image/webp.`
+      );
+  }
+}
+
 /**
  * Controlled asset discovery: searches strictly inside the entity's Visual Canon directory
  * for supported extensions. Never reads arbitrary or persisted filesystem paths.
@@ -120,20 +140,28 @@ export async function deleteControlledVisualReferenceFiles(
     let candidateExists = false;
     try {
       candidateExists = await exists(candidate);
-    } catch {
-      // Ignored for existence check
+    } catch (err: unknown) {
+      const nodeErr = err as NodeJS.ErrnoException;
+      if (nodeErr?.code !== "ENOENT") {
+        errors.push({
+          extension: ext,
+          code: typeof nodeErr?.code === "string" ? nodeErr.code : undefined,
+          message: nodeErr?.message ? String(nodeErr.message) : "Failed to inspect reference file",
+        });
+      }
     }
 
     if (candidateExists) {
       try {
         await rm(candidate, { force: true });
         deletedCount++;
-      } catch (err: any) {
-        if (err?.code !== "ENOENT") {
+      } catch (err: unknown) {
+        const nodeErr = err as NodeJS.ErrnoException;
+        if (nodeErr?.code !== "ENOENT") {
           errors.push({
             extension: ext,
-            code: typeof err?.code === "string" ? err.code : undefined,
-            message: err?.message ? String(err.message) : "Failed to remove reference file",
+            code: typeof nodeErr?.code === "string" ? nodeErr.code : undefined,
+            message: nodeErr?.message ? String(nodeErr.message) : "Failed to remove reference file",
           });
         }
       }

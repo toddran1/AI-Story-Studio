@@ -33,7 +33,7 @@ import { AlignmentArtifact, alignmentArtifactSchema } from "../../src/alignment/
 import { SubtitleDocument, subtitleDocumentSchema } from "../../src/subtitles/types.js";
 import { normalizeSpeechForProvider } from "../../src/tts/speech-normalization.js";
 import { continuityReviewSchema } from "../../src/story-bible/continuity.js";
-import { applyCanonicalOverlay, findDuplicateSuggestions } from "../../src/story-bible/canonical.js";
+import { applyCanonicalOverlay, findDuplicateSuggestions, loadStoryBibleWithCanonicalOverlay } from "../../src/story-bible/canonical.js";
 import { ttsProviderNameSchema } from "../../src/domain/provider.js";
 import { analyzeStoryBible } from "../../src/story-bible/granularity.js";
 
@@ -165,12 +165,8 @@ export async function getQaDashboard(root: string, slug: string) {
 }
 
 export async function getStoryBible(root: string, slug: string, options: { includeCanonicalOverlay?: boolean } = {}): Promise<StoryBible> {
-  slugSchema.parse(slug); const paths = storyPaths(root, slug, 1);
-  // Production maintains this canonical snapshot atomically and chronologically.
-  // Browser reads should never replay thousands of chapter updates merely to paginate it.
-  const raw = await readJsonIfExists<StoryBible>(paths.bible);
-  const bible = raw ? storyBibleSchema.parse(raw) : await rebuildStoryBibleBeforeChapter(root, slug, Number.MAX_SAFE_INTEGER, { includeCanonicalOverlay: false });
-  return options.includeCanonicalOverlay === false ? bible : (await applyCanonicalOverlay(root, slug, bible)).bible;
+  slugSchema.parse(slug);
+  return loadStoryBibleWithCanonicalOverlay(root, slug, options);
 }
 
 export async function getStoryBibleView(root: string, slug: string) { const bible = await getStoryBible(root, slug); const view = await applyManualBibleOverlay(root, slug, bible); return { ...view, staleExtractionChapters: await computeStaleExtractionChapters(root, slug) }; }

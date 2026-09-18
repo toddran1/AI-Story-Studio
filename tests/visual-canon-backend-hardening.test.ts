@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdtemp, rm, mkdir, writeFile, readFile, chmod } from "node:fs/promises";
 import * as fsPromises from "node:fs/promises";
-import { join } from "node:path";
+import { join, basename } from "node:path";
 import { tmpdir } from "node:os";
 import { testStory } from "./helpers.js";
 import { StoryBible, emptyStoryBible, canonicalEntitySchema } from "../src/domain/story-bible.js";
@@ -16,6 +16,7 @@ import {
   finalizeVisualCanonMerge,
   prepareVisualCanonMerge,
   rollbackPreparedVisualCanonMerge,
+  generateStyleSheet,
 } from "../src/visual-canon/profiles.js";
 import * as profilesModule from "../src/visual-canon/profiles.js";
 import * as canonicalModule from "../src/story-bible/canonical.js";
@@ -27,7 +28,11 @@ import {
   isVisualReferenceExtension,
   mimeForVisualReferenceExtension,
   findVisualReferenceFile,
+  deleteControlledVisualReferenceFiles,
+  visualReferenceExtensionForMime,
 } from "../src/visual-canon/assets.js";
+import { loadStoryArtDirection } from "../src/visual-canon/art-direction.js";
+import { ImageProvider } from "../src/artwork/provider.js";
 import { visualProfileRefPath, storyPaths } from "../src/storage/paths.js";
 import { exists } from "../src/storage/story-files.js";
 import { atomicWriteJson } from "../src/storage/atomic-write.js";
@@ -842,5 +847,221 @@ describe("Milestone 21: Visual Canon Backend Consistency & Asset Safety Hardenin
 
     // Source reference image is still present and untouched!
     expect(await exists(sourceRef.imagePath)).toBe(true);
+  });
+
+  // Scenario R1: Nonexistent canonical entity cannot create or update Visual Profile
+  it("Scenario R1: nonexistent canonical entity cannot create or update Visual Profile", async () => {
+    const invalidId = "ent_999999999999999999999999";
+    await expect(updateVisualProfile(tempDir, slug, invalidId, { appearance: "Ghost" }))
+      .rejects.toThrow("Canonical entity 'ent_999999999999999999999999' was not found in Story Bible");
+  });
+
+  // Scenario R2: Nonexistent canonical entity cannot receive reference image
+  it("Scenario R2: nonexistent canonical entity cannot receive reference", async () => {
+    const invalidId = "ent_999999999999999999999999";
+    await expect(
+      addVisualReferenceImage(tempDir, slug, invalidId, {
+        data: DUMMY_PNG,
+        role: "face_portrait",
+        ext: "png",
+      })
+    ).rejects.toThrow("Canonical entity 'ent_999999999999999999999999' was not found in Story Bible");
+  });
+
+  // Scenario R3: Nonexistent canonical entity cannot generate Style Sheet
+  it("Scenario R3: nonexistent canonical entity cannot generate Style Sheet", async () => {
+    const invalidId = "ent_999999999999999999999999";
+    const dummyProvider: ImageProvider = {
+      name: "test-provider",
+      version: "1.0",
+      validateConfiguration: async () => {},
+      generate: async () => ({ data: DUMMY_PNG, mimeType: "image/png" }),
+    };
+    await expect(generateStyleSheet(tempDir, slug, invalidId, dummyProvider, story))
+      .rejects.toThrow("Canonical entity 'ent_999999999999999999999999' was not found in Story Bible");
+  });
+
+  // Scenario S: prepareVisualCanonMerge does not mutate original profile metadata
+  it("Scenario S: prepareVisualCanonMerge does not mutate original profile metadata", async () => {
+    await updateVisualProfile(tempDir, slug, idTarget, {
+      appearance: "Target App",
+      notes: "Original Target Notes",
+      negativePrompt: "target_bad",
+      variants: [{ id: "var_target", name: "TargetVariant", description: "target variant app" }],
+    });
+    await addVisualReferenceImage(tempDir, slug, idTarget, {
+      data: DUMMY_PNG,
+      role: "front",
+      ext: "png",
+    });
+
+    await updateVisualProfile(tempDir, slug, idSource, {
+      appearance: "Source App",
+      notes: "Original Source Notes",
+      negativePrompt: "source_bad",
+      variants: [{ id: "var_source", name: "SourceVariant", description: "source variant app" }],
+    });
+    await addVisualReferenceImage(tempDir, slug, idSource, {
+      data: DUMMY_PNG,
+      role: "side",
+      ext: "png",
+    });
+
+    const originalProfiles = await loadVisualProfiles(tempDir, slug);
+    const targetBefore = structuredClone(originalProfiles[idTarget]!);
+    const sourceBefore = structuredClone(originalProfiles[idSource]!);
+
+    // Prepare merge WITHOUT commit
+    const prepared = await prepareVisualCanonMerge(tempDir, slug, idTarget, [idSource]);
+
+    // Verify original input profiles are 100% unchanged
+    expect(originalProfiles[idTarget]!.notes).toBe(targetBefore.notes);
+    expect(originalProfiles[idTarget]!.negativePrompt).toBe(targetBefore.negativePrompt);
+    expect(originalProfiles[idTarget]!.variants).toEqual(targetBefore.variants);
+    expect(originalProfiles[idTarget]!.references.length).toBe(targetBefore.references.length);
+    expect(originalProfiles[idTarget]!.revision).toBe(targetBefore.revision);
+
+    expect(originalProfiles[idSource]!.notes).toBe(sourceBefore.notes);
+    expect(originalProfiles[idSource]!.negativePrompt).toBe(sourceBefore.negativePrompt);
+    expect(originalProfiles[idSource]!.variants).toEqual(sourceBefore.variants);
+    expect(originalProfiles[idSource]!.references.length).toBe(sourceBefore.references.length);
+    expect(originalProfiles[idSource]!.revision).toBe(sourceBefore.revision);
+
+    // Rollback prepared assets
+    await rollbackPreparedVisualCanonMerge(prepared);
+  });
+
+  // Scenario T1: Metadata save failure cleans the new reference file
+  it("Scenario T1: metadata save failure after reference file creation cleans the new file", async () => {
+    await updateVisualProfile(tempDir, slug, idTarget, { appearance: "Target" });
+    const { reference: existingRef } = await addVisualReferenceImage(tempDir, slug, idTarget, {
+      data: DUMMY_PNG,
+      role: "front",
+      ext: "png",
+    });
+    expect(await exists(existingRef.imagePath)).toBe(true);
+
+    const storyDir = join(tempDir, "stories", slug);
+    const entityDir = join(storyPaths(tempDir, slug, 1).visualProfilesDirectory, idTarget);
+
+    // Make story directory read-only so saving metadata fails, but entityDir is writable
+    await chmod(storyDir, 0o555);
+
+    try {
+      await expect(
+        addVisualReferenceImage(tempDir, slug, idTarget, {
+          data: DUMMY_PNG,
+          role: "side",
+          ext: "png",
+        })
+      ).rejects.toThrow();
+
+      // Existing reference preserved
+      expect(await exists(existingRef.imagePath)).toBe(true);
+
+      // Restore permission to inspect
+      await chmod(storyDir, 0o777);
+      const profiles = await loadVisualProfiles(tempDir, slug);
+      expect(profiles[idTarget]?.references.length).toBe(1);
+
+      // Verify no orphaned reference files were left in entityDir
+      const filesInEntityDir = await fsPromises.readdir(entityDir);
+      expect(filesInEntityDir.length).toBe(1);
+      expect(filesInEntityDir[0]).toBe(basename(existingRef.imagePath));
+    } finally {
+      await chmod(storyDir, 0o777);
+    }
+  });
+
+  // Scenario T2: Cleanup failure after metadata save failure preserves primary metadata error
+  it("Scenario T2: cleanup failure after metadata save failure preserves primary metadata error", async () => {
+    await updateVisualProfile(tempDir, slug, idTarget, { appearance: "Target" });
+
+    const storyDir = join(tempDir, "stories", slug);
+    // Make story directory read-only so saving metadata fails
+    await chmod(storyDir, 0o555);
+
+    try {
+      const err = await addVisualReferenceImage(tempDir, slug, idTarget, {
+        data: DUMMY_PNG,
+        role: "expression_sheet",
+        ext: "png",
+      }).catch((e) => e);
+
+      // Primary error is preserved
+      expect(err).toBeInstanceOf(Error);
+      expect((err as NodeJS.ErrnoException).code).toBe("EACCES");
+    } finally {
+      await chmod(storyDir, 0o777);
+    }
+  });
+
+  // Scenario U: Style Sheet format matches provider output contract and MIME mapping
+  it("Scenario U: Style Sheet format matches provider output contract and MIME mapping", async () => {
+    await updateVisualProfile(tempDir, slug, idTarget, { appearance: "Target Character" });
+
+    const jpegProvider: ImageProvider = {
+      name: "jpeg-provider",
+      version: "1.0",
+      validateConfiguration: async () => {},
+      generate: async () => ({
+        data: DUMMY_PNG,
+        mimeType: "image/jpeg" as any,
+      }),
+    };
+
+    const result = await generateStyleSheet(tempDir, slug, idTarget, jpegProvider, story);
+    expect(result.reference.imagePath.endsWith(".jpg")).toBe(true);
+    expect(result.reference.role).toBe("expression_sheet");
+
+    expect(visualReferenceExtensionForMime("image/png")).toBe("png");
+    expect(visualReferenceExtensionForMime("image/jpeg")).toBe("jpg");
+    expect(visualReferenceExtensionForMime("image/webp")).toBe("webp");
+    expect(() => visualReferenceExtensionForMime("image/gif")).toThrow("Unsupported reference image MIME type 'image/gif'");
+  });
+
+  // Scenario V1: Missing Art Direction loads defaults
+  it("Scenario V1: missing Art Direction loads defaults", async () => {
+    const artDirection = await loadStoryArtDirection(tempDir, slug);
+    expect(artDirection.activePresetId).toBe("preset_main_style");
+    expect(artDirection.presets.length).toBeGreaterThan(0);
+    expect(artDirection.presets[0]?.artStyle).toBe("Manhwa");
+  });
+
+  // Scenario V2: Invalid persisted Art Direction throws instead of silently defaulting, and does not overwrite
+  it("Scenario V2: invalid persisted Art Direction throws instead of silently defaulting, and does not overwrite", async () => {
+    const artDirectionPath = storyPaths(tempDir, slug, 1).artDirection;
+    const corruptedContent = JSON.stringify({ corrupted: true, presets: "not an array" });
+    await writeFile(artDirectionPath, corruptedContent, "utf8");
+
+    await expect(loadStoryArtDirection(tempDir, slug)).rejects.toThrow(
+      `Saved Art Direction for story '${slug}' is invalid and could not be loaded`
+    );
+
+    const fileOnDisk = await readFile(artDirectionPath, "utf8");
+    expect(fileOnDisk).toBe(corruptedContent);
+  });
+
+  // Scenario W: ENOENT cleanup remains benign while real filesystem inspection/removal errors remain observable
+  it("Scenario W: ENOENT cleanup remains benign while real filesystem inspection/removal errors remain observable", async () => {
+    const missingResult = await deleteControlledVisualReferenceFiles(tempDir, slug, idTarget, "ref_nonexistent");
+    expect(missingResult.wasMissing).toBe(true);
+    expect(missingResult.deletedCount).toBe(0);
+    expect(missingResult.errors).toEqual([]);
+
+    const targetDir = join(storyPaths(tempDir, slug, 1).visualProfilesDirectory, idTarget);
+    await mkdir(targetDir, { recursive: true });
+    const testFilePath = join(targetDir, "ref_test_locked.png");
+    await writeFile(testFilePath, DUMMY_PNG);
+
+    // Make targetDir read-only so rm fails with EACCES
+    await chmod(targetDir, 0o555);
+    try {
+      const errorResult = await deleteControlledVisualReferenceFiles(tempDir, slug, idTarget, "ref_test_locked");
+      expect(errorResult.errors.length).toBeGreaterThan(0);
+      expect(errorResult.errors.some((e) => e.code === "EACCES")).toBe(true);
+    } finally {
+      await chmod(targetDir, 0o777);
+    }
   });
 });

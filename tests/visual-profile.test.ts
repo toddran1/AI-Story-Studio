@@ -16,6 +16,7 @@ import {
 import { VisualEntityProfile } from "../src/domain/visual-profile.js";
 import { storyPaths } from "../src/storage/paths.js";
 import { atomicWriteJson } from "../src/storage/atomic-write.js";
+import { emptyStoryBible, canonicalEntitySchema } from "../src/domain/story-bible.js";
 
 describe("Visual Entity Profiles", () => {
   let root: string;
@@ -26,6 +27,39 @@ describe("Visual Entity Profiles", () => {
     root = await mkdtemp(join(tmpdir(), "visual-profile-test-"));
     // Ensure story directory exists
     await atomicWriteJson(storyPaths(root, slug, 1).storyConfig, { slug, title: "Test Story" });
+    const testBible = {
+      ...emptyStoryBible(),
+      canonicalEntities: [
+        canonicalEntitySchema.parse({
+          id: entityId,
+          type: "character",
+          canonicalName: "Test Character",
+          aliases: [],
+          description: "Test description",
+          firstAppearance: 1,
+          lastKnownAppearance: 1,
+        }),
+        canonicalEntitySchema.parse({
+          id: "ent_aaaaaaaaaaaaaaaaaaaaaaaa",
+          type: "character",
+          canonicalName: "Target Hero",
+          aliases: [],
+          description: "Target description",
+          firstAppearance: 1,
+          lastKnownAppearance: 1,
+        }),
+        canonicalEntitySchema.parse({
+          id: "ent_bbbbbbbbbbbbbbbbbbbbbbbb",
+          type: "character",
+          canonicalName: "Source Hero",
+          aliases: [],
+          description: "Source description",
+          firstAppearance: 1,
+          lastKnownAppearance: 1,
+        }),
+      ],
+    };
+    await atomicWriteJson(storyPaths(root, slug, 1).bible, testBible);
     return async () => {
       await rm(root, { recursive: true, force: true });
     };

@@ -94,6 +94,33 @@ describe("Milestone 21: Visual Canon & Scene Identity Hardening", () => {
           firstAppearance: 1,
           lastKnownAppearance: 5,
         }),
+        canonicalEntitySchema.parse({
+          id: "ent_aaaaaaaaaaaaaaaaaaaaaaaa",
+          type: "character",
+          canonicalName: "Source Alpha",
+          aliases: [],
+          description: "Alpha character",
+          firstAppearance: 1,
+          lastKnownAppearance: 5,
+        }),
+        canonicalEntitySchema.parse({
+          id: "ent_bbbbbbbbbbbbbbbbbbbbbbbb",
+          type: "character",
+          canonicalName: "Target Beta",
+          aliases: [],
+          description: "Beta character",
+          firstAppearance: 1,
+          lastKnownAppearance: 5,
+        }),
+        canonicalEntitySchema.parse({
+          id: "ent_444444444444444444444444",
+          type: "character",
+          canonicalName: "Entity Four",
+          aliases: [],
+          description: "Fourth character",
+          firstAppearance: 1,
+          lastKnownAppearance: 5,
+        }),
       ],
     };
     await atomicWriteJson(storyPaths(tempDir, slug, 1).bible, testBible);

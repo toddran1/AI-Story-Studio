@@ -11,6 +11,7 @@ import {
   visualReferenceImageSchema,
 } from "../domain/visual-profile.js";
 import { canonicalEntitySchema } from "../domain/story-bible.js";
+import { requireCanonicalStoryBibleEntity } from "../story-bible/canonical.js";
 import { Story } from "../domain/story.js";
 import { ImageProvider } from "../artwork/provider.js";
 import { atomicWrite, atomicWriteJson } from "../storage/atomic-write.js";
@@ -24,6 +25,7 @@ import {
   isVisualReferenceExtension,
   normalizeVisualReferenceExtension,
   resolveVisualReferencePath,
+  visualReferenceExtensionForMime,
 } from "./assets.js";
 
 
@@ -62,7 +64,7 @@ export async function updateVisualProfile(
   entityId: string,
   patch: Partial<VisualEntityProfile> & { visualType?: VisualEntityProfile["visualType"] },
 ): Promise<VisualEntityProfile> {
-  canonicalEntitySchema.shape.id.parse(entityId);
+  await requireCanonicalStoryBibleEntity(root, slug, entityId);
   const profiles = await loadVisualProfiles(root, slug);
   const existing = profiles[entityId];
   const now = new Date().toISOString();
@@ -176,7 +178,7 @@ export async function addVisualReferenceImage(
     provenance?: Record<string, unknown>;
   },
 ): Promise<{ profile: VisualEntityProfile; reference: VisualReferenceImage }> {
-  canonicalEntitySchema.shape.id.parse(entityId);
+  await requireCanonicalStoryBibleEntity(root, slug, entityId);
   const fileBytes = options.data ?? options.buffer;
   if (!fileBytes) throw new Error("Image data buffer is required");
   const ext = normalizeVisualReferenceExtension(options.ext ?? "png");
@@ -193,25 +195,34 @@ export async function addVisualReferenceImage(
   await mkdir(dirname(filePath), { recursive: true });
   await atomicWrite(filePath, fileBytes);
 
-  const reference = visualReferenceImageSchema.parse({
-    id: refId,
-    entityId,
-    role: options.role ?? "general_reference",
-    imagePath: filePath,
-    createdAt: new Date().toISOString(),
-    source: options.source ?? "uploaded",
-    approved: options.approved ?? false,
-    prompt: options.prompt,
-    provenance: options.provenance,
-  });
+  try {
+    const reference = visualReferenceImageSchema.parse({
+      id: refId,
+      entityId,
+      role: options.role ?? "general_reference",
+      imagePath: filePath,
+      createdAt: new Date().toISOString(),
+      source: options.source ?? "uploaded",
+      approved: options.approved ?? false,
+      prompt: options.prompt,
+      provenance: options.provenance,
+    });
 
-  profile.references.push(reference);
-  profile.updatedAt = new Date().toISOString();
-  profile.revision += 1;
-  profiles[entityId] = profile;
+    profile.references.push(reference);
+    profile.updatedAt = new Date().toISOString();
+    profile.revision += 1;
+    profiles[entityId] = profile;
 
-  await saveVisualProfiles(root, slug, profiles);
-  return { profile, reference };
+    await saveVisualProfiles(root, slug, profiles);
+    return { profile, reference };
+  } catch (err) {
+    try {
+      await rm(filePath, { force: true });
+    } catch {
+      // Best-effort cleanup of orphan file must not mask primary persistence error
+    }
+    throw err;
+  }
 }
 
 export async function generateStyleSheet(
@@ -226,7 +237,7 @@ export async function generateStyleSheet(
     presetId?: string;
   } = {},
 ): Promise<{ profile: VisualEntityProfile; reference: VisualReferenceImage }> {
-  canonicalEntitySchema.shape.id.parse(entityId);
+  await requireCanonicalStoryBibleEntity(root, slug, entityId);
   const profile = await getVisualProfile(root, slug, entityId);
   if (!profile) throw new Error(`Visual profile for entity '${entityId}' was not found`);
 
@@ -316,10 +327,14 @@ export async function generateStyleSheet(
     outputFormat: story.artwork.outputFormat,
   });
 
+  const ext = result.mimeType
+    ? visualReferenceExtensionForMime(result.mimeType)
+    : normalizeVisualReferenceExtension((story.artwork as { outputFormat?: string }).outputFormat ?? "png");
+
   return addVisualReferenceImage(root, slug, entityId, {
     role: options.role ?? "expression_sheet",
     data: result.data,
-    ext: "png",
+    ext,
     prompt: sheetPrompt,
     source: "style_sheet",
     approved: true,
@@ -368,7 +383,7 @@ export async function prepareVisualCanonMerge(
     return {
       targetEntityId,
       sourceEntityIds,
-      preparedProfiles: profiles,
+      preparedProfiles: structuredClone(profiles),
       migratedTargetPaths: [],
       migratedSourceDirs: [],
     };
@@ -428,7 +443,7 @@ export async function prepareVisualCanonMerge(
   };
 
   const now = new Date().toISOString();
-  const preparedProfiles = { ...profiles };
+  const preparedProfiles: Record<string, VisualEntityProfile> = structuredClone(profiles);
 
   try {
     if (!target) {
@@ -477,8 +492,9 @@ export async function prepareVisualCanonMerge(
         delete preparedProfiles[src.entityId];
       }
     } else {
-      const existingIds = new Set<string>(target.references.map((r) => r.id));
-      const allRefs = [...target.references];
+      const preparedTarget = preparedProfiles[targetEntityId]!;
+      const existingIds = new Set<string>(preparedTarget.references.map((r) => r.id));
+      const allRefs = [...preparedTarget.references];
 
       for (const src of sources) {
         for (const ref of src.references) {
@@ -487,24 +503,24 @@ export async function prepareVisualCanonMerge(
         }
         migratedSourceDirs.push(join(storyPaths(root, slug, 1).visualProfilesDirectory, src.entityId));
 
-        if (src.notes && !target.notes.includes(src.notes)) {
-          target.notes = [target.notes, src.notes].filter(Boolean).join("\n");
+        if (src.notes && !preparedTarget.notes.includes(src.notes)) {
+          preparedTarget.notes = [preparedTarget.notes, src.notes].filter(Boolean).join("\n");
         }
-        if (src.negativePrompt && !target.negativePrompt.includes(src.negativePrompt)) {
-          target.negativePrompt = [target.negativePrompt, src.negativePrompt].filter(Boolean).join(", ");
+        if (src.negativePrompt && !preparedTarget.negativePrompt.includes(src.negativePrompt)) {
+          preparedTarget.negativePrompt = [preparedTarget.negativePrompt, src.negativePrompt].filter(Boolean).join(", ");
         }
         for (const v of src.variants) {
-          if (!target.variants.some((existing) => existing.name.toLowerCase() === v.name.toLowerCase())) {
-            target.variants.push(v);
+          if (!preparedTarget.variants.some((existing) => existing.name.toLowerCase() === v.name.toLowerCase())) {
+            preparedTarget.variants.push(v);
           }
         }
         delete preparedProfiles[src.entityId];
       }
 
-      target.references = allRefs;
-      target.updatedAt = now;
-      target.revision += 1;
-      preparedProfiles[targetEntityId] = visualProfileSchema.parse(target);
+      preparedTarget.references = allRefs;
+      preparedTarget.updatedAt = now;
+      preparedTarget.revision += 1;
+      preparedProfiles[targetEntityId] = visualProfileSchema.parse(preparedTarget);
     }
   } catch (err) {
     for (const p of migratedTargetPaths) {
@@ -548,9 +564,10 @@ export async function finalizeVisualCanonMerge(
     try {
       await rm(srcDir, { recursive: true, force: true });
       cleanedDirs.push(srcDir);
-    } catch (err: any) {
-      if (err?.code !== "ENOENT") {
-        const msg = `Failed to clean up source directory '${srcDir}': ${err?.message ?? String(err)}`;
+    } catch (err: unknown) {
+      const nodeErr = err as NodeJS.ErrnoException;
+      if (nodeErr?.code !== "ENOENT") {
+        const msg = `Failed to clean up source directory '${srcDir}': ${nodeErr?.message ?? String(err)}`;
         errors.push(msg);
         console.warn(`[VisualCanon] ${msg}`);
       }
