@@ -1926,11 +1926,20 @@ export function JobConsole({ job, onUpdate, onClose, navigate, initialQaComparis
     }
   };
   const isSceneJob = job.type === "scenes" || stage === "scenePlanning" || stage === "scenes";
-  const label = ({ batch: "Processing chapters", preview: "Rendering comparison", metadataTranslation: "Translating reader metadata", qaRepair: "Repairing selected QA findings", summary: "Building story recap", audio: "Mastering chapter audio", audiobook: "Building audiobook", alignment: "Aligning narration to audio", subtitles: "Timing subtitles", video: "Rendering chapter video", videoExport: "Building combined video", scenes: "Planning chapter scenes", artwork: "Generating scene artwork", production: "Producing finished story" } as Record<string, string>)[job.type] ?? "Working";
+  const label = ({ batch: "Processing chapters", preview: "Rendering comparison", metadataTranslation: "Translating reader metadata", qaRepair: "Repairing selected QA findings", qaRecheck: "Rechecking chapter QA", summary: "Building story recap", audio: "Mastering chapter audio", audiobook: "Building audiobook", alignment: "Aligning narration to audio", subtitles: "Timing subtitles", video: "Rendering chapter video", videoExport: "Building combined video", scenes: "Planning chapter scenes", artwork: "Generating scene artwork", production: "Producing finished story" } as Record<string, string>)[job.type] ?? "Working";
   const modelBadge = [diagnostic?.provider, diagnostic?.model].filter(Boolean).join(" · ");
+  const terminal = isTerminalJob(job);
+  const title = terminal ? (job.status === "completed" ? `${label} — completed` : `${label} — ${job.status}`) : label;
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+  useEffect(() => {
+    if (job.status !== "completed" || diagnostic) return;
+    const timer = window.setTimeout(() => onCloseRef.current(), 10000);
+    return () => window.clearTimeout(timer);
+  }, [job.id, job.status]);
   return <aside className={`job-console ${job.status}`} role={job.status === "failed" ? "alert" : "status"}>
     <div className="job-head">
-      <div><span className="live-dot" /><b>{label}</b></div>
+      <div>{!terminal && <span className="live-dot" />}<b>{title}</b></div>
       <span className="mono">{job.status}</span>
     </div>
     <div className="job-progress"><i /><i /><i /><i /><i /></div>

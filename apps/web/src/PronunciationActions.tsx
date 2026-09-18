@@ -16,7 +16,7 @@ export function PronunciationActions({ slug, id, locked, hasAutomatic = false, o
           const next = await api<Job>(`/jobs/${job.id}`); if (current !== token.current) return;
           if (next.status === "failed" || next.status === "paused") { setError(next.error ?? "Pronunciation job stopped"); setBusy(false); return; }
           failures = 0;
-          if (next.status === "completed") { if (test) setAudio(next.result?.audioUrl); else onEnriched(next.result?.entities?.find((e: { id: string }) => e.id === id)?.pronunciation); setBusy(false); return; }
+          if (next.status === "completed") { if (test) setAudio(next.result?.audioUrl); else { const suggestion = next.result?.suggestions?.[id]; onEnriched(suggestion ? { ...suggestion, source: "manual" as const, needsReview: false } : undefined); } setBusy(false); return; }
         } catch (e) { if (current !== token.current) return; if (++failures >= 5) { setError(`${String(e)}. Try again after checking the local server.`); setBusy(false); return; } }
         timer.current = setTimeout(() => void poll(), 1000);
       }; void poll();

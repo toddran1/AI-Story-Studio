@@ -10,7 +10,7 @@ import {
 } from "../src/qa/findings.js";
 import {
   computeQaDependencyFingerprint, computeQaDependencyFingerprints, deriveQaFreshness, loadQaDeterministicDependencies,
-  projectNamingForQa, type QaDependencies,
+  projectNamingForQa, projectPronunciationForQa, type QaDependencies,
 } from "../src/qa/freshness.js";
 import { QA_PROMPT_VERSION } from "../src/qa/prompts.js";
 import { buildQaState, recheckChapterQa, transitionQaFinding } from "../src/qa/review.js";
@@ -44,7 +44,7 @@ describe("QA dependency fingerprint", () => {
       { ...baseDeps(), prompt: "9" },
       { ...baseDeps(), mode: "thorough" as const },
       { ...baseDeps(), naming: [{ id: "ent_a", canonicalName: "Feixue", originalName: "飞雪", aliases: [], aliasNarrationRules: [], canonicalNameLocked: false, preferredNarrationName: "Feixue" }] },
-      { ...baseDeps(), pronunciation: [{ id: "ent_a", canonicalName: "Feixue", originalName: "飞雪", aliases: [], attempt: "attempt-fp" }] },
+      { ...baseDeps(), pronunciation: [{ id: "ent_a", pronunciation: { mode: "custom" as const, customPronunciation: "Fay-shway" } }] },
       { ...baseDeps(), exceptions: [{ id: "qax_aaaaaaaaaaaaaaaaaaaaaaaa", category: "names" as const, matchKind: "terminology" as const, value: "Feixue", createdAt: NOW }] },
       { ...baseDeps(), acceptedContinuity: [{ id: "cnt_1", entityIds: [], explanation: "Intentional time skip" }] },
     ];
@@ -77,6 +77,29 @@ describe("QA dependency fingerprint", () => {
     expect(fingerprint(afterEdits)).toBe(fingerprint(before));
     const afterNamingEdit = projectNamingForQa(bible({ preferredNarrationName: "Fei" }).canonicalEntities);
     expect(fingerprint(afterNamingEdit)).not.toBe(fingerprint(before));
+  });
+
+  it("covers only active pronunciation configurations; suggestions and default TTS are invisible", () => {
+    const bible = (pronunciation?: Record<string, unknown>) => storyBibleSchema.parse({
+      ...emptyStoryBible(),
+      canonicalEntities: [{
+        id: "ent_aaaaaaaaaaaaaaaaaaaaaaaa", type: "character", canonicalName: "Feixue", originalName: "飞雪", aliases: [],
+        firstAppearance: 1, lastKnownAppearance: 3, status: "alive", ...(pronunciation ? { pronunciation } : {}),
+      }],
+    });
+    // No record, an unaccepted AI suggestion, and a legacy unresolved record all
+    // project to nothing: they are not QA dependencies.
+    expect(projectPronunciationForQa(bible().canonicalEntities)).toEqual([]);
+    expect(projectPronunciationForQa(bible({ mode: "automatic", phoneticHint: "Fay-shway", confidence: .6, needsReview: true, source: "ai" }).canonicalEntities)).toEqual([]);
+    expect(projectPronunciationForQa(bible({ mode: "automatic", confidence: 0, needsReview: true, source: "ai", locked: false }).canonicalEntities)).toEqual([]);
+    // Active configurations are QA dependencies, and changes to them fingerprint differently.
+    const active = projectPronunciationForQa(bible({ mode: "custom", customPronunciation: "Fay-shway", source: "manual" }).canonicalEntities);
+    expect(active).toHaveLength(1);
+    const edited = projectPronunciationForQa(bible({ mode: "custom", customPronunciation: "Fei-shwei", source: "manual" }).canonicalEntities);
+    expect(fingerprint(edited)).not.toBe(fingerprint(active));
+    // Confidence/metadata churn on an unaccepted suggestion never enters the projection.
+    const suggestionV2 = projectPronunciationForQa(bible({ mode: "automatic", phoneticHint: "Fay-shway", confidence: .9, needsReview: true, source: "ai" }).canonicalEntities);
+    expect(suggestionV2).toEqual([]);
   });
 
   it("derives freshness from the recorded fingerprint and stage status", () => {
@@ -147,6 +170,23 @@ const qaWith = (issue: ReturnType<typeof namesIssue>) => ({
 });
 
 describe("finding lifecycle vs verification (Feixue/Xiaoxue)", () => {
+  it("leaves the QA fingerprint untouched by suggestions but invalidates on active configuration changes", async () => {
+    const ctx = await setupChapter();
+    await atomicWriteJson(ctx.paths.bible, JSON.parse(JSON.stringify(feixueBible())));
+    const before = await currentFingerprint(ctx.root, ctx.story, 1);
+    const entity = feixueBible().canonicalEntities[0]!;
+    // Suggestion-only changes (including dismissed/churned suggestions) are not QA dependencies.
+    await atomicWriteJson(join(ctx.paths.story, "pronunciation-enrichment.json"), { [entity.id]: { attempt: "attempt-fp", suggestion: { mode: "automatic", phoneticHint: "Fay-shway", confidence: .5, needsReview: true, source: "ai" } } });
+    expect(await currentFingerprint(ctx.root, ctx.story, 1)).toBe(before);
+    await atomicWriteJson(join(ctx.paths.story, "pronunciation-enrichment.json"), { [entity.id]: { attempt: "attempt-fp" } });
+    expect(await currentFingerprint(ctx.root, ctx.story, 1)).toBe(before);
+    // An active, user-configured pronunciation is a QA dependency.
+    const withActive = feixueBible();
+    withActive.canonicalEntities[0]!.pronunciation = { mode: "custom", customPronunciation: "Fay-shway", source: "manual" };
+    await atomicWriteJson(ctx.paths.bible, JSON.parse(JSON.stringify(withActive)));
+    expect(await currentFingerprint(ctx.root, ctx.story, 1)).not.toBe(before);
+  });
+
   it("retires a fixed naming problem only after a successful recheck against changed dependencies", async () => {
     const ctx = await setupChapter();
     const llm = new MockLLM("openai", undefined, qaWith(namesIssue("Xiaoxue")));

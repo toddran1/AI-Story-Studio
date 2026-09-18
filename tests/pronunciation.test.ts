@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { canonicalEntitySchema, pronunciationSchema } from "../src/domain/story-bible.js";
-import { adaptPronunciationText, enrichPronunciation, enrichPronunciationBatch, pronunciationFingerprint, resolvePronunciations } from "../src/tts/pronunciation.js";
+import { canonicalEntitySchema, hasActivePronunciation, pronunciationSchema } from "../src/domain/story-bible.js";
+import { adaptPronunciationText, enrichPronunciation, enrichPronunciationBatch, pronunciationFingerprint, pronunciationProvider, resolvePronunciations } from "../src/tts/pronunciation.js";
 import { normalizeSpeechText } from "../src/tts/speech-normalization.js";
 import { ProviderError } from "../src/pipeline/errors.js";
 import type { LLMProvider } from "../src/llm/provider.js";
@@ -60,6 +60,30 @@ describe("provider-neutral pronunciation foundation", () => {
     const provider = { generateStructured: () => { throw new Error("must not call"); } } as unknown as LLMProvider;
     const locked = { ...entity, pronunciation: { ...entity.pronunciation!, locked: true } };
     expect((await enrichPronunciation(provider, { provider: "openai", model: "fake" }, locked, "zh-CN")).pronunciation).toEqual(locked.pronunciation);
+  });
+});
+
+describe("active pronunciation intent", () => {
+  it("defines exactly which records actively steer TTS and QA", () => {
+    expect(hasActivePronunciation(undefined)).toBe(false);
+    expect(hasActivePronunciation({ mode: "custom", customPronunciation: "Jyang Yweh", source: "manual" })).toBe(true);
+    expect(hasActivePronunciation({ mode: "automatic", phoneticHint: "Jyang Yweh", locked: true })).toBe(true);
+    // Legacy unresolved AI records (never accepted) are suggestions, not configuration.
+    expect(hasActivePronunciation({ mode: "automatic", sourceLanguage: "zh-CN", confidence: 0, needsReview: true, source: "ai", locked: false })).toBe(false);
+    expect(hasActivePronunciation({ mode: "automatic", phoneticHint: "Jyang Yweh", confidence: .6, needsReview: true, source: "ai" })).toBe(false);
+    // Confident AI records already in effect stay active.
+    expect(hasActivePronunciation({ mode: "automatic", phoneticHint: "Jyang Yweh", confidence: .95, source: "ai" })).toBe(true);
+  });
+  it("never resolves or fingerprints inactive pronunciation records", () => {
+    const legacy = { ...entity, pronunciation: { mode: "automatic" as const, sourceLanguage: "zh-CN", confidence: 0, needsReview: true, source: "ai" as const, locked: false } };
+    expect(resolvePronunciations("Jiang Yue entered.", [legacy])).toEqual([]);
+    expect(resolvePronunciations("Jiang Yue entered.", [{ ...entity, pronunciation: undefined }])).toEqual([]);
+    expect(pronunciationFingerprint(resolvePronunciations("Jiang Yue entered.", [legacy]))).toBeUndefined();
+    // The provider wrapper is a no-op without active pronunciation.
+    const tts = { name: "fake", synthesize: async (request: unknown) => request } as unknown as import("../src/tts/provider.js").TTSProvider;
+    expect(pronunciationProvider(tts, [legacy])).toBe(tts);
+    expect(pronunciationProvider(tts, [{ ...entity, pronunciation: undefined }])).toBe(tts);
+    expect(pronunciationProvider(tts, [entity])).not.toBe(tts);
   });
 });
 

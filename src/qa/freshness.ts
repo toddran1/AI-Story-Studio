@@ -1,9 +1,9 @@
 import { StageState } from "../domain/chapter.js";
 import { QaException } from "../domain/qa.js";
 import { Story } from "../domain/story.js";
-import { CanonicalEntity, emptyStoryBible } from "../domain/story-bible.js";
+import { CanonicalEntity, emptyStoryBible, hasActivePronunciation } from "../domain/story-bible.js";
 import { loadNarrationNamingEntities } from "../story-bible/narration-names.js";
-import { loadPronunciationAttempts, loadPronunciationEntities } from "../story-bible/pronunciation.js";
+import { loadPronunciationEntities } from "../story-bible/pronunciation.js";
 import { storyPaths } from "../storage/paths.js";
 import { readJsonIfExists, readTextIfExists } from "../storage/story-files.js";
 import { fingerprint } from "../utils/hash.js";
@@ -23,16 +23,14 @@ export type QaNamingProjection = {
   canonicalNameLocked: boolean;
 };
 
-/** Pronunciation state QA actually consumes, per entity, plus the recorded enrichment attempt. */
+/**
+ * Pronunciation state QA actually consumes: active configurations only.
+ * Entities using default TTS, AI suggestions, and enrichment attempts are not
+ * QA dependencies and never affect the fingerprint.
+ */
 export type QaPronunciationProjection = {
   id: string;
-  canonicalName: string;
-  originalName: string;
-  aliases: string[];
-  preferredNarrationName?: string;
-  localizedNames?: (string | undefined)[];
-  pronunciation?: CanonicalEntity["pronunciation"];
-  attempt?: string;
+  pronunciation: CanonicalEntity["pronunciation"];
 };
 
 /** The full set of effective QA dependencies for one chapter QA evaluation. */
@@ -70,17 +68,10 @@ export function projectNamingForQa(entities: CanonicalEntity[]): QaNamingProject
   })).sort((a, b) => a.id.localeCompare(b.id));
 }
 
-export function projectPronunciationForQa(entities: CanonicalEntity[], attempts: Record<string, string>): QaPronunciationProjection[] {
-  return entities.map((entity) => ({
-    id: entity.id,
-    canonicalName: entity.canonicalName,
-    originalName: entity.originalName,
-    aliases: entity.aliases,
-    preferredNarrationName: entity.preferredNarrationName,
-    localizedNames: entity.localizedNaming ? [entity.localizedNaming.fullName, entity.localizedNaming.shortName] : undefined,
-    pronunciation: entity.pronunciation,
-    attempt: attempts[entity.id],
-  })).sort((a, b) => a.id.localeCompare(b.id));
+export function projectPronunciationForQa(entities: CanonicalEntity[]): QaPronunciationProjection[] {
+  return entities.filter((entity) => hasActivePronunciation(entity.pronunciation))
+    .map((entity) => ({ id: entity.id, pronunciation: entity.pronunciation }))
+    .sort((a, b) => a.id.localeCompare(b.id));
 }
 
 export type QaDependencyFingerprints = {
@@ -125,16 +116,15 @@ export async function loadQaDeterministicDependencies(
   root: string,
   slug: string,
 ): Promise<Pick<QaDependencies, "naming" | "pronunciation" | "exceptions" | "acceptedContinuity">> {
-  const [namingEntities, pronunciationEntities, attempts, exceptions, acceptedContinuity] = await Promise.all([
+  const [namingEntities, pronunciationEntities, exceptions, acceptedContinuity] = await Promise.all([
     loadNarrationNamingEntities(root, slug),
     loadPronunciationEntities(root, slug),
-    loadPronunciationAttempts(root, slug),
     listQaExceptions(root, slug),
     loadAcceptedContinuity(root, slug),
   ]);
   return {
     naming: projectNamingForQa(namingEntities),
-    pronunciation: projectPronunciationForQa(pronunciationEntities, attempts),
+    pronunciation: projectPronunciationForQa(pronunciationEntities),
     exceptions,
     acceptedContinuity,
   };

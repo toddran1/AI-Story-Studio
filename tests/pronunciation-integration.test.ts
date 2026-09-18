@@ -9,7 +9,7 @@ import { storyPaths } from "../src/storage/paths.js";
 import { mergeStoryBible } from "../src/story-bible/updater.js";
 import { updateCanonicalEntity, applyCanonicalOverlay } from "../src/story-bible/canonical.js";
 import { rebuildStoryBibleBeforeChapter } from "../src/story-bible/rebuild.js";
-import { enrichStoryPronunciations, invalidatePronunciationChange, loadPronunciationEntities } from "../src/story-bible/pronunciation.js";
+import { enrichStoryPronunciations, invalidatePronunciationChange, loadPronunciationEntities, loadPronunciationSuggestions } from "../src/story-bible/pronunciation.js";
 import { adaptPronunciationText, pronunciationProvider, resolvePronunciations } from "../src/tts/pronunciation.js";
 import { FishAudioProvider } from "../src/tts/fish/fish-audio.provider.js";
 import { retrieveRelevantContext } from "../src/story-bible/retrieval.js";
@@ -97,7 +97,9 @@ describe("pronunciation persistence and production boundary", () => {
     await enrichStoryPronunciations(root, story.slug, bible, llm, story.pipeline.storyBible, story.sourceLanguage);
     await enrichStoryPronunciations(root, story.slug, bible, llm, story.pipeline.storyBible, story.sourceLanguage);
     expect(generate).toHaveBeenCalledTimes(1);
-    expect((await loadPronunciationEntities(root, story.slug))[0]?.pronunciation?.sourceLanguage).toBe("zh-CN");
+    // Enrichment stores a suggestion; the canonical entity keeps default TTS.
+    expect((await loadPronunciationEntities(root, story.slug))[0]?.pronunciation).toBeUndefined();
+    expect((await loadPronunciationSuggestions(root, story.slug))[entity.id]).toMatchObject({ sourceLanguage: "zh-CN", source: "ai" });
     await updateCanonicalEntity(root, story.slug, bible, entity.id, { pronunciation: { mode: "custom", customPronunciation: "Manual", source: "manual" } });
     await enrichStoryPronunciations(root, story.slug, bible, llm, story.pipeline.storyBible, story.sourceLanguage, [entity.id]);
     expect(generate).toHaveBeenCalledTimes(1);
@@ -107,19 +109,22 @@ describe("pronunciation persistence and production boundary", () => {
     await enrichStoryPronunciations(root, story.slug, english, llm, story.pipeline.storyBible, story.sourceLanguage);
     expect(generate).toHaveBeenCalledTimes(2);
   });
-  it("uses original chapter evidence for AI enrichment and records a reviewable unresolved result when identity is not established", async () => {
+  it("uses original chapter evidence for AI enrichment and records an uncertain outcome as a suggestion, not an obligation", async () => {
     const { root, story, bible, entity, paths } = await fixture(); const llm = new MockLLM();
     await atomicWrite(paths.original, "江月抬头，看见远处的山门。");
     const generate = vi.spyOn(llm, "generateStructured").mockImplementation(async request => ({ value: request.schema.parse({ pronunciation: { mode: "automatic", sourceLanguage: "zh-CN", originalText: "江月", romanization: "Jiāng Yuè", phoneticHint: "Jyang Yweh", confidence: .96, evidence: [{ chapter: 1, sourceText: "江月抬头", reason: "Source name appears in Chapter 1" }] } }) }));
     await enrichStoryPronunciations(root, story.slug, bible, llm, story.pipeline.storyBible, story.sourceLanguage, [entity.id]);
     expect(String(generate.mock.calls[0]?.[0].input)).toContain("江月抬头");
-    expect((await loadPronunciationEntities(root, story.slug))[0]?.pronunciation).toMatchObject({ originalText: "江月", romanization: "Jiāng Yuè", source: "ai" });
+    expect((await loadPronunciationEntities(root, story.slug))[0]?.pronunciation).toBeUndefined();
+    expect((await loadPronunciationSuggestions(root, story.slug))[entity.id]).toMatchObject({ originalText: "江月", romanization: "Jiāng Yuè", source: "ai" });
     await updateCanonicalEntity(root, story.slug, bible, entity.id, { pronunciation: null });
     await atomicWrite(paths.original, "这段来源没有提供能够确认该实体身份的名字。");
     generate.mockImplementation(async request => ({ value: request.schema.parse({ pronunciation: null }) }));
     const result = await enrichStoryPronunciations(root, story.slug, bible, llm, story.pipeline.storyBible, story.sourceLanguage, [entity.id]);
     expect(result.unresolved).toContain(entity.id);
-    expect((await loadPronunciationEntities(root, story.slug))[0]?.pronunciation).toMatchObject({ needsReview: true, confidence: 0 });
+    // Uncertain AI analysis: an optional suggestion, never an active record.
+    expect((await loadPronunciationEntities(root, story.slug))[0]?.pronunciation).toBeUndefined();
+    expect((await loadPronunciationSuggestions(root, story.slug))[entity.id]).toMatchObject({ needsReview: true, confidence: 0, source: "ai" });
   });
   it("batches eligible entities, skips protected records, and never calls a provider during a dry run", async () => {
     const { root, story, bible, entity, paths } = await fixture(); const second = structuredClone(entity), third = structuredClone(entity);
@@ -147,11 +152,14 @@ describe("pronunciation persistence and production boundary", () => {
     ] }) }));
     const result = await enrichStoryPronunciations(root, story.slug, base, llm, story.pipeline.storyBible, story.sourceLanguage);
     const entities = await loadPronunciationEntities(root, story.slug);
-    // Explicit null: no record, no unresolved flag, and the attempt is cached.
+    const suggestions = await loadPronunciationSuggestions(root, story.slug);
+    // Explicit null: no record, no suggestion, no unresolved flag; the attempt is cached.
     expect(entities.find(item => item.id === ordinary.id)?.pronunciation).toBeUndefined();
+    expect(suggestions[ordinary.id]).toBeUndefined();
     expect(result.unresolved).not.toContain(ordinary.id);
-    // Missing from the batch results: reviewable unresolved record.
-    expect(entities.find(item => item.id === entity.id)?.pronunciation).toMatchObject({ needsReview: true, confidence: 0 });
+    // Missing from the batch results: an uncertain suggestion, not an active record.
+    expect(entities.find(item => item.id === entity.id)?.pronunciation).toBeUndefined();
+    expect(suggestions[entity.id]).toMatchObject({ needsReview: true, confidence: 0 });
     // A second run must not re-query the cached null outcome.
     await enrichStoryPronunciations(root, story.slug, base, llm, story.pipeline.storyBible, story.sourceLanguage);
     expect(generate).toHaveBeenCalledTimes(1);
@@ -175,6 +183,32 @@ describe("pronunciation persistence and production boundary", () => {
     const cached: Array<{ processed: number; total: number }> = [];
     await enrichStoryPronunciations(root, story.slug, base, llm, story.pipeline.storyBible, story.sourceLanguage, undefined, false, false, event => cached.push(event));
     expect(cached).toEqual([{ processed: 0, total: 0 }]);
+  });
+  it("stores suggestions without touching chapter freshness; accepting activates TTS, clearing returns to default", async () => {
+    const { root, story, bible, entity, paths } = await fixture();
+    const now = new Date().toISOString(), complete = { status: "complete", fingerprint: "old", outputFingerprint: "old" };
+    await atomicWrite(paths.narration, "Jiang Yue's sword fell.");
+    await atomicWriteJson(paths.chapterMeta, chapterSchema.parse({ chapter: 1, sourceLanguage: "zh-CN", outputLanguage: "en-US", counts: { originalCharacters: 1, englishWords: 1, narrationWords: 1 }, createdAt: now, updatedAt: now, stages: Object.fromEntries(["ingestion", "translation", "narration", "qa", "storyBible", "continuity", "tts", "audioMastering", "alignment", "subtitles", "scenePlanning", "artwork", "video"].map(stage => [stage, complete])) }));
+    const llm = new MockLLM();
+    vi.spyOn(llm, "generateStructured").mockImplementation(async request => ({ value: request.schema.parse({ pronunciation: { mode: "automatic", sourceLanguage: "zh-CN", phoneticHint: "Jyang Yweh", confidence: .95 } }) }));
+    const result = await enrichStoryPronunciations(root, story.slug, bible, llm, story.pipeline.storyBible, story.sourceLanguage);
+    expect(result.enriched).toEqual([entity.id]);
+    // Suggestion-only change: the entity stays on default TTS and no stage goes stale.
+    expect((await loadPronunciationEntities(root, story.slug))[0]?.pronunciation).toBeUndefined();
+    expect(resolvePronunciations("Jiang Yue entered.", await loadPronunciationEntities(root, story.slug))).toEqual([]);
+    const meta = JSON.parse(await readFile(paths.chapterMeta, "utf8"));
+    for (const stage of ["tts", "audioMastering", "alignment", "subtitles", "video"]) expect(meta.stages[stage].staleReason).toBeUndefined();
+    // Accepting the suggestion (explicit user action) activates it for TTS.
+    const suggestion = (await loadPronunciationSuggestions(root, story.slug))[entity.id]!;
+    await updateCanonicalEntity(root, story.slug, bible, entity.id, { pronunciation: { ...suggestion, source: "manual", needsReview: false } });
+    const active = resolvePronunciations("Jiang Yue entered.", await loadPronunciationEntities(root, story.slug));
+    expect(active).toHaveLength(1);
+    expect(active[0]?.pronunciation.phoneticHint).toBe("Jyang Yweh");
+    // Clearing the override returns to default TTS with no placeholder record.
+    await updateCanonicalEntity(root, story.slug, bible, entity.id, { pronunciation: null });
+    const cleared = await loadPronunciationEntities(root, story.slug);
+    expect(cleared[0]?.pronunciation).toBeUndefined();
+    expect(resolvePronunciations("Jiang Yue entered.", cleared)).toEqual([]);
   });
   it("marks only referenced sound-dependent stages stale and retains playable files", async () => {
     const { root, story, entity } = await fixture(); const now = new Date().toISOString();

@@ -40,6 +40,18 @@ export const pronunciationSchema = z.object({
 });
 export type EntityPronunciation = z.infer<typeof pronunciationSchema>;
 
+/**
+ * Pronunciation is opt-in: only an explicit user configuration steers TTS and
+ * creates QA obligations. `undefined` means default provider pronunciation.
+ * Unresolved automatic AI records (never user-accepted) are suggestions, not
+ * configuration; confident AI records already in effect stay active.
+ */
+export function hasActivePronunciation(pronunciation: EntityPronunciation | undefined): boolean {
+  if (!pronunciation) return false;
+  if (pronunciation.source === "manual" || pronunciation.locked) return true;
+  return !(pronunciation.source === "ai" && pronunciation.mode === "automatic" && pronunciation.needsReview === true);
+}
+
 const namedEntity = z.object({
   canonicalEnglishName: z.string().min(1).max(300), originalName: z.string().max(300).default(""), description: z.string().max(10_000).default(""),
   firstSeenChapter: z.number().int().positive(), lastSeenChapter: z.number().int().positive(),

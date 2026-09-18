@@ -242,7 +242,11 @@ export function reconcileQaState(
         || anchorCoveredByEvaluation(prior, options.evaluatedContent, entities);
       const anchorGone = options.content !== undefined
         && (anchorAbsentFromContent(prior, options.content, entities) || wrongTermAbsent(prior, options.content));
-      if (dependenciesChanged && covered && anchorGone) {
+      // Deterministic rules re-evaluate the checked content on every recheck, so
+      // a covered recheck that did not re-fire the rule is proof of absence even
+      // when the anchor text remains (e.g. the rule itself was removed).
+      const verifiedAbsent = anchorGone || prior.origin === "deterministic";
+      if (dependenciesChanged && covered && verifiedAbsent) {
         prior.status = "obsolete";
         prior.resolution = {
           action: "obsolete", resolvedAt: now,

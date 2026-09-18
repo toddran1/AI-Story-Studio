@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { pronunciationSchema, type CanonicalEntity, type EntityPronunciation } from "../domain/story-bible.js";
+import { pronunciationSchema, hasActivePronunciation, type CanonicalEntity, type EntityPronunciation } from "../domain/story-bible.js";
 import type { LLMProvider } from "../llm/provider.js";
 import type { StageModelConfig } from "../domain/provider.js";
 import { fingerprint } from "../utils/hash.js";
@@ -17,7 +17,7 @@ export type PronunciationCapabilities = { ipa?: boolean; dictionary?: boolean; s
 
 /** Resolve again for each actual request, so censor splitting cannot corrupt offsets. */
 export function pronunciationProvider(provider: TTSProvider, entities: readonly CanonicalEntity[]): TTSProvider {
-  if (!entities.some(entity => entity.pronunciation)) return provider;
+  if (!entities.some(entity => hasActivePronunciation(entity.pronunciation))) return provider;
   return {
     name: provider.name, inputNormalizationVersion: provider.inputNormalizationVersion,
     pronunciationCapabilities: provider.pronunciationCapabilities,
@@ -56,7 +56,7 @@ export function resolvePronunciations(text: string, entities: readonly Canonical
   for (const candidate of candidates) {
     if (candidates.some(other => other.entityId !== candidate.entityId && other.start < candidate.end && other.end > candidate.start)) continue;
     if (result.some(other => other.start < candidate.end && other.end > candidate.start)) continue;
-    if (entities.find(entity => entity.id === candidate.entityId)?.pronunciation) result.push(candidate);
+    if (hasActivePronunciation(entities.find(entity => entity.id === candidate.entityId)?.pronunciation)) result.push(candidate);
   }
   return result;
 }

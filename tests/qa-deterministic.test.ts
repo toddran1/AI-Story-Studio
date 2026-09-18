@@ -101,35 +101,64 @@ describe("deterministic speech-readiness checks", () => {
 });
 
 describe("deterministic pronunciation checks", () => {
-  it("flags needsReview pronunciation and missing pronunciation for foreign-named spoken entities", async () => {
+  it("warns only for active configurations genuinely needing review; missing records are valid", async () => {
     const root = await mkdtemp(join(tmpdir(), "qa-det-"));
     const { story } = await setup(root, { entities: [
-      entity({ pronunciation: { mode: "automatic", needsReview: true } }),
+      entity({ pronunciation: { mode: "automatic", phoneticHint: "Soo Ming", source: "manual", needsReview: true } }),
       entity({ id: "ent_dddddddddddddddddddddddd", canonicalName: "Kael", originalName: "凯尔" }),
       entity({ id: "ent_eeeeeeeeeeeeeeeeeeeeeeee", canonicalName: "Bone Cage", originalName: "" }),
+      entity({ id: "ent_ffffffffffffffffffffffff", canonicalName: "Mo Xie", originalName: "莫邪" }),
     ] });
-    const { detections } = await run(root, story, "Su Ming and Kael entered the Bone Cage.");
+    const { detections } = await run(root, story, "Su Ming, Kael, and Mo Xie entered the Bone Cage.");
     const findings = detections.filter((detection) => detection.category === "names");
-    expect(findings).toHaveLength(2);
-    expect(findings.find((detection) => detection.entityIds?.[0] === "ent_aaaaaaaaaaaaaaaaaaaaaaaa")!.message).toContain("needsReview");
-    expect(findings.find((detection) => detection.entityIds?.[0] === "ent_dddddddddddddddddddddddd")!.message).toContain("no pronunciation guidance");
-    // Ordinary translated English terms need no pronunciation record.
-    expect(findings.some((detection) => detection.entityIds?.[0] === "ent_eeeeeeeeeeeeeeeeeeeeeeee")).toBe(false);
+    // Only the active, user-configured pronunciation marked needsReview warns.
+    expect(findings).toHaveLength(1);
+    expect(findings[0]).toMatchObject({ entityIds: ["ent_aaaaaaaaaaaaaaaaaaaaaaaa"], origin: "deterministic" });
+    expect(findings[0]!.message).toContain("needsReview");
   });
 
-  it("stays silent for entities whose completed enrichment attempt determined no guidance was needed", async () => {
+  it("treats legacy unresolved AI records and enrichment attempts as suggestions, never obligations", async () => {
     const root = await mkdtemp(join(tmpdir(), "qa-det-"));
+    const legacy = entity({ canonicalName: "Su Ming", originalName: "苏明", pronunciation: { mode: "automatic", sourceLanguage: "zh-CN", confidence: 0, needsReview: true, source: "ai", locked: false } });
     const term = entity({ id: "ent_ffffffffffffffffffffffff", canonicalName: "Level", originalName: "等级" });
-    const { story, paths } = await setup(root, { entities: [term] });
+    const { story, paths } = await setup(root, { entities: [legacy, term] });
+    // A completed "no guidance needed" enrichment attempt changes nothing either.
     const parsed = canonicalEntitySchema.parse(term);
-    await atomicWriteJson(join(paths.story, "pronunciation-enrichment.json"), { [parsed.id]: pronunciationAttemptInput(parsed, story.sourceLanguage) });
-    const { detections } = await run(root, story, "His Level rose quickly.");
+    await atomicWriteJson(join(paths.story, "pronunciation-enrichment.json"), { [parsed.id]: { attempt: pronunciationAttemptInput(parsed, story.sourceLanguage) } });
+    const { detections } = await run(root, story, "Su Ming raised his Level quickly.");
     expect(detections.filter((detection) => detection.category === "names")).toEqual([]);
-    // A stale attempt (identity changed afterwards) must not suppress the warning.
-    const renamed = { ...term, canonicalName: "Level Rank" };
-    await atomicWriteJson(paths.bible, storyBibleSchema.parse({ ...emptyStoryBible(), canonicalEntities: [entity(renamed)] }));
-    const flagged = await run(root, story, "His Level Rank rose quickly.");
-    expect(flagged.detections.some((detection) => detection.category === "names" && detection.message.includes("no pronunciation guidance"))).toBe(true);
+  });
+
+  it("retires an old missing-pronunciation finding on recheck with history preserved", () => {
+    const stale = {
+      category: "names" as const, severity: "warn" as const, origin: "deterministic" as const, safeToFix: false,
+      entityIds: ["ent_aaaaaaaaaaaaaaaaaaaaaaaa"], ruleKey: "names:pronunciation-missing:ent_aaaaaaaaaaaaaaaaaaaaaaaa",
+      message: "Su Ming is spoken in the narration but has no pronunciation guidance.",
+      evidence: `Narration names Su Ming; the entity has original name "苏明" and no pronunciation record.`,
+    };
+    const entities = storyBibleSchema.parse({ ...emptyStoryBible(), canonicalEntities: [entity({})] }).canonicalEntities;
+    const first = buildQaState(undefined, [stale], { chapter: 1, canonicalEntities: entities, translation: "T", narration: "Su Ming walked in.", now: NOW, dependencyFingerprint: "fp-1" }).state;
+    expect(first.findings[0]!.status).toBe("open");
+    // The rule no longer exists: a recheck against changed dependencies does not
+    // rediscover it, and the deterministic rule not re-firing is proof of absence.
+    const recheck = buildQaState(first, [], { chapter: 1, canonicalEntities: entities, translation: "T", narration: "Su Ming walked in.", now: "2026-09-16T13:00:00.000Z", dependencyFingerprint: "fp-2" });
+    expect(recheck.state.findings).toHaveLength(1);
+    expect(recheck.state.findings[0]!.status).toBe("obsolete");
+    expect(recheck.state.findings[0]!.resolution?.action).toBe("obsolete");
+  });
+
+  it("keeps an active configuration warning open while its dependency state is unchanged", () => {
+    const active = {
+      category: "names" as const, severity: "warn" as const, origin: "deterministic" as const, safeToFix: false,
+      entityIds: ["ent_aaaaaaaaaaaaaaaaaaaaaaaa"], ruleKey: "names:pronunciation-review:ent_aaaaaaaaaaaaaaaaaaaaaaaa",
+      message: "The pronunciation for Su Ming is marked needsReview.",
+      evidence: `Narration names Su Ming; pronunciation mode "automatic" has needsReview=true.`,
+    };
+    const entities = storyBibleSchema.parse({ ...emptyStoryBible(), canonicalEntities: [entity({})] }).canonicalEntities;
+    const first = buildQaState(undefined, [active], { chapter: 1, canonicalEntities: entities, translation: "T", narration: "Su Ming walked in.", now: NOW, dependencyFingerprint: "fp-1" }).state;
+    // Same fingerprint: the finding was not re-verified, so it must not retire.
+    const again = buildQaState(first, [], { chapter: 1, canonicalEntities: entities, translation: "T", narration: "Su Ming walked in.", now: "2026-09-16T13:00:00.000Z", dependencyFingerprint: "fp-1" });
+    expect(again.state.findings[0]!.status).toBe("open");
   });
 });
 

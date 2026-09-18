@@ -1,4 +1,4 @@
-import { loadPronunciationEntities, enrichStoryPronunciations, clearPronunciationAttempt, invalidatePronunciationChange } from "../../src/story-bible/pronunciation.js";
+import { loadPronunciationEntities, enrichStoryPronunciations, clearPronunciationAttempt, dismissPronunciationSuggestion, invalidatePronunciationChange, loadPronunciationSuggestions } from "../../src/story-bible/pronunciation.js";
 import { pronunciationProvider, pronunciationFingerprint, resolvePronunciations } from "../../src/tts/pronunciation.js";
 import { randomUUID } from "node:crypto";
 import { censorToneConfig } from "../../src/tts/censor-audio.js";
@@ -700,6 +700,27 @@ export class StudioOperations {
     if (invalidation.exportCleanupWarnings.length) logger.warn({ event: "bible.entity.export_cleanup_incomplete", story: slug, entityId: id, manifests: invalidation.exportCleanupWarnings });
     invalidateCatalogCache(this.root, slug); await recordActivity(this.root, slug, "bible.entity.edited", invalidation.affectedChapters.length ? `Updated canonical entity ${id}; marked ${invalidation.affectedChapters.length} chapter(s) affected by narration naming` : `Updated canonical entity ${id}`); return { entity, invalidation };
   }); }
+  async listPronunciationDesk(slug: string) {
+    slugSchema.parse(slug);
+    const [bible, suggestions] = await Promise.all([getStoryBible(this.root, slug), loadPronunciationSuggestions(this.root, slug)]);
+    return { entities: bible.canonicalEntities, suggestions };
+  }
+  /** Accepting a suggestion is the explicit user action that activates pronunciation. */
+  async acceptPronunciationSuggestion(slug: string, id: string) {
+    slugSchema.parse(slug); z.string().regex(/^ent_[a-f0-9]{24}$/).parse(id);
+    const suggestions = await loadPronunciationSuggestions(this.root, slug);
+    const suggestion = suggestions[id];
+    if (!suggestion) throw new Error("No pronunciation suggestion exists for this entity");
+    return this.updateCanonicalEntity(slug, id, { pronunciation: { ...suggestion, source: "manual", locked: false, needsReview: false, updatedAt: new Date().toISOString() } });
+  }
+  async dismissPronunciationSuggestion(slug: string, id: string) {
+    slugSchema.parse(slug); z.string().regex(/^ent_[a-f0-9]{24}$/).parse(id);
+    return withStoryLock(this.root, slug, "pronunciation suggestion dismiss", async () => {
+      await dismissPronunciationSuggestion(this.root, slug, id);
+      invalidateCatalogCache(this.root, slug);
+      return { status: "dismissed" };
+    });
+  }
   startPronunciationEnrichment(slug: string, raw: unknown) {
     slugSchema.parse(slug);
     const input = z.object({ entityId: z.string().regex(/^ent_[a-f0-9]{24}$/).optional(), force: z.boolean().default(false), dryRun: z.boolean().default(false) }).strict().parse(raw);

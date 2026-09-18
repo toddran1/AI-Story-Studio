@@ -1,8 +1,8 @@
 import { Story } from "../domain/story.js";
-import { CanonicalEntity } from "../domain/story-bible.js";
+import { CanonicalEntity, hasActivePronunciation } from "../domain/story-bible.js";
 import { continuityReviewSchema } from "../story-bible/continuity.js";
 import { loadNarrationNamingEntities } from "../story-bible/narration-names.js";
-import { loadPronunciationAttempts, loadPronunciationEntities, pronunciationAttemptInput } from "../story-bible/pronunciation.js";
+import { loadPronunciationEntities } from "../story-bible/pronunciation.js";
 import { normalizeSpeechText, speechNormalizationSettingsFromNarration } from "../tts/speech-normalization.js";
 import { detectVocalizations } from "../tts/vocalizations.js";
 import { readJsonIfExists } from "../storage/story-files.js";
@@ -136,32 +136,31 @@ function speechReadinessDetections(story: Story, narration: string): FreshQaDete
   return detections;
 }
 
-/** Spoken entities whose pronunciation is missing (foreign-named) or needs review. */
-function pronunciationDetections(entities: CanonicalEntity[], narration: string, attempts: Record<string, string>, sourceLanguage: string): FreshQaDetection[] {
+/**
+ * Pronunciation QA applies only to active, user-configured pronunciations.
+ * No record, an AI suggestion, or an unaccepted analysis means default TTS —
+ * a valid state that never produces a finding.
+ */
+function pronunciationDetections(entities: CanonicalEntity[], narration: string): FreshQaDetection[] {
   const detections: FreshQaDetection[] = [];
   for (const entity of entities) {
+    const pronunciation = entity.pronunciation;
+    if (!hasActivePronunciation(pronunciation)) continue;
     const names = [entity.canonicalName, entity.originalName, ...entity.aliases, entity.preferredNarrationName ?? "", entity.localizedNaming?.fullName ?? "", entity.localizedNaming?.shortName ?? ""];
     if (!names.some((name) => containsName(narration, name))) continue;
-    if (!entity.pronunciation) {
-      // A completed enrichment attempt with no record means the system already
-      // determined no guidance is needed (ordinary translated term); don't nag.
-      if (attempts[entity.id] === pronunciationAttemptInput(entity, sourceLanguage)) continue;
-      // Ordinary translated English terms need no guidance; flag only entities
-      // with a distinct original-language name actually spoken in narration.
-      if (entity.originalName && normalizeQaText(entity.originalName) !== normalizeQaText(entity.canonicalName)) {
-        detections.push({
-          category: "names", severity: "warn", origin: "deterministic", safeToFix: false, entityIds: [entity.id],
-          ruleKey: `names:pronunciation-missing:${entity.id}`,
-          message: `${entity.canonicalName} (${entity.id}) is spoken in the narration but has no pronunciation guidance; TTS will guess at "${entity.canonicalName}".`,
-          evidence: `Narration names ${entity.canonicalName}; the entity has original name "${entity.originalName}" and no pronunciation record.`,
-        });
-      }
-    } else if (entity.pronunciation.needsReview) {
+    if (pronunciation!.mode === "custom" && !pronunciation!.customPronunciation) {
+      detections.push({
+        category: "names", severity: "warn", origin: "deterministic", safeToFix: false, entityIds: [entity.id],
+        ruleKey: `names:pronunciation-invalid:${entity.id}`,
+        message: `The custom pronunciation for ${entity.canonicalName} (${entity.id}) has no spoken form; TTS cannot apply it.`,
+        evidence: `Narration names ${entity.canonicalName}; the active custom pronunciation lacks customPronunciation.`,
+      });
+    } else if (pronunciation!.needsReview) {
       detections.push({
         category: "names", severity: "warn", origin: "deterministic", safeToFix: false, entityIds: [entity.id],
         ruleKey: `names:pronunciation-review:${entity.id}`,
         message: `The pronunciation for ${entity.canonicalName} (${entity.id}) is marked needsReview; confirm it before producing audio for this chapter.`,
-        evidence: `Narration names ${entity.canonicalName}; pronunciation mode "${entity.pronunciation.mode}" has needsReview=true.`,
+        evidence: `Narration names ${entity.canonicalName}; pronunciation mode "${pronunciation!.mode}" has needsReview=true.`,
       });
     }
   }
@@ -191,17 +190,16 @@ export async function runDeterministicQaChecks(deps: {
   narration: string;
 }): Promise<DeterministicQaResult> {
   const { root, story, translation, narration } = deps;
-  const [namingEntities, pronunciationEntities, acceptedContinuity, pronunciationAttempts] = await Promise.all([
+  const [namingEntities, pronunciationEntities, acceptedContinuity] = await Promise.all([
     loadNarrationNamingEntities(root, story.slug),
     loadPronunciationEntities(root, story.slug),
     loadAcceptedContinuity(root, story.slug),
-    loadPronunciationAttempts(root, story.slug),
   ]);
   const detections: FreshQaDetection[] = [
     ...namingDetections(namingEntities, narration),
     ...duplicateParagraphDetections(translation, narration),
     ...speechReadinessDetections(story, narration),
-    ...pronunciationDetections(pronunciationEntities, narration, pronunciationAttempts, story.sourceLanguage),
+    ...pronunciationDetections(pronunciationEntities, narration),
   ];
   return { detections, acceptedContinuity };
 }

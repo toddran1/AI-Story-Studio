@@ -354,17 +354,22 @@ export function createApiHandler(operations: StudioOperations) {
       if (bibleEntityMatch && request.method === "GET") return send(response, 200, await getCanonicalEntityDetail(operations.root, bibleEntityMatch[1]!, bibleEntityMatch[2]!));
       if (bibleEntityMatch && request.method === "PUT") return send(response, 200, await operations.updateCanonicalEntity(bibleEntityMatch[1]!, bibleEntityMatch[2]!, await jsonBody(request)));
       const localizationSuggestionsMatch = /^\/api\/stories\/([a-z0-9-]+)\/story-bible\/entities\/(ent_[a-f0-9]{24})\/localization-suggestions$/.exec(url.pathname);
-      const pronunciationMatch = /^\/api\/stories\/([a-z0-9-]+)\/pronunciation(?:\/(ent_[a-f0-9]{24})(?:\/(test|enrich))?)?$/.exec(url.pathname);
+      const pronunciationMatch = /^\/api\/stories\/([a-z0-9-]+)\/pronunciation(?:\/(ent_[a-f0-9]{24})(?:\/(test|enrich|accept-suggestion|dismiss-suggestion))?)?$/.exec(url.pathname);
       if (pronunciationMatch) {
-        const slug = pronunciationMatch[1]!, id = pronunciationMatch[2];
+        const slug = pronunciationMatch[1]!, id = pronunciationMatch[2], action = pronunciationMatch[3];
         if (request.method === "GET") {
-          const entities = (await getStoryBible(operations.root, slug)).canonicalEntities;
-          await loadStory(storyPaths(operations.root, slug, 1).storyConfig);
-          if (id && !entities.some(entity => entity.id === id)) return send(response, 404, { error: "Canonical entity was not found" });
-          return send(response, 200, id ? entities.find(entity => entity.id === id) : { entities });
+          if (id) {
+            const entities = (await getStoryBible(operations.root, slug)).canonicalEntities;
+            const entity = entities.find(item => item.id === id);
+            if (!entity) return send(response, 404, { error: "Canonical entity was not found" });
+            return send(response, 200, entity);
+          }
+          return send(response, 200, await operations.listPronunciationDesk(slug));
         }
         if (request.method === "PUT" && id) return send(response, 200, await operations.updateCanonicalEntity(slug, id, { pronunciation: await jsonBody(request) }));
-        if (request.method === "POST") return send(response, 202, pronunciationMatch[3] === "test" && id ? operations.startPronunciationTest(slug, id) : operations.startPronunciationEnrichment(slug, id ? { entityId: id } : await jsonBody(request)));
+        if (request.method === "POST" && action === "accept-suggestion" && id) return send(response, 200, await operations.acceptPronunciationSuggestion(slug, id));
+        if (request.method === "POST" && action === "dismiss-suggestion" && id) return send(response, 200, await operations.dismissPronunciationSuggestion(slug, id));
+        if (request.method === "POST") return send(response, 202, action === "test" && id ? operations.startPronunciationTest(slug, id) : operations.startPronunciationEnrichment(slug, id ? { entityId: id } : await jsonBody(request)));
       }
       if (localizationSuggestionsMatch && request.method === "POST") return send(response, 202, operations.startLocalizationSuggestions(localizationSuggestionsMatch[1]!, localizationSuggestionsMatch[2]!, await jsonBody(request)));
       const bibleAnalysisMatch = /^\/api\/stories\/([a-z0-9-]+)\/story-bible\/analysis$/.exec(url.pathname);
