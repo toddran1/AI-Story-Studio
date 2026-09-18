@@ -19,6 +19,7 @@ import { exportManifestSchema } from "../../src/audio/audiobook.js";
 import { FfmpegTools } from "../../src/audio/ffmpeg.js";
 import { videoExportManifestSchema } from "../../src/video/video-export.js";
 import { SceneManifest, artworkSettingsSchema, sceneManifestSchema, sceneSettingsSchema } from "../../src/scenes/types.js";
+import { resolveSceneVisualEntity } from "../../src/scenes/identity.js";
 import { loadLatestProduction } from "../../src/production/manifest.js";
 import { ProductionManifest } from "../../src/production/types.js";
 import { applyManualBibleOverlay } from "../../src/studio/workflow.js";
@@ -467,6 +468,7 @@ export async function getScenesDashboard(root: string, slug: string, selectedCha
     const raw = await readJsonIfExists<SceneManifest>(storyPaths(root, slug, chapterNumber).scenesManifest);
     const parsed = raw ? sceneManifestSchema.safeParse(raw) : undefined;
     if (parsed?.success) {
+      const bible = await getStoryBible(root, slug).catch(() => undefined);
       const scenes = await mapLimit(parsed.data.scenes, 8, async (scene) => {
         const hasMain =
           scene.artwork.status === "complete" &&
@@ -482,8 +484,12 @@ export async function getScenesDashboard(root: string, slug: string, selectedCha
                 : undefined,
           };
         });
+        const resolvedCharacters = (scene.characters ?? []).map((charName) =>
+          resolveSceneVisualEntity(charName, bible?.canonicalEntities ?? [], visualProfiles)
+        );
         return {
           ...scene,
+          resolvedCharacters,
           imageUrl: hasMain
             ? `/api/stories/${slug}/chapters/${chapterNumber}/scenes/${scene.id}.png`
             : undefined,

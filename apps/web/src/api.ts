@@ -319,8 +319,18 @@ export type Scene = {
   imageUrl?: string;
   versionUrls?: Record<string, string>;
   entityIds?: string[];
+  resolvedCharacters?: ResolvedSceneCharacter[];
   direction?: SceneDirection;
   overrides?: SceneOverrides;
+};
+
+export type ResolvedSceneCharacter = {
+  name: string;
+  entityId?: string;
+  canonicalName?: string;
+  profileStatus?: "draft" | "approved" | "missing";
+  visualProfileId?: string;
+  resolution: "exact_id" | "canonical_name" | "preferred_name" | "localized_name" | "original_name" | "alias" | "unresolved";
 };
 
 export type SceneManifest = { version: 1; chapter: number; durationSeconds: number; planningFingerprint: string; manualRevision: number; manuallyEdited: boolean; updatedAt: string; scenes: Scene[] };

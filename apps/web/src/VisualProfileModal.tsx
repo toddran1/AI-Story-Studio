@@ -73,8 +73,29 @@ export function VisualProfileModal({
       })
       .catch((err) => {
         if (active) {
-          setError(err instanceof Error ? err.message : String(err));
-          setLoading(false);
+          const msg = err instanceof Error ? err.message : String(err);
+          if (msg.includes("404") || msg.toLowerCase().includes("not found")) {
+            const now = new Date().toISOString();
+            setProfile({
+              id: `vprof_draft_${entityId}`,
+              entityId,
+              visualType: "character",
+              status: "draft",
+              appearance: "",
+              visualPrompt: "",
+              negativePrompt: "",
+              notes: "",
+              variants: [],
+              references: [],
+              revision: 1,
+              createdAt: now,
+              updatedAt: now,
+            });
+            setLoading(false);
+          } else {
+            setError(msg);
+            setLoading(false);
+          }
         }
       });
     return () => {

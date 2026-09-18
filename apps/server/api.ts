@@ -206,12 +206,38 @@ export function createApiHandler(operations: StudioOperations) {
         }
         return sendFile(request, response, sceneImagePath(operations.root, sceneVersionImageMatch[1]!, chapterNumber, scene.id), "image/png");
       }
-      const visualProfileRefImageMatch = /^\/api\/stories\/([a-z0-9-]+)\/visual-profiles\/(ent_[a-f0-9]{24})\/references\/([a-f0-9-]+)\.(png|jpg|jpeg|webp)$/.exec(url.pathname);
+      const visualProfileRefImageMatch = /^\/api\/stories\/([a-z0-9-]+)\/visual-profiles\/(ent_[a-f0-9]{24})\/references\/([a-zA-Z0-9_-]+)(?:\.(png|jpg|jpeg|webp))?$/.exec(url.pathname);
       if (visualProfileRefImageMatch && request.method === "GET") {
-        const path = visualProfileRefPath(operations.root, visualProfileRefImageMatch[1]!, visualProfileRefImageMatch[2]!, visualProfileRefImageMatch[3]!, visualProfileRefImageMatch[4]!);
-        if (!(await exists(path))) return send(response, 404, { error: "Reference image not found" });
-        const mime = visualProfileRefImageMatch[4] === "webp" ? "image/webp" : visualProfileRefImageMatch[4] === "png" ? "image/png" : "image/jpeg";
-        return sendFile(request, response, path, mime);
+        const storySlug = visualProfileRefImageMatch[1]!;
+        const entityId = visualProfileRefImageMatch[2]!;
+        const refId = visualProfileRefImageMatch[3]!;
+        const requestedExt = visualProfileRefImageMatch[4];
+
+        let filePath: string | undefined;
+        let effectiveExt: string | undefined;
+
+        if (requestedExt) {
+          const candidate = visualProfileRefPath(operations.root, storySlug, entityId, refId, requestedExt);
+          if (await exists(candidate)) {
+            filePath = candidate;
+            effectiveExt = requestedExt.toLowerCase();
+          }
+        } else {
+          for (const ext of ["png", "jpg", "jpeg", "webp"]) {
+            const candidate = visualProfileRefPath(operations.root, storySlug, entityId, refId, ext);
+            if (await exists(candidate)) {
+              filePath = candidate;
+              effectiveExt = ext;
+              break;
+            }
+          }
+        }
+
+        if (!filePath || !effectiveExt || !(await exists(filePath))) {
+          return send(response, 404, { error: "Reference image not found" });
+        }
+        const mime = effectiveExt === "webp" ? "image/webp" : effectiveExt === "png" ? "image/png" : "image/jpeg";
+        return sendFile(request, response, filePath, mime);
       }
       const qaMatch = /^\/api\/stories\/([a-z0-9-]+)\/qa$/.exec(url.pathname);
       if (qaMatch && request.method === "GET") return send(response, 200, await getQaDashboard(operations.root, qaMatch[1]!));
@@ -259,9 +285,14 @@ export function createApiHandler(operations: StudioOperations) {
           return send(response, 201, await operations.addVisualReferenceImage(visualProfileRefsMatch[1]!, visualProfileRefsMatch[2]!, Buffer.from(data), ext, viewType, notes));
         }
       }
+      const visualProfileSingleRefMatch = /^\/api\/stories\/([a-z0-9-]+)\/visual-profiles\/(ent_[a-f0-9]{24})\/references\/([a-zA-Z0-9_-]+)$/.exec(url.pathname);
+      if (visualProfileSingleRefMatch && request.method === "DELETE") {
+        return send(response, 200, await operations.deleteVisualReferenceImage(visualProfileSingleRefMatch[1]!, visualProfileSingleRefMatch[2]!, visualProfileSingleRefMatch[3]!));
+      }
       const visualProfileStyleSheetMatch = /^\/api\/stories\/([a-z0-9-]+)\/visual-profiles\/(ent_[a-f0-9]{24})\/style-sheet$/.exec(url.pathname);
       if (visualProfileStyleSheetMatch && request.method === "POST") {
-        return send(response, 200, await operations.generateStyleSheet(visualProfileStyleSheetMatch[1]!, visualProfileStyleSheetMatch[2]!));
+        const bodyData = (await jsonBody(request).catch(() => ({}))) as any;
+        return send(response, 200, await operations.generateStyleSheet(visualProfileStyleSheetMatch[1]!, visualProfileStyleSheetMatch[2]!, bodyData));
       }
       const artDirectionMatch = /^\/api\/stories\/([a-z0-9-]+)\/art-direction$/.exec(url.pathname);
       if (artDirectionMatch && request.method === "GET") {

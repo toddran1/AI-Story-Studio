@@ -112,6 +112,10 @@
 .entity-chip-list { display: flex; flex-wrap: wrap; gap: 6px; margin: 4px 0; }
 .entity-chip { display: inline-flex; align-items: center; gap: 5px; padding: 2px 8px; border-radius: 12px; background: rgba(119,114,232,.12); border: 1px solid rgba(119,114,232,.3); font-size: 9px; color: var(--violet-soft); cursor: pointer; transition: all .15s; }
 .entity-chip:hover { background: rgba(119,114,232,.25); border-color: var(--violet); }
+.entity-chip.approved { border-color: rgba(72,199,142,0.4); color: #48c78e; background: rgba(72,199,142,0.1); }
+.entity-chip.approved:hover { background: rgba(72,199,142,0.2); border-color: #48c78e; }
+.entity-chip.unlinked { opacity: 0.6; cursor: default; border-style: dashed; color: var(--muted); border-color: rgba(255,255,255,0.15); background: rgba(255,255,255,0.04); }
+.entity-chip.unlinked:hover { background: rgba(255,255,255,0.04); border-color: rgba(255,255,255,0.15); }
 .entity-chip .chip-canon-icon { font-size: 8px; }
 
 .scene-direction-panel { border: 1px solid var(--line); border-radius: 6px; padding: 8px 12px; background: #0e0e13; margin: 6px 0; }

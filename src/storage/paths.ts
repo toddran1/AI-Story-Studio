@@ -35,9 +35,14 @@ export function sceneVersionImagePath(root: string, slug: string, chapter: numbe
   return join(storyPaths(root, slug, chapter).scenesDirectory, `${sceneId}-v${versionNumber}.png`);
 }
 
+const ALLOWED_REF_EXTENSIONS = new Set(["png", "jpg", "jpeg", "webp"]);
+
 export function visualProfileRefPath(root: string, slug: string, entityId: string, refId: string, ext = "png") {
   if (!/^ent_[a-f0-9]{24}$/.test(entityId)) throw new Error("Invalid entity ID");
-  return join(storyPaths(root, slug, 1).visualProfilesDirectory, entityId, `${refId}.${ext}`);
+  if (!/^[a-zA-Z0-9_-]+$/.test(refId)) throw new Error("Invalid reference image ID");
+  const normalizedExt = ext.toLowerCase().replace(/^\./, "");
+  if (!ALLOWED_REF_EXTENSIONS.has(normalizedExt)) throw new Error(`Invalid reference image extension: ${ext}`);
+  return join(storyPaths(root, slug, 1).visualProfilesDirectory, entityId, `${refId}.${normalizedExt}`);
 }
 
 export function videoExportPaths(root: string, slug: string, from: number, to: number) {

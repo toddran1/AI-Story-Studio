@@ -123,6 +123,27 @@ export const sceneArtworkSchema = z.object({
   approvedVersionId: z.string().optional(),
 }).default({ status: "pending", review: "unreviewed", versions: [] });
 
+export const characterResolutionKindSchema = z.enum([
+  "exact_id",
+  "canonical_name",
+  "preferred_name",
+  "localized_name",
+  "original_name",
+  "alias",
+  "unresolved",
+]);
+export type CharacterResolutionKind = z.infer<typeof characterResolutionKindSchema>;
+
+export const resolvedSceneCharacterSchema = z.object({
+  name: z.string(),
+  entityId: z.string().optional(),
+  canonicalName: z.string().optional(),
+  profileStatus: z.enum(["draft", "approved", "missing"]).optional(),
+  visualProfileId: z.string().optional(),
+  resolution: characterResolutionKindSchema,
+});
+export type ResolvedSceneCharacter = z.infer<typeof resolvedSceneCharacterSchema>;
+
 export const sceneSchema = z.object({
   id: z.string().regex(/^scene-\d{3}$/), summary: z.string().trim().min(1).max(1000),
   startSeconds: z.number().min(0), endSeconds: z.number().positive(),
@@ -131,6 +152,7 @@ export const sceneSchema = z.object({
   narrationText: z.string().max(1000000).optional(),
   narrationStartWord: z.number().int().nonnegative().optional(), narrationEndWord: z.number().int().positive().optional(),
   entityIds: z.array(z.string().trim().min(1)).max(100).optional().default([]),
+  resolvedCharacters: z.array(resolvedSceneCharacterSchema).optional(),
   visualType: z.enum(["image", "video"]).optional(),
   disabled: z.boolean().optional(),
   direction: sceneDirectionSchema.optional(),

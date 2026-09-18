@@ -46,7 +46,7 @@ import { planStoredScenes, updateStoredSceneManifest } from "../../src/scenes/ma
 import { generateStoredArtwork, reviewStoredArtwork, reviewStoredArtworkVersion } from "../../src/artwork/generator.js";
 import { ImageProvider } from "../../src/artwork/provider.js";
 import { OpenAIImageProvider } from "../../src/artwork/openai-image.provider.js";
-import { loadVisualProfiles, getVisualProfile as loadVisualProfileEntity, updateVisualProfile, deleteVisualProfile, addVisualReferenceImage, generateStyleSheet } from "../../src/visual-canon/profiles.js";
+import { loadVisualProfiles, getVisualProfile as loadVisualProfileEntity, updateVisualProfile, deleteVisualProfile, deleteVisualReferenceImage, addVisualReferenceImage, generateStyleSheet, handleEntityMerge, handleEntityDemote } from "../../src/visual-canon/profiles.js";
 import { loadStoryArtDirection, saveStoryArtDirection, createPreset, updatePreset, deletePreset, duplicatePreset, setDefaultPreset } from "../../src/visual-canon/art-direction.js";
 import { visualProfileSchema } from "../../src/domain/visual-profile.js";
 import { storyArtDirectionSchema, artDirectionPresetSchema } from "../../src/domain/art-direction.js";
@@ -86,7 +86,7 @@ import { loadNarrationNamingEntities } from "../../src/story-bible/narration-nam
 import { issueRepairTargets, repairQaText, repairTargets } from "../../src/qa/repair.js";
 import { LLMRouter } from "../../src/llm/router.js";
 import { validateChapterQuality } from "../../src/qa/validator.js";
-import { emptyStoryBible, storyBibleSchema } from "../../src/domain/story-bible.js";
+import { canonicalEntitySchema, emptyStoryBible, storyBibleSchema } from "../../src/domain/story-bible.js";
 import { SummaryService } from "../../src/summaries/service.js";
 import { SummaryMediaService, summaryMediaInputSchema, summaryNarrationEditSchema, summaryScenesInputSchema } from "../../src/summaries/media.js";
 import { SummaryVisualService, summaryVisualInputSchema, summaryProduceInputSchema } from "../../src/summaries/visuals.js";
@@ -715,7 +715,7 @@ export class StudioOperations {
       return { entityId: id, locale: input.locale ?? defaultLocale(story.outputLanguage), model: config, suggestions: result.suggestions };
     });
   }
-  async mergeCanonicalEntities(slug: string, raw: unknown) { slugSchema.parse(slug); const input = z.object({ targetEntityId: z.string(), sourceEntityIds: z.array(z.string()).min(1).max(50), reason: z.string().trim().min(1).max(1000) }).strict().parse(raw); return withStoryLock(this.root, slug, "canonical entity merge", async () => { const base = await getStoryBible(this.root, slug, { includeCanonicalOverlay: false }); const result = await mergeCanonicalEntities(this.root, slug, base, input.targetEntityId, input.sourceEntityIds, input.reason); await recordActivity(this.root, slug, "bible.entities.merged", `Merged ${input.sourceEntityIds.length} duplicate entity record(s)`); return { merge: result.merge, entity: result.bible.canonicalEntities.find((item) => item.id === input.targetEntityId) }; }); }
+  async mergeCanonicalEntities(slug: string, raw: unknown) { slugSchema.parse(slug); const input = z.object({ targetEntityId: z.string(), sourceEntityIds: z.array(z.string()).min(1).max(50), reason: z.string().trim().min(1).max(1000) }).strict().parse(raw); return withStoryLock(this.root, slug, "canonical entity merge", async () => { const base = await getStoryBible(this.root, slug, { includeCanonicalOverlay: false }); const result = await mergeCanonicalEntities(this.root, slug, base, input.targetEntityId, input.sourceEntityIds, input.reason); await handleEntityMerge(this.root, slug, input.targetEntityId, input.sourceEntityIds).catch(() => undefined); await recordActivity(this.root, slug, "bible.entities.merged", `Merged ${input.sourceEntityIds.length} duplicate entity record(s)`); return { merge: result.merge, entity: result.bible.canonicalEntities.find((item) => item.id === input.targetEntityId) }; }); }
   async undoCanonicalMerge(slug: string, mergeId: string) { slugSchema.parse(slug); return withStoryLock(this.root, slug, "undo canonical entity merge", async () => { const base = await getStoryBible(this.root, slug, { includeCanonicalOverlay: false }); await undoCanonicalMerge(this.root, slug, base, mergeId); await recordActivity(this.root, slug, "bible.merge.undone", "Undid a canonical entity merge"); return { status: "undone" }; }); }
   async resolveContinuity(slug: string, id: string, raw: unknown) {
     slugSchema.parse(slug); const input = z.object({ resolution: z.enum(["accepted_new", "kept_existing", "intentional", "corrected", "merged", "dismissed"]), note: z.string().trim().max(2000).optional() }).strict().parse(raw);
@@ -726,6 +726,7 @@ export class StudioOperations {
       if (input.resolution === "merged") {
         if (current.type !== "identity_alias_ambiguity" || current.entityIds.length < 2) throw new Error("Only identity or alias findings can be resolved by merging entities");
         await mergeCanonicalEntities(this.root, slug, base, current.entityIds[0]!, current.entityIds.slice(1), input.note || `Resolved continuity finding ${id}`);
+        await handleEntityMerge(this.root, slug, current.entityIds[0]!, current.entityIds.slice(1)).catch(() => undefined);
       } else if (input.resolution === "accepted_new") {
         if (current.type !== "status_conflict" || current.entityIds.length !== 1) throw new Error("This finding requires a manual Story Bible correction before it can be accepted");
         const chapter = Math.max(...current.chapters); const latest = base.entityTimeline.filter((event) => event.entityId === current.entityIds[0] && event.chapter === chapter).at(-1); const status = latest?.status ?? (latest?.type === "appearance" ? "alive" : undefined);
@@ -763,6 +764,7 @@ export class StudioOperations {
       force: z.boolean().optional(),
     }).passthrough().parse(raw ?? {});
     const result = await demoteCanonicalEntity(this.root, slug, id, input);
+    await handleEntityDemote(this.root, slug, id).catch(() => undefined);
     invalidateCatalogCache(this.root, slug);
     await recordActivity(this.root, slug, "bible.entity.demoted", `Demoted canonical entity ${id} to minor reference`);
     return result;
@@ -911,26 +913,44 @@ export class StudioOperations {
 
   async getVisualProfile(slug: string, entityId: string) {
     slugSchema.parse(slug);
+    canonicalEntitySchema.shape.id.parse(entityId);
     return loadVisualProfileEntity(this.root, slug, entityId);
   }
 
   async updateVisualProfile(slug: string, entityId: string, input: unknown) {
     slugSchema.parse(slug);
+    canonicalEntitySchema.shape.id.parse(entityId);
     return withStoryLock(this.root, slug, "update visual profile", async () => {
-      const parsed = visualProfileSchema.parse(input);
+      const bible = await getStoryBible(this.root, slug);
+      const entity = bible.canonicalEntities.find((e) => e.id === entityId);
+      if (!entity) {
+        throw new Error(`Cannot update visual profile: entity ${entityId} does not exist in Story Bible`);
+      }
+      const rawProfile = (typeof input === "object" && input !== null && "profile" in input) ? (input as any).profile : input;
+      const parsed = visualProfileSchema.parse({ ...rawProfile, entityId });
       return updateVisualProfile(this.root, slug, entityId, parsed);
     });
   }
 
   async deleteVisualProfile(slug: string, entityId: string) {
     slugSchema.parse(slug);
+    canonicalEntitySchema.shape.id.parse(entityId);
     return withStoryLock(this.root, slug, "delete visual profile", async () => {
       return deleteVisualProfile(this.root, slug, entityId);
     });
   }
 
+  async deleteVisualReferenceImage(slug: string, entityId: string, refId: string) {
+    slugSchema.parse(slug);
+    canonicalEntitySchema.shape.id.parse(entityId);
+    return withStoryLock(this.root, slug, "delete visual reference image", async () => {
+      return deleteVisualReferenceImage(this.root, slug, entityId, refId);
+    });
+  }
+
   async addVisualReferenceImage(slug: string, entityId: string, imageBuffer: Buffer, ext: string, viewType: string, notes?: string) {
     slugSchema.parse(slug);
+    canonicalEntitySchema.shape.id.parse(entityId);
     return withStoryLock(this.root, slug, "add visual reference image", async () => {
       return addVisualReferenceImage(this.root, slug, entityId, {
         data: imageBuffer,
@@ -941,12 +961,13 @@ export class StudioOperations {
     });
   }
 
-  async generateStyleSheet(slug: string, entityId: string) {
+  async generateStyleSheet(slug: string, entityId: string, options?: { promptOverride?: string; role?: any; presetId?: string }) {
     slugSchema.parse(slug);
+    canonicalEntitySchema.shape.id.parse(entityId);
     return withStoryLock(this.root, slug, "generate style sheet", async () => {
       const story = await loadStory(storyPaths(this.root, slug, 1).storyConfig);
       const provider = new OpenAIImageProvider();
-      return generateStyleSheet(this.root, slug, entityId, provider, story);
+      return generateStyleSheet(this.root, slug, entityId, provider, story, options);
     });
   }
 
@@ -958,7 +979,8 @@ export class StudioOperations {
   async updateArtDirection(slug: string, input: unknown) {
     slugSchema.parse(slug);
     return withStoryLock(this.root, slug, "update art direction", async () => {
-      const parsed = storyArtDirectionSchema.parse(input);
+      const rawArtDirection = (typeof input === "object" && input !== null && "artDirection" in input) ? (input as any).artDirection : input;
+      const parsed = storyArtDirectionSchema.parse(rawArtDirection);
       await saveStoryArtDirection(this.root, slug, parsed);
       return parsed;
     });

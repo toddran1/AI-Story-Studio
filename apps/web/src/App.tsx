@@ -1223,28 +1223,73 @@ export function ScenesPage({ slug, onJob, navigate, initialData }: { slug: strin
                         </Field>
                         {(scene.characters ?? []).length > 0 && (
                           <div className="entity-chip-list">
-                            {(scene.characters ?? []).map((charName) => {
+                            {(scene.characters ?? []).map((charName, charIdx) => {
                               const profileList = Array.isArray(data.visualProfiles)
                                 ? data.visualProfiles
                                 : Object.values(data.visualProfiles ?? {});
-                              const profile = profileList.find(
-                                (p) => p.entityId === charName || scene.entityIds?.includes(p.entityId)
-                              );
+
+                              let resolved = scene.resolvedCharacters?.[charIdx]?.name === charName
+                                ? scene.resolvedCharacters[charIdx]
+                                : scene.resolvedCharacters?.find((r) => r.name === charName);
+
+                              if (!resolved && profileList.length > 0) {
+                                const matched = profileList.find(
+                                  (p: any) => p.canonicalName === charName || p.entityId === charName
+                                );
+                                if (matched) {
+                                  resolved = {
+                                    name: charName,
+                                    entityId: matched.entityId,
+                                    canonicalName: matched.canonicalName || charName,
+                                    profileStatus: matched.status === "approved" ? "approved" : "draft",
+                                    visualProfileId: matched.id,
+                                    resolution: "exact_id",
+                                  };
+                                }
+                              }
+
+                              if (resolved?.entityId) {
+                                const statusLabel =
+                                  resolved.profileStatus === "approved"
+                                    ? "(approved)"
+                                    : resolved.profileStatus === "draft"
+                                    ? "(draft)"
+                                    : "(no profile)";
+                                const displayName =
+                                  resolved.canonicalName && resolved.canonicalName !== charName
+                                    ? `${charName} (${resolved.canonicalName})`
+                                    : charName;
+                                return (
+                                  <button
+                                    key={`${charName}-${charIdx}`}
+                                    type="button"
+                                    className={`entity-chip ${resolved.profileStatus === "approved" ? "approved" : ""}`}
+                                    onClick={() => {
+                                      setActiveVisualProfile({
+                                        id: resolved!.entityId!,
+                                        name: resolved!.canonicalName || charName,
+                                      });
+                                    }}
+                                    title={`Visual Profile for ${resolved.canonicalName || charName} [${resolved.entityId}]`}
+                                  >
+                                    <span className="chip-canon-icon">✦</span>
+                                    <span>{displayName}</span>
+                                    <small>{statusLabel}</small>
+                                  </button>
+                                );
+                              }
+
                               return (
-                                <button
-                                  key={charName}
-                                  type="button"
-                                  className="entity-chip"
-                                  onClick={() => {
-                                    const entityId = profile?.entityId || charName;
-                                    setActiveVisualProfile({ id: entityId, name: charName });
-                                  }}
-                                  title={`Open Visual Profile for ${charName}`}
+                                <span
+                                  key={`${charName}-${charIdx}`}
+                                  className="entity-chip unlinked"
+                                  title={`"${charName}" is not linked to a canonical Story Bible entity`}
+                                  style={{ opacity: 0.6, cursor: "not-allowed", borderStyle: "dashed" }}
                                 >
-                                  <span className="chip-canon-icon">✦</span>
+                                  <span className="chip-canon-icon">?</span>
                                   <span>{charName}</span>
-                                  {profile && <small>({profile.status})</small>}
-                                </button>
+                                  <small>(unlinked)</small>
+                                </span>
                               );
                             })}
                           </div>
