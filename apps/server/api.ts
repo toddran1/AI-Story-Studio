@@ -9,7 +9,7 @@ import { z } from "zod";
 import { getAudioDashboard, getCanonicalEntitiesPage, getCanonicalEntityDetail, getChapter, getChapterPage, getContinuityReview, getMinorReferencesPage, getOutputsLibrary, getQaDashboard, getScenesDashboard, getStoryBibleView, getStoryDashboard, getStoryOverview, getVideoDashboard, listStories, updateStorySettings, chapterFilterSchema } from "./catalog.js";
 import { JobConflictError } from "./job-manager.js";
 import { StudioOperations } from "./operations.js";
-import { exportPaths, previewPaths, sceneImagePath, storyPaths, videoExportPaths, voicePreviewPaths } from "../../src/storage/paths.js";
+import { exportPaths, previewPaths, sceneImagePath, sceneVersionImagePath, storyPaths, videoExportPaths, visualProfileRefPath, voicePreviewPaths } from "../../src/storage/paths.js";
 import { SceneManifest, sceneManifestSchema } from "../../src/scenes/types.js";
 import { readJsonIfExists } from "../../src/storage/story-files.js";
 import { BatchValidationError, ConfigurationError, ProviderError, SceneError, StorageError } from "../../src/pipeline/errors.js";
@@ -192,6 +192,27 @@ export function createApiHandler(operations: StudioOperations) {
       if (chapterVideoMatch && request.method === "GET") { const chapterNumber = chapterParam(chapterVideoMatch[2]!); const chapter = await getChapter(operations.root, chapterVideoMatch[1]!, chapterNumber); if (!chapter.videoUrl) return send(response, 404, { error: "Chapter video was not found" }); return sendFile(request, response, storyPaths(operations.root, chapterVideoMatch[1]!, chapterNumber).video, "video/mp4"); }
       const sceneImageMatch = /^\/api\/stories\/([a-z0-9-]+)\/chapters\/(\d+)\/scenes\/(scene-\d{3})\.png$/.exec(url.pathname);
       if (sceneImageMatch && request.method === "GET") { const chapterNumber = chapterParam(sceneImageMatch[2]!); const raw = await readJsonIfExists<SceneManifest>(storyPaths(operations.root, sceneImageMatch[1]!, chapterNumber).scenesManifest); const manifest = raw ? sceneManifestSchema.safeParse(raw) : undefined; const scene = manifest?.success ? manifest.data.scenes.find((item) => item.id === sceneImageMatch[3]) : undefined; if (!scene || scene.artwork.status !== "complete") return send(response, 404, { error: "Scene artwork was not found" }); return sendFile(request, response, sceneImagePath(operations.root, sceneImageMatch[1]!, chapterNumber, sceneImageMatch[3]!), "image/png"); }
+      const sceneVersionImageMatch = /^\/api\/stories\/([a-z0-9-]+)\/chapters\/(\d+)\/scenes\/(scene-\d{3})\/versions\/(v\d+)\.png$/.exec(url.pathname);
+      if (sceneVersionImageMatch && request.method === "GET") {
+        const chapterNumber = chapterParam(sceneVersionImageMatch[2]!);
+        const raw = await readJsonIfExists<SceneManifest>(storyPaths(operations.root, sceneVersionImageMatch[1]!, chapterNumber).scenesManifest);
+        const manifest = raw ? sceneManifestSchema.safeParse(raw) : undefined;
+        const scene = manifest?.success ? manifest.data.scenes.find((item) => item.id === sceneVersionImageMatch[3]) : undefined;
+        const version = scene?.artwork.versions?.find((v) => v.id === sceneVersionImageMatch[4]);
+        if (!scene || !version) return send(response, 404, { error: "Artwork version was not found" });
+        const vPath = sceneVersionImagePath(operations.root, sceneVersionImageMatch[1]!, chapterNumber, scene.id, version.versionNumber);
+        if (await exists(vPath)) {
+          return sendFile(request, response, vPath, "image/png");
+        }
+        return sendFile(request, response, sceneImagePath(operations.root, sceneVersionImageMatch[1]!, chapterNumber, scene.id), "image/png");
+      }
+      const visualProfileRefImageMatch = /^\/api\/stories\/([a-z0-9-]+)\/visual-profiles\/(ent_[a-f0-9]{24})\/references\/([a-f0-9-]+)\.(png|jpg|jpeg|webp)$/.exec(url.pathname);
+      if (visualProfileRefImageMatch && request.method === "GET") {
+        const path = visualProfileRefPath(operations.root, visualProfileRefImageMatch[1]!, visualProfileRefImageMatch[2]!, visualProfileRefImageMatch[3]!, visualProfileRefImageMatch[4]!);
+        if (!(await exists(path))) return send(response, 404, { error: "Reference image not found" });
+        const mime = visualProfileRefImageMatch[4] === "webp" ? "image/webp" : visualProfileRefImageMatch[4] === "png" ? "image/png" : "image/jpeg";
+        return sendFile(request, response, path, mime);
+      }
       const qaMatch = /^\/api\/stories\/([a-z0-9-]+)\/qa$/.exec(url.pathname);
       if (qaMatch && request.method === "GET") return send(response, 200, await getQaDashboard(operations.root, qaMatch[1]!));
       const qaExceptionsMatch = /^\/api\/stories\/([a-z0-9-]+)\/qa-exceptions$/.exec(url.pathname);
@@ -205,6 +226,70 @@ export function createApiHandler(operations: StudioOperations) {
       if (videoDashboardMatch && request.method === "GET") return send(response, 200, await getVideoDashboard(operations.root, videoDashboardMatch[1]!));
       const scenesDashboardMatch = /^\/api\/stories\/([a-z0-9-]+)\/scenes$/.exec(url.pathname);
       if (scenesDashboardMatch && request.method === "GET") return send(response, 200, await getScenesDashboard(operations.root, scenesDashboardMatch[1]!, optionalInteger(url.searchParams.get("chapter"))));
+      const visualProfilesMatch = /^\/api\/stories\/([a-z0-9-]+)\/visual-profiles$/.exec(url.pathname);
+      if (visualProfilesMatch && request.method === "GET") {
+        return send(response, 200, await operations.getVisualProfiles(visualProfilesMatch[1]!));
+      }
+      const visualProfileMatch = /^\/api\/stories\/([a-z0-9-]+)\/visual-profiles\/(ent_[a-f0-9]{24})$/.exec(url.pathname);
+      if (visualProfileMatch && request.method === "GET") {
+        const profile = await operations.getVisualProfile(visualProfileMatch[1]!, visualProfileMatch[2]!);
+        if (!profile) return send(response, 404, { error: "Visual profile not found" });
+        return send(response, 200, profile);
+      }
+      if (visualProfileMatch && request.method === "PUT") {
+        return send(response, 200, await operations.updateVisualProfile(visualProfileMatch[1]!, visualProfileMatch[2]!, await jsonBody(request)));
+      }
+      if (visualProfileMatch && request.method === "DELETE") {
+        return send(response, 200, await operations.deleteVisualProfile(visualProfileMatch[1]!, visualProfileMatch[2]!));
+      }
+      const visualProfileRefsMatch = /^\/api\/stories\/([a-z0-9-]+)\/visual-profiles\/(ent_[a-f0-9]{24})\/references$/.exec(url.pathname);
+      if (visualProfileRefsMatch && request.method === "POST") {
+        const contentType = request.headers["content-type"] ?? "";
+        if (contentType.includes("application/json")) {
+          const bodyData = (await jsonBody(request)) as any;
+          const buffer = Buffer.from(bodyData.base64, "base64");
+          const ext = bodyData.ext || "png";
+          return send(response, 201, await operations.addVisualReferenceImage(visualProfileRefsMatch[1]!, visualProfileRefsMatch[2]!, buffer, ext, bodyData.viewType, bodyData.notes));
+        } else {
+          const filename = decodeURIComponent((request.headers["x-file-name"] as string) || "reference.png");
+          const viewType = (request.headers["x-view-type"] as string) || "character_face";
+          const notes = request.headers["x-notes"] ? decodeURIComponent(request.headers["x-notes"] as string) : undefined;
+          const ext = filename.split(".").pop() || "png";
+          const data = await body(request, 15 * 1024 * 1024);
+          return send(response, 201, await operations.addVisualReferenceImage(visualProfileRefsMatch[1]!, visualProfileRefsMatch[2]!, Buffer.from(data), ext, viewType, notes));
+        }
+      }
+      const visualProfileStyleSheetMatch = /^\/api\/stories\/([a-z0-9-]+)\/visual-profiles\/(ent_[a-f0-9]{24})\/style-sheet$/.exec(url.pathname);
+      if (visualProfileStyleSheetMatch && request.method === "POST") {
+        return send(response, 200, await operations.generateStyleSheet(visualProfileStyleSheetMatch[1]!, visualProfileStyleSheetMatch[2]!));
+      }
+      const artDirectionMatch = /^\/api\/stories\/([a-z0-9-]+)\/art-direction$/.exec(url.pathname);
+      if (artDirectionMatch && request.method === "GET") {
+        return send(response, 200, await operations.getArtDirection(artDirectionMatch[1]!));
+      }
+      if (artDirectionMatch && request.method === "PUT") {
+        return send(response, 200, await operations.updateArtDirection(artDirectionMatch[1]!, await jsonBody(request)));
+      }
+      const artDirectionPresetsMatch = /^\/api\/stories\/([a-z0-9-]+)\/art-direction\/presets$/.exec(url.pathname);
+      if (artDirectionPresetsMatch && request.method === "POST") {
+        return send(response, 201, await operations.createArtDirectionPreset(artDirectionPresetsMatch[1]!, await jsonBody(request)));
+      }
+      const artDirectionPresetDuplicateMatch = /^\/api\/stories\/([a-z0-9-]+)\/art-direction\/presets\/(preset_[A-Za-z0-9_-]+)\/duplicate$/.exec(url.pathname);
+      if (artDirectionPresetDuplicateMatch && request.method === "POST") {
+        const bodyData = (await jsonBody(request).catch(() => ({}))) as any;
+        return send(response, 200, await operations.duplicateArtDirectionPreset(artDirectionPresetDuplicateMatch[1]!, artDirectionPresetDuplicateMatch[2]!, bodyData?.name));
+      }
+      const artDirectionPresetDefaultMatch = /^\/api\/stories\/([a-z0-9-]+)\/art-direction\/presets\/(preset_[A-Za-z0-9_-]+)\/default$/.exec(url.pathname);
+      if (artDirectionPresetDefaultMatch && request.method === "POST") {
+        return send(response, 200, await operations.setDefaultArtDirectionPreset(artDirectionPresetDefaultMatch[1]!, artDirectionPresetDefaultMatch[2]!));
+      }
+      const artDirectionPresetMatch = /^\/api\/stories\/([a-z0-9-]+)\/art-direction\/presets\/(preset_[A-Za-z0-9_-]+)$/.exec(url.pathname);
+      if (artDirectionPresetMatch && request.method === "PUT") {
+        return send(response, 200, await operations.updateArtDirectionPreset(artDirectionPresetMatch[1]!, artDirectionPresetMatch[2]!, await jsonBody(request)));
+      }
+      if (artDirectionPresetMatch && request.method === "DELETE") {
+        return send(response, 200, await operations.deleteArtDirectionPreset(artDirectionPresetMatch[1]!, artDirectionPresetMatch[2]!));
+      }
       const productionMatch = /^\/api\/stories\/([a-z0-9-]+)\/production$/.exec(url.pathname);
       if (productionMatch && request.method === "GET") return send(response, 200, { latest: (await getStoryDashboard(operations.root, productionMatch[1]!)).latestProduction });
       const costsMatch = /^\/api\/stories\/([a-z0-9-]+)\/costs$/.exec(url.pathname);
@@ -219,6 +304,20 @@ export function createApiHandler(operations: StudioOperations) {
       if (scenesEditMatch && request.method === "PUT") { const input = z.object({ scenes: z.array(z.unknown()) }).strict().parse(await jsonBody(request)); return send(response, 200, { manifest: await operations.updateScenes(scenesEditMatch[1]!, chapterParam(scenesEditMatch[2]!), input.scenes) }); }
       const artworkReviewMatch = /^\/api\/stories\/([a-z0-9-]+)\/chapters\/(\d+)\/scenes\/(scene-\d{3})\/review$/.exec(url.pathname);
       if (artworkReviewMatch && request.method === "POST") { const input = z.object({ review: z.enum(["unreviewed", "approved", "rejected", "needs-regeneration"]) }).strict().parse(await jsonBody(request)); return send(response, 200, { manifest: await operations.reviewArtwork(artworkReviewMatch[1]!, chapterParam(artworkReviewMatch[2]!), artworkReviewMatch[3]!, input.review) }); }
+      const artworkVersionReviewMatch = /^\/api\/stories\/([a-z0-9-]+)\/chapters\/(\d+)\/scenes\/(scene-\d{3})\/versions\/(v\d+)\/review$/.exec(url.pathname);
+      if (artworkVersionReviewMatch && request.method === "POST") {
+        const bodyData = (await jsonBody(request).catch(() => ({}))) as any;
+        const review = bodyData?.review ?? "approved";
+        return send(response, 200, {
+          manifest: await operations.reviewArtworkVersion(
+            artworkVersionReviewMatch[1]!,
+            chapterParam(artworkVersionReviewMatch[2]!),
+            artworkVersionReviewMatch[3]!,
+            artworkVersionReviewMatch[4]!,
+            review
+          ),
+        });
+      }
       const exportMatch = /^\/api\/stories\/([a-z0-9-]+)\/exports\/(\d+)-(\d+)\.(mp3|m4b)$/.exec(url.pathname);
       if (exportMatch && request.method === "GET") {
         const from = chapterParam(exportMatch[2]!); const to = chapterParam(exportMatch[3]!); const format = exportMatch[4] as "mp3" | "m4b";

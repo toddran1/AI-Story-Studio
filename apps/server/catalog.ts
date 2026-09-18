@@ -8,10 +8,12 @@ import { Story, storySchema } from "../../src/domain/story.js";
 import { StoryBible, emptyStoryBible, storyBibleSchema } from "../../src/domain/story-bible.js";
 import { SourceManifest, sourceManifestSchema } from "../../src/source/types.js";
 import { atomicWriteJson } from "../../src/storage/atomic-write.js";
-import { exportPaths, sceneImagePath, storyPaths, videoExportPaths } from "../../src/storage/paths.js";
+import { exportPaths, sceneImagePath, sceneVersionImagePath, storyPaths, videoExportPaths } from "../../src/storage/paths.js";
 import { exists, readJsonIfExists, readTextIfExists } from "../../src/storage/story-files.js";
 import { withStoryLock } from "../../src/storage/story-lock.js";
 import { loadStory } from "../../src/config/load-config.js";
+import { loadVisualProfiles, getVisualProfile as loadSingleVisualProfile } from "../../src/visual-canon/profiles.js";
+import { loadStoryArtDirection } from "../../src/visual-canon/art-direction.js";
 import { rebuildStoryBibleBeforeChapter, computeStaleExtractionChapters } from "../../src/story-bible/rebuild.js";
 import { exportManifestSchema } from "../../src/audio/audiobook.js";
 import { FfmpegTools } from "../../src/audio/ffmpeg.js";
@@ -411,9 +413,28 @@ export async function getVideoDashboard(root: string, slug: string) {
   return { settings: story.video, subtitleSettings: story.subtitles, background: { coverAvailable: Boolean(cover), coverName: cover, effectiveMode: story.video.backgroundMode === "gradient" || !cover ? "fallback" : story.video.backgroundMode }, counts: { total: chapters.length, mastered: chapters.filter((item) => item.audioAvailable || item.audioMastering === "complete").length, subtitles: chapters.filter((item) => item.subtitles === "complete").length, videos: chapters.filter((item) => item.video === "complete").length }, chapters: chapters.map((item) => ({ chapter: item.chapter, title: item.originalTitle, durationSeconds: item.durationSeconds, subtitleStatus: item.subtitles, videoStatus: item.video, videoAvailable: item.videoAvailable })), exports };
 }
 
+export async function getVisualProfiles(root: string, slug: string) {
+  slugSchema.parse(slug);
+  return await loadVisualProfiles(root, slug);
+}
+
+export async function getVisualProfile(root: string, slug: string, entityId: string) {
+  slugSchema.parse(slug);
+  return await loadSingleVisualProfile(root, slug, entityId);
+}
+
+export async function getArtDirection(root: string, slug: string) {
+  slugSchema.parse(slug);
+  return await loadStoryArtDirection(root, slug);
+}
+
 export async function getScenesDashboard(root: string, slug: string, selectedChapter?: number) {
-  slugSchema.parse(slug); const story = await loadStory(storyPaths(root, slug, 1).storyConfig); const chapters = await loadChapterSummaries(root, slug); const chapterNumber = selectedChapter ?? chapters[0]?.chapter;
-  if (chapterNumber !== undefined && !chapters.some((item) => item.chapter === chapterNumber)) throw new Error(`Chapter ${chapterNumber} was not found`);
+  slugSchema.parse(slug);
+  const story = await loadStory(storyPaths(root, slug, 1).storyConfig);
+  const chapters = await loadChapterSummaries(root, slug);
+  const chapterNumber = selectedChapter ?? chapters[0]?.chapter;
+  if (chapterNumber !== undefined && !chapters.some((item) => item.chapter === chapterNumber))
+    throw new Error(`Chapter ${chapterNumber} was not found`);
   const env = loadEnvironment();
   const globalDefaults = await loadGlobalSettings(root, env).catch(() => undefined);
   const scenePlannerRouting = resolveModelRouting({
@@ -423,10 +444,80 @@ export async function getScenesDashboard(root: string, slug: string, selectedCha
     env,
     requiredCapability: "structured_output",
   });
-  let manifest: (SceneManifest & { scenes: Array<SceneManifest["scenes"][number] & { imageUrl?: string }> }) | undefined;
-  if (chapterNumber !== undefined) { const raw = await readJsonIfExists<SceneManifest>(storyPaths(root, slug, chapterNumber).scenesManifest); const parsed = raw ? sceneManifestSchema.safeParse(raw) : undefined; if (parsed?.success) { const scenes = await mapLimit(parsed.data.scenes, 8, async (scene) => ({ ...scene, imageUrl: scene.artwork.status === "complete" && await exists(sceneImagePath(root, slug, chapterNumber, scene.id)) ? `/api/stories/${slug}/chapters/${chapterNumber}/scenes/${scene.id}.png` : undefined })); manifest = { ...parsed.data, scenes }; } }
-  return { settings: story.scenes, artwork: story.artwork, planner: story.pipeline.scenePlanner, selectedChapter: chapterNumber, chapters: chapters.map((item) => ({ chapter: item.chapter, title: item.originalTitle, durationSeconds: item.durationSeconds, sceneStatus: item.scenePlanning, artworkStatus: item.artwork })), counts: { chapters: chapters.length, planned: chapters.filter((item) => item.scenePlanning === "complete").length, artworkReady: chapters.filter((item) => item.artwork === "complete").length }, manifest };
-  return { settings: story.scenes, artwork: story.artwork, planner: story.pipeline.scenePlanner, scenePlannerRouting, selectedChapter: chapterNumber, chapters: chapters.map((item) => ({ chapter: item.chapter, title: item.originalTitle, durationSeconds: item.durationSeconds, sceneStatus: item.scenePlanning, artworkStatus: item.artwork })), counts: { chapters: chapters.length, planned: chapters.filter((item) => item.scenePlanning === "complete").length, artworkReady: chapters.filter((item) => item.artwork === "complete").length }, manifest };
+  const artDirection = await loadStoryArtDirection(root, slug);
+  const visualProfiles = await loadVisualProfiles(root, slug);
+
+  let manifest:
+    | (SceneManifest & {
+        scenes: Array<
+          SceneManifest["scenes"][number] & {
+            imageUrl?: string;
+            artwork: SceneManifest["scenes"][number]["artwork"] & {
+              versions: Array<
+                SceneManifest["scenes"][number]["artwork"]["versions"][number] & { imageUrl?: string }
+              >;
+            };
+          }
+        >;
+      })
+    | undefined;
+
+  if (chapterNumber !== undefined) {
+    const raw = await readJsonIfExists<SceneManifest>(storyPaths(root, slug, chapterNumber).scenesManifest);
+    const parsed = raw ? sceneManifestSchema.safeParse(raw) : undefined;
+    if (parsed?.success) {
+      const scenes = await mapLimit(parsed.data.scenes, 8, async (scene) => {
+        const hasMain =
+          scene.artwork.status === "complete" &&
+          (await exists(sceneImagePath(root, slug, chapterNumber, scene.id)));
+        const versions = await mapLimit(scene.artwork.versions ?? [], 8, async (v) => {
+          const vPath = sceneVersionImagePath(root, slug, chapterNumber, scene.id, v.versionNumber);
+          const vExists = await exists(vPath);
+          return {
+            ...v,
+            imageUrl:
+              vExists || hasMain
+                ? `/api/stories/${slug}/chapters/${chapterNumber}/scenes/${scene.id}/versions/${v.id}.png`
+                : undefined,
+          };
+        });
+        return {
+          ...scene,
+          imageUrl: hasMain
+            ? `/api/stories/${slug}/chapters/${chapterNumber}/scenes/${scene.id}.png`
+            : undefined,
+          artwork: {
+            ...scene.artwork,
+            versions,
+          },
+        };
+      });
+      manifest = { ...parsed.data, scenes };
+    }
+  }
+
+  return {
+    settings: story.scenes,
+    artwork: story.artwork,
+    planner: story.pipeline.scenePlanner,
+    scenePlannerRouting,
+    selectedChapter: chapterNumber,
+    chapters: chapters.map((item) => ({
+      chapter: item.chapter,
+      title: item.originalTitle,
+      durationSeconds: item.durationSeconds,
+      sceneStatus: item.scenePlanning,
+      artworkStatus: item.artwork,
+    })),
+    counts: {
+      chapters: chapters.length,
+      planned: chapters.filter((item) => item.scenePlanning === "complete").length,
+      artworkReady: chapters.filter((item) => item.artwork === "complete").length,
+    },
+    manifest,
+    artDirection,
+    visualProfiles,
+  };
 }
 
 export function publicProductionManifest(manifest: ProductionManifest, slug: string): ProductionManifest {

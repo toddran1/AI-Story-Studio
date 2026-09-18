@@ -1,7 +1,7 @@
 import { SceneError } from "../pipeline/errors.js";
 import { Scene, SceneSettings } from "./types.js";
 
-export function normalizeSceneTiming(raw: Array<Omit<Scene, "id" | "artwork">>, durationSeconds: number, settings: SceneSettings): Scene[] {
+export function normalizeSceneTiming(raw: Array<Pick<Scene, "summary" | "startSeconds" | "endSeconds" | "visualPrompt"> & Partial<Omit<Scene, "id" | "artwork">>>, durationSeconds: number, settings: SceneSettings): Scene[] {
   if (!Number.isFinite(durationSeconds) || durationSeconds <= 0) throw new SceneError("Scene timing requires a positive chapter duration");
   if (!raw.length) throw new SceneError("Scene planner returned no scenes");
   const minimumRequired = Math.max(1, Math.ceil(durationSeconds / settings.maximumDurationSeconds));
@@ -14,7 +14,16 @@ export function normalizeSceneTiming(raw: Array<Omit<Scene, "id" | "artwork">>, 
   const durations = boundedDurations(weights, durationSeconds, settings.minimumDurationSeconds, settings.maximumDurationSeconds); let cursor = 0;
   return selected.map((scene, index) => {
     const endSeconds = index === selected.length - 1 ? durationSeconds : Math.min(durationSeconds, cursor + durations[index]!);
-    const result: Scene = { ...scene, id: `scene-${String(index + 1).padStart(3, "0")}`, startSeconds: round(cursor), endSeconds: round(endSeconds), artwork: { status: "pending", review: "unreviewed" } };
+    const result: Scene = {
+      characters: [],
+      importance: "standard",
+      entityIds: [],
+      ...scene,
+      id: `scene-${String(index + 1).padStart(3, "0")}`,
+      startSeconds: round(cursor),
+      endSeconds: round(endSeconds),
+      artwork: { status: "pending", review: "unreviewed", versions: [] },
+    };
     cursor = endSeconds; return result;
   });
 }
@@ -51,7 +60,7 @@ const round = (value: number) => Math.round(value * 1000) / 1000;
 
 /** Recaps retain every semantic beat. Pacing is guidance, never a reason to
  * truncate the story's ending. Provider timings are estimates, not alignment. */
-export function normalizeProductionSceneTiming(raw: Array<Omit<Scene, "id" | "artwork">>, durationSeconds: number): Scene[] {
+export function normalizeProductionSceneTiming(raw: Array<Pick<Scene, "summary" | "startSeconds" | "endSeconds" | "visualPrompt"> & Partial<Omit<Scene, "id" | "artwork">>>, durationSeconds: number): Scene[] {
   if (!Number.isFinite(durationSeconds) || durationSeconds <= 0 || raw.length === 0 || raw.length > 100)
     throw new SceneError("Visual production requires a positive duration and 1–100 scenes");
   const weights = raw.map((scene) => Math.max(.1, scene.endSeconds - scene.startSeconds));
@@ -59,8 +68,16 @@ export function normalizeProductionSceneTiming(raw: Array<Omit<Scene, "id" | "ar
   let cursor = 0;
   const scenes = raw.map((scene, index) => {
     const end = index === raw.length - 1 ? durationSeconds : cursor + durationSeconds * weights[index]! / total;
-    const result: Scene = { ...scene, id: `scene-${String(index + 1).padStart(3, "0")}`, startSeconds: cursor, endSeconds: end,
-      artwork: { status: "pending", review: "unreviewed" } };
+    const result: Scene = {
+      characters: [],
+      importance: "standard",
+      entityIds: [],
+      ...scene,
+      id: `scene-${String(index + 1).padStart(3, "0")}`,
+      startSeconds: cursor,
+      endSeconds: end,
+      artwork: { status: "pending", review: "unreviewed", versions: [] },
+    };
     cursor = end; return result;
   });
   validateSceneCoverage(scenes, durationSeconds);

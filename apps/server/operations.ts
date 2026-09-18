@@ -43,9 +43,14 @@ import { renderStoredChapterVideo } from "../../src/video/chapter-video.js";
 import { assembleVideoExport, FfmpegVideoExportProcessor, VideoExportProcessor } from "../../src/video/video-export.js";
 import { LLMProvider } from "../../src/llm/provider.js";
 import { planStoredScenes, updateStoredSceneManifest } from "../../src/scenes/manifest.js";
-import { generateStoredArtwork, reviewStoredArtwork } from "../../src/artwork/generator.js";
+import { generateStoredArtwork, reviewStoredArtwork, reviewStoredArtworkVersion } from "../../src/artwork/generator.js";
 import { ImageProvider } from "../../src/artwork/provider.js";
 import { OpenAIImageProvider } from "../../src/artwork/openai-image.provider.js";
+import { loadVisualProfiles, getVisualProfile as loadVisualProfileEntity, updateVisualProfile, deleteVisualProfile, addVisualReferenceImage, generateStyleSheet } from "../../src/visual-canon/profiles.js";
+import { loadStoryArtDirection, saveStoryArtDirection, createPreset, updatePreset, deletePreset, duplicatePreset, setDefaultPreset } from "../../src/visual-canon/art-direction.js";
+import { visualProfileSchema } from "../../src/domain/visual-profile.js";
+import { storyArtDirectionSchema, artDirectionPresetSchema } from "../../src/domain/art-direction.js";
+import { artworkReviewSchema } from "../../src/scenes/types.js";
 import { planProduction, runProduction } from "../../src/production/orchestrator.js";
 import { productionForceSchema, productionOutputSchema } from "../../src/production/types.js";
 import { refreshProductionRange } from "../../src/production/refresh.js";
@@ -882,6 +887,118 @@ export class StudioOperations {
 
   async updateScenes(slug: string, chapter: number, scenes: unknown) { slugSchema.parse(slug); return withStoryLock(this.root, slug, "manual scene edit", async () => { const story = await loadStory(storyPaths(this.root, slug, chapter).storyConfig); return updateStoredSceneManifest({ root: this.root, story, chapter, scenes }); }); }
   async reviewArtwork(slug: string, chapter: number, sceneId: string, review: unknown) { slugSchema.parse(slug); return withStoryLock(this.root, slug, "artwork review", async () => { const story = await loadStory(storyPaths(this.root, slug, chapter).storyConfig); return reviewStoredArtwork({ root: this.root, story, chapter, sceneId, review }); }); }
+  async reviewArtworkVersion(slug: string, chapter: number, sceneId: string, versionId: string, review?: unknown) {
+    slugSchema.parse(slug);
+    return withStoryLock(this.root, slug, "artwork version review", async () => {
+      const story = await loadStory(storyPaths(this.root, slug, chapter).storyConfig);
+      const parsedReview = review !== undefined ? artworkReviewSchema.parse(review) : "approved";
+      return reviewStoredArtworkVersion({
+        root: this.root,
+        story,
+        chapter,
+        sceneId,
+        versionId,
+        review: parsedReview,
+      });
+    });
+  }
+
+  async getVisualProfiles(slug: string) {
+    slugSchema.parse(slug);
+    return loadVisualProfiles(this.root, slug);
+  }
+
+  async getVisualProfile(slug: string, entityId: string) {
+    slugSchema.parse(slug);
+    return loadVisualProfileEntity(this.root, slug, entityId);
+  }
+
+  async updateVisualProfile(slug: string, entityId: string, input: unknown) {
+    slugSchema.parse(slug);
+    return withStoryLock(this.root, slug, "update visual profile", async () => {
+      const parsed = visualProfileSchema.parse(input);
+      return updateVisualProfile(this.root, slug, entityId, parsed);
+    });
+  }
+
+  async deleteVisualProfile(slug: string, entityId: string) {
+    slugSchema.parse(slug);
+    return withStoryLock(this.root, slug, "delete visual profile", async () => {
+      return deleteVisualProfile(this.root, slug, entityId);
+    });
+  }
+
+  async addVisualReferenceImage(slug: string, entityId: string, imageBuffer: Buffer, ext: string, viewType: string, notes?: string) {
+    slugSchema.parse(slug);
+    return withStoryLock(this.root, slug, "add visual reference image", async () => {
+      return addVisualReferenceImage(this.root, slug, entityId, {
+        data: imageBuffer,
+        ext,
+        role: viewType as any,
+        prompt: notes,
+      });
+    });
+  }
+
+  async generateStyleSheet(slug: string, entityId: string) {
+    slugSchema.parse(slug);
+    return withStoryLock(this.root, slug, "generate style sheet", async () => {
+      const story = await loadStory(storyPaths(this.root, slug, 1).storyConfig);
+      const provider = new OpenAIImageProvider();
+      return generateStyleSheet(this.root, slug, entityId, provider, story);
+    });
+  }
+
+  async getArtDirection(slug: string) {
+    slugSchema.parse(slug);
+    return loadStoryArtDirection(this.root, slug);
+  }
+
+  async updateArtDirection(slug: string, input: unknown) {
+    slugSchema.parse(slug);
+    return withStoryLock(this.root, slug, "update art direction", async () => {
+      const parsed = storyArtDirectionSchema.parse(input);
+      await saveStoryArtDirection(this.root, slug, parsed);
+      return parsed;
+    });
+  }
+
+  async createArtDirectionPreset(slug: string, input: unknown) {
+    slugSchema.parse(slug);
+    return withStoryLock(this.root, slug, "create art direction preset", async () => {
+      const parsed = z.object({ name: z.string().trim().min(1) }).and(artDirectionPresetSchema.partial()).parse(input);
+      return createPreset(this.root, slug, parsed);
+    });
+  }
+
+  async updateArtDirectionPreset(slug: string, presetId: string, input: unknown) {
+    slugSchema.parse(slug);
+    return withStoryLock(this.root, slug, "update art direction preset", async () => {
+      const parsed = artDirectionPresetSchema.partial().parse(input);
+      return updatePreset(this.root, slug, presetId, parsed);
+    });
+  }
+
+  async deleteArtDirectionPreset(slug: string, presetId: string) {
+    slugSchema.parse(slug);
+    return withStoryLock(this.root, slug, "delete art direction preset", async () => {
+      return deletePreset(this.root, slug, presetId);
+    });
+  }
+
+  async duplicateArtDirectionPreset(slug: string, presetId: string, newName?: string) {
+    slugSchema.parse(slug);
+    return withStoryLock(this.root, slug, "duplicate art direction preset", async () => {
+      return duplicatePreset(this.root, slug, presetId, newName);
+    });
+  }
+
+  async setDefaultArtDirectionPreset(slug: string, presetId: string) {
+    slugSchema.parse(slug);
+    return withStoryLock(this.root, slug, "set default art direction preset", async () => {
+      return setDefaultPreset(this.root, slug, presetId);
+    });
+  }
 
   async getPreview(slug: string, id: string) {
     slugSchema.parse(slug); if (!/^[A-Za-z0-9T_-]+$/.test(id)) throw new Error("Invalid preview id"); const paths = previewPaths(this.root, slug, id);

@@ -21,6 +21,96 @@ export const artworkSettingsSchema = z.object({
 
 export const artworkReviewSchema = z.enum(["unreviewed", "approved", "rejected", "needs-regeneration"]);
 export const sceneImportanceSchema = z.enum(["transition", "standard", "major"]);
+
+export const shotTypeSchema = z.enum([
+  "extreme_wide",
+  "wide",
+  "medium_wide",
+  "medium",
+  "medium_close_up",
+  "close_up",
+  "extreme_close_up",
+]);
+export type ShotType = z.infer<typeof shotTypeSchema>;
+
+export const cameraAngleSchema = z.enum([
+  "eye_level",
+  "low_angle",
+  "high_angle",
+  "overhead",
+  "dutch_angle",
+  "pov",
+  "over_shoulder",
+]);
+export type CameraAngle = z.infer<typeof cameraAngleSchema>;
+
+export const compositionTendencySchema = z.enum([
+  "balanced",
+  "centered",
+  "rule_of_thirds",
+  "dynamic",
+  "symmetrical",
+  "environmental",
+  "character_focused",
+]);
+export type CompositionTendency = z.infer<typeof compositionTendencySchema>;
+
+export const sceneDirectionSchema = z.object({
+  shotType: shotTypeSchema.optional(),
+  cameraAngle: cameraAngleSchema.optional(),
+  composition: compositionTendencySchema.optional(),
+  lighting: z.string().trim().max(500).optional(),
+  timeEnvironment: z.enum(["dawn", "day", "sunset", "dusk", "night", "interior", "custom"]).optional(),
+  characterExpressions: z.record(z.string(), z.string().trim().max(300)).default({}),
+  useCharacterReferences: z.boolean().default(true),
+  useCreatureReferences: z.boolean().default(true),
+  useLocationReferences: z.boolean().default(true),
+  preserveWardrobeEquipment: z.boolean().default(true),
+  useStoryArtDirection: z.boolean().default(true),
+});
+export type SceneDirection = z.infer<typeof sceneDirectionSchema>;
+
+export const sceneOverridesSchema = z.object({
+  wardrobeOverrides: z.record(z.string(), z.string().trim().max(1000)).default({}),
+  artDirectionPresetId: z.string().optional(),
+  customVisualPrompt: z.string().trim().max(8000).optional(),
+  customNegativePrompt: z.string().trim().max(2000).optional(),
+});
+export type SceneOverrides = z.infer<typeof sceneOverridesSchema>;
+
+export const artworkVersionSchema = z.object({
+  id: z.string().min(1),
+  versionNumber: z.number().int().positive(),
+  sceneId: z.string().regex(/^scene-\d{3}$/),
+  imagePath: z.string().min(1),
+  imageFingerprint: z.string(),
+  createdAt: z.string().datetime(),
+  provider: z.string(),
+  model: z.string(),
+  prompt: z.string().max(12000),
+  promptFingerprint: z.string(),
+  resolvedVisualProfileReferences: z.array(z.object({
+    entityId: z.string(),
+    name: z.string().optional(),
+    role: z.string().optional(),
+    referenceId: z.string().optional(),
+  })).default([]),
+  artDirectionFingerprint: z.string().default(""),
+  settings: z.object({
+    quality: z.string().optional(),
+    size: z.string().optional(),
+    aspectRatio: z.string().optional(),
+    outputFormat: z.string().optional(),
+  }).default({}),
+  cost: z.object({
+    requests: z.number().optional(),
+    estimatedCostUsd: z.number().optional(),
+  }).optional(),
+  review: artworkReviewSchema.default("unreviewed"),
+  provenance: z.record(z.string(), z.unknown()).optional(),
+});
+export type ArtworkVersion = z.infer<typeof artworkVersionSchema>;
+
 export const sceneArtworkSchema = z.object({
   status: z.enum(["pending", "running", "complete", "failed"]).default("pending"),
   review: artworkReviewSchema.default("unreviewed"),
@@ -29,7 +119,9 @@ export const sceneArtworkSchema = z.object({
   manuallyEdited: z.boolean().optional(), prompt: z.string().max(12000).optional(),
   sourceType: z.enum(["chapter", "summary"]).optional(), sourceId: z.string().optional(), entityIds: z.array(z.string()).optional(),
   originalFingerprint: z.string().optional(), acceptedAt: z.string().datetime().optional(),
-}).default({ status: "pending", review: "unreviewed" });
+  versions: z.array(artworkVersionSchema).optional().default([]),
+  approvedVersionId: z.string().optional(),
+}).default({ status: "pending", review: "unreviewed", versions: [] });
 
 export const sceneSchema = z.object({
   id: z.string().regex(/^scene-\d{3}$/), summary: z.string().trim().min(1).max(1000),
@@ -38,9 +130,11 @@ export const sceneSchema = z.object({
   visualPrompt: z.string().trim().min(1).max(8000), importance: sceneImportanceSchema.default("standard"), artwork: sceneArtworkSchema,
   narrationText: z.string().max(1000000).optional(),
   narrationStartWord: z.number().int().nonnegative().optional(), narrationEndWord: z.number().int().positive().optional(),
-  entityIds: z.array(z.string().trim().min(1)).max(100).optional(),
+  entityIds: z.array(z.string().trim().min(1)).max(100).optional().default([]),
   visualType: z.enum(["image", "video"]).optional(),
   disabled: z.boolean().optional(),
+  direction: sceneDirectionSchema.optional(),
+  overrides: sceneOverridesSchema.optional(),
 }).refine((value) => value.endSeconds > value.startSeconds, { message: "Scene end must be after its start" });
 
 export const productionSceneManifestSchema = z.object({

@@ -3,59 +3,577 @@ import { Chapter, chapterSchema } from "../domain/chapter.js";
 import { Story } from "../domain/story.js";
 import { ArtworkError } from "../pipeline/errors.js";
 import { atomicWrite, atomicWriteJson } from "../storage/atomic-write.js";
-import { sceneImagePath, storyPaths } from "../storage/paths.js";
-import { readJsonIfExists } from "../storage/story-files.js";
+import { sceneImagePath, sceneVersionImagePath, storyPaths } from "../storage/paths.js";
+import { exists, readJsonIfExists } from "../storage/story-files.js";
 import { fingerprint } from "../utils/hash.js";
 import { sceneContentFingerprint } from "../scenes/manifest.js";
 import { loadCharacterVisualReferences } from "../scenes/visual-references.js";
-import { artworkReviewSchema, Scene, SceneManifest, sceneManifestSchema } from "../scenes/types.js";
+import { artworkReviewSchema, ArtworkVersion, Scene, SceneManifest, sceneManifestSchema } from "../scenes/types.js";
 import { ImageProvider } from "./provider.js";
 import { withRetry } from "../batch/retry.js";
 import { retryConfigSchema } from "../batch/types.js";
+import { loadVisualProfiles } from "../visual-canon/profiles.js";
+import { loadStoryArtDirection, resolveActiveArtDirection } from "../visual-canon/art-direction.js";
+import { resolveVisualCanonPrompt, ResolvedSceneVisualPrompt } from "../visual-canon/resolver.js";
+import { emptyStoryBible, storyBibleSchema, StoryBible } from "../domain/story-bible.js";
 
-export async function generateStoredArtwork(options: { root: string; story: Story; chapter: number; provider: ImageProvider; sceneId?: string; force?: boolean; dryRun?: boolean; onProgress?: (event: { type: string; chapter: number; scene?: string; index?: number; total?: number }) => void }) {
-  const paths = storyPaths(options.root, options.story.slug, options.chapter); const raw = await readJsonIfExists<SceneManifest>(paths.scenesManifest); if (!raw) throw new ArtworkError(`Chapter ${options.chapter} has no scene plan`); const manifest = sceneManifestSchema.parse(raw);
-  const rawChapter = await readJsonIfExists<Chapter>(paths.chapterMeta); if (!rawChapter) throw new ArtworkError(`Chapter ${options.chapter} has no pipeline metadata`); const chapter = chapterSchema.parse(rawChapter);
-  let selected = options.sceneId ? manifest.scenes.filter((scene) => scene.id === options.sceneId) : manifest.scenes; if (options.sceneId && !selected.length) throw new ArtworkError(`Scene '${options.sceneId}' was not found`);
-  const candidates: Array<{ scene: Scene; prompt: string; refs: Awaited<ReturnType<typeof loadCharacterVisualReferences>>; inputFingerprint: string }> = [];
-  for (const scene of selected) { const refs = await loadCharacterVisualReferences(options.root, options.story.slug, scene.characters); const prompt = artworkPrompt(scene, refs, options.story.artwork.stylePrompt, options.story.artwork.size); const inputFingerprint = artworkFingerprint(scene, refs.map((ref) => ref.fingerprint), options.story, options.provider.version); const actualImageFingerprint = await validPngFingerprint(sceneImagePath(options.root, options.story.slug, options.chapter, scene.id)); const validFile = Boolean(actualImageFingerprint && actualImageFingerprint === scene.artwork.imageFingerprint); const needs = options.force || scene.artwork.status !== "complete" || !validFile || scene.artwork.fingerprint !== inputFingerprint || scene.artwork.review === "needs-regeneration"; if (needs) candidates.push({ scene, prompt, refs, inputFingerprint }); }
-  if (options.dryRun) return { dryRun: true, chapter: options.chapter, planned: manifest.scenes.length, selected: selected.length, imagesToGenerate: candidates.length, sceneIds: candidates.map((item) => item.scene.id) };
-  if (!candidates.length) return { dryRun: false, chapter: options.chapter, planned: manifest.scenes.length, selected: selected.length, imagesToGenerate: 0, generated: 0, reused: selected.length };
-  await options.provider.validateConfiguration(); const started = Date.now(); chapter.stages.artwork = { status: "running", provider: options.story.artwork.provider, model: options.story.artwork.model, fingerprint: fingerprint({ manifest: manifest.planningFingerprint, manualRevision: manifest.manualRevision, settings: options.story.artwork }), startedAt: new Date().toISOString() }; await persistChapter(paths.chapterMeta, chapter);
-  let generated = 0; let reused = selected.length - candidates.length;
-  for (let index = 0; index < candidates.length; index++) { const item = candidates[index]!; item.scene.artwork = { ...item.scene.artwork, status: "running", provider: options.provider.name, model: options.story.artwork.model, fingerprint: item.inputFingerprint, error: undefined }; manifest.updatedAt = new Date().toISOString(); await atomicWriteJson(paths.scenesManifest, manifest); options.onProgress?.({ type: "artwork.scene.started", chapter: options.chapter, scene: item.scene.id, index: index + 1, total: candidates.length });
-    try { const result = await generateSceneImage(options.provider, options.story, item.prompt); const imagePath = sceneImagePath(options.root, options.story.slug, options.chapter, item.scene.id); await atomicWrite(imagePath, result.data); item.scene.artwork = { status: "complete", review: "unreviewed", provider: options.provider.name, model: options.story.artwork.model, fingerprint: item.inputFingerprint, imageFingerprint: fingerprint(result.data.toString("base64")), generatedAt: new Date().toISOString() }; generated++; options.onProgress?.({ type: "artwork.scene.completed", chapter: options.chapter, scene: item.scene.id, index: index + 1, total: candidates.length }); }
-    catch (error) { item.scene.artwork = { ...item.scene.artwork, status: "failed", review: "needs-regeneration", error: error instanceof Error ? error.message : String(error) }; await atomicWriteJson(paths.scenesManifest, manifest); chapter.stages.artwork = { ...chapter.stages.artwork, status: "failed", durationMs: Date.now() - started, error: { message: `${item.scene.id}: ${item.scene.artwork.error}` } }; await persistChapter(paths.chapterMeta, chapter); throw new ArtworkError(`Artwork generation failed for ${item.scene.id}: ${item.scene.artwork.error}`, { cause: error }); }
+export async function generateStoredArtwork(options: {
+  root: string;
+  story: Story;
+  chapter: number;
+  provider: ImageProvider;
+  sceneId?: string;
+  force?: boolean;
+  dryRun?: boolean;
+  onProgress?: (event: { type: string; chapter: number; scene?: string; index?: number; total?: number }) => void;
+}) {
+  const paths = storyPaths(options.root, options.story.slug, options.chapter);
+  const raw = await readJsonIfExists<SceneManifest>(paths.scenesManifest);
+  if (!raw) throw new ArtworkError(`Chapter ${options.chapter} has no scene plan`);
+  const manifest = sceneManifestSchema.parse(raw);
+
+  const rawChapter = await readJsonIfExists<Chapter>(paths.chapterMeta);
+  if (!rawChapter) throw new ArtworkError(`Chapter ${options.chapter} has no pipeline metadata`);
+  const chapter = chapterSchema.parse(rawChapter);
+
+  const rawBible = await readJsonIfExists<StoryBible>(paths.bible);
+  const bible = rawBible ? storyBibleSchema.parse(rawBible) : emptyStoryBible();
+
+  const artDirectionConfig = await loadStoryArtDirection(options.root, options.story.slug);
+  const visualProfiles = await loadVisualProfiles(options.root, options.story.slug);
+
+  // Migrate any legacy scenes without versions array
+  for (const scene of manifest.scenes) {
+    if (scene.artwork.status === "complete" && (!scene.artwork.versions || scene.artwork.versions.length === 0)) {
+      const v1: ArtworkVersion = {
+        id: "v1",
+        versionNumber: 1,
+        sceneId: scene.id,
+        imagePath: `${scene.id}.png`,
+        imageFingerprint: scene.artwork.imageFingerprint ?? "",
+        createdAt: scene.artwork.generatedAt ?? new Date().toISOString(),
+        provider: scene.artwork.provider ?? options.story.artwork.provider,
+        model: scene.artwork.model ?? options.story.artwork.model,
+        prompt: scene.artwork.prompt ?? scene.visualPrompt,
+        promptFingerprint: scene.artwork.fingerprint ?? "",
+        resolvedVisualProfileReferences: [],
+        artDirectionFingerprint: "",
+        settings: {
+          quality: options.story.artwork.quality,
+          size: options.story.artwork.size,
+          aspectRatio: options.story.artwork.aspectRatio,
+          outputFormat: options.story.artwork.outputFormat,
+        },
+        review: scene.artwork.review ?? "unreviewed",
+      };
+      scene.artwork.versions = [v1];
+      if (scene.artwork.review === "approved") {
+        scene.artwork.approvedVersionId = "v1";
+      }
+    }
+  }
+
+  let selected = options.sceneId ? manifest.scenes.filter((scene) => scene.id === options.sceneId) : manifest.scenes;
+  if (options.sceneId && !selected.length) throw new ArtworkError(`Scene '${options.sceneId}' was not found`);
+
+  const candidates: Array<{
+    scene: Scene;
+    prompt: string;
+    resolved: ResolvedSceneVisualPrompt;
+    refs: Awaited<ReturnType<typeof loadCharacterVisualReferences>>;
+    inputFingerprint: string;
+  }> = [];
+
+  for (const scene of selected) {
+    const refs = await loadCharacterVisualReferences(options.root, options.story.slug, scene.characters);
+    const activePreset = resolveActiveArtDirection(artDirectionConfig, scene.overrides?.artDirectionPresetId);
+    const resolved = resolveVisualCanonPrompt({
+      scene,
+      story: options.story,
+      bible,
+      artDirection: activePreset,
+      visualProfiles,
+    });
+
+    const inputFingerprint = artworkFingerprint(
+      scene,
+      refs.map((ref) => ref.fingerprint),
+      options.story,
+      options.provider.version,
+      {
+        artDirectionFingerprint: resolved.artDirectionFingerprint,
+        entityVisualFingerprints: resolved.entityVisualFingerprints,
+        sceneDirectionFingerprint: resolved.sceneDirectionFingerprint,
+        resolvedPromptFingerprint: resolved.resolvedPromptFingerprint,
+      }
+    );
+
+    const actualImageFingerprint = await validPngFingerprint(
+      sceneImagePath(options.root, options.story.slug, options.chapter, scene.id)
+    );
+    const validFile = Boolean(actualImageFingerprint && actualImageFingerprint === scene.artwork.imageFingerprint);
+    const needs =
+      options.force ||
+      scene.artwork.status !== "complete" ||
+      !validFile ||
+      scene.artwork.fingerprint !== inputFingerprint ||
+      scene.artwork.review === "needs-regeneration";
+
+    if (needs) {
+      candidates.push({ scene, prompt: resolved.prompt, resolved, refs, inputFingerprint });
+    }
+  }
+
+  if (options.dryRun) {
+    return {
+      dryRun: true,
+      chapter: options.chapter,
+      planned: manifest.scenes.length,
+      selected: selected.length,
+      imagesToGenerate: candidates.length,
+      sceneIds: candidates.map((item) => item.scene.id),
+    };
+  }
+
+  if (!candidates.length) {
+    return {
+      dryRun: false,
+      chapter: options.chapter,
+      planned: manifest.scenes.length,
+      selected: selected.length,
+      imagesToGenerate: 0,
+      generated: 0,
+      reused: selected.length,
+    };
+  }
+
+  await options.provider.validateConfiguration();
+  const started = Date.now();
+  chapter.stages.artwork = {
+    status: "running",
+    provider: options.story.artwork.provider,
+    model: options.story.artwork.model,
+    fingerprint: fingerprint({
+      manifest: manifest.planningFingerprint,
+      manualRevision: manifest.manualRevision,
+      settings: options.story.artwork,
+    }),
+    startedAt: new Date().toISOString(),
+  };
+  await persistChapter(paths.chapterMeta, chapter);
+
+  let generated = 0;
+  let reused = selected.length - candidates.length;
+
+  for (let index = 0; index < candidates.length; index++) {
+    const item = candidates[index]!;
+    item.scene.artwork = {
+      ...item.scene.artwork,
+      status: "running",
+      provider: options.provider.name,
+      model: options.story.artwork.model,
+      fingerprint: item.inputFingerprint,
+      error: undefined,
+    };
+    manifest.updatedAt = new Date().toISOString();
+    await atomicWriteJson(paths.scenesManifest, manifest);
+
+    options.onProgress?.({
+      type: "artwork.scene.started",
+      chapter: options.chapter,
+      scene: item.scene.id,
+      index: index + 1,
+      total: candidates.length,
+    });
+
+    try {
+      const result = await generateSceneImage(options.provider, options.story, item.prompt);
+      const imageFingerprint = fingerprint(result.data.toString("base64"));
+
+      // Determine next version number
+      const existingVersions = item.scene.artwork.versions ?? [];
+      const nextVersionNumber =
+        existingVersions.length > 0 ? Math.max(...existingVersions.map((v) => v.versionNumber), 0) + 1 : 1;
+      const versionId = `v${nextVersionNumber}`;
+
+      // Write version-specific file
+      const versionImagePath = sceneVersionImagePath(
+        options.root,
+        options.story.slug,
+        options.chapter,
+        item.scene.id,
+        nextVersionNumber
+      );
+      await atomicWrite(versionImagePath, result.data);
+
+      // Create new artwork version record
+      const newVersion: ArtworkVersion = {
+        id: versionId,
+        versionNumber: nextVersionNumber,
+        sceneId: item.scene.id,
+        imagePath: `${item.scene.id}-v${nextVersionNumber}.png`,
+        imageFingerprint,
+        createdAt: new Date().toISOString(),
+        provider: options.provider.name,
+        model: options.story.artwork.model,
+        prompt: item.prompt,
+        promptFingerprint: item.inputFingerprint,
+        resolvedVisualProfileReferences: item.resolved.resolvedEntities.map((e) => ({
+          entityId: e.entityId,
+          name: e.name,
+          role: e.type,
+        })),
+        artDirectionFingerprint: item.resolved.artDirectionFingerprint,
+        settings: {
+          quality: options.story.artwork.quality,
+          size: options.story.artwork.size,
+          aspectRatio: options.story.artwork.aspectRatio,
+          outputFormat: options.story.artwork.outputFormat,
+        },
+        review: "unreviewed",
+      };
+
+      item.scene.artwork.versions = [...existingVersions, newVersion];
+      item.scene.artwork.status = "complete";
+
+      // If no version is approved yet, keep standard scene image updated for preview
+      if (!item.scene.artwork.approvedVersionId) {
+        const standardImagePath = sceneImagePath(options.root, options.story.slug, options.chapter, item.scene.id);
+        await atomicWrite(standardImagePath, result.data);
+        item.scene.artwork.review = "unreviewed";
+        item.scene.artwork.provider = options.provider.name;
+        item.scene.artwork.model = options.story.artwork.model;
+        item.scene.artwork.fingerprint = item.inputFingerprint;
+        item.scene.artwork.imageFingerprint = imageFingerprint;
+        item.scene.artwork.generatedAt = new Date().toISOString();
+      }
+
+      generated++;
+      options.onProgress?.({
+        type: "artwork.scene.completed",
+        chapter: options.chapter,
+        scene: item.scene.id,
+        index: index + 1,
+        total: candidates.length,
+      });
+    } catch (error) {
+      item.scene.artwork = {
+        ...item.scene.artwork,
+        status: "failed",
+        review: "needs-regeneration",
+        error: error instanceof Error ? error.message : String(error),
+      };
+      await atomicWriteJson(paths.scenesManifest, manifest);
+      chapter.stages.artwork = {
+        ...chapter.stages.artwork,
+        status: "failed",
+        durationMs: Date.now() - started,
+        error: { message: `${item.scene.id}: ${item.scene.artwork.error}` },
+      };
+      await persistChapter(paths.chapterMeta, chapter);
+      throw new ArtworkError(`Artwork generation failed for ${item.scene.id}: ${item.scene.artwork.error}`, {
+        cause: error,
+      });
+    }
     await atomicWriteJson(paths.scenesManifest, manifest);
   }
-  const outputFingerprint = fingerprint(manifest.scenes.map((scene) => ({ id: scene.id, fingerprint: scene.artwork.fingerprint, imageFingerprint: scene.artwork.imageFingerprint, review: scene.artwork.review }))); const allGenerated = manifest.scenes.every((scene) => scene.artwork.status === "complete"); chapter.stages.artwork = { ...chapter.stages.artwork, status: allGenerated ? "complete" : "pending", outputFingerprint, completedAt: new Date().toISOString(), durationMs: Date.now() - started, usage: { requests: generated } }; chapter.scenes = { total: manifest.scenes.length, generated: manifest.scenes.filter((scene) => scene.artwork.status === "complete").length, approved: manifest.scenes.filter((scene) => scene.artwork.review === "approved").length }; if (generated) { chapter.stages.video = { status: "pending" }; chapter.video = undefined; } await persistChapter(paths.chapterMeta, chapter); return { dryRun: false, chapter: options.chapter, planned: manifest.scenes.length, selected: selected.length, imagesToGenerate: candidates.length, generated, reused };
+
+  const outputFingerprint = fingerprint(
+    manifest.scenes.map((scene) => ({
+      id: scene.id,
+      fingerprint: scene.artwork.fingerprint,
+      imageFingerprint: scene.artwork.imageFingerprint,
+      review: scene.artwork.review,
+      approvedVersionId: scene.artwork.approvedVersionId,
+    }))
+  );
+  const allGenerated = manifest.scenes.every((scene) => scene.artwork.status === "complete");
+  chapter.stages.artwork = {
+    ...chapter.stages.artwork,
+    status: allGenerated ? "complete" : "pending",
+    outputFingerprint,
+    completedAt: new Date().toISOString(),
+    durationMs: Date.now() - started,
+    usage: { requests: generated },
+  };
+  chapter.scenes = {
+    total: manifest.scenes.length,
+    generated: manifest.scenes.filter((scene) => scene.artwork.status === "complete").length,
+    approved: manifest.scenes.filter((scene) => scene.artwork.review === "approved").length,
+  };
+  if (generated) {
+    chapter.stages.video = { status: "pending" };
+    chapter.video = undefined;
+  }
+  await persistChapter(paths.chapterMeta, chapter);
+  return {
+    dryRun: false,
+    chapter: options.chapter,
+    planned: manifest.scenes.length,
+    selected: selected.length,
+    imagesToGenerate: candidates.length,
+    generated,
+    reused,
+  };
 }
 
-export async function reviewStoredArtwork(options: { root: string; story: Story; chapter: number; sceneId: string; review: unknown }) { const review = artworkReviewSchema.parse(options.review); const paths = storyPaths(options.root, options.story.slug, options.chapter); const raw = await readJsonIfExists<SceneManifest>(paths.scenesManifest); if (!raw) throw new ArtworkError(`Chapter ${options.chapter} has no scene plan`); const manifest = sceneManifestSchema.parse(raw); const scene = manifest.scenes.find((item) => item.id === options.sceneId); if (!scene) throw new ArtworkError(`Scene '${options.sceneId}' was not found`); if (review === "approved") { const actual = await validPngFingerprint(sceneImagePath(options.root, options.story.slug, options.chapter, scene.id)); if (scene.artwork.status !== "complete" || !actual || actual !== scene.artwork.imageFingerprint) throw new ArtworkError("Only intact, successfully generated artwork can be approved"); } scene.artwork.review = review; manifest.updatedAt = new Date().toISOString(); await atomicWriteJson(paths.scenesManifest, manifest); const chapterRaw = await readJsonIfExists<Chapter>(paths.chapterMeta); if (chapterRaw) { const chapter = chapterSchema.parse(chapterRaw); chapter.scenes = { total: manifest.scenes.length, generated: manifest.scenes.filter((item) => item.artwork.status === "complete").length, approved: manifest.scenes.filter((item) => item.artwork.review === "approved").length }; chapter.stages.video = { status: "pending" }; chapter.video = undefined; await persistChapter(paths.chapterMeta, chapter); } return manifest; }
+export async function reviewStoredArtworkVersion(options: {
+  root: string;
+  story: Story;
+  chapter: number;
+  sceneId: string;
+  versionId: string;
+  review?: "approved" | "unreviewed" | "rejected" | "needs-regeneration";
+}) {
+  const reviewAction = options.review ?? "approved";
+  const paths = storyPaths(options.root, options.story.slug, options.chapter);
+  const raw = await readJsonIfExists<SceneManifest>(paths.scenesManifest);
+  if (!raw) throw new ArtworkError(`Chapter ${options.chapter} has no scene plan`);
+  const manifest = sceneManifestSchema.parse(raw);
+  const scene = manifest.scenes.find((item) => item.id === options.sceneId);
+  if (!scene) throw new ArtworkError(`Scene '${options.sceneId}' was not found`);
 
-export function artworkFingerprint(scene: Scene, visualReferenceFingerprints: string[], story: Story, providerVersion: string) { return fingerprint({ scene: sceneContentFingerprint(scene), visualReferenceFingerprints, style: story.artwork.stylePrompt, aspectRatio: story.artwork.aspectRatio, quality: story.artwork.quality, size: story.artwork.size, outputFormat: story.artwork.outputFormat, provider: story.artwork.provider, model: story.artwork.model, providerVersion }); }
-export function artworkPrompt(scene: Scene, refs: Array<{ name: string; description: string }>, style: string, size: string) { const [width = 0, height = 0] = size.split("x").map(Number); const orientation = width >= height ? "landscape" : "portrait"; return [`STORY-WIDE ART DIRECTION: ${style}`, `SCENE: ${scene.visualPrompt}`, `SUMMARY: ${scene.summary}`, scene.location ? `LOCATION: ${scene.location}` : "", scene.characters.length ? `CHARACTERS: ${scene.characters.join(", ")}` : "", ...refs.map((ref) => `CANONICAL VISUAL REFERENCE — ${ref.name}: ${ref.description}`), `Create one polished still illustration. ${orientation}-safe composition. No text, captions, speech bubbles, logos, or watermarks.`].filter(Boolean).join("\n"); }
+  const version = scene.artwork.versions.find((v) => v.id === options.versionId);
+  if (!version) throw new ArtworkError(`Artwork version '${options.versionId}' was not found for scene '${options.sceneId}'`);
+
+  if (reviewAction === "approved") {
+    // Locate the version image file
+    let versionPath = sceneVersionImagePath(options.root, options.story.slug, options.chapter, scene.id, version.versionNumber);
+    let versionFileExists = await exists(versionPath);
+    if (!versionFileExists) {
+      // Check if legacy imagePath can be found
+      const fallbackPath = sceneImagePath(options.root, options.story.slug, options.chapter, scene.id);
+      if (await exists(fallbackPath)) {
+        versionPath = fallbackPath;
+        versionFileExists = true;
+      }
+    }
+    if (!versionFileExists) {
+      throw new ArtworkError("Version image file does not exist on disk");
+    }
+
+    const actualFingerprint = await validPngFingerprint(versionPath);
+    if (!actualFingerprint || (version.imageFingerprint && actualFingerprint !== version.imageFingerprint)) {
+      throw new ArtworkError("Only intact, successfully generated artwork can be approved");
+    }
+
+    // Sync approved image to sceneImagePath (${sceneId}.png) for downstream video
+    const standardImagePath = sceneImagePath(options.root, options.story.slug, options.chapter, scene.id);
+    const data = await readFile(versionPath);
+    await atomicWrite(standardImagePath, data);
+
+    // Update versions state
+    for (const v of scene.artwork.versions) {
+      v.review = v.id === options.versionId ? "approved" : "unreviewed";
+    }
+    scene.artwork.approvedVersionId = options.versionId;
+    scene.artwork.review = "approved";
+    scene.artwork.imageFingerprint = actualFingerprint;
+    scene.artwork.fingerprint = version.promptFingerprint;
+  } else {
+    // Unapproving or marking needs-regeneration
+    version.review = reviewAction;
+    if (scene.artwork.approvedVersionId === options.versionId) {
+      scene.artwork.approvedVersionId = undefined;
+      scene.artwork.review = reviewAction;
+    }
+  }
+
+  manifest.updatedAt = new Date().toISOString();
+  await atomicWriteJson(paths.scenesManifest, manifest);
+
+  const chapterRaw = await readJsonIfExists<Chapter>(paths.chapterMeta);
+  if (chapterRaw) {
+    const chapter = chapterSchema.parse(chapterRaw);
+    chapter.scenes = {
+      total: manifest.scenes.length,
+      generated: manifest.scenes.filter((item) => item.artwork.status === "complete").length,
+      approved: manifest.scenes.filter((item) => item.artwork.review === "approved").length,
+    };
+    chapter.stages.video = { status: "pending" };
+    chapter.video = undefined;
+    await persistChapter(paths.chapterMeta, chapter);
+  }
+
+  return manifest;
+}
+
+export async function reviewStoredArtwork(options: {
+  root: string;
+  story: Story;
+  chapter: number;
+  sceneId: string;
+  review: unknown;
+}) {
+  const review = artworkReviewSchema.parse(options.review);
+  const paths = storyPaths(options.root, options.story.slug, options.chapter);
+  const raw = await readJsonIfExists<SceneManifest>(paths.scenesManifest);
+  if (!raw) throw new ArtworkError(`Chapter ${options.chapter} has no scene plan`);
+  const manifest = sceneManifestSchema.parse(raw);
+  const scene = manifest.scenes.find((item) => item.id === options.sceneId);
+  if (!scene) throw new ArtworkError(`Scene '${options.sceneId}' was not found`);
+
+  if (review === "approved") {
+    const actual = await validPngFingerprint(
+      sceneImagePath(options.root, options.story.slug, options.chapter, scene.id)
+    );
+    if (scene.artwork.status !== "complete" || !actual || (scene.artwork.imageFingerprint && actual !== scene.artwork.imageFingerprint)) {
+      throw new ArtworkError("Only intact, successfully generated artwork can be approved");
+    }
+
+    // If versions exist, approve the approvedVersionId or the latest version
+    if (scene.artwork.versions && scene.artwork.versions.length > 0) {
+      const targetVersionId = scene.artwork.approvedVersionId ?? scene.artwork.versions[scene.artwork.versions.length - 1]!.id;
+      return reviewStoredArtworkVersion({
+        root: options.root,
+        story: options.story,
+        chapter: options.chapter,
+        sceneId: options.sceneId,
+        versionId: targetVersionId,
+        review: "approved",
+      });
+    }
+  }
+
+  scene.artwork.review = review;
+  if (review !== "approved") {
+    scene.artwork.approvedVersionId = undefined;
+  }
+  manifest.updatedAt = new Date().toISOString();
+  await atomicWriteJson(paths.scenesManifest, manifest);
+
+  const chapterRaw = await readJsonIfExists<Chapter>(paths.chapterMeta);
+  if (chapterRaw) {
+    const chapter = chapterSchema.parse(chapterRaw);
+    chapter.scenes = {
+      total: manifest.scenes.length,
+      generated: manifest.scenes.filter((item) => item.artwork.status === "complete").length,
+      approved: manifest.scenes.filter((item) => item.artwork.review === "approved").length,
+    };
+    chapter.stages.video = { status: "pending" };
+    chapter.video = undefined;
+    await persistChapter(paths.chapterMeta, chapter);
+  }
+  return manifest;
+}
+
+export function artworkFingerprint(
+  scene: Scene,
+  visualReferenceFingerprints: string[],
+  story: Story,
+  providerVersion: string,
+  extra?: {
+    artDirectionFingerprint?: string;
+    entityVisualFingerprints?: Record<string, string>;
+    sceneDirectionFingerprint?: string;
+    resolvedPromptFingerprint?: string;
+  }
+) {
+  const artDirectionFingerprint =
+    extra?.artDirectionFingerprint ??
+    (scene.artwork.versions?.length
+      ? scene.artwork.versions[scene.artwork.versions.length - 1]?.artDirectionFingerprint
+      : undefined);
+
+  return fingerprint({
+    scene: sceneContentFingerprint(scene),
+    visualReferenceFingerprints,
+    style: story.artwork.stylePrompt,
+    aspectRatio: story.artwork.aspectRatio,
+    quality: story.artwork.quality,
+    size: story.artwork.size,
+    outputFormat: story.artwork.outputFormat,
+    provider: story.artwork.provider,
+    model: story.artwork.model,
+    providerVersion,
+    ...(artDirectionFingerprint ? { artDirectionFingerprint } : {}),
+    ...(extra?.entityVisualFingerprints && Object.keys(extra.entityVisualFingerprints).length > 0
+      ? { entityVisualFingerprints: extra.entityVisualFingerprints }
+      : {}),
+  });
+}
+
+export function artworkPrompt(
+  scene: Scene,
+  refs: Array<{ name: string; description: string }>,
+  style: string,
+  size: string
+) {
+  const [width = 0, height = 0] = size.split("x").map(Number);
+  const orientation = width >= height ? "landscape" : "portrait";
+  return [
+    `STORY-WIDE ART DIRECTION: ${style}`,
+    `SCENE: ${scene.visualPrompt}`,
+    `SUMMARY: ${scene.summary}`,
+    scene.location ? `LOCATION: ${scene.location}` : "",
+    scene.characters.length ? `CHARACTERS: ${scene.characters.join(", ")}` : "",
+    ...refs.map((ref) => `CANONICAL VISUAL REFERENCE — ${ref.name}: ${ref.description}`),
+    `Create one polished still illustration. ${orientation}-safe composition. No text, captions, speech bubbles, logos, or watermarks.`,
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
 export async function generateSceneImage(provider: ImageProvider, story: Story, prompt: string) {
-  const result = await withRetry(() => provider.generate({ model: story.artwork.model, prompt, quality: story.artwork.quality,
-    size: story.artwork.size, outputFormat: story.artwork.outputFormat }), retryConfigSchema.parse({}));
-  validatePng(result.data); return result;
+  const result = await withRetry(
+    () =>
+      provider.generate({
+        model: story.artwork.model,
+        prompt,
+        quality: story.artwork.quality,
+        size: story.artwork.size,
+        outputFormat: story.artwork.outputFormat,
+      }),
+    retryConfigSchema.parse({})
+  );
+  validatePng(result.data);
+  return result;
 }
+
 function validatePng(data: Buffer) {
   const signature = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
-  if (data.length < 45 || !data.subarray(0, 8).equals(signature)) throw new ArtworkError("Image provider returned invalid PNG data");
-  let offset = 8; let sawHeader = false; let sawEnd = false;
+  if (data.length < 45 || !data.subarray(0, 8).equals(signature))
+    throw new ArtworkError("Image provider returned invalid PNG data");
+  let offset = 8;
+  let sawHeader = false;
+  let sawEnd = false;
   while (offset + 12 <= data.length) {
-    const length = data.readUInt32BE(offset); const end = offset + 12 + length;
+    const length = data.readUInt32BE(offset);
+    const end = offset + 12 + length;
     if (end > data.length) throw new ArtworkError("Image provider returned truncated PNG data");
     const type = data.toString("ascii", offset + 4, offset + 8);
     if (!sawHeader) {
-      if (type !== "IHDR" || length !== 13 || data.readUInt32BE(offset + 8) === 0 || data.readUInt32BE(offset + 12) === 0) throw new ArtworkError("Image provider returned invalid PNG header data");
+      if (
+        type !== "IHDR" ||
+        length !== 13 ||
+        data.readUInt32BE(offset + 8) === 0 ||
+        data.readUInt32BE(offset + 12) === 0
+      )
+        throw new ArtworkError("Image provider returned invalid PNG header data");
       sawHeader = true;
     }
-    if (type === "IEND") { if (length !== 0 || end !== data.length) throw new ArtworkError("Image provider returned invalid PNG trailer data"); sawEnd = true; break; }
+    if (type === "IEND") {
+      if (length !== 0 || end !== data.length) throw new ArtworkError("Image provider returned invalid PNG trailer data");
+      sawEnd = true;
+      break;
+    }
     offset = end;
   }
   if (!sawHeader || !sawEnd) throw new ArtworkError("Image provider returned incomplete PNG data");
 }
-export async function validPngFingerprint(path: string) { try { const data = await readFile(path); validatePng(data); return fingerprint(data.toString("base64")); } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT" || error instanceof ArtworkError) return undefined; throw error; } }
-async function persistChapter(path: string, chapter: Chapter) { chapter.updatedAt = new Date().toISOString(); await atomicWriteJson(path, chapterSchema.parse(chapter)); }
+
+export async function validPngFingerprint(path: string) {
+  try {
+    const data = await readFile(path);
+    validatePng(data);
+    return fingerprint(data.toString("base64"));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT" || error instanceof ArtworkError) return undefined;
+    throw error;
+  }
+}
+
+async function persistChapter(path: string, chapter: Chapter) {
+  chapter.updatedAt = new Date().toISOString();
+  await atomicWriteJson(path, chapterSchema.parse(chapter));
+}

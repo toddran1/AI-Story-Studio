@@ -8,6 +8,8 @@ export function storyPaths(root: string, slug: string, chapter: number) {
     story, source, sourceManifest: join(source, "source.json"), sourceChapters: join(source, "chapters"), chapterDir,
     storyConfig: join(story, "story.json"), pipelineConfig: join(story, "pipeline.json"),
     bible: join(story, "story-bible.json"), bibleManual: join(story, "story-bible-manual.json"), bibleCanonicalManual: join(story, "story-bible-canonical-manual.json"), continuityReview: join(story, "continuity-review.json"), qaExceptions: join(story, "qa-exceptions.json"), chapterMeta: join(chapterDir, "chapter.json"),
+    visualProfiles: join(story, "visual-profiles.json"), artDirection: join(story, "art-direction.json"),
+    visualProfilesDirectory: join(story, "assets", "visual-profiles"),
     original: join(chapterDir, "original.txt"), english: join(chapterDir, "english.txt"),
     narration: join(chapterDir, "narration.txt"), narrationTts: join(chapterDir, "narration-tts.txt"), qa: join(chapterDir, "qa.json"), bibleUpdate: join(chapterDir, "story-bible-update.json"), continuityAnalysis: join(chapterDir, "continuity.json"), storyContext: join(chapterDir, "story-context.json"),
     audioRaw: join(chapterDir, "audio-raw.mp3"), audio: join(chapterDir, "audio.mp3"), segments: join(chapterDir, "audio-segments"),
@@ -26,6 +28,16 @@ export function voicePreviewPaths(root: string, slug: string, id: string) {
 export function sceneImagePath(root: string, slug: string, chapter: number, sceneId: string) {
   if (!/^scene-\d{3}$/.test(sceneId)) throw new Error("Invalid scene ID");
   return join(storyPaths(root, slug, chapter).scenesDirectory, `${sceneId}.png`);
+}
+
+export function sceneVersionImagePath(root: string, slug: string, chapter: number, sceneId: string, versionNumber: number) {
+  if (!/^scene-\d{3}$/.test(sceneId)) throw new Error("Invalid scene ID");
+  return join(storyPaths(root, slug, chapter).scenesDirectory, `${sceneId}-v${versionNumber}.png`);
+}
+
+export function visualProfileRefPath(root: string, slug: string, entityId: string, refId: string, ext = "png") {
+  if (!/^ent_[a-f0-9]{24}$/.test(entityId)) throw new Error("Invalid entity ID");
+  return join(storyPaths(root, slug, 1).visualProfilesDirectory, entityId, `${refId}.${ext}`);
 }
 
 export function videoExportPaths(root: string, slug: string, from: number, to: number) {

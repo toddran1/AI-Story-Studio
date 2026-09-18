@@ -142,7 +142,7 @@ export class SummaryVisualService {
         progress?.({ type: "summary.artwork.started", scene: scene.id, index: index + 1, total: selected.length });
         await input.provider.validateConfiguration(); scene.artwork = { ...scene.artwork, status: "running", error: undefined }; await this.save(slug, summary);
         try { const result = await withUsageScope({ story: slug, stage: "artwork" }, () => generateSceneImage(input.provider, input.story, input.prompt)); await atomicWrite(this.paths(slug, id).image(scene.id), result.data);
-          scene.artwork = { status: "complete", review: "unreviewed", fingerprint: input.inputFingerprint, imageFingerprint: fingerprint(result.data.toString("base64")), provider: input.provider.name, model: input.story.artwork.model, generatedAt: new Date().toISOString(), prompt: input.prompt, sourceType: "summary", sourceId: id, entityIds: input.entityIds }; }
+          scene.artwork = { status: "complete", review: "unreviewed", fingerprint: input.inputFingerprint, imageFingerprint: fingerprint(result.data.toString("base64")), provider: input.provider.name, model: input.story.artwork.model, generatedAt: new Date().toISOString(), prompt: input.prompt, sourceType: "summary", sourceId: id, entityIds: input.entityIds, versions: [] }; }
         catch (error) { scene.artwork = { ...scene.artwork, status: "failed", error: error instanceof Error ? error.message : String(error) }; throw error; }
         if (summary.video) summary.video.status = "stale"; await this.save(slug, summary); progress?.({ type: "summary.artwork.completed", scene: scene.id, index: index + 1, total: selected.length });
       }

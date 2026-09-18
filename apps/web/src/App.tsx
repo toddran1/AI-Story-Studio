@@ -14,8 +14,12 @@ import { LanguageSelect } from "./languages.js";
 import { AudioDeck } from "./AudioDeck.js";
 import { VocalizationList } from "./VocalizationList.js";
 import { getEntityStatusOptions, isStandardEntityStatus, statusKey } from "../../../src/story-bible/entity-status.js";
+import { VisualProfileModal } from "./VisualProfileModal.js";
+import { ArtDirectionModal } from "./ArtDirectionModal.js";
+import { reviewArtworkVersion, ShotType, CameraAngle, CompositionTendency } from "./api.js";
 import "./entity-sheet-actions.css";
 import "./stage-execution.css";
+import "./scenes.css";
 
 type Route = { page: string; story?: string; chapter?: number };
 
@@ -260,6 +264,7 @@ function BiblePage({ slug, navigate }: { slug: string; navigate: (path: string) 
   const [tab, setTab] = useState<"canonical" | "references" | "cleanup">("canonical");
   const [refsView, setRefsView] = useState<any>(); const [refsQuery, setRefsQuery] = useState(""); const deferredRefs = useDeferredValue(refsQuery); const [refsType, setRefsType] = useState("all"); const [refsPage, setRefsPage] = useState(1);
   const [analysis, setAnalysis] = useState<any>(); const [loadingAnalysis, setLoadingAnalysis] = useState(false);
+  const [visualProfileTarget, setVisualProfileTarget] = useState<{ id: string; name?: string } | null>(null);
   const load = () => api<any>(`/stories/${slug}/story-bible/entities?page=${page}&pageSize=50&type=${type}&sort=${sort}&q=${encodeURIComponent(deferred)}`).then(setView); useEffect(() => { void load().catch((value) => setError(message(value))); }, [slug, page, type, sort, deferred]);
   const loadReferences = () => api<any>(`/stories/${slug}/story-bible/references?page=${refsPage}&pageSize=50&type=${refsType}&q=${encodeURIComponent(deferredRefs)}`).then(setRefsView);
   useEffect(() => { if (tab === "references") void loadReferences().catch((value) => setError(message(value))); }, [slug, tab, refsPage, refsType, deferredRefs]);
@@ -358,13 +363,14 @@ function BiblePage({ slug, navigate }: { slug: string; navigate: (path: string) 
         {!analysis.recommendations?.length && <Empty title="Story Bible is clean" text="No entities currently warrant demotion or cleanup." />}
       </div>
     </div> : <LoadFailure error="Could not load analysis." />)}
-    {detail && <CanonicalEntitySheet detail={detail} slug={slug} navigate={navigate} onClose={() => setDetail(undefined)} onUndo={undo} onEdit={() => setEditing(canonicalDraft(detail.entity))} onDemote={() => demote(detail.entity)} />}
+    {detail && <CanonicalEntitySheet detail={detail} slug={slug} navigate={navigate} onClose={() => setDetail(undefined)} onUndo={undo} onEdit={() => setEditing(canonicalDraft(detail.entity))} onDemote={() => demote(detail.entity)} onOpenVisualProfile={(id: string, name?: string) => setVisualProfileTarget({ id, name })} />}
+    {visualProfileTarget && <VisualProfileModal slug={slug} entityId={visualProfileTarget.id} entityName={visualProfileTarget.name} onClose={() => setVisualProfileTarget(null)} />}
     <PronunciationPanel slug={slug} />{editing && <CanonicalEntityEditor slug={slug} value={editing} onChange={setEditing} onClose={() => setEditing(undefined)} onSave={save} />}</section>;
 }
 
 function canonicalDraft(entity: any) { const rules = new Map((entity.aliasNarrationRules ?? []).map((rule: any) => [rule.alias.toLocaleLowerCase(), rule])); return { ...entity, preferredNarrationName: entity.preferredNarrationName ?? "", aliasDrafts: entity.aliases.map((alias: string) => ({ alias, behavior: rules.get(alias.toLocaleLowerCase())?.behavior ?? "no_override", replacement: rules.get(alias.toLocaleLowerCase())?.replacement ?? "" })) }; }
 function namingLabel(alias: string, entity: any) { const rule = (entity.aliasNarrationRules ?? []).find((item: any) => item.alias.toLocaleLowerCase() === alias.toLocaleLowerCase()); if (!rule || rule.behavior === "no_override") return "No override"; if (rule.behavior === "use_preferred") return entity.preferredNarrationName ? `Use ${entity.preferredNarrationName}` : "Use preferred name"; return `Custom → ${rule.replacement}`; }
-export function CanonicalEntitySheet({ detail, slug, navigate, onClose, onUndo, onEdit, onDemote }: any) {
+export function CanonicalEntitySheet({ detail, slug, navigate, onClose, onUndo, onEdit, onDemote, onOpenVisualProfile }: any) {
   const entity = detail.entity;
   const activeMerges = (detail.merges ?? []).filter((item: any) => !item.undoneAt);
   const [descExpanded, setDescExpanded] = useState(false);
@@ -582,6 +588,9 @@ export function CanonicalEntitySheet({ detail, slug, navigate, onClose, onUndo, 
             <button className="button" onClick={() => navigate(`/stories/${slug}/names?entity=${entity.id}`)}>
               Open localization
             </button>
+            <button className="button" onClick={() => onOpenVisualProfile?.(entity.id, entity.canonicalName)}>
+              Visual Profile
+            </button>
             {detail.issues?.length > 0 && (
               <button className="button warn-badge-button" onClick={() => navigate(`/stories/${slug}/continuity`)}>
                 {detail.issues.length} continuity issues
@@ -633,45 +642,746 @@ function BibleFields({ category, value, onChange }: { category: string; value: a
 function newBibleValue(category: string) { const chapters = { firstSeenChapter: 1, lastSeenChapter: 1 }; if (category === "relationships") return { subject: "", relationship: "", object: "", ...chapters }; if (category === "translationTerms") return { original: "", canonicalEnglish: "", notes: "", ...chapters }; return { canonicalEnglishName: "", originalName: "", description: "", ...(category === "characters" ? { aliases: [], pronouns: [] } : {}), ...chapters }; }
 function bibleEntryTitle(value: any) { return value.canonicalEnglishName ?? value.canonicalEnglish ?? `${value.subject} → ${value.object}`; }
 
+function getSceneProductionState(scene: Scene): { label: string; cls: string } {
+  if (scene.artwork.review === "approved" && (scene.imageUrl || scene.artwork.versions?.some((v) => v.id === scene.artwork.approvedVersionId))) {
+    return { label: "Video Ready", cls: "state-video-ready" };
+  }
+  if (scene.artwork.review === "approved") {
+    return { label: "Approved", cls: "state-approved" };
+  }
+  if (scene.artwork.review === "needs-regeneration" || (scene.artwork.status === "complete" && scene.artwork.review === "unreviewed")) {
+    return { label: "Needs Review", cls: "state-needs-review" };
+  }
+  if (scene.artwork.status === "running") {
+    return { label: "Generating", cls: "state-generating" };
+  }
+  if (scene.artwork.status === "complete") {
+    return { label: "Generated", cls: "state-generated" };
+  }
+  if (scene.visualPrompt) {
+    return { label: "Prompt Ready", cls: "state-prompt-ready" };
+  }
+  return { label: "Planned", cls: "state-planned" };
+}
+
 function ScenesPage({ slug, onJob, navigate }: { slug: string; onJob: (job: Job) => void; navigate?: (path: string) => void }) {
-  const [data, setData] = useState<ScenesDashboard>(); const [draft, setDraft] = useState<Scene[]>([]); const [range, setRange] = useState({ from: "", to: "" }); const [error, setError] = useState(""); const [estimate, setEstimate] = useState<number>(); const [saving, setSaving] = useState(false); const watcher = useRef<(() => void) | undefined>(undefined);
-  const load = async (chapter?: number) => { const next = await api<ScenesDashboard>(`/stories/${slug}/scenes${chapter ? `?chapter=${chapter}` : ""}`); setData(next); setDraft(structuredClone(next.manifest?.scenes ?? [])); if (!range.from && next.selectedChapter) setRange({ from: String(next.selectedChapter), to: String(next.selectedChapter) }); };
-  useEffect(() => { setData(undefined); setError(""); void load().catch((value) => setError(message(value))); return () => watcher.current?.(); }, [slug]);
-  const chooseChapter = (chapter: number) => { setEstimate(undefined); setRange({ from: String(chapter), to: String(chapter) }); void load(chapter).catch((value) => setError(message(value))); };
-  const run = async (kind: "scenes" | "artwork", extra: Record<string, unknown> = {}) => { try { setError(""); const job = await post<Job>(`/stories/${slug}/jobs/${kind}`, { from: Number(range.from), to: Number(range.to), ...extra }); onJob(job); watcher.current?.(); watcher.current = watchJob(job.id, async (next) => { onJob(next); if (next.status === "completed") { if (next.result?.dryRun) setEstimate(next.result.imageCountEstimate); await load(data?.selectedChapter); } else if (next.status === "failed") setError(next.error ?? `${pretty(kind)} job failed`); }, (value) => setError(message(value))); } catch (value) { setError(message(value)); } };
-  const save = async () => { if (!data?.selectedChapter) return; try { setSaving(true); setError(""); await put(`/stories/${slug}/chapters/${data.selectedChapter}/scenes`, { scenes: draft }); await load(data.selectedChapter); } catch (value) { setError(message(value)); } finally { setSaving(false); } };
-  const review = async (scene: Scene, value: Scene["artwork"]["review"]) => { if (!data?.selectedChapter) return; try { await post(`/stories/${slug}/chapters/${data.selectedChapter}/scenes/${scene.id}/review`, { review: value }); await load(data.selectedChapter); } catch (cause) { setError(message(cause)); } };
-  const edit = (id: string, patch: Partial<Scene>) => setDraft((current) => current.map((scene) => scene.id === id ? { ...scene, ...patch } : scene));
-  if (error && !data) return <LoadFailure error={error} />; if (!data) return <Loading />;
+  const [data, setData] = useState<ScenesDashboard>();
+  const [draft, setDraft] = useState<Scene[]>([]);
+  const [rangeMode, setRangeMode] = useState<"single" | "range">("single");
+  const [range, setRange] = useState({ from: "", to: "" });
+  const [rangeError, setRangeError] = useState("");
+  const [error, setError] = useState("");
+  const [estimate, setEstimate] = useState<number>();
+  const [saving, setSaving] = useState(false);
+  const [sceneFilter, setSceneFilter] = useState<"all" | "needs-review" | "approved" | "video-ready">("all");
+  const [selectedVersionByScene, setSelectedVersionByScene] = useState<Record<string, string>>({});
+  const [activeVisualProfile, setActiveVisualProfile] = useState<{ id: string; name?: string } | null>(null);
+  const [showArtDirectionModal, setShowArtDirectionModal] = useState(false);
+  const watcher = useRef<(() => void) | undefined>(undefined);
+
+  const load = async (chapter?: number) => {
+    const next = await api<ScenesDashboard>(`/stories/${slug}/scenes${chapter ? `?chapter=${chapter}` : ""}`);
+    setData(next);
+    setDraft(structuredClone(next.manifest?.scenes ?? []));
+    if (!range.from && next.selectedChapter) {
+      setRange({ from: String(next.selectedChapter), to: String(next.selectedChapter) });
+    }
+  };
+
+  useEffect(() => {
+    setData(undefined);
+    setError("");
+    void load().catch((value) => setError(message(value)));
+    return () => watcher.current?.();
+  }, [slug]);
+
+  const chooseChapter = (chapter: number) => {
+    setEstimate(undefined);
+    setRange({ from: String(chapter), to: String(chapter) });
+    setRangeError("");
+    void load(chapter).catch((value) => setError(message(value)));
+  };
+
+  const handleRangeChange = (fromVal: string, toVal: string) => {
+    setRange({ from: fromVal, to: toVal });
+    const fromNum = Number(fromVal);
+    const toNum = Number(toVal);
+    if (!fromVal.trim() || !toVal.trim()) {
+      setRangeError("Range bounds cannot be empty");
+    } else if (Number.isNaN(fromNum) || Number.isNaN(toNum) || fromNum < 1 || toNum < 1) {
+      setRangeError("Chapter numbers must be positive integers");
+    } else if (fromNum > toNum) {
+      setRangeError("Start chapter must be less than or equal to end chapter");
+    } else {
+      setRangeError("");
+    }
+  };
+
+  const run = async (kind: "scenes" | "artwork", extra: Record<string, unknown> = {}) => {
+    const fromNum = Number(range.from);
+    const toNum = Number(range.to);
+    if (fromNum > toNum) {
+      setRangeError("Start chapter must be less than or equal to end chapter");
+      return;
+    }
+    try {
+      setError("");
+      const job = await post<Job>(`/stories/${slug}/jobs/${kind}`, { from: fromNum, to: toNum, ...extra });
+      onJob(job);
+      watcher.current?.();
+      watcher.current = watchJob(job.id, async (next) => {
+        onJob(next);
+        if (next.status === "completed") {
+          if (next.result?.dryRun) setEstimate(next.result.imageCountEstimate);
+          await load(data?.selectedChapter);
+        } else if (next.status === "failed") {
+          setError(next.error ?? `${pretty(kind)} job failed`);
+        }
+      }, (value) => setError(message(value)));
+    } catch (value) {
+      setError(message(value));
+    }
+  };
+
+  const save = async () => {
+    if (!data?.selectedChapter) return;
+    try {
+      setSaving(true);
+      setError("");
+      await put(`/stories/${slug}/chapters/${data.selectedChapter}/scenes`, { scenes: draft });
+      await load(data.selectedChapter);
+    } catch (value) {
+      setError(message(value));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const review = async (scene: Scene, value: Scene["artwork"]["review"]) => {
+    if (!data?.selectedChapter) return;
+    try {
+      await post(`/stories/${slug}/chapters/${data.selectedChapter}/scenes/${scene.id}/review`, { review: value });
+      await load(data.selectedChapter);
+    } catch (cause) {
+      setError(message(cause));
+    }
+  };
+
+  const handleApproveVersion = async (scene: Scene, versionId: string) => {
+    if (!data?.selectedChapter) return;
+    try {
+      setError("");
+      await reviewArtworkVersion(slug, data.selectedChapter, scene.id, versionId, "approved");
+      await load(data.selectedChapter);
+    } catch (cause) {
+      setError(message(cause));
+    }
+  };
+
+  const edit = (id: string, patch: Partial<Scene>) =>
+    setDraft((current) => current.map((scene) => (scene.id === id ? { ...scene, ...patch } : scene)));
+
+  const editDirection = (id: string, patch: Partial<NonNullable<Scene["direction"]>>) =>
+    setDraft((current) => current.map((scene) => (scene.id === id ? { ...scene, direction: { ...scene.direction, ...patch } } : scene)));
+
+  const editOverrides = (id: string, patch: Partial<NonNullable<Scene["overrides"]>>) =>
+    setDraft((current) => current.map((scene) => (scene.id === id ? { ...scene, overrides: { ...scene.overrides, ...patch } } : scene)));
+
+  if (error && !data) return <LoadFailure error={error} />;
+  if (!data) return <Loading />;
   const plannerNotReady = Boolean(data.scenePlannerRouting && !data.scenePlannerRouting.ready);
-  return <section className="page scenes-page">
-    <div className="section-heading">
-      <div><span className="eyebrow">Visual development</span><h2>Scene reel</h2><p>Plan the chapter’s visual rhythm, direct each frame, then approve the artwork that enters video.</p></div>
-      <div className="scene-status-cluster">
-        <div className="scene-count"><b>{data.counts.planned}</b><span>chapters planned</span><small>{data.counts.artworkReady} with artwork</small></div>
-        <div className="scene-planner-badge" title={data.scenePlannerRouting?.reason}>
-          <span className="eyebrow">Planner</span>
-          <b>{data.scenePlannerRouting ? `${data.scenePlannerRouting.provider} · ${data.scenePlannerRouting.model}` : `${data.planner.provider} · ${data.planner.model}`}</b>
-          <span className={`routing-badge ${data.scenePlannerRouting?.source === "override" ? "override" : "inherited"}`}>
-            {data.scenePlannerRouting?.source === "override" ? "Book override" : "Studio default"}
-          </span>
-          <button type="button" className="button small text-btn" onClick={() => navigate?.(`/stories/${slug}/settings`) ?? (location.href = `/stories/${slug}/settings`)}>Settings</button>
+
+  const filteredScenes = draft.filter((scene) => {
+    if (sceneFilter === "all") return true;
+    const state = getSceneProductionState(scene);
+    if (sceneFilter === "needs-review") return state.label === "Needs Review";
+    if (sceneFilter === "approved") return state.label === "Approved" || state.label === "Video Ready";
+    if (sceneFilter === "video-ready") return state.label === "Video Ready";
+    return true;
+  });
+
+  const filterCounts = {
+    all: draft.length,
+    needsReview: draft.filter((s) => getSceneProductionState(s).label === "Needs Review").length,
+    approved: draft.filter((s) => getSceneProductionState(s).label === "Approved" || getSceneProductionState(s).label === "Video Ready").length,
+    videoReady: draft.filter((s) => getSceneProductionState(s).label === "Video Ready").length,
+  };
+
+  return (
+    <section className="page scenes-page">
+      <div className="section-heading">
+        <div>
+          <span className="eyebrow">Visual development</span>
+          <h2>Scene reel & Visual Canon</h2>
+          <p>Plan the chapter’s visual rhythm, direct each frame with canonical profiles, then approve the artwork that enters video.</p>
+        </div>
+        <div className="scene-status-cluster">
+          <div className="scene-count">
+            <b>{data.counts.planned}</b>
+            <span>chapters planned</span>
+            <small>{data.counts.artworkReady} with artwork</small>
+          </div>
+          <div className="scene-planner-badge" title={data.scenePlannerRouting?.reason}>
+            <span className="eyebrow">Planner</span>
+            <b>{data.scenePlannerRouting ? `${data.scenePlannerRouting.provider} · ${data.scenePlannerRouting.model}` : `${data.planner.provider} · ${data.planner.model}`}</b>
+            <span className={`routing-badge ${data.scenePlannerRouting?.source === "override" ? "override" : "inherited"}`}>
+              {data.scenePlannerRouting?.source === "override" ? "Book override" : "Studio default"}
+            </span>
+            <button type="button" className="button small text-btn" onClick={() => navigate?.(`/stories/${slug}/settings`) ?? (location.href = `/stories/${slug}/settings`)}>Settings</button>
+          </div>
         </div>
       </div>
-    </div>
-    {plannerNotReady && <div className="scene-preflight-alert" role="alert">
-      <div><Status status="fail" label="Scene Planner Not Configured" /><p>{data.scenePlannerRouting?.reason ?? "Scene planner provider or model is not configured."}</p></div>
-      <button type="button" className="button primary" onClick={() => navigate?.(`/stories/${slug}/settings`) ?? (location.href = `/stories/${slug}/settings`)}>Configure Scene Planner →</button>
-    </div>}
-    <div className="scene-toolbar"><Field label="Chapter"><select value={data.selectedChapter ?? ""} onChange={(event) => chooseChapter(Number(event.target.value))}>{data.chapters.map((chapter) => <option key={chapter.chapter} value={chapter.chapter}>{String(chapter.chapter).padStart(4, "0")} · {chapter.title ?? "Untitled"}</option>)}</select></Field><Field label="Range from"><input inputMode="numeric" value={range.from} onChange={(event) => setRange({ ...range, from: event.target.value })} /></Field><Field label="Range to"><input inputMode="numeric" value={range.to} onChange={(event) => setRange({ ...range, to: event.target.value })} /></Field><div className="scene-actions"><button className="button" disabled={plannerNotReady} title={plannerNotReady ? data.scenePlannerRouting?.reason : undefined} onClick={() => run("scenes")}>Plan scenes</button><button className="button" onClick={() => run("artwork", { dryRun: true })}>Estimate images</button><button className="button primary" onClick={() => run("artwork")}>Generate missing artwork</button></div>{estimate !== undefined && <div className="cost-estimate"><b>{estimate}</b><span>paid image request{estimate === 1 ? "" : "s"}</span><small>Dry run only—nothing generated.</small></div>}</div>
-    {error && <ErrorBox text={error} />}
-    {data.manifest ? <>
-      {(data.manifestStale || data.chapters.find((item) => item.chapter === data.selectedChapter)?.sceneStatus === "stale") && <ArtifactStatusNotice status="stale" reason="This scene plan was generated from older inputs or settings. Scenes and artwork remain visible below; plan scenes again to make the manifest current." />}
-      <div className="filmstrip" aria-label="Scene timing preview">{draft.map((scene) => <button key={scene.id} style={{ flexGrow: Math.max(1, scene.endSeconds - scene.startSeconds) }} className={`${scene.importance} ${scene.artwork.review}`} onClick={() => document.getElementById(scene.id)?.scrollIntoView({ behavior: "smooth" })}><i />{scene.imageUrl ? <img src={scene.imageUrl} alt="" /> : <span>{scene.id.replace("scene-", "")}</span>}<small>{formatTime(scene.startSeconds)}–{formatTime(scene.endSeconds)}</small></button>)}</div>
-      <div className="scene-reel-head"><div><h3>Chapter {data.manifest.chapter} direction</h3><p>{data.manifest.manuallyEdited ? `Manual revision ${data.manifest.manualRevision}` : "Planner draft"} · {formatDuration(data.manifest.durationSeconds)}</p></div><button className="button primary" disabled={saving} onClick={save}>{saving ? "Saving…" : "Save scene edits"}</button></div>
-      <div className="scene-cards">{draft.map((scene, index) => <article id={scene.id} key={scene.id} className={`scene-card ${scene.importance}`}><div className="scene-frame">{scene.imageUrl ? <img src={scene.imageUrl} alt={scene.summary} /> : <div><span>{String(index + 1).padStart(2, "0")}</span><small>Frame pending</small></div>}<span className={`review-flag ${scene.artwork.review}`}>{pretty(scene.artwork.review)}</span></div><div className="scene-copy"><header><div><span className="eyebrow">{scene.id}</span><h3>{formatTime(scene.startSeconds)} — {formatTime(scene.endSeconds)}</h3></div><Stage value={scene.artwork.status} /></header><Field label="Summary"><textarea value={scene.summary} onChange={(event) => edit(scene.id, { summary: event.target.value })} /></Field><div className="scene-fields"><Field label="Start seconds"><input type="number" step="0.001" min="0" value={scene.startSeconds} onChange={(event) => edit(scene.id, { startSeconds: Number(event.target.value) })} /></Field><Field label="End seconds"><input type="number" step="0.001" min="0" value={scene.endSeconds} onChange={(event) => edit(scene.id, { endSeconds: Number(event.target.value) })} /></Field><Field label="Importance"><select value={scene.importance} onChange={(event) => edit(scene.id, { importance: event.target.value as Scene["importance"] })}><option value="transition">Transition</option><option value="standard">Standard</option><option value="major">Major</option></select></Field></div><div className="scene-fields two"><Field label="Characters"><input value={scene.characters.join(", ")} onChange={(event) => edit(scene.id, { characters: event.target.value.split(",").map((value) => value.trim()).filter(Boolean) })} /></Field><Field label="Location"><input value={scene.location ?? ""} onChange={(event) => edit(scene.id, { location: event.target.value || undefined })} /></Field></div><Field label="Artwork prompt"><textarea className="prompt-editor" value={scene.visualPrompt} onChange={(event) => edit(scene.id, { visualPrompt: event.target.value })} /></Field><div className="scene-review"><button onClick={() => review(scene, "approved")} disabled={!scene.imageUrl}>Approve</button><button onClick={() => review(scene, "rejected")} disabled={!scene.imageUrl}>Reject</button><button onClick={() => review(scene, "needs-regeneration")} disabled={!scene.imageUrl}>Needs regeneration</button><button className="regenerate" onClick={() => run("artwork", { scene: scene.id, force: true })}>Regenerate frame</button></div>{scene.artwork.error && <small className="scene-error">{scene.artwork.error}</small>}</div></article>)}</div>
-    </> : <Empty title="No scene plan yet" text="Choose one mastered chapter and plan its visual sequence. No artwork is generated during planning." action={<button className="button primary" disabled={plannerNotReady} onClick={() => run("scenes")}>Plan this chapter</button>} />}
-  </section>;
+
+      {plannerNotReady && (
+        <div className="scene-preflight-alert" role="alert">
+          <div>
+            <Status status="fail" label="Scene Planner Not Configured" />
+            <p>{data.scenePlannerRouting?.reason ?? "Scene planner provider or model is not configured."}</p>
+          </div>
+          <button type="button" className="button primary" onClick={() => navigate?.(`/stories/${slug}/settings`) ?? (location.href = `/stories/${slug}/settings`)}>
+            Configure Scene Planner →
+          </button>
+        </div>
+      )}
+
+      <div className="scene-toolbar">
+        <Field label="Selection Mode">
+          <select
+            value={rangeMode}
+            onChange={(e) => {
+              const mode = e.target.value as "single" | "range";
+              setRangeMode(mode);
+              if (mode === "single" && data.selectedChapter) {
+                setRange({ from: String(data.selectedChapter), to: String(data.selectedChapter) });
+                setRangeError("");
+              }
+            }}
+          >
+            <option value="single">Single Chapter</option>
+            <option value="range">Chapter Range</option>
+          </select>
+        </Field>
+
+        {rangeMode === "single" ? (
+          <Field label="Chapter">
+            <select
+              value={data.selectedChapter ?? ""}
+              onChange={(event) => chooseChapter(Number(event.target.value))}
+            >
+              {data.chapters.map((chapter) => (
+                <option key={chapter.chapter} value={chapter.chapter}>
+                  {String(chapter.chapter).padStart(4, "0")} · {chapter.title ?? "Untitled"}
+                </option>
+              ))}
+            </select>
+          </Field>
+        ) : (
+          <>
+            <Field label="Range from">
+              <input
+                inputMode="numeric"
+                value={range.from}
+                onChange={(event) => handleRangeChange(event.target.value, range.to)}
+              />
+            </Field>
+            <Field label="Range to">
+              <input
+                inputMode="numeric"
+                value={range.to}
+                onChange={(event) => handleRangeChange(range.from, event.target.value)}
+              />
+            </Field>
+          </>
+        )}
+
+        <div className="scene-actions">
+          <button
+            type="button"
+            className="button"
+            onClick={() => setShowArtDirectionModal(true)}
+            title="Manage story art direction presets and global visual style"
+          >
+            🎨 Art Direction
+          </button>
+          <button
+            type="button"
+            className="button"
+            disabled={plannerNotReady || Boolean(rangeError)}
+            onClick={() => run("scenes")}
+          >
+            Plan scenes
+          </button>
+          <button
+            type="button"
+            className="button"
+            disabled={Boolean(rangeError)}
+            onClick={() => run("artwork", { dryRun: true })}
+          >
+            Estimate images
+          </button>
+          <button
+            type="button"
+            className="button primary"
+            disabled={Boolean(rangeError)}
+            onClick={() => run("artwork")}
+          >
+            Generate artwork
+          </button>
+        </div>
+
+        {rangeError && (
+          <div style={{ gridColumn: "1/-1", color: "var(--fail)", fontSize: "11px" }}>
+            ⚠️ {rangeError}
+          </div>
+        )}
+
+        {estimate !== undefined && (
+          <div className="cost-estimate">
+            <b>{estimate}</b>
+            <span>paid image request{estimate === 1 ? "" : "s"}</span>
+            <small>Dry run only—nothing generated.</small>
+          </div>
+        )}
+      </div>
+
+      {error && <ErrorBox text={error} />}
+
+      {data.manifest ? (
+        <>
+          {(data.manifestStale || data.chapters.find((item) => item.chapter === data.selectedChapter)?.sceneStatus === "stale") && (
+            <ArtifactStatusNotice
+              status="stale"
+              reason="This scene plan was generated from older inputs or settings. Scenes and artwork remain visible below; plan scenes again to make the manifest current."
+            />
+          )}
+
+          <div className="filmstrip" aria-label="Scene timing preview">
+            {draft.map((scene) => {
+              const state = getSceneProductionState(scene);
+              return (
+                <button
+                  key={scene.id}
+                  style={{ flexGrow: Math.max(1, scene.endSeconds - scene.startSeconds) }}
+                  className={`${scene.importance} ${scene.artwork.review}`}
+                  onClick={() => document.getElementById(scene.id)?.scrollIntoView({ behavior: "smooth" })}
+                  title={`${scene.id}: ${state.label}`}
+                >
+                  <i />
+                  {scene.imageUrl ? <img src={scene.imageUrl} alt="" /> : <span>{scene.id.replace("scene-", "")}</span>}
+                  <small>{formatTime(scene.startSeconds)}–{formatTime(scene.endSeconds)}</small>
+                </button>
+              );
+            })}
+          </div>
+
+          <div className="scene-reel-head">
+            <div>
+              <h3>Chapter {data.manifest.chapter} direction</h3>
+              <p>
+                {data.manifest.manuallyEdited ? `Manual revision ${data.manifest.manualRevision}` : "Planner draft"} · {formatDuration(data.manifest.durationSeconds)}
+              </p>
+            </div>
+            <button className="button primary" disabled={saving} onClick={save}>
+              {saving ? "Saving…" : "Save scene edits"}
+            </button>
+          </div>
+
+          <div className="scene-filter-bar">
+            <button
+              type="button"
+              className={`filter-btn ${sceneFilter === "all" ? "active" : ""}`}
+              onClick={() => setSceneFilter("all")}
+            >
+              All Scenes <span className="filter-count">({filterCounts.all})</span>
+            </button>
+            <button
+              type="button"
+              className={`filter-btn ${sceneFilter === "needs-review" ? "active" : ""}`}
+              onClick={() => setSceneFilter("needs-review")}
+            >
+              Needs Review <span className="filter-count">({filterCounts.needsReview})</span>
+            </button>
+            <button
+              type="button"
+              className={`filter-btn ${sceneFilter === "approved" ? "active" : ""}`}
+              onClick={() => setSceneFilter("approved")}
+            >
+              Approved <span className="filter-count">({filterCounts.approved})</span>
+            </button>
+            <button
+              type="button"
+              className={`filter-btn ${sceneFilter === "video-ready" ? "active" : ""}`}
+              onClick={() => setSceneFilter("video-ready")}
+            >
+              Video Ready <span className="filter-count">({filterCounts.videoReady})</span>
+            </button>
+          </div>
+
+          <div className="scene-cards">
+            {filteredScenes.map((scene, index) => {
+              const state = getSceneProductionState(scene);
+              const versions = scene.artwork.versions ?? [];
+              const selectedVerId = selectedVersionByScene[scene.id] || scene.artwork.approvedVersionId || (versions.length ? versions.at(-1)!.id : undefined);
+              const displayedVersion = versions.find((v) => v.id === selectedVerId);
+              const displayImageUrl = displayedVersion ? (scene.versionUrls?.[String(displayedVersion.versionNumber)] || displayedVersion.imageUrl || scene.imageUrl) : scene.imageUrl;
+
+              return (
+                <article id={scene.id} key={scene.id} className={`scene-card ${scene.importance}`}>
+                  <div className="scene-frame">
+                    {displayImageUrl ? (
+                      <img src={displayImageUrl} alt={scene.summary} />
+                    ) : (
+                      <div>
+                        <span>{String(index + 1).padStart(2, "0")}</span>
+                        <small>Frame pending</small>
+                      </div>
+                    )}
+                    <span className={`state-badge ${state.cls}`}>{state.label}</span>
+                  </div>
+
+                  <div className="scene-copy">
+                    <header>
+                      <div>
+                        <span className="eyebrow">{scene.id}</span>
+                        <h3>{formatTime(scene.startSeconds)} — {formatTime(scene.endSeconds)}</h3>
+                      </div>
+                      <Stage value={scene.artwork.status} />
+                    </header>
+
+                    {/* Versions Switcher Bar */}
+                    {versions.length > 0 && (
+                      <div className="version-tabs-bar">
+                        <div className="version-tabs">
+                          {versions.map((ver) => {
+                            const isApproved = scene.artwork.approvedVersionId === ver.id;
+                            const isSelected = selectedVerId === ver.id;
+                            return (
+                              <button
+                                key={ver.id}
+                                type="button"
+                                className={`version-tab ${isSelected ? "active" : ""} ${isApproved ? "is-approved" : ""}`}
+                                onClick={() => setSelectedVersionByScene({ ...selectedVersionByScene, [scene.id]: ver.id })}
+                                title={`Version ${ver.versionNumber}: ${new Date(ver.createdAt).toLocaleTimeString()} (${ver.provider}/${ver.model})`}
+                              >
+                                v{ver.versionNumber} {isApproved ? "✓" : ""}
+                              </button>
+                            );
+                          })}
+                        </div>
+                        {displayedVersion && (
+                          <div className="version-approve-action">
+                            {scene.artwork.approvedVersionId === displayedVersion.id ? (
+                              <span style={{ color: "#4caf50", fontWeight: 600 }}>✓ Approved Canon Version</span>
+                            ) : (
+                              <button
+                                type="button"
+                                className="button"
+                                style={{ fontSize: "9px", padding: "3px 8px" }}
+                                onClick={() => handleApproveVersion(scene, displayedVersion.id)}
+                              >
+                                Approve v{displayedVersion.versionNumber}
+                              </button>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                    <Field label="Summary">
+                      <textarea
+                        value={scene.summary}
+                        onChange={(event) => edit(scene.id, { summary: event.target.value })}
+                      />
+                    </Field>
+
+                    <div className="scene-fields">
+                      <Field label="Start seconds">
+                        <input
+                          type="number"
+                          step="0.001"
+                          min="0"
+                          value={scene.startSeconds}
+                          onChange={(event) => edit(scene.id, { startSeconds: Number(event.target.value) })}
+                        />
+                      </Field>
+                      <Field label="End seconds">
+                        <input
+                          type="number"
+                          step="0.001"
+                          min="0"
+                          value={scene.endSeconds}
+                          onChange={(event) => edit(scene.id, { endSeconds: Number(event.target.value) })}
+                        />
+                      </Field>
+                      <Field label="Importance">
+                        <select
+                          value={scene.importance}
+                          onChange={(event) => edit(scene.id, { importance: event.target.value as Scene["importance"] })}
+                        >
+                          <option value="transition">Transition</option>
+                          <option value="standard">Standard</option>
+                          <option value="major">Major</option>
+                        </select>
+                      </Field>
+                    </div>
+
+                    <div className="scene-fields two">
+                      <div>
+                        <Field label="Characters">
+                          <input
+                            value={scene.characters.join(", ")}
+                            onChange={(event) =>
+                              edit(scene.id, {
+                                characters: event.target.value
+                                  .split(",")
+                                  .map((v) => v.trim())
+                                  .filter(Boolean),
+                              })
+                            }
+                          />
+                        </Field>
+                        {scene.characters.length > 0 && (
+                          <div className="entity-chip-list">
+                            {scene.characters.map((charName) => {
+                              const profile = data.visualProfiles?.find(
+                                (p) => p.entityId === charName || scene.entityIds?.includes(p.entityId)
+                              );
+                              return (
+                                <button
+                                  key={charName}
+                                  type="button"
+                                  className="entity-chip"
+                                  onClick={() => {
+                                    const entityId = profile?.entityId || charName;
+                                    setActiveVisualProfile({ id: entityId, name: charName });
+                                  }}
+                                  title={`Open Visual Profile for ${charName}`}
+                                >
+                                  <span className="chip-canon-icon">✦</span>
+                                  <span>{charName}</span>
+                                  {profile && <small>({profile.status})</small>}
+                                </button>
+                              );
+                            })}
+                          </div>
+                        )}
+                      </div>
+
+                      <Field label="Location">
+                        <input
+                          value={scene.location ?? ""}
+                          onChange={(event) => edit(scene.id, { location: event.target.value || undefined })}
+                        />
+                      </Field>
+                    </div>
+
+                    {/* Collapsible Scene Direction Panel */}
+                    <details className="scene-direction-panel">
+                      <summary>🎬 Scene Direction & Visual Canon Overrides</summary>
+                      <div className="scene-direction-content">
+                        <div className="form-grid-2col">
+                          <div>
+                            <label>Shot Type</label>
+                            <select
+                              value={scene.direction?.shotType ?? ""}
+                              onChange={(e) =>
+                                editDirection(scene.id, {
+                                  shotType: (e.target.value || undefined) as ShotType | undefined,
+                                })
+                              }
+                            >
+                              <option value="">Default / Auto</option>
+                              <option value="extreme_wide">Extreme Wide</option>
+                              <option value="wide">Wide Shot</option>
+                              <option value="medium_wide">Medium Wide</option>
+                              <option value="medium">Medium Shot</option>
+                              <option value="medium_close_up">Medium Close-up</option>
+                              <option value="close_up">Close-up</option>
+                              <option value="extreme_close_up">Extreme Close-up</option>
+                            </select>
+                          </div>
+                          <div>
+                            <label>Camera Angle</label>
+                            <select
+                              value={scene.direction?.cameraAngle ?? ""}
+                              onChange={(e) =>
+                                editDirection(scene.id, {
+                                  cameraAngle: (e.target.value || undefined) as CameraAngle | undefined,
+                                })
+                              }
+                            >
+                              <option value="">Default / Eye-level</option>
+                              <option value="eye_level">Eye Level</option>
+                              <option value="low_angle">Low Angle (Heroic/Imposing)</option>
+                              <option value="high_angle">High Angle (Diminishing)</option>
+                              <option value="overhead">Overhead / Bird's Eye</option>
+                              <option value="dutch_angle">Dutch Angle (Tension/Disorientation)</option>
+                              <option value="pov">Point of View (POV)</option>
+                              <option value="over_shoulder">Over the Shoulder</option>
+                            </select>
+                          </div>
+                        </div>
+
+                        <div className="form-grid-2col">
+                          <div>
+                            <label>Composition Tendency</label>
+                            <select
+                              value={scene.direction?.composition ?? ""}
+                              onChange={(e) =>
+                                editDirection(scene.id, {
+                                  composition: (e.target.value || undefined) as CompositionTendency | undefined,
+                                })
+                              }
+                            >
+                              <option value="">Default Composition</option>
+                              <option value="balanced">Balanced</option>
+                              <option value="centered">Centered / Symmetrical</option>
+                              <option value="rule_of_thirds">Rule of Thirds</option>
+                              <option value="dynamic">Dynamic Action Diagonal</option>
+                              <option value="environmental">Environmental Scale</option>
+                              <option value="character_focused">Character Focused</option>
+                            </select>
+                          </div>
+                          <div>
+                            <label>Time of Day / Atmosphere</label>
+                            <select
+                              value={scene.direction?.timeEnvironment ?? ""}
+                              onChange={(e) =>
+                                editDirection(scene.id, {
+                                  timeEnvironment: (e.target.value || undefined) as any,
+                                })
+                              }
+                            >
+                              <option value="">Auto from scene</option>
+                              <option value="dawn">Dawn</option>
+                              <option value="day">Day</option>
+                              <option value="sunset">Sunset / Golden Hour</option>
+                              <option value="dusk">Dusk</option>
+                              <option value="night">Night</option>
+                              <option value="interior">Interior Lighting</option>
+                              <option value="custom">Custom Atmosphere</option>
+                            </select>
+                          </div>
+                        </div>
+
+                        <div className="form-row">
+                          <label>Lighting Guidance</label>
+                          <input
+                            type="text"
+                            value={scene.direction?.lighting ?? ""}
+                            onChange={(e) =>
+                              editDirection(scene.id, { lighting: e.target.value || undefined })
+                            }
+                            placeholder="e.g. moonlight through broken ceiling, dramatic backlighting"
+                          />
+                        </div>
+
+                        <div className="form-row">
+                          <label>Wardrobe / Outfit Override</label>
+                          <input
+                            type="text"
+                            value={scene.overrides?.customVisualPrompt ?? ""}
+                            onChange={(e) =>
+                              editOverrides(scene.id, { customVisualPrompt: e.target.value || undefined })
+                            }
+                            placeholder="e.g. damaged armor, hood drawn up, soaked in rain"
+                          />
+                        </div>
+
+                        <div style={{ display: "flex", gap: "14px", flexWrap: "wrap", fontSize: "10px", color: "var(--muted)" }}>
+                          <label style={{ display: "inline-flex", alignItems: "center", gap: "5px", cursor: "pointer" }}>
+                            <input
+                              type="checkbox"
+                              checked={scene.direction?.useStoryArtDirection !== false}
+                              onChange={(e) => editDirection(scene.id, { useStoryArtDirection: e.target.checked })}
+                            />
+                            Apply Story Art Direction
+                          </label>
+                          <label style={{ display: "inline-flex", alignItems: "center", gap: "5px", cursor: "pointer" }}>
+                            <input
+                              type="checkbox"
+                              checked={scene.direction?.useCharacterReferences !== false}
+                              onChange={(e) => editDirection(scene.id, { useCharacterReferences: e.target.checked })}
+                            />
+                            Use Approved Entity Profiles
+                          </label>
+                          <label style={{ display: "inline-flex", alignItems: "center", gap: "5px", cursor: "pointer" }}>
+                            <input
+                              type="checkbox"
+                              checked={scene.direction?.preserveWardrobeEquipment !== false}
+                              onChange={(e) => editDirection(scene.id, { preserveWardrobeEquipment: e.target.checked })}
+                            />
+                            Preserve Equipment Canon
+                          </label>
+                        </div>
+                      </div>
+                    </details>
+
+                    <Field label="Artwork prompt">
+                      <textarea
+                        className="prompt-editor"
+                        value={scene.visualPrompt}
+                        onChange={(event) => edit(scene.id, { visualPrompt: event.target.value })}
+                      />
+                    </Field>
+
+                    <div className="scene-review">
+                      <button onClick={() => review(scene, "approved")} disabled={!displayImageUrl}>
+                        Approve
+                      </button>
+                      <button onClick={() => review(scene, "rejected")} disabled={!displayImageUrl}>
+                        Reject
+                      </button>
+                      <button onClick={() => review(scene, "needs-regeneration")} disabled={!displayImageUrl}>
+                        Needs regeneration
+                      </button>
+                      <button
+                        className="regenerate"
+                        onClick={() => run("artwork", { scene: scene.id, force: true })}
+                        title="Regenerate this scene as a new Version (preserves earlier versions)"
+                      >
+                        Regenerate frame (v{versions.length + 1})
+                      </button>
+                    </div>
+
+                    {scene.artwork.error && <small className="scene-error">{scene.artwork.error}</small>}
+                  </div>
+                </article>
+              );
+            })}
+          </div>
+        </>
+      ) : (
+        <Empty
+          title="No scene plan yet"
+          text="Choose one mastered chapter and plan its visual sequence. No artwork is generated during planning."
+          action={
+            <button className="button primary" disabled={plannerNotReady || Boolean(rangeError)} onClick={() => run("scenes")}>
+              Plan this chapter
+            </button>
+          }
+        />
+      )}
+
+      {showArtDirectionModal && (
+        <ArtDirectionModal
+          slug={slug}
+          onClose={() => setShowArtDirectionModal(false)}
+          onUpdated={() => load(data?.selectedChapter)}
+        />
+      )}
+
+      {activeVisualProfile && (
+        <VisualProfileModal
+          slug={slug}
+          entityId={activeVisualProfile.id}
+          entityName={activeVisualProfile.name}
+          onClose={() => setActiveVisualProfile(null)}
+          onUpdated={() => load(data?.selectedChapter)}
+        />
+      )}
+    </section>
+  );
 }
 
 function VideoPage({ slug, onJob }: { slug: string; onJob: (job: Job) => void }) {

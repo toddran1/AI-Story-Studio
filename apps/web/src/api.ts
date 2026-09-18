@@ -54,10 +54,289 @@ export type SubtitleSettings = { maxCharactersPerLine: number; maxLines: number;
 export type VideoSettings = { width: number; height: number; fps: 24 | 25 | 30 | 60; codec: "libx264"; quality: number; subtitleMode: "none" | "burn" | "soft" | "both"; subtitleStyle: "default" | "large" | "minimal"; backgroundMode: "cover" | "gradient" | "kenBurns"; introDurationSeconds: number };
 export type SceneSettings = { targetDurationSeconds: number; minimumDurationSeconds: number; maximumDurationSeconds: number; maximumScenesPerChapter: number };
 export type ArtworkSettings = { provider: "openai"; model: string; stylePrompt: string; aspectRatio: "16:9"; quality: "low" | "medium" | "high"; size: "1536x1024" | "1024x1024" | "1024x1536"; outputFormat: "png" };
-export type SceneArtwork = { status: "pending" | "running" | "complete" | "failed"; review: "unreviewed" | "approved" | "rejected" | "needs-regeneration"; provider?: string; model?: string; fingerprint?: string; imageFingerprint?: string; generatedAt?: string; error?: string };
-export type Scene = { id: string; summary: string; startSeconds: number; endSeconds: number; characters: string[]; location?: string; visualPrompt: string; importance: "transition" | "standard" | "major"; artwork: SceneArtwork; imageUrl?: string };
+export type VisualRole =
+  | "front"
+  | "three_quarter"
+  | "side"
+  | "back"
+  | "full_body"
+  | "face_portrait"
+  | "expression_sheet"
+  | "outfit_sheet"
+  | "equipment_reference"
+  | "environment_reference"
+  | "general_reference";
+
+export type VisualReferenceImage = {
+  id: string;
+  entityId: string;
+  role: VisualRole;
+  imagePath: string;
+  createdAt: string;
+  source: "generated" | "uploaded" | "style_sheet";
+  approved: boolean;
+  prompt?: string;
+  provenance?: Record<string, unknown>;
+  imageUrl?: string;
+};
+
+export type VisualEntityType =
+  | "character"
+  | "creature"
+  | "location"
+  | "item"
+  | "weapon"
+  | "object"
+  | "faction"
+  | "vehicle"
+  | "other";
+
+export type VisualProfileStatus = "draft" | "approved";
+
+export type CharacterVisualDetails = {
+  apparentAge?: string;
+  gender?: string;
+  height?: string;
+  build?: string;
+  skinTone?: string;
+  faceShape?: string;
+  eyeColor?: string;
+  hairColor?: string;
+  hairstyle?: string;
+  facialHair?: string;
+  distinguishingFeatures?: string;
+  scars?: string;
+  tattoos?: string;
+  defaultOutfit?: string;
+  shoes?: string;
+  accessories?: string;
+  weapons?: string;
+  equipment?: string;
+  additionalAppearanceNotes?: string;
+};
+
+export type LocationVisualDetails = {
+  environmentDescription?: string;
+  architecture?: string;
+  terrain?: string;
+  vegetation?: string;
+  weatherTendencies?: string;
+  lighting?: string;
+  atmosphere?: string;
+  colorPalette?: string;
+  recurringLandmarks?: string;
+  canonicalEnvironmentPrompt?: string;
+};
+
+export type CreatureVisualDetails = {
+  species?: string;
+  scale?: string;
+  anatomy?: string;
+  coloration?: string;
+  eyes?: string;
+  armorFur?: string;
+  distinguishingFeatures?: string;
+  sizeRelativeToHuman?: string;
+  canonicalCreaturePrompt?: string;
+};
+
+export type ItemVisualDetails = {
+  shape?: string;
+  materials?: string;
+  dimensions?: string;
+  color?: string;
+  ornamentation?: string;
+  wearDamage?: string;
+  magicalEffects?: string;
+  canonicalObjectPrompt?: string;
+};
+
+export type VisualVariant = {
+  id: string;
+  name: string;
+  description?: string;
+  defaultOutfit?: string;
+  visualPrompt?: string;
+};
+
+export type VisualEntityProfile = {
+  id: string;
+  entityId: string;
+  visualType: VisualEntityType;
+  status: VisualProfileStatus;
+  appearance: string;
+  visualPrompt: string;
+  negativePrompt: string;
+  notes: string;
+  character?: CharacterVisualDetails;
+  location?: LocationVisualDetails;
+  creature?: CreatureVisualDetails;
+  item?: ItemVisualDetails;
+  variants: VisualVariant[];
+  references: VisualReferenceImage[];
+  revision: number;
+  createdAt: string;
+  updatedAt: string;
+  approvedAt?: string;
+};
+
+export type ArtStyleOption =
+  | "Cinematic anime"
+  | "Manhwa"
+  | "Manga"
+  | "Semi-realistic"
+  | "Photorealistic"
+  | "Illustration"
+  | "Custom";
+
+export type ArtDirectionPreset = {
+  id: string;
+  name: string;
+  isDefault: boolean;
+  artStyle: ArtStyleOption;
+  customStylePrompt: string;
+  visualTone: string;
+  colorDirection: string;
+  lightingDirection: string;
+  cameraStyle: string;
+  compositionTendencies: string;
+  environmentStyle: string;
+  characterRenderingGuidance: string;
+  aspectRatio: "16:9" | "1:1" | "9:16" | "4:3" | "21:9";
+  characterConsistencyStrength: number;
+  environmentConsistencyStrength: number;
+  globalNegativePrompt: string;
+  additionalVisualInstructions: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type StoryArtDirection = {
+  activePresetId: string;
+  presets: ArtDirectionPreset[];
+  updatedAt: string;
+};
+
+export type ShotType =
+  | "extreme_wide"
+  | "wide"
+  | "medium_wide"
+  | "medium"
+  | "medium_close_up"
+  | "close_up"
+  | "extreme_close_up";
+
+export type CameraAngle =
+  | "eye_level"
+  | "low_angle"
+  | "high_angle"
+  | "overhead"
+  | "dutch_angle"
+  | "pov"
+  | "over_shoulder";
+
+export type CompositionTendency =
+  | "balanced"
+  | "centered"
+  | "rule_of_thirds"
+  | "dynamic"
+  | "symmetrical"
+  | "environmental"
+  | "character_focused";
+
+export type SceneDirection = {
+  shotType?: ShotType;
+  cameraAngle?: CameraAngle;
+  composition?: CompositionTendency;
+  lighting?: string;
+  timeEnvironment?: "dawn" | "day" | "sunset" | "dusk" | "night" | "interior" | "custom";
+  characterExpressions?: Record<string, string>;
+  useCharacterReferences?: boolean;
+  useCreatureReferences?: boolean;
+  useLocationReferences?: boolean;
+  preserveWardrobeEquipment?: boolean;
+  useStoryArtDirection?: boolean;
+};
+
+export type SceneOverrides = {
+  wardrobeOverrides?: Record<string, string>;
+  artDirectionPresetId?: string;
+  customVisualPrompt?: string;
+  customNegativePrompt?: string;
+};
+
+export type ArtworkVersion = {
+  id: string;
+  versionNumber: number;
+  sceneId: string;
+  imagePath: string;
+  imageFingerprint: string;
+  createdAt: string;
+  provider: string;
+  model: string;
+  prompt: string;
+  promptFingerprint: string;
+  resolvedVisualProfileReferences?: Array<{
+    entityId: string;
+    name?: string;
+    role?: string;
+    referenceId?: string;
+  }>;
+  artDirectionFingerprint?: string;
+  settings?: {
+    quality?: string;
+    size?: string;
+    aspectRatio?: string;
+    outputFormat?: string;
+  };
+  review: "unreviewed" | "approved" | "rejected" | "needs-regeneration";
+  imageUrl?: string;
+};
+
+export type SceneArtwork = {
+  status: "pending" | "running" | "complete" | "failed";
+  review: "unreviewed" | "approved" | "rejected" | "needs-regeneration";
+  provider?: string;
+  model?: string;
+  fingerprint?: string;
+  imageFingerprint?: string;
+  generatedAt?: string;
+  error?: string;
+  versions?: ArtworkVersion[];
+  approvedVersionId?: string;
+};
+
+export type Scene = {
+  id: string;
+  summary: string;
+  startSeconds: number;
+  endSeconds: number;
+  characters: string[];
+  location?: string;
+  visualPrompt: string;
+  importance: "transition" | "standard" | "major";
+  artwork: SceneArtwork;
+  imageUrl?: string;
+  versionUrls?: Record<string, string>;
+  entityIds?: string[];
+  direction?: SceneDirection;
+  overrides?: SceneOverrides;
+};
+
 export type SceneManifest = { version: 1; chapter: number; durationSeconds: number; planningFingerprint: string; manualRevision: number; manuallyEdited: boolean; updatedAt: string; scenes: Scene[] };
-export type ScenesDashboard = { settings: SceneSettings; artwork: ArtworkSettings; planner: Model; scenePlannerRouting?: ResolvedModelRouting; selectedChapter?: number; chapters: Array<{ chapter: number; title?: string; durationSeconds?: number; sceneStatus: string; artworkStatus: string }>; counts: { chapters: number; planned: number; artworkReady: number }; manifest?: SceneManifest; manifestStale?: boolean };
+export type ScenesDashboard = {
+  settings: SceneSettings;
+  artwork: ArtworkSettings;
+  planner: Model;
+  scenePlannerRouting?: ResolvedModelRouting;
+  selectedChapter?: number;
+  chapters: Array<{ chapter: number; title?: string; durationSeconds?: number; sceneStatus: string; artworkStatus: string }>;
+  counts: { chapters: number; planned: number; artworkReady: number };
+  manifest?: SceneManifest;
+  manifestStale?: boolean;
+  visualProfiles?: VisualEntityProfile[];
+  artDirection?: StoryArtDirection;
+};
 export type AudioDashboard = { settings: AudioSettings; chapters: Array<{ chapter: number; title?: string; status: string; durationSeconds?: number; audioAvailable: boolean; audioStale: boolean }>; counts: { total: number; mastered: number; current: number; stale: number }; totalDurationSeconds: number; exports: Array<{ fingerprint: string; from: number; to: number; format: "mp3" | "m4b"; createdAt: string; durationSeconds: number; downloadUrl: string }> };
 export type VideoDashboard = { settings: VideoSettings; subtitleSettings: SubtitleSettings; background: { coverAvailable: boolean; coverName?: string; effectiveMode: string }; counts: { total: number; mastered: number; subtitles: number; videos: number }; chapters: Array<{ chapter: number; title?: string; durationSeconds?: number; subtitleStatus: string; videoStatus: string; videoAvailable: boolean; videoStale?: boolean }>; exports: Array<{ fingerprint: string; from: number; to: number; createdAt: string; durationSeconds: number; downloadUrl: string }> };
 export type Model = { provider: "openai" | "gemini" | "kimi"; model: string };
@@ -102,3 +381,60 @@ export type QueuePage<T> = {items:T[];page:number;pageSize:number;total:number;p
 export type ProductionManifest = { id: string; status: string; selection: { from: number; to: number }; options: { outputs: string[]; artwork: boolean; repairQa: boolean; refresh: boolean; audiobookFormat: string; force?: string; profile?: string; dryRun: boolean }; current: { chapter?: number; stage?: string }; chapters: Record<string, { chapter: number; status: string; qa?: string; warning?: string; operations: Record<string, { status: string; reused: boolean; startedAt?: string; completedAt?: string; error?: string }> }>; failures: Array<{ chapter?: number; stage: string; message: string }>; summary: { chapters: number; completed: number; needsReview: number; failed: number; reusedStages: number; newStages: number; qaWarnings: number; qaFailures: number; exports: Record<string, string>; elapsedMs: number } };
 export type StoryDashboard = { story: StoryConfig; counts: Counts & { chapters: number; complete: number; minChapter?: number; maxChapter?: number }; source?: { type: string; origin: unknown; importedAt: string; chapterCount: number }; progress: { processed: number; audio: number; artwork: number; video: number }; latestProduction?: ProductionManifest; currentProfile?: string; estimatedRemainingStages: number };
 export type OutputItem = { id: string; group: "chapterAudio" | "audiobooks" | "chapterVideos" | "combinedVideos" | "subtitles" | "artwork"; chapter?: number; from?: number; to?: number; format: string; createdAt: string; bytes: number; durationSeconds?: number; url: string };
+
+export async function getVisualProfiles(slug: string): Promise<VisualEntityProfile[]> {
+  return api<VisualEntityProfile[]>(`/stories/${encodeURIComponent(slug)}/visual-profiles`);
+}
+
+export async function getVisualProfile(slug: string, entityId: string): Promise<VisualEntityProfile> {
+  return api<VisualEntityProfile>(`/stories/${encodeURIComponent(slug)}/visual-profiles/${encodeURIComponent(entityId)}`);
+}
+
+export async function updateVisualProfile(slug: string, entityId: string, profile: Partial<VisualEntityProfile>): Promise<VisualEntityProfile> {
+  return put<VisualEntityProfile>(`/stories/${encodeURIComponent(slug)}/visual-profiles/${encodeURIComponent(entityId)}`, { profile });
+}
+
+export async function deleteVisualProfile(slug: string, entityId: string): Promise<{ ok: boolean }> {
+  return del<{ ok: boolean }>(`/stories/${encodeURIComponent(slug)}/visual-profiles/${encodeURIComponent(entityId)}`);
+}
+
+export async function uploadVisualReference(slug: string, entityId: string, payload: { filename: string; dataBase64: string; role?: string; label?: string; notes?: string }): Promise<VisualReferenceImage> {
+  return post<VisualReferenceImage>(`/stories/${encodeURIComponent(slug)}/visual-profiles/${encodeURIComponent(entityId)}/references`, payload);
+}
+
+export async function generateStyleSheet(slug: string, entityId: string): Promise<{ styleSheetUrl: string; profile: VisualEntityProfile }> {
+  return post<{ styleSheetUrl: string; profile: VisualEntityProfile }>(`/stories/${encodeURIComponent(slug)}/visual-profiles/${encodeURIComponent(entityId)}/style-sheet`, {});
+}
+
+export async function getArtDirection(slug: string): Promise<StoryArtDirection> {
+  return api<StoryArtDirection>(`/stories/${encodeURIComponent(slug)}/art-direction`);
+}
+
+export async function updateArtDirection(slug: string, artDirection: StoryArtDirection): Promise<StoryArtDirection> {
+  return put<StoryArtDirection>(`/stories/${encodeURIComponent(slug)}/art-direction`, { artDirection });
+}
+
+export async function createArtDirectionPreset(slug: string, preset: ArtDirectionPreset): Promise<StoryArtDirection> {
+  return post<StoryArtDirection>(`/stories/${encodeURIComponent(slug)}/art-direction/presets`, { preset });
+}
+
+export async function updateArtDirectionPreset(slug: string, id: string, preset: Partial<ArtDirectionPreset>): Promise<StoryArtDirection> {
+  return put<StoryArtDirection>(`/stories/${encodeURIComponent(slug)}/art-direction/presets/${encodeURIComponent(id)}`, { preset });
+}
+
+export async function deleteArtDirectionPreset(slug: string, id: string): Promise<StoryArtDirection> {
+  return del<StoryArtDirection>(`/stories/${encodeURIComponent(slug)}/art-direction/presets/${encodeURIComponent(id)}`);
+}
+
+export async function duplicateArtDirectionPreset(slug: string, id: string): Promise<{ preset: ArtDirectionPreset; artDirection: StoryArtDirection }> {
+  return post<{ preset: ArtDirectionPreset; artDirection: StoryArtDirection }>(`/stories/${encodeURIComponent(slug)}/art-direction/presets/${encodeURIComponent(id)}/duplicate`, {});
+}
+
+export async function setDefaultArtDirectionPreset(slug: string, id: string): Promise<StoryArtDirection> {
+  return post<StoryArtDirection>(`/stories/${encodeURIComponent(slug)}/art-direction/presets/${encodeURIComponent(id)}/default`, {});
+}
+
+export async function reviewArtworkVersion(slug: string, chapter: number, sceneId: string, versionId: string, review: string): Promise<SceneArtwork> {
+  return post<SceneArtwork>(`/stories/${encodeURIComponent(slug)}/scenes/${chapter}/artwork/${encodeURIComponent(sceneId)}/versions/${encodeURIComponent(versionId)}/review`, { review });
+}
+

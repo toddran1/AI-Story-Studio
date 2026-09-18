@@ -12,6 +12,7 @@ import { retrieveRelevantContext } from "../story-bible/retrieval.js";
 import { fingerprint } from "../utils/hash.js";
 import { withRetry } from "../batch/retry.js";
 import { retryConfigSchema } from "../batch/types.js";
+import { resolveVisualEntities } from "./identity.js";
 import { planScenes, SCENE_PLANNER_PROMPT_VERSION } from "./planner.js";
 import { normalizeSceneTiming, validateSceneCoverage } from "./timing.js";
 import { Scene, SceneManifest, sceneManifestSchema, sceneSchema } from "./types.js";
@@ -29,7 +30,11 @@ export async function planStoredScenes(options: { root: string; story: Story; ch
   const started = Date.now(); chapter.stages.scenePlanning = { status: "running", provider: config.provider, model: config.model, promptVersion: SCENE_PLANNER_PROMPT_VERSION, fingerprint: inputFingerprint, startedAt: new Date().toISOString() }; await persistChapter(paths.chapterMeta, chapter);
   try {
     const result = await withRetry(() => planScenes(options.provider, config, { chapter: options.chapter, title: chapter.translatedTitle ?? chapter.originalTitle, narration, durationSeconds: audioDurationSeconds, bible, settings: options.story.scenes }), retryConfigSchema.parse({}));
-    const scenes = normalizeSceneTiming(result.value.scenes.map((scene) => ({ ...scene, location: scene.location ?? undefined, artwork: undefined as never })), audioDurationSeconds, options.story.scenes);
+    const scenes = normalizeSceneTiming(result.value.scenes.map((scene) => ({
+      ...scene,
+      location: scene.location ?? undefined,
+      entityIds: resolveVisualEntities(scene.characters, fullBible.canonicalEntities).map((e) => e.id),
+    })), audioDurationSeconds, options.story.scenes);
     const previousById = new Map(cached?.success ? cached.data.scenes.map((scene) => [scene.id, scene]) : []);
     for (const scene of scenes) { const previous = previousById.get(scene.id); if (previous && sceneContentFingerprint(previous) === sceneContentFingerprint(scene)) scene.artwork = previous.artwork; }
     validateSceneCoverage(scenes, audioDurationSeconds, options.story.scenes); const now = new Date().toISOString(); const manifest = sceneManifestSchema.parse({ version: 1, chapter: options.chapter, durationSeconds: audioDurationSeconds, planningFingerprint: inputFingerprint, planner: { provider: config.provider, model: config.model, promptVersion: SCENE_PLANNER_PROMPT_VERSION }, manualRevision: 0, manuallyEdited: false, createdAt: cached?.success ? cached.data.createdAt : now, updatedAt: now, scenes });
@@ -53,7 +58,7 @@ export async function planStoredScenes(options: { root: string; story: Story; ch
 export async function updateStoredSceneManifest(options: { root: string; story: Story; chapter: number; scenes: unknown }) {
   const paths = storyPaths(options.root, options.story.slug, options.chapter); const raw = await readJsonIfExists<SceneManifest>(paths.scenesManifest); if (!raw) throw new SceneError(`Chapter ${options.chapter} has no scene plan`); const manifest = sceneManifestSchema.parse(raw);
   const incoming = sceneSchema.array().length(manifest.scenes.length).parse(options.scenes); const previous = new Map(manifest.scenes.map((scene) => [scene.id, scene])); const ids = new Set<string>();
-  const scenes = incoming.map((scene) => { if (ids.has(scene.id) || !previous.has(scene.id)) throw new SceneError("Scene IDs must remain unique and stable"); ids.add(scene.id); const before = previous.get(scene.id)!; return { ...scene, artwork: sceneContentFingerprint(before) === sceneContentFingerprint(scene) ? before.artwork : { status: "pending" as const, review: "unreviewed" as const } }; });
+  const scenes = incoming.map((scene) => { if (ids.has(scene.id) || !previous.has(scene.id)) throw new SceneError("Scene IDs must remain unique and stable"); ids.add(scene.id); const before = previous.get(scene.id)!; return { ...scene, artwork: sceneContentFingerprint(before) === sceneContentFingerprint(scene) ? before.artwork : { ...before.artwork, status: "pending" as const, review: "unreviewed" as const } }; });
   validateSceneCoverage(scenes, manifest.durationSeconds, options.story.scenes); const updated = sceneManifestSchema.parse({ ...manifest, scenes, manuallyEdited: true, manualRevision: manifest.manualRevision + 1, updatedAt: new Date().toISOString() }); await atomicWriteJson(paths.scenesManifest, updated); await invalidateAfterSceneEdit(paths.chapterMeta, updated); return updated;
 }
 
@@ -62,7 +67,9 @@ export function productionSceneFingerprint(plan: { scenes: Scene[]; [key: string
   if (!plan) return fingerprint(undefined);
   return fingerprint({ ...plan, updatedAt: undefined, scenes: plan.scenes.map(({ artwork, ...scene }) => scene) });
 }
-export function sceneContentFingerprint(scene: Pick<Scene, "summary" | "startSeconds" | "endSeconds" | "characters" | "location" | "visualPrompt" | "importance">) { return fingerprint({ summary: scene.summary, startSeconds: scene.startSeconds, endSeconds: scene.endSeconds, characters: scene.characters, location: scene.location, visualPrompt: scene.visualPrompt, importance: scene.importance }); }
+export function sceneContentFingerprint(scene: Pick<Scene, "summary" | "startSeconds" | "endSeconds" | "characters" | "location" | "visualPrompt" | "importance"> & { direction?: Scene["direction"]; overrides?: Scene["overrides"] }) {
+  return fingerprint({ summary: scene.summary, startSeconds: scene.startSeconds, endSeconds: scene.endSeconds, characters: scene.characters, location: scene.location, visualPrompt: scene.visualPrompt, importance: scene.importance, direction: scene.direction, overrides: scene.overrides });
+}
 async function invalidateAfterSceneEdit(path: string, manifest: SceneManifest) { const raw = await readJsonIfExists<Chapter>(path); if (!raw) return; const chapter = chapterSchema.parse(raw); chapter.scenes = { total: manifest.scenes.length, generated: manifest.scenes.filter((scene) => scene.artwork.status === "complete").length, approved: manifest.scenes.filter((scene) => scene.artwork.review === "approved").length }; chapter.stages.artwork = { status: "pending" }; chapter.stages.video = { status: "pending" }; chapter.video = undefined; await persistChapter(path, chapter); }
 async function fileFingerprint(path: string) { const data = await readFile(path); return fingerprint(data.toString("base64")); }
 async function persistChapter(path: string, chapter: Chapter) { chapter.updatedAt = new Date().toISOString(); await atomicWriteJson(path, chapterSchema.parse(chapter)); }
