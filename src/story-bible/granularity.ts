@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { rm } from "node:fs/promises";
 import { z } from "zod";
 import {
   CanonicalEntity,
@@ -1284,4 +1285,31 @@ export async function applyCleanupRecommendations(
     failed,
     bible,
   };
+}
+
+export interface PreDemoteSnapshot {
+  bible: StoryBible;
+  overlay?: Record<string, unknown>;
+}
+
+export async function snapshotPreDemoteStoryBible(root: string, slug: string): Promise<PreDemoteSnapshot> {
+  const paths = storyPaths(root, slug, 1);
+  const bibleRaw = await readJsonIfExists(paths.bible);
+  if (!bibleRaw) throw new Error(`Story Bible not found for '${slug}'`);
+  const bible = storyBibleSchema.parse(bibleRaw);
+  const overlayRaw = await readJsonIfExists<Record<string, unknown>>(paths.bibleCanonicalManual);
+  return {
+    bible: structuredClone(bible),
+    overlay: overlayRaw ? structuredClone(overlayRaw) : undefined,
+  };
+}
+
+export async function restorePreDemoteStoryBible(root: string, slug: string, snapshot: PreDemoteSnapshot): Promise<void> {
+  const paths = storyPaths(root, slug, 1);
+  await atomicWriteJson(paths.bible, snapshot.bible);
+  if (snapshot.overlay) {
+    await atomicWriteJson(paths.bibleCanonicalManual, snapshot.overlay);
+  } else {
+    await rm(paths.bibleCanonicalManual, { force: true }).catch(() => undefined);
+  }
 }

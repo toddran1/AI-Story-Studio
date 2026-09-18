@@ -15,6 +15,7 @@ import { defaultStory, loadStory } from "../../src/config/load-config.js";
 import { Story, storySchema } from "../../src/domain/story.js";
 import { createPipelineRuntime } from "../../src/pipeline/create-pipeline.js";
 import { ConfigurationError } from "../../src/pipeline/errors.js";
+import { ConfigurationError, ReconciliationError } from "../../src/pipeline/errors.js";
 import { applyPreviewProfile } from "../../src/preview/profile.js";
 import { PreviewRunner } from "../../src/preview/preview-runner.js";
 import { previewPresetSchema } from "../../src/preview/types.js";
@@ -60,6 +61,8 @@ import {
   commitVisualCanonMerge,
   finalizeVisualCanonMerge,
   rollbackPreparedVisualCanonMerge,
+  prepareVisualCanonDemote,
+  commitVisualCanonDemote,
 } from "../../src/visual-canon/profiles.js";
 import { loadStoryArtDirection, saveStoryArtDirection, createPreset, updatePreset, deletePreset, duplicatePreset, setDefaultPreset } from "../../src/visual-canon/art-direction.js";
 import { visualProfileSchema } from "../../src/domain/visual-profile.js";
@@ -81,6 +84,7 @@ import { alignStoredChapter } from "../../src/alignment/chapter-alignment.js";
 import { discardManualSubtitles, saveManualSubtitles } from "../../src/subtitles/chapter-subtitles.js";
 import { backfillCanonicalSnapshots, mergeCanonicalEntities, undoCanonicalMerge, updateCanonicalEntity } from "../../src/story-bible/canonical.js";
 import { analyzeStoryBible, applyCleanupRecommendations, demoteCanonicalEntity, promoteMinorReference, updateMinorReference } from "../../src/story-bible/granularity.js";
+import { analyzeStoryBible, applyCleanupRecommendations, demoteCanonicalEntity, promoteMinorReference, restorePreDemoteStoryBible, snapshotPreDemoteStoryBible, updateMinorReference } from "../../src/story-bible/granularity.js";
 import { continuityFindingSchema, resolveContinuityFinding } from "../../src/story-bible/continuity.js";
 import { PostgresUsageRepository } from "../../src/cost/repository.js";
 import { estimatePlanCost } from "../../src/cost/estimate.js";
@@ -738,14 +742,34 @@ export class StudioOperations {
     const prepared = await prepareVisualCanonMerge(this.root, slug, targetEntityId, sourceEntityIds);
     const base = await getStoryBible(this.root, slug, { includeCanonicalOverlay: false });
     const result = await mergeCanonicalEntities(this.root, slug, base, targetEntityId, sourceEntityIds, reason);
+    const mergeId = result.merge.id;
+
     try {
       await commitVisualCanonMerge(this.root, slug, prepared);
     } catch (commitErr) {
       await rollbackPreparedVisualCanonMerge(prepared);
+      try {
+        await undoCanonicalMerge(this.root, slug, base, mergeId);
+      } catch (undoErr) {
+        throw new ReconciliationError(
+          `Entity merge failed and automatic rollback could not fully restore the previous state. The story requires reconciliation before retrying this merge.`,
+          {
+            cause: commitErr,
+            rollbackError: undoErr,
+            storySlug: slug,
+            targetEntityId,
+            sourceEntityIds,
+            mergeId,
+            failedPhase: "visual_canon_commit_rollback",
+          }
+        );
+      }
       throw commitErr;
     }
     await finalizeVisualCanonMerge(prepared);
     return result;
+    const cleanup = await finalizeVisualCanonMerge(prepared);
+    return { ...result, cleanup };
   }
 
   async mergeCanonicalEntities(slug: string, raw: unknown) {
@@ -802,13 +826,40 @@ export class StudioOperations {
 
   async demoteCanonicalEntity(slug: string, id: string, raw: unknown) {
     slugSchema.parse(slug);
+    canonicalEntitySchema.shape.id.parse(id);
     const input = z.object({
       parentEntityId: z.string().optional(),
       reason: z.string().optional(),
       force: z.boolean().optional(),
     }).passthrough().parse(raw ?? {});
+
+    const preparedVisual = await prepareVisualCanonDemote(this.root, slug, id);
+    const snapshot = await snapshotPreDemoteStoryBible(this.root, slug);
+
     const result = await demoteCanonicalEntity(this.root, slug, id, input);
     await handleEntityDemote(this.root, slug, id);
+
+    try {
+      await commitVisualCanonDemote(this.root, slug, preparedVisual);
+    } catch (visualErr) {
+      try {
+        await restorePreDemoteStoryBible(this.root, slug, snapshot);
+      } catch (rollbackErr) {
+        throw new ReconciliationError(
+          `Canonical entity demotion failed and automatic rollback could not fully restore the previous Story Bible state. The story requires reconciliation before retrying.`,
+          {
+            cause: visualErr,
+            rollbackError: rollbackErr,
+            storySlug: slug,
+            targetEntityId: id,
+            failedPhase: "visual_canon_demote_rollback",
+          }
+        );
+      }
+      invalidateCatalogCache(this.root, slug);
+      throw visualErr;
+    }
+
     invalidateCatalogCache(this.root, slug);
     await recordActivity(this.root, slug, "bible.entity.demoted", `Demoted canonical entity ${id} to minor reference`);
     return result;

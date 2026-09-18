@@ -129,6 +129,7 @@ export async function deleteVisualReferenceImage(
   entityId: string,
   refId: string,
 ): Promise<{ profile: VisualEntityProfile; deleted: boolean }> {
+): Promise<{ profile: VisualEntityProfile; deleted: boolean; cleanupWarnings?: string[] }> {
   canonicalEntitySchema.shape.id.parse(entityId);
   if (!/^[a-zA-Z0-9_-]+$/.test(refId)) throw new Error("Invalid reference image ID");
   const profiles = await loadVisualProfiles(root, slug);
@@ -147,8 +148,20 @@ export async function deleteVisualReferenceImage(
 
   // Safely remove file on disk strictly using controlled paths - NEVER arbitrary imagePath
   await deleteControlledVisualReferenceFiles(root, slug, entityId, refId);
+  const cleanupResult = await deleteControlledVisualReferenceFiles(root, slug, entityId, refId);
 
   return { profile, deleted: true };
+  const cleanupWarnings = cleanupResult.errors.length > 0
+    ? cleanupResult.errors.map(
+        (e) => `Failed to delete physical reference file for format '${e.extension}': ${e.message}`
+      )
+    : undefined;
+
+  return {
+    profile,
+    deleted: true,
+    ...(cleanupWarnings ? { cleanupWarnings } : {}),
+  };
 }
 
 export async function addVisualReferenceImage(
@@ -542,6 +555,11 @@ export async function finalizeVisualCanonMerge(
       const msg = `Failed to clean up source directory '${srcDir}': ${err?.message ?? String(err)}`;
       errors.push(msg);
       console.warn(`[VisualCanon] ${msg}`);
+      if (err?.code !== "ENOENT") {
+        const msg = `Failed to clean up source directory '${srcDir}': ${err?.message ?? String(err)}`;
+        errors.push(msg);
+        console.warn(`[VisualCanon] ${msg}`);
+      }
     }
   }
 
@@ -565,6 +583,18 @@ export async function handleEntityMerge(
 }
 
 export async function handleEntityDemote(root: string, slug: string, entityId: string): Promise<void> {
+export interface PreparedVisualCanonDemote {
+  entityId: string;
+  hadProfile: boolean;
+  preDemoteProfile?: VisualEntityProfile;
+  preparedProfiles: Record<string, VisualEntityProfile>;
+}
+
+export async function prepareVisualCanonDemote(
+  root: string,
+  slug: string,
+  entityId: string,
+): Promise<PreparedVisualCanonDemote> {
   canonicalEntitySchema.shape.id.parse(entityId);
   const profiles = await loadVisualProfiles(root, slug);
   if (profiles[entityId]) {
@@ -573,7 +603,54 @@ export async function handleEntityDemote(root: string, slug: string, entityId: s
       status: "draft",
       notes: `${profiles[entityId]!.notes}\n[Archived from demoted entity]`.trim(),
       updatedAt: new Date().toISOString(),
+  const existing = profiles[entityId];
+  if (!existing) {
+    return {
+      entityId,
+      hadProfile: false,
+      preparedProfiles: profiles,
     };
+  }
+
+  const preparedProfiles = { ...profiles };
+  preparedProfiles[entityId] = {
+    ...existing,
+    status: "draft",
+    notes: `${existing.notes}\n[Archived from demoted entity]`.trim(),
+    updatedAt: new Date().toISOString(),
+  };
+
+  return {
+    entityId,
+    hadProfile: true,
+    preDemoteProfile: structuredClone(existing),
+    preparedProfiles,
+  };
+}
+
+export async function commitVisualCanonDemote(
+  root: string,
+  slug: string,
+  prepared: PreparedVisualCanonDemote,
+): Promise<void> {
+  if (prepared.hadProfile) {
+    await saveVisualProfiles(root, slug, prepared.preparedProfiles);
+  }
+}
+
+export async function rollbackPreparedVisualCanonDemote(
+  root: string,
+  slug: string,
+  prepared: PreparedVisualCanonDemote,
+): Promise<void> {
+  if (prepared.hadProfile && prepared.preDemoteProfile) {
+    const profiles = await loadVisualProfiles(root, slug);
+    profiles[prepared.entityId] = prepared.preDemoteProfile;
     await saveVisualProfiles(root, slug, profiles);
   }
+}
+
+export async function handleEntityDemote(root: string, slug: string, entityId: string): Promise<void> {
+  const prepared = await prepareVisualCanonDemote(root, slug, entityId);
+  await commitVisualCanonDemote(root, slug, prepared);
 }

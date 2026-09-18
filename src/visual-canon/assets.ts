@@ -90,6 +90,18 @@ export async function findVisualReferenceFile(
   return undefined;
 }
 
+export interface VisualReferenceCleanupError {
+  extension: VisualReferenceExtension;
+  code?: string;
+  message: string;
+}
+
+export interface ControlledDeletionResult {
+  deletedCount: number;
+  wasMissing: boolean;
+  errors: VisualReferenceCleanupError[];
+}
+
 /**
  * Controlled asset deletion: removes files strictly by reconstructing the allowed path
  * for each supported extension. Never trusts or deletes arbitrary persisted image paths.
@@ -100,14 +112,33 @@ export async function deleteControlledVisualReferenceFiles(
   entityId: string,
   refId: string
 ): Promise<{ deletedCount: number; wasMissing: boolean }> {
+): Promise<ControlledDeletionResult> {
   let deletedCount = 0;
+  const errors: VisualReferenceCleanupError[] = [];
 
   for (const ext of SUPPORTED_VISUAL_REFERENCE_EXTENSIONS) {
+    const candidate = visualProfileRefPath(root, slug, entityId, refId, ext);
+    let candidateExists = false;
     try {
       const candidate = visualProfileRefPath(root, slug, entityId, refId, ext);
       if (await exists(candidate)) {
+      candidateExists = await exists(candidate);
+    } catch {
+      // Ignored for existence check
+    }
+
+    if (candidateExists) {
+      try {
         await rm(candidate, { force: true });
         deletedCount++;
+      } catch (err: any) {
+        if (err?.code !== "ENOENT") {
+          errors.push({
+            extension: ext,
+            code: typeof err?.code === "string" ? err.code : undefined,
+            message: err?.message ? String(err.message) : "Failed to remove reference file",
+          });
+        }
       }
     } catch {
       // Ignored for individual candidates; non-critical
@@ -117,6 +148,8 @@ export async function deleteControlledVisualReferenceFiles(
   return {
     deletedCount,
     wasMissing: deletedCount === 0,
+    wasMissing: deletedCount === 0 && errors.length === 0,
+    errors,
   };
 }
 

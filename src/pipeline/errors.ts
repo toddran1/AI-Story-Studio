@@ -45,3 +45,31 @@ export class SubtitleError extends AppError {}
 export class VideoError extends AppError {}
 export class SceneError extends AppError {}
 export class ArtworkError extends AppError {}
+export class ReconciliationError extends AppError {
+  readonly rollbackError?: unknown;
+  readonly storySlug?: string;
+  readonly targetEntityId?: string;
+  readonly sourceEntityIds?: string[];
+  readonly mergeId?: string;
+  readonly failedPhase?: string;
+
+  constructor(
+    message: string,
+    options?: ErrorOptions & {
+      rollbackError?: unknown;
+      storySlug?: string;
+      targetEntityId?: string;
+      sourceEntityIds?: string[];
+      mergeId?: string;
+      failedPhase?: string;
+    }
+  ) {
+    super(message, options);
+    this.rollbackError = options?.rollbackError;
+    this.storySlug = options?.storySlug;
+    this.targetEntityId = options?.targetEntityId;
+    this.sourceEntityIds = options?.sourceEntityIds;
+    this.mergeId = options?.mergeId;
+    this.failedPhase = options?.failedPhase;
+  }
+}

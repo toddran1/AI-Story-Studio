@@ -1,5 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdtemp, rm, mkdir, writeFile, readFile } from "node:fs/promises";
+import { mkdtemp, rm, mkdir, writeFile, readFile, chmod } from "node:fs/promises";
+import * as fsPromises from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { testStory } from "./helpers.js";
@@ -13,7 +15,14 @@ import {
   addVisualReferenceImage,
   handleEntityMerge,
   finalizeVisualCanonMerge,
+  prepareVisualCanonMerge,
+  rollbackPreparedVisualCanonMerge,
 } from "../src/visual-canon/profiles.js";
+import * as profilesModule from "../src/visual-canon/profiles.js";
+import * as canonicalModule from "../src/story-bible/canonical.js";
+import * as granularityModule from "../src/story-bible/granularity.js";
+import { ReconciliationError } from "../src/pipeline/errors.js";
+import { readActivity } from "../src/studio/projects.js";
 import {
   normalizeVisualReferenceExtension,
   isVisualReferenceExtension,
@@ -412,5 +421,265 @@ describe("Milestone 21: Visual Canon Backend Consistency & Asset Safety Hardenin
     expect(result.cleanedDirs.length).toBe(1); // rm with force: true succeeds on non-existent
 
     warnSpy.mockRestore();
+  });
+
+  // Scenario L: Visual Canon commit failure after Story Bible merge rolls back Story Bible and prepared assets
+  it("Scenario L: Visual Canon commit failure after Story Bible merge rolls back Story Bible and prepared assets", async () => {
+    const operations = new StudioOperations(tempDir, loadEnvironment({}));
+
+    await updateVisualProfile(tempDir, slug, idTarget, { appearance: "Target Appearance" });
+    await updateVisualProfile(tempDir, slug, idSource, { appearance: "Source Appearance" });
+
+    const { reference: srcRef } = await addVisualReferenceImage(tempDir, slug, idSource, {
+      data: DUMMY_PNG,
+      role: "face_portrait",
+      ext: "png",
+    });
+
+    const commitSpy = vi.spyOn(profilesModule, "commitVisualCanonMerge").mockRejectedValueOnce(
+      new Error("Disk failure during Visual Canon commit")
+    );
+
+    await expect(
+      operations.mergeCanonicalEntities(slug, {
+        targetEntityId: idTarget,
+        sourceEntityIds: [idSource],
+        reason: "Test merge rollback on Visual Canon failure",
+      })
+    ).rejects.toThrow("Disk failure during Visual Canon commit");
+
+    commitSpy.mockRestore();
+
+    // Story Bible was restored via undoCanonicalMerge
+    const bibleAfter = await getStoryBible(tempDir, slug);
+    expect(bibleAfter.canonicalEntities.some((e) => e.id === idSource)).toBe(true);
+    expect(bibleAfter.canonicalEntities.some((e) => e.id === idTarget)).toBe(true);
+
+    // Source visual profile and reference image remain intact
+    const profiles = await loadVisualProfiles(tempDir, slug);
+    expect(profiles[idSource]).toBeDefined();
+    expect(profiles[idSource]?.references.length).toBe(1);
+    expect(await exists(srcRef.imagePath)).toBe(true);
+
+    // No merge activity was logged because transaction aborted
+    const activities = await readActivity(tempDir, slug);
+    expect(activities.some((a) => a.type === "bible.entities.merged")).toBe(false);
+  });
+
+  // Scenario M: Visual Canon commit failure with failed Story Bible rollback throws structured ReconciliationError
+  it("Scenario M: Visual Canon commit failure with failed Story Bible rollback throws structured ReconciliationError", async () => {
+    const operations = new StudioOperations(tempDir, loadEnvironment({}));
+
+    await updateVisualProfile(tempDir, slug, idTarget, { appearance: "Target Appearance" });
+    await updateVisualProfile(tempDir, slug, idSource, { appearance: "Source Appearance" });
+
+    const commitSpy = vi.spyOn(profilesModule, "commitVisualCanonMerge").mockRejectedValueOnce(
+      new Error("Primary commit failed")
+    );
+    const undoSpy = vi.spyOn(canonicalModule, "undoCanonicalMerge").mockRejectedValueOnce(
+      new Error("Undo canonical merge disk error")
+    );
+
+    let caughtError: any;
+    try {
+      await operations.mergeCanonicalEntities(slug, {
+        targetEntityId: idTarget,
+        sourceEntityIds: [idSource],
+        reason: "Testing double failure",
+      });
+    } catch (err) {
+      caughtError = err;
+    } finally {
+      commitSpy.mockRestore();
+      undoSpy.mockRestore();
+    }
+
+    expect(caughtError).toBeInstanceOf(ReconciliationError);
+    const recErr = caughtError as ReconciliationError;
+    expect(recErr.storySlug).toBe(slug);
+    expect(recErr.targetEntityId).toBe(idTarget);
+    expect(recErr.sourceEntityIds).toEqual([idSource]);
+    expect(recErr.failedPhase).toBe("visual_canon_commit_rollback");
+    expect((recErr.rollbackError as Error)?.message).toBe("Undo canonical merge disk error");
+    expect(recErr.message).toContain("rollback could not fully restore the previous state");
+  });
+
+  // Scenario M2: Visual Canon demote failure with failed restore throws structured ReconciliationError
+  it("Scenario M2: Demote failure with failed restore throws structured ReconciliationError", async () => {
+    const operations = new StudioOperations(tempDir, loadEnvironment({}));
+
+    await updateVisualProfile(tempDir, slug, idTarget, { appearance: "Target Appearance" });
+
+    const commitSpy = vi.spyOn(profilesModule, "commitVisualCanonDemote").mockRejectedValueOnce(
+      new Error("Visual Canon demote write failed")
+    );
+    const restoreSpy = vi.spyOn(granularityModule, "restorePreDemoteStoryBible").mockRejectedValueOnce(
+      new Error("Disk restore error")
+    );
+
+    let caughtError: any;
+    try {
+      await operations.demoteCanonicalEntity(slug, idTarget, {
+        reason: "Testing demotion double failure",
+      });
+    } catch (err) {
+      caughtError = err;
+    } finally {
+      commitSpy.mockRestore();
+      restoreSpy.mockRestore();
+    }
+
+    expect(caughtError).toBeInstanceOf(ReconciliationError);
+    const recErr = caughtError as ReconciliationError;
+    expect(recErr.storySlug).toBe(slug);
+    expect(recErr.targetEntityId).toBe(idTarget);
+    expect(recErr.failedPhase).toBe("visual_canon_demote_rollback");
+    expect((recErr.rollbackError as Error)?.message).toBe("Disk restore error");
+  });
+
+  // Scenario N: Demotion commit failure restores pre-demotion Story Bible faithfully
+  it("Scenario N: Demotion commit failure restores pre-demotion Story Bible faithfully", async () => {
+    const operations = new StudioOperations(tempDir, loadEnvironment({}));
+
+    // Setup target with rich attributes and approved profile
+    await updateVisualProfile(tempDir, slug, idTarget, {
+      appearance: "Target Appearance",
+      status: "approved",
+      notes: "Canon notes",
+    });
+
+    const commitSpy = vi.spyOn(profilesModule, "commitVisualCanonDemote").mockRejectedValueOnce(
+      new Error("Visual Canon demote write failed")
+    );
+
+    await expect(
+      operations.demoteCanonicalEntity(slug, idTarget, {
+        reason: "Testing demotion rollback",
+      })
+    ).rejects.toThrow("Visual Canon demote write failed");
+
+    commitSpy.mockRestore();
+
+    // Story Bible entity must be fully restored
+    const bibleAfter = await getStoryBible(tempDir, slug);
+    const entity = bibleAfter.canonicalEntities.find((e) => e.id === idTarget);
+    expect(entity).toBeDefined();
+    expect(entity?.canonicalName).toBe("Protagonist Target");
+    expect(entity?.aliases).toEqual(["Hero"]);
+    expect(entity?.description).toBe("Target entity for merge tests");
+
+    // Visual profile remains approved (not modified to draft)
+    const profiles = await loadVisualProfiles(tempDir, slug);
+    expect(profiles[idTarget]?.status).toBe("approved");
+
+    // No demotion activity logged
+    const activities = await readActivity(tempDir, slug);
+    expect(activities.some((a) => a.type === "bible.entity.demoted")).toBe(false);
+  });
+
+  // Scenario O: Real filesystem cleanup failure during merge finalization logs warning and preserves successful merge
+  it("Scenario O: Real filesystem cleanup failure during merge finalization logs warning and preserves successful merge", async () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    // Create a source directory with a file inside it, then make directory read-only so rm fails with EACCES
+    const unremovableDir = join(tempDir, "unremovable-source-dir");
+    await mkdir(unremovableDir, { recursive: true });
+    await writeFile(join(unremovableDir, "dummy.txt"), "data", "utf8");
+    await chmod(unremovableDir, 0o555);
+
+    const prepared = {
+      targetEntityId: idTarget,
+      sourceEntityIds: [idSource],
+      preparedProfiles: {},
+      migratedTargetPaths: [],
+      migratedSourceDirs: [unremovableDir],
+    };
+
+    try {
+      const result = await finalizeVisualCanonMerge(prepared);
+      expect(result.errors.length).toBe(1);
+      expect(result.errors[0]).toContain("Failed to clean up source directory");
+      expect(warnSpy).toHaveBeenCalled();
+      const warnCall = warnSpy.mock.calls.find((call) =>
+        String(call[0]).includes("Failed to clean up source directory")
+      );
+      expect(warnCall).toBeDefined();
+    } finally {
+      await chmod(unremovableDir, 0o777);
+      warnSpy.mockRestore();
+    }
+  });
+
+  // Scenario P: Individual reference deletion with real cleanup failure surfaces cleanupWarnings and removes metadata
+  it("Scenario P: Individual reference deletion with real cleanup failure surfaces cleanupWarnings and removes metadata", async () => {
+    await updateVisualProfile(tempDir, slug, idTarget, { appearance: "Target" });
+    const { reference: ref } = await addVisualReferenceImage(tempDir, slug, idTarget, {
+      data: DUMMY_PNG,
+      role: "front",
+      ext: "png",
+    });
+
+    expect(await exists(ref.imagePath)).toBe(true);
+
+    // Make the containing entity directory read-only so deleting the file inside it fails with EACCES
+    const targetDir = join(storyPaths(tempDir, slug, 1).visualProfilesDirectory, idTarget);
+    await chmod(targetDir, 0o555);
+
+    try {
+      const result = await deleteVisualReferenceImage(tempDir, slug, idTarget, ref.id);
+
+      expect(result.deleted).toBe(true);
+      expect(result.cleanupWarnings).toBeDefined();
+      expect(result.cleanupWarnings?.length).toBeGreaterThan(0);
+      expect(result.cleanupWarnings?.[0]).toContain("EACCES");
+      // Metadata was still cleaned up
+      expect(result.profile.references.some((r) => r.id === ref.id)).toBe(false);
+
+      // Profile on disk also reflects metadata deletion
+      const profiles = await loadVisualProfiles(tempDir, slug);
+      expect(profiles[idTarget]?.references.some((r) => r.id === ref.id)).toBe(false);
+    } finally {
+      await chmod(targetDir, 0o777);
+    }
+  });
+
+  // Scenario Q: Narrow rollback deletes only newly-migrated target assets, preserving existing target assets
+  it("Scenario Q: Narrow rollback deletes only newly-migrated target assets, preserving existing target assets", async () => {
+    // Target entity already has an existing reference
+    await updateVisualProfile(tempDir, slug, idTarget, { appearance: "Target" });
+    const { reference: existingTargetRef } = await addVisualReferenceImage(tempDir, slug, idTarget, {
+      data: DUMMY_PNG,
+      role: "front",
+      ext: "png",
+    });
+    expect(await exists(existingTargetRef.imagePath)).toBe(true);
+
+    // Source entity has a reference
+    await updateVisualProfile(tempDir, slug, idSource, { appearance: "Source" });
+    const { reference: sourceRef } = await addVisualReferenceImage(tempDir, slug, idSource, {
+      data: DUMMY_PNG,
+      role: "side",
+      ext: "png",
+    });
+    expect(await exists(sourceRef.imagePath)).toBe(true);
+
+    // Prepare merge
+    const prepared = await prepareVisualCanonMerge(tempDir, slug, idTarget, [idSource]);
+    expect(prepared.migratedTargetPaths.length).toBe(1);
+    const newlyPreparedPath = prepared.migratedTargetPaths[0]!;
+    expect(await exists(newlyPreparedPath)).toBe(true);
+    expect(newlyPreparedPath).not.toBe(existingTargetRef.imagePath);
+
+    // Rollback prepared merge
+    await rollbackPreparedVisualCanonMerge(prepared);
+
+    // Newly prepared target path is deleted
+    expect(await exists(newlyPreparedPath)).toBe(false);
+
+    // Pre-existing target reference image is still present and untouched!
+    expect(await exists(existingTargetRef.imagePath)).toBe(true);
+
+    // Source reference image is still present and untouched!
+    expect(await exists(sourceRef.imagePath)).toBe(true);
   });
 });
