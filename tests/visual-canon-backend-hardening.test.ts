@@ -467,6 +467,58 @@ describe("Milestone 21: Visual Canon Backend Consistency & Asset Safety Hardenin
 
   // Scenario M: Visual Canon commit failure with failed Story Bible rollback throws structured ReconciliationError
   it("Scenario M: Visual Canon commit failure with failed Story Bible rollback throws structured ReconciliationError", async () => {
+  // Scenario M1 (Case B): Visual Canon commit failure with failed VC rollback still executes Bible undo and throws ReconciliationError
+  it("Scenario M1 (Case B): Visual Canon commit failure with failed VC rollback still executes Bible undo and throws ReconciliationError", async () => {
+    const operations = new StudioOperations(tempDir, loadEnvironment({}));
+
+    await updateVisualProfile(tempDir, slug, idTarget, { appearance: "Target Appearance" });
+    await updateVisualProfile(tempDir, slug, idSource, { appearance: "Source Appearance" });
+
+    const commitSpy = vi.spyOn(profilesModule, "commitVisualCanonMerge").mockRejectedValueOnce(
+      new Error("Primary commit failed")
+    );
+    const rollbackVCSpy = vi.spyOn(profilesModule, "rollbackPreparedVisualCanonMerge").mockRejectedValueOnce(
+      new Error("Rollback VC assets failed")
+    );
+
+    let caughtError: any;
+    try {
+      await operations.mergeCanonicalEntities(slug, {
+        targetEntityId: idTarget,
+        sourceEntityIds: [idSource],
+        reason: "Testing Case B",
+      });
+    } catch (err) {
+      caughtError = err;
+    } finally {
+      commitSpy.mockRestore();
+      rollbackVCSpy.mockRestore();
+    }
+
+    expect(caughtError).toBeInstanceOf(ReconciliationError);
+    const recErr = caughtError as ReconciliationError;
+    expect(recErr.storySlug).toBe(slug);
+    expect(recErr.targetEntityId).toBe(idTarget);
+    expect(recErr.sourceEntityIds).toEqual([idSource]);
+    expect(recErr.failedPhase).toBe("visual_canon_commit_rollback");
+    expect((recErr.cause as Error)?.message).toBe("Primary commit failed");
+    expect(recErr.rollbackFailures).toHaveLength(1);
+    expect(recErr.rollbackFailures?.[0]?.phase).toBe("visual_canon_prepared_assets");
+    expect((recErr.rollbackFailures?.[0]?.error as Error)?.message).toBe("Rollback VC assets failed");
+    expect((recErr.rollbackError as Error)?.message).toBe("Rollback VC assets failed");
+
+    // CRITICAL: Story Bible undo STILL executed and restored despite VC rollback failure!
+    const bibleAfter = await getStoryBible(tempDir, slug);
+    expect(bibleAfter.canonicalEntities.some((e) => e.id === idSource)).toBe(true);
+    expect(bibleAfter.canonicalEntities.some((e) => e.id === idTarget)).toBe(true);
+
+    // No merge activity logged
+    const activities = await readActivity(tempDir, slug);
+    expect(activities.some((a) => a.type === "bible.entities.merged")).toBe(false);
+  });
+
+  // Scenario M2 (Case C): Visual Canon commit failure with failed Story Bible undo throws ReconciliationError
+  it("Scenario M2 (Case C): Visual Canon commit failure with failed Story Bible undo throws ReconciliationError", async () => {
     const operations = new StudioOperations(tempDir, loadEnvironment({}));
 
     await updateVisualProfile(tempDir, slug, idTarget, { appearance: "Target Appearance" });
@@ -485,6 +537,7 @@ describe("Milestone 21: Visual Canon Backend Consistency & Asset Safety Hardenin
         targetEntityId: idTarget,
         sourceEntityIds: [idSource],
         reason: "Testing double failure",
+        reason: "Testing Case C",
       });
     } catch (err) {
       caughtError = err;
@@ -499,12 +552,75 @@ describe("Milestone 21: Visual Canon Backend Consistency & Asset Safety Hardenin
     expect(recErr.targetEntityId).toBe(idTarget);
     expect(recErr.sourceEntityIds).toEqual([idSource]);
     expect(recErr.failedPhase).toBe("visual_canon_commit_rollback");
+    expect((recErr.cause as Error)?.message).toBe("Primary commit failed");
+    expect(recErr.rollbackFailures).toHaveLength(1);
+    expect(recErr.rollbackFailures?.[0]?.phase).toBe("story_bible_merge");
+    expect((recErr.rollbackFailures?.[0]?.error as Error)?.message).toBe("Undo canonical merge disk error");
     expect((recErr.rollbackError as Error)?.message).toBe("Undo canonical merge disk error");
     expect(recErr.message).toContain("rollback could not fully restore the previous state");
+
+    // No merge activity logged
+    const activities = await readActivity(tempDir, slug);
+    expect(activities.some((a) => a.type === "bible.entities.merged")).toBe(false);
   });
 
   // Scenario M2: Visual Canon demote failure with failed restore throws structured ReconciliationError
   it("Scenario M2: Demote failure with failed restore throws structured ReconciliationError", async () => {
+  // Scenario M3 (Case D): Visual Canon commit failure with BOTH VC rollback and Story Bible undo failing records both failures
+  it("Scenario M3 (Case D): Visual Canon commit failure with BOTH VC rollback and Story Bible undo failing records both failures", async () => {
+    const operations = new StudioOperations(tempDir, loadEnvironment({}));
+
+    await updateVisualProfile(tempDir, slug, idTarget, { appearance: "Target Appearance" });
+    await updateVisualProfile(tempDir, slug, idSource, { appearance: "Source Appearance" });
+
+    const commitSpy = vi.spyOn(profilesModule, "commitVisualCanonMerge").mockRejectedValueOnce(
+      new Error("Primary commit failed")
+    );
+    const rollbackVCSpy = vi.spyOn(profilesModule, "rollbackPreparedVisualCanonMerge").mockRejectedValueOnce(
+      new Error("Rollback VC assets failed")
+    );
+    const undoSpy = vi.spyOn(canonicalModule, "undoCanonicalMerge").mockRejectedValueOnce(
+      new Error("Undo canonical merge failed")
+    );
+
+    let caughtError: any;
+    try {
+      await operations.mergeCanonicalEntities(slug, {
+        targetEntityId: idTarget,
+        sourceEntityIds: [idSource],
+        reason: "Testing Case D",
+      });
+    } catch (err) {
+      caughtError = err;
+    } finally {
+      commitSpy.mockRestore();
+      rollbackVCSpy.mockRestore();
+      undoSpy.mockRestore();
+    }
+
+    expect(caughtError).toBeInstanceOf(ReconciliationError);
+    const recErr = caughtError as ReconciliationError;
+    expect(recErr.storySlug).toBe(slug);
+    expect(recErr.targetEntityId).toBe(idTarget);
+    expect(recErr.sourceEntityIds).toEqual([idSource]);
+    expect(recErr.failedPhase).toBe("visual_canon_commit_rollback");
+    expect((recErr.cause as Error)?.message).toBe("Primary commit failed");
+    expect(recErr.rollbackFailures).toHaveLength(2);
+    expect(recErr.rollbackFailures?.map((f) => f.phase)).toEqual([
+      "visual_canon_prepared_assets",
+      "story_bible_merge",
+    ]);
+    expect((recErr.rollbackFailures?.[0]?.error as Error)?.message).toBe("Rollback VC assets failed");
+    expect((recErr.rollbackFailures?.[1]?.error as Error)?.message).toBe("Undo canonical merge failed");
+    expect((recErr.rollbackError as Error)?.message).toBe("Rollback VC assets failed");
+
+    // No merge activity logged
+    const activities = await readActivity(tempDir, slug);
+    expect(activities.some((a) => a.type === "bible.entities.merged")).toBe(false);
+  });
+
+  // Scenario M4: Demote failure with BOTH Story Bible restore and Visual Canon rollback failing records both failures
+  it("Scenario M4: Demote failure with BOTH Story Bible restore and Visual Canon rollback failing records both failures", async () => {
     const operations = new StudioOperations(tempDir, loadEnvironment({}));
 
     await updateVisualProfile(tempDir, slug, idTarget, { appearance: "Target Appearance" });
@@ -515,17 +631,22 @@ describe("Milestone 21: Visual Canon Backend Consistency & Asset Safety Hardenin
     const restoreSpy = vi.spyOn(granularityModule, "restorePreDemoteStoryBible").mockRejectedValueOnce(
       new Error("Disk restore error")
     );
+    const rollbackDemoteSpy = vi.spyOn(profilesModule, "rollbackPreparedVisualCanonDemote").mockRejectedValueOnce(
+      new Error("Visual Canon rollback error")
+    );
 
     let caughtError: any;
     try {
       await operations.demoteCanonicalEntity(slug, idTarget, {
         reason: "Testing demotion double failure",
+        reason: "Testing demotion double rollback failure",
       });
     } catch (err) {
       caughtError = err;
     } finally {
       commitSpy.mockRestore();
       restoreSpy.mockRestore();
+      rollbackDemoteSpy.mockRestore();
     }
 
     expect(caughtError).toBeInstanceOf(ReconciliationError);
@@ -533,7 +654,19 @@ describe("Milestone 21: Visual Canon Backend Consistency & Asset Safety Hardenin
     expect(recErr.storySlug).toBe(slug);
     expect(recErr.targetEntityId).toBe(idTarget);
     expect(recErr.failedPhase).toBe("visual_canon_demote_rollback");
+    expect((recErr.cause as Error)?.message).toBe("Visual Canon demote write failed");
+    expect(recErr.rollbackFailures).toHaveLength(2);
+    expect(recErr.rollbackFailures?.map((f) => f.phase)).toEqual([
+      "story_bible_demote",
+      "visual_canon_demote",
+    ]);
+    expect((recErr.rollbackFailures?.[0]?.error as Error)?.message).toBe("Disk restore error");
+    expect((recErr.rollbackFailures?.[1]?.error as Error)?.message).toBe("Visual Canon rollback error");
     expect((recErr.rollbackError as Error)?.message).toBe("Disk restore error");
+
+    // No demote activity logged
+    const activities = await readActivity(tempDir, slug);
+    expect(activities.some((a) => a.type === "bible.entity.demoted")).toBe(false);
   });
 
   // Scenario N: Demotion commit failure restores pre-demotion Story Bible faithfully
@@ -610,6 +743,41 @@ describe("Milestone 21: Visual Canon Backend Consistency & Asset Safety Hardenin
   });
 
   // Scenario P: Individual reference deletion with real cleanup failure surfaces cleanupWarnings and removes metadata
+  // Scenario O2: Merge with cleanup warnings from finalizeVisualCanonMerge propagates cleanupWarnings without rolling back
+  it("Scenario O2: Merge with cleanup warnings from finalizeVisualCanonMerge propagates cleanupWarnings without rolling back", async () => {
+    const operations = new StudioOperations(tempDir, loadEnvironment({}));
+
+    await updateVisualProfile(tempDir, slug, idTarget, { appearance: "Target Appearance" });
+    await updateVisualProfile(tempDir, slug, idSource, { appearance: "Source Appearance" });
+
+    const finalizeSpy = vi.spyOn(profilesModule, "finalizeVisualCanonMerge").mockResolvedValueOnce({
+      cleanedDirs: [],
+      errors: ["Non-fatal unlink warning: file locked by another process"],
+    });
+
+    try {
+      const result = await operations.mergeCanonicalEntities(slug, {
+        targetEntityId: idTarget,
+        sourceEntityIds: [idSource],
+        reason: "Testing cleanup warnings propagation",
+      });
+
+      expect(result).toBeDefined();
+      expect(result.cleanupWarnings).toEqual(["Non-fatal unlink warning: file locked by another process"]);
+      expect(result.merge.id).toBeDefined();
+
+      // Logical commit succeeded and was not rolled back!
+      const bibleAfter = await getStoryBible(tempDir, slug);
+      expect(bibleAfter.canonicalEntities.some((e) => e.id === idSource)).toBe(false);
+      expect(bibleAfter.canonicalEntities.some((e) => e.id === idTarget)).toBe(true);
+
+      // Merge activity was logged because logical transaction committed
+      const activities = await readActivity(tempDir, slug);
+      expect(activities.some((a) => a.type === "bible.entities.merged")).toBe(true);
+    } finally {
+      finalizeSpy.mockRestore();
+    }
+  });
   it("Scenario P: Individual reference deletion with real cleanup failure surfaces cleanupWarnings and removes metadata", async () => {
     await updateVisualProfile(tempDir, slug, idTarget, { appearance: "Target" });
     const { reference: ref } = await addVisualReferenceImage(tempDir, slug, idTarget, {

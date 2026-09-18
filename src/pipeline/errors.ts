@@ -45,8 +45,14 @@ export class SubtitleError extends AppError {}
 export class VideoError extends AppError {}
 export class SceneError extends AppError {}
 export class ArtworkError extends AppError {}
+export interface RollbackFailure {
+  phase: string;
+  error: unknown;
+}
+
 export class ReconciliationError extends AppError {
   readonly rollbackError?: unknown;
+  readonly rollbackFailures?: RollbackFailure[];
   readonly storySlug?: string;
   readonly targetEntityId?: string;
   readonly sourceEntityIds?: string[];
@@ -57,6 +63,7 @@ export class ReconciliationError extends AppError {
     message: string,
     options?: ErrorOptions & {
       rollbackError?: unknown;
+      rollbackFailures?: RollbackFailure[];
       storySlug?: string;
       targetEntityId?: string;
       sourceEntityIds?: string[];
@@ -66,6 +73,8 @@ export class ReconciliationError extends AppError {
   ) {
     super(message, options);
     this.rollbackError = options?.rollbackError;
+    this.rollbackFailures = options?.rollbackFailures;
+    this.rollbackError = options?.rollbackError ?? options?.rollbackFailures?.[0]?.error;
     this.storySlug = options?.storySlug;
     this.targetEntityId = options?.targetEntityId;
     this.sourceEntityIds = options?.sourceEntityIds;

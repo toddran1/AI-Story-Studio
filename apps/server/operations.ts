@@ -15,6 +15,7 @@ import { defaultStory, loadStory } from "../../src/config/load-config.js";
 import { Story, storySchema } from "../../src/domain/story.js";
 import { createPipelineRuntime } from "../../src/pipeline/create-pipeline.js";
 import { ConfigurationError, ReconciliationError } from "../../src/pipeline/errors.js";
+import { ConfigurationError, ReconciliationError, RollbackFailure } from "../../src/pipeline/errors.js";
 import { applyPreviewProfile } from "../../src/preview/profile.js";
 import { PreviewRunner } from "../../src/preview/preview-runner.js";
 import { previewPresetSchema } from "../../src/preview/types.js";
@@ -139,6 +140,18 @@ const productionInputSchema = z.object({ from: z.number().int().positive(), to: 
 
 type InspectionRecord = { inspection: SourceInspection; temporaryDirectory?: string; createdAt: number; bytes: number };
 export type OperationsDependencies = { pipeline?: ChapterProcessor; preview?: PreviewRunner; registry?: SourceProviderRegistry; llm?: LLMRouter; audio?: AudioMasteringProcessor; audiobook?: AudiobookProcessor; video?: VideoProcessor; videoExport?: VideoExportProcessor; scenePlanner?: LLMProvider; image?: ImageProvider; tts?: TTSProvider | TTSProviderRouter; censor?: CensorAudioService; alignment?: AlignmentEngine; queue?: ProductionQueueService; usage?: PostgresUsageRepository };
+
+async function attemptRollback(
+  phase: string,
+  operation: () => Promise<unknown>,
+  failures: RollbackFailure[],
+): Promise<void> {
+  try {
+    await operation();
+  } catch (error) {
+    failures.push({ phase, error });
+  }
+}
 
 export class StudioOperations {
   private static readonly maxInspections = 10;
@@ -750,23 +763,47 @@ export class StudioOperations {
       try {
         await undoCanonicalMerge(this.root, slug, base, mergeId);
       } catch (undoErr) {
+      const rollbackFailures: RollbackFailure[] = [];
+
+      await attemptRollback(
+        "visual_canon_prepared_assets",
+        () => rollbackPreparedVisualCanonMerge(prepared),
+        rollbackFailures,
+      );
+
+      await attemptRollback(
+        "story_bible_merge",
+        () => undoCanonicalMerge(this.root, slug, base, mergeId),
+        rollbackFailures,
+      );
+
+      if (rollbackFailures.length > 0) {
         throw new ReconciliationError(
           `Entity merge failed and automatic rollback could not fully restore the previous state. The story requires reconciliation before retrying this merge.`,
           {
             cause: commitErr,
             rollbackError: undoErr,
+            rollbackFailures,
             storySlug: slug,
             targetEntityId,
             sourceEntityIds,
             mergeId,
             failedPhase: "visual_canon_commit_rollback",
           }
+          },
         );
       }
+
       throw commitErr;
     }
     await finalizeVisualCanonMerge(prepared);
     return result;
+
+    const cleanup = await finalizeVisualCanonMerge(prepared);
+    return {
+      ...result,
+      cleanupWarnings: cleanup.errors.length > 0 ? cleanup.errors : undefined,
+    };
   }
 
   async mergeCanonicalEntities(slug: string, raw: unknown) {
@@ -780,6 +817,11 @@ export class StudioOperations {
       const result = await this.executeCanonicalEntityMerge(slug, input.targetEntityId, input.sourceEntityIds, input.reason);
       await recordActivity(this.root, slug, "bible.entities.merged", `Merged ${input.sourceEntityIds.length} duplicate entity record(s)`);
       return { merge: result.merge, entity: result.bible.canonicalEntities.find((item) => item.id === input.targetEntityId) };
+      return {
+        merge: result.merge,
+        entity: result.bible.canonicalEntities.find((item) => item.id === input.targetEntityId),
+        ...(result.cleanupWarnings ? { cleanupWarnings: result.cleanupWarnings } : {}),
+      };
     });
   }
   async undoCanonicalMerge(slug: string, mergeId: string) { slugSchema.parse(slug); return withStoryLock(this.root, slug, "undo canonical entity merge", async () => { const base = await getStoryBible(this.root, slug, { includeCanonicalOverlay: false }); await undoCanonicalMerge(this.root, slug, base, mergeId); await recordActivity(this.root, slug, "bible.merge.undone", "Undid a canonical entity merge"); return { status: "undone" }; }); }
@@ -841,19 +883,40 @@ export class StudioOperations {
       try {
         await restorePreDemoteStoryBible(this.root, slug, snapshot);
       } catch (rollbackErr) {
+      const rollbackFailures: RollbackFailure[] = [];
+
+      await attemptRollback(
+        "story_bible_demote",
+        async () => {
+          await restorePreDemoteStoryBible(this.root, slug, snapshot);
+          invalidateCatalogCache(this.root, slug);
+        },
+        rollbackFailures,
+      );
+
+      await attemptRollback(
+        "visual_canon_demote",
+        () => rollbackPreparedVisualCanonDemote(this.root, slug, preparedVisual),
+        rollbackFailures,
+      );
+
+      if (rollbackFailures.length > 0) {
         throw new ReconciliationError(
           `Canonical entity demotion failed and automatic rollback could not fully restore the previous Story Bible state. The story requires reconciliation before retrying.`,
           {
             cause: visualErr,
             rollbackError: rollbackErr,
+            rollbackFailures,
             storySlug: slug,
             targetEntityId: id,
             failedPhase: "visual_canon_demote_rollback",
           }
+          },
         );
       }
       invalidateCatalogCache(this.root, slug);
       await rollbackPreparedVisualCanonDemote(this.root, slug, preparedVisual).catch(() => undefined);
+
       throw visualErr;
     }
 
