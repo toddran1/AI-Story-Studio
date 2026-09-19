@@ -1,4 +1,3 @@
-import { stat } from "node:fs/promises";
 import { open, stat } from "node:fs/promises";
 import { Chapter, StageName } from "../domain/chapter.js";
 import { qaResultSchema } from "../domain/qa.js";
@@ -43,7 +42,6 @@ export async function inspectStageArtifact(root: string, story: string, chapterN
   const freshness = stageFreshness(chapter, stage);
   try {
     const valid = await artifactIsValid(stage, paths, root, story, chapterNumber);
-    return valid ? { stage, availability: "available", freshness } : { stage, availability: await artifactExists(stage, paths) ? "invalid" : "missing" };
     return valid
       ? { stage, availability: "available", freshness }
       : { stage, availability: (await artifactExists(stage, paths, root, story, chapterNumber)) ? "invalid" : "missing" };
@@ -77,7 +75,6 @@ export async function fileIsNonEmpty(path: string): Promise<boolean> {
   try { return (await stat(path)).size > 0; } catch { return false; }
 }
 
-async function artifactExists(stage: ArtifactStage, paths: ReturnType<typeof storyPaths>): Promise<boolean> {
 async function readHeaderBytes(path: string, maxBytes = 1024): Promise<Buffer | undefined> {
   try {
     const handle = await open(path, "r");
@@ -256,7 +253,6 @@ function artifactPath(stage: ArtifactStage, paths: ReturnType<typeof storyPaths>
 
 async function artifactIsValid(stage: ArtifactStage, paths: ReturnType<typeof storyPaths>, root: string, story: string, chapter: number): Promise<boolean> {
   if (["ingestion", "translation", "narration"].includes(stage)) return Boolean((await readTextIfExists(artifactPath(stage, paths)!))?.trim());
-  if (["tts", "audioMastering", "video"].includes(stage)) return artifactExists(stage, paths);
   if (["tts", "audioMastering"].includes(stage)) {
     const path = artifactPath(stage, paths);
     if (!path) return false;
@@ -284,7 +280,6 @@ async function artifactIsValid(stage: ArtifactStage, paths: ReturnType<typeof st
     if (!parsed.success || !parsed.data.scenes.length) return false;
     if (stage === "scenePlanning") return true;
     for (const scene of parsed.data.scenes) {
-      if (scene.artwork.status !== "complete" || !(await fileIsNonEmpty(sceneImagePath(root, story, chapter, scene.id)))) return false;
       if (scene.artwork.status !== "complete") return false;
       const inspected = await inspectSceneArtwork(root, story, chapter, scene.id, scene.artwork.imageFingerprint);
       if (inspected.availability !== "available") return false;

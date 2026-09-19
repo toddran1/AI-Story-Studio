@@ -21,7 +21,6 @@ export async function alignStoredChapter(options: { root: string; storySlug: str
   const audioArtifact = await inspectStageArtifact(options.root, options.storySlug, options.chapter, "audioMastering");
   if (audioArtifact.availability !== "available" || !chapter.audio) throw new Error(`Chapter ${options.chapter} audio is not mastered`);
   const narrationArtifact = await inspectStageArtifact(options.root, options.storySlug, options.chapter, "narration");
-  if (narrationArtifact.availability !== "available") throw new Error(`Chapter ${options.chapter} narration is missing`);
   if (narrationArtifact.availability === "missing") throw new Error(`Chapter ${options.chapter} narration is missing`);
   if (narrationArtifact.availability === "invalid") throw new Error(`Chapter ${options.chapter} narration exists but is invalid`);
   const warnings: string[] = [];

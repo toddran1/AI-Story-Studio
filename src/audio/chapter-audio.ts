@@ -7,11 +7,9 @@ import { AudioError } from "../pipeline/errors.js";
 import { atomicWrite, atomicWriteJson } from "../storage/atomic-write.js";
 import { storyPaths } from "../storage/paths.js";
 import { exists, readJsonIfExists } from "../storage/story-files.js";
-import { stageFreshness, stalePrerequisiteWarning } from "../studio/artifact-state.js";
 import { inspectStageArtifact, stageFreshness, stalePrerequisiteWarning } from "../studio/artifact-state.js";
 import { fingerprint } from "../utils/hash.js";
 import { fileFingerprint } from "../utils/file-fingerprint.js";
-import { AudioProbe } from "./ffmpeg.js";
 import { AudioProbe, FfmpegTools } from "./ffmpeg.js";
 import { AudioMasteringProcessor } from "./mastering.js";
 
@@ -20,8 +18,6 @@ export async function masterStoredChapter(options: { root: string; story: Story;
   const paths = storyPaths(options.root, options.story.slug, options.chapter); const raw = await readJsonIfExists<Chapter>(paths.chapterMeta);
   if (!raw) throw new AudioError(`Chapter ${options.chapter} has no pipeline metadata; run TTS first`);
   const chapter = chapterSchema.parse(raw);
-  const hasRawOrSegments = (await exists(paths.audioRaw)) || (await exists(paths.segments)) || (await exists(paths.audio));
-  if (chapter.stages.tts.status !== "complete" && !hasRawOrSegments) throw new AudioError(`Chapter ${options.chapter} TTS is not complete`);
   const hasRawOrSegments = (await exists(paths.audioRaw)) || (await exists(paths.segments));
   if (!hasRawOrSegments) {
     if (chapter.stages.tts.status !== "complete") throw new AudioError(`Chapter ${options.chapter} TTS is not complete`);
@@ -29,7 +25,6 @@ export async function masterStoredChapter(options: { root: string; story: Story;
   }
   const warnings: string[] = [];
   if (stageFreshness(chapter, "tts") === "stale") warnings.push(stalePrerequisiteWarning("tts"));
-  if (!(await exists(paths.audioRaw)) && await exists(paths.audio) && chapter.stages.audioMastering.status !== "complete") await atomicWrite(paths.audioRaw, await readFile(paths.audio));
   const inputs = await masteringInputs(paths.segments, paths.audioRaw); const fp = audioMasteringFingerprint(chapter.stages.tts.outputFingerprint, options.story.audio, options.processor.version, await inputFingerprints(inputs));
   const currentOutput = await fileFingerprint(paths.audio);
   if (!options.force && chapter.stages.audioMastering.status === "complete" && chapter.stages.audioMastering.fingerprint === fp && currentOutput

@@ -23,7 +23,6 @@ import { Scene, SceneManifest, sceneManifestSchema, sceneSchema } from "./types.
 export async function planStoredScenes(options: { root: string; story: Story; chapter: number; provider: LLMProvider; force?: boolean }) {
   const paths = storyPaths(options.root, options.story.slug, options.chapter); const rawChapter = await readJsonIfExists<Chapter>(paths.chapterMeta); if (!rawChapter) throw new SceneError(`Chapter ${options.chapter} has no pipeline metadata`); const chapter = chapterSchema.parse(rawChapter);
   const narrationArtifact = await inspectStageArtifact(options.root, options.story.slug, options.chapter, "narration");
-  if (narrationArtifact.availability !== "available") throw new SceneError(`Chapter ${options.chapter} narration is missing`);
   if (narrationArtifact.availability === "missing") throw new SceneError(`Chapter ${options.chapter} narration is missing`);
   if (narrationArtifact.availability === "invalid") throw new SceneError(`Chapter ${options.chapter} narration exists but is invalid`);
   const resolved = await resolveMasteredAudio(options.root, options.story.slug, options.chapter, chapter).catch((error) => {
