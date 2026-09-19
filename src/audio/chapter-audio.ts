@@ -8,9 +8,11 @@ import { atomicWrite, atomicWriteJson } from "../storage/atomic-write.js";
 import { storyPaths } from "../storage/paths.js";
 import { exists, readJsonIfExists } from "../storage/story-files.js";
 import { stageFreshness, stalePrerequisiteWarning } from "../studio/artifact-state.js";
+import { inspectStageArtifact, stageFreshness, stalePrerequisiteWarning } from "../studio/artifact-state.js";
 import { fingerprint } from "../utils/hash.js";
 import { fileFingerprint } from "../utils/file-fingerprint.js";
 import { AudioProbe } from "./ffmpeg.js";
+import { AudioProbe, FfmpegTools } from "./ffmpeg.js";
 import { AudioMasteringProcessor } from "./mastering.js";
 
 export type AudioMasteringEvent = { status: "started" | "completed" | "reused"; chapter: number; state: StageState };
@@ -20,6 +22,11 @@ export async function masterStoredChapter(options: { root: string; story: Story;
   const chapter = chapterSchema.parse(raw);
   const hasRawOrSegments = (await exists(paths.audioRaw)) || (await exists(paths.segments)) || (await exists(paths.audio));
   if (chapter.stages.tts.status !== "complete" && !hasRawOrSegments) throw new AudioError(`Chapter ${options.chapter} TTS is not complete`);
+  const hasRawOrSegments = (await exists(paths.audioRaw)) || (await exists(paths.segments));
+  if (!hasRawOrSegments) {
+    if (chapter.stages.tts.status !== "complete") throw new AudioError(`Chapter ${options.chapter} TTS is not complete`);
+    throw new AudioError("Raw TTS audio is unavailable. Existing mastered audio can still be used by downstream stages, but Audio Mastering cannot be rerun without its original TTS input.");
+  }
   const warnings: string[] = [];
   if (stageFreshness(chapter, "tts") === "stale") warnings.push(stalePrerequisiteWarning("tts"));
   if (!(await exists(paths.audioRaw)) && await exists(paths.audio) && chapter.stages.audioMastering.status !== "complete") await atomicWrite(paths.audioRaw, await readFile(paths.audio));
@@ -58,7 +65,35 @@ export async function masteringInputs(segmentsDirectory: string, rawAudio: strin
 export async function inputFingerprints(paths: string[]) { return Promise.all(paths.map(async (path) => { const value = await fileFingerprint(path); if (!value) throw new AudioError(`Mastering input is missing or empty: ${path}`); return value; })); }
 async function persist(path: string, chapter: Chapter) { chapter.updatedAt = new Date().toISOString(); await atomicWriteJson(path, chapterSchema.parse(chapter)); }
 
+export async function resolveMasteredAudio(root: string, story: string, chapterNumber: number, existingChapter?: Chapter): Promise<{ path: string; audio: AudioProbe }> {
+  const paths = storyPaths(root, story, chapterNumber);
+  const audioArtifact = await inspectStageArtifact(root, story, chapterNumber, "audioMastering");
+  if (audioArtifact.availability === "missing") {
+    throw new AudioError(`Chapter ${chapterNumber} mastered audio is missing (audio is not mastered)`);
+  }
+  if (audioArtifact.availability === "invalid") {
+    throw new AudioError(`Chapter ${chapterNumber} mastered audio exists but could not be read as valid audio`);
+  }
+  if (existingChapter?.audio && existingChapter.audio.durationSeconds > 0) {
+    return { path: paths.audio, audio: existingChapter.audio };
+  }
+  const meta = existingChapter ?? await readJsonIfExists<Chapter>(paths.chapterMeta);
+  if (meta?.audio && meta.audio.durationSeconds > 0) {
+    return { path: paths.audio, audio: meta.audio };
+  }
+  try {
+    const probe = await new FfmpegTools().probe(paths.audio);
+    if (probe && probe.durationSeconds > 0) {
+      return { path: paths.audio, audio: probe };
+    }
+  } catch {
+    // probe failed
+  }
+  throw new AudioError(`Chapter ${chapterNumber} audio is not mastered: duration metadata is unavailable`);
+}
+
 export class CopyingAudioProcessor implements AudioMasteringProcessor {
   readonly version = "test-copy-v1";
   async master(inputs: string[], output: string): Promise<AudioProbe> { await atomicWrite(output, await readFile(inputs[0]!)); return { durationSeconds: 1, codec: "mp3", container: "mp3" }; }
 }
+

@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { readFile } from "node:fs/promises";
+import { resolveMasteredAudio } from "../audio/chapter-audio.js";
 import { Chapter, StageState, chapterSchema } from "../domain/chapter.js";
 import { ConfigurationError } from "../pipeline/errors.js";
 import { atomicWriteJson } from "../storage/atomic-write.js";
@@ -15,10 +16,14 @@ export type AlignmentEvent = { status: "started" | "completed" | "reused"; chapt
 export async function alignStoredChapter(options: { root: string; storySlug: string; chapter: number; language: string; config: AlignmentConfig; engine?: AlignmentEngine; force?: boolean; forceEstimated?: boolean; requireAligned?: boolean; onEvent?: (event: AlignmentEvent) => void }) {
   const paths = storyPaths(options.root, options.storySlug, options.chapter); const raw = await readJsonIfExists<Chapter>(paths.chapterMeta); if (!raw) throw new Error(`Chapter ${options.chapter} has no pipeline metadata`);
   const chapter = chapterSchema.parse(raw);
+  const resolved = await resolveMasteredAudio(options.root, options.storySlug, options.chapter, chapter);
+  chapter.audio = resolved.audio;
   const audioArtifact = await inspectStageArtifact(options.root, options.storySlug, options.chapter, "audioMastering");
   if (audioArtifact.availability !== "available" || !chapter.audio) throw new Error(`Chapter ${options.chapter} audio is not mastered`);
   const narrationArtifact = await inspectStageArtifact(options.root, options.storySlug, options.chapter, "narration");
   if (narrationArtifact.availability !== "available") throw new Error(`Chapter ${options.chapter} narration is missing`);
+  if (narrationArtifact.availability === "missing") throw new Error(`Chapter ${options.chapter} narration is missing`);
+  if (narrationArtifact.availability === "invalid") throw new Error(`Chapter ${options.chapter} narration exists but is invalid`);
   const warnings: string[] = [];
   if (audioArtifact.freshness === "stale") warnings.push(stalePrerequisiteWarning("audioMastering"));
   if (narrationArtifact.freshness === "stale") warnings.push(stalePrerequisiteWarning("narration"));

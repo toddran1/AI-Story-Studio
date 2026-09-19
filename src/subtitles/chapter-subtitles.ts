@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { readFile, rm } from "node:fs/promises";
 import { AlignmentArtifact, alignmentArtifactSchema } from "../alignment/types.js";
+import { resolveMasteredAudio } from "../audio/chapter-audio.js";
 import { Chapter, StageState, chapterSchema } from "../domain/chapter.js";
 import { Story } from "../domain/story.js";
 import { SubtitleError } from "../pipeline/errors.js";
@@ -20,14 +21,23 @@ export type SubtitleEvent = { status: "started" | "completed" | "reused"; chapte
 export async function generateStoredSubtitles(options: { root: string; story: Story; chapter: number; force?: boolean; forceEstimated?: boolean; onEvent?: (event: SubtitleEvent) => void }) {
   const paths = storyPaths(options.root, options.story.slug, options.chapter); const raw = await readJsonIfExists<Chapter>(paths.chapterMeta); if (!raw) throw new SubtitleError(`Chapter ${options.chapter} has no pipeline metadata`);
   const chapter = chapterSchema.parse(raw);
+  const resolved = await resolveMasteredAudio(options.root, options.story.slug, options.chapter, chapter).catch((error) => {
+    throw new SubtitleError(error instanceof Error ? error.message : String(error), { cause: error });
+  });
+  chapter.audio = resolved.audio;
   const audioArtifact = await inspectStageArtifact(options.root, options.story.slug, options.chapter, "audioMastering");
   if (audioArtifact.availability !== "available" || !chapter.audio) throw new SubtitleError(`Chapter ${options.chapter} audio is not mastered`);
   const warnings: string[] = [];
   if (audioArtifact.freshness === "stale") warnings.push(stalePrerequisiteWarning("audioMastering"));
   if (stageFreshness(chapter, "narration") === "stale") warnings.push(stalePrerequisiteWarning("narration"));
+  const narrationArtifact = await inspectStageArtifact(options.root, options.story.slug, options.chapter, "narration");
+  if (narrationArtifact.availability === "missing") throw new SubtitleError(`Chapter ${options.chapter} narration is missing`);
+  if (narrationArtifact.availability === "invalid") throw new SubtitleError(`Chapter ${options.chapter} narration exists but is invalid`);
+  if (narrationArtifact.freshness === "stale") warnings.push(stalePrerequisiteWarning("narration"));
   const manualRaw = await readJsonIfExists<SubtitleDocument>(paths.subtitlesManual); const manual = manualRaw ? subtitleDocumentSchema.safeParse(manualRaw) : undefined;
   if (manual?.success && await outputsFingerprint(paths.subtitlesSrt, paths.subtitlesVtt, paths.subtitlesDocument)) { chapter.subtitle = { cueCount: manual.data.cues.length, durationSeconds: manual.data.durationSeconds, timingMode: manual.data.timingMode, engine: "manual", manual: true }; if (chapter.stages.subtitles.provider !== "manual") { chapter.stages.subtitles = { ...chapter.stages.subtitles, status: "complete", provider: "manual", model: "studio-editor" }; await persist(paths.chapterMeta, chapter); } options.onEvent?.({ status: "reused", chapter: options.chapter, state: chapter.stages.subtitles }); return { chapter, document: manual.data, reused: true, protected: true, warnings }; }
   const narration = await readFile(paths.narration, "utf8").catch(() => { throw new SubtitleError(`Chapter ${options.chapter} narration is missing`); }); const masteredAudioFingerprint = await fileFingerprint(paths.audio).catch(() => { throw new SubtitleError(`Chapter ${options.chapter} mastered audio is missing`); });
+  const narration = await readFile(paths.narration, "utf8"); const masteredAudioFingerprint = await fileFingerprint(paths.audio).catch(() => { throw new SubtitleError(`Chapter ${options.chapter} mastered audio is missing`); });
   const alignmentRaw = options.forceEstimated ? undefined : await readJsonIfExists<AlignmentArtifact>(paths.alignment); const alignment = alignmentRaw ? alignmentArtifactSchema.safeParse(alignmentRaw) : undefined; const aligned = alignment?.success && alignment.data.mode === "aligned"; if (aligned && stageFreshness(chapter, "alignment") === "stale") warnings.push(stalePrerequisiteWarning("alignment"));
   const inputFingerprint = subtitleFingerprint(fingerprint(narration), masteredAudioFingerprint, options.story.subtitles, aligned ? alignment.data.inputFingerprint : "estimated"); const outputFingerprint = await outputsFingerprint(paths.subtitlesSrt, paths.subtitlesVtt, paths.subtitlesDocument);
   if (!options.force && chapter.stages.subtitles.status === "complete" && chapter.stages.subtitles.fingerprint === inputFingerprint && chapter.stages.subtitles.outputFingerprint === outputFingerprint && chapter.subtitle) { const document = subtitleDocumentSchema.parse(await readJsonIfExists(paths.subtitlesDocument)); options.onEvent?.({ status: "reused", chapter: options.chapter, state: chapter.stages.subtitles }); return { chapter, document, reused: true, protected: false, warnings }; }

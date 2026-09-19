@@ -1,6 +1,7 @@
 import { rename, rm } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
+import { resolveMasteredAudio } from "../audio/chapter-audio.js";
 import { Chapter, StageState, chapterSchema } from "../domain/chapter.js";
 import { Story } from "../domain/story.js";
 import { VideoError } from "../pipeline/errors.js";
@@ -8,6 +9,7 @@ import { atomicWriteJson } from "../storage/atomic-write.js";
 import { sceneImagePath, storyPaths } from "../storage/paths.js";
 import { exists, readJsonIfExists } from "../storage/story-files.js";
 import { fileIsNonEmpty, inspectStageArtifact, stalePrerequisiteWarning } from "../studio/artifact-state.js";
+import { fileIsNonEmpty, inspectSceneArtwork, inspectStageArtifact, stalePrerequisiteWarning } from "../studio/artifact-state.js";
 import { fingerprint } from "../utils/hash.js";
 import { fileFingerprint } from "../utils/file-fingerprint.js";
 import { ChapterVideoInput, VideoProcessor } from "./renderer.js";
@@ -16,6 +18,10 @@ import { SceneManifest, sceneManifestSchema } from "../scenes/types.js";
 export type VideoEvent = { status: "started" | "completed" | "reused"; chapter: number; state: StageState };
 export async function renderStoredChapterVideo(options: { root: string; story: Story; chapter: number; processor: VideoProcessor; force?: boolean; onEvent?: (event: VideoEvent) => void }) {
   const paths = storyPaths(options.root, options.story.slug, options.chapter); const raw = await readJsonIfExists<Chapter>(paths.chapterMeta); if (!raw) throw new VideoError(`Chapter ${options.chapter} has no pipeline metadata`); const chapter = chapterSchema.parse(raw);
+  const resolved = await resolveMasteredAudio(options.root, options.story.slug, options.chapter, chapter).catch((error) => {
+    throw new VideoError(error instanceof Error ? error.message : String(error), { cause: error });
+  });
+  chapter.audio = resolved.audio;
   const audioArtifact = await inspectStageArtifact(options.root, options.story.slug, options.chapter, "audioMastering");
   if (audioArtifact.availability !== "available" || !chapter.audio) throw new VideoError(`Chapter ${options.chapter} audio is not mastered`);
   const needsSubtitles = options.story.video.subtitleMode !== "none";
@@ -33,4 +39,32 @@ export async function renderStoredChapterVideo(options: { root: string; story: S
 export function videoFingerprint(audio: string | undefined, subtitles: string | undefined, background: string | undefined, settings: Story["video"], title?: string) { return fingerprint({ audio, subtitles, background, settings, title, version: "chapter-video-v1" }); }
 async function findCover(root: string, slug: string) { for (const name of ["cover.jpg", "cover.jpeg", "cover.png"]) { const path = join(storyPaths(root, slug, 1).story, name); if (await exists(path)) return path; } return undefined; }
 async function approvedSceneArtwork(root: string, slug: string, chapter: number) { const raw = await readJsonIfExists<SceneManifest>(storyPaths(root, slug, chapter).scenesManifest); const parsed = raw ? sceneManifestSchema.safeParse(raw) : undefined; if (!parsed?.success || !parsed.data.scenes.length) return undefined; const result: Array<{ path: string; durationSeconds: number; fingerprint: string }> = []; for (const scene of parsed.data.scenes) { const path = sceneImagePath(root, slug, chapter, scene.id); if (scene.artwork.status !== "complete" || scene.artwork.review !== "approved" || !scene.artwork.imageFingerprint || !(await exists(path)) || await fileFingerprint(path) !== scene.artwork.imageFingerprint) return undefined; result.push({ path, durationSeconds: scene.endSeconds - scene.startSeconds, fingerprint: scene.artwork.imageFingerprint }); } return result; }
+async function approvedSceneArtwork(root: string, slug: string, chapter: number) {
+  const raw = await readJsonIfExists<SceneManifest>(storyPaths(root, slug, chapter).scenesManifest);
+  const parsed = raw ? sceneManifestSchema.safeParse(raw) : undefined;
+  if (!parsed?.success || !parsed.data.scenes.length) return undefined;
+  const allApproved = parsed.data.scenes.every((scene) => scene.artwork.review === "approved");
+  if (!allApproved) return undefined;
+  const result: Array<{ path: string; durationSeconds: number; fingerprint: string }> = [];
+  for (const scene of parsed.data.scenes) {
+    if (!scene.artwork.imageFingerprint) {
+      throw new VideoError(`Approved artwork for Scene ${scene.id} is missing recorded fingerprint.`);
+    }
+    const inspected = await inspectSceneArtwork(root, slug, chapter, scene.id, scene.artwork.imageFingerprint);
+    if (inspected.availability === "missing") {
+      throw new VideoError(`Approved artwork for Scene ${scene.id} is missing.`);
+    }
+    if (inspected.availability === "invalid") {
+      if (inspected.corrupt) {
+        throw new VideoError(`Approved artwork for Scene ${scene.id} is corrupt.`);
+      }
+      if (!inspected.matchesRecordedFingerprint) {
+        throw new VideoError(`Approved artwork for Scene ${scene.id} does not match its recorded fingerprint.`);
+      }
+      throw new VideoError(`Approved artwork for Scene ${scene.id} is corrupt.`);
+    }
+    result.push({ path: inspected.imagePath, durationSeconds: scene.endSeconds - scene.startSeconds, fingerprint: scene.artwork.imageFingerprint });
+  }
+  return result;
+}
 async function persist(path: string, chapter: Chapter) { chapter.updatedAt = new Date().toISOString(); await atomicWriteJson(path, chapterSchema.parse(chapter)); }

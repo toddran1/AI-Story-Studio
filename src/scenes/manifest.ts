@@ -1,4 +1,5 @@
 import { readFile } from "node:fs/promises";
+import { resolveMasteredAudio } from "../audio/chapter-audio.js";
 import { Chapter, chapterSchema } from "../domain/chapter.js";
 import { Story } from "../domain/story.js";
 import { StoryBible } from "../domain/story-bible.js";
@@ -23,6 +24,12 @@ export async function planStoredScenes(options: { root: string; story: Story; ch
   const paths = storyPaths(options.root, options.story.slug, options.chapter); const rawChapter = await readJsonIfExists<Chapter>(paths.chapterMeta); if (!rawChapter) throw new SceneError(`Chapter ${options.chapter} has no pipeline metadata`); const chapter = chapterSchema.parse(rawChapter);
   const narrationArtifact = await inspectStageArtifact(options.root, options.story.slug, options.chapter, "narration");
   if (narrationArtifact.availability !== "available") throw new SceneError(`Chapter ${options.chapter} narration is missing`);
+  if (narrationArtifact.availability === "missing") throw new SceneError(`Chapter ${options.chapter} narration is missing`);
+  if (narrationArtifact.availability === "invalid") throw new SceneError(`Chapter ${options.chapter} narration exists but is invalid`);
+  const resolved = await resolveMasteredAudio(options.root, options.story.slug, options.chapter, chapter).catch((error) => {
+    throw new SceneError(error instanceof Error ? error.message : String(error), { cause: error });
+  });
+  chapter.audio = resolved.audio;
   const audioArtifact = await inspectStageArtifact(options.root, options.story.slug, options.chapter, "audioMastering");
   if (audioArtifact.availability !== "available" || !chapter.audio) throw new SceneError(`Chapter ${options.chapter} audio is not mastered`);
   const warnings: string[] = [];
