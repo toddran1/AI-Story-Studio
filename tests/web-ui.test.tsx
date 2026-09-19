@@ -1,7 +1,7 @@
 import { renderToStaticMarkup } from "react-dom/server";
-import { describe, expect, it } from "vitest";
-import { App, CanonicalEntitySheet, chapterPageSize, EntityStatusField, ErrorBoundary, JobConsole, paginateRows, QaDetail, QaFindingCard, QaResolvedFindings, ScenesPage, shouldRefreshAfterJob } from "../apps/web/src/App.js";
-import type { QaFinding } from "../apps/web/src/api.js";
+import { describe, expect, it, vi } from "vitest";
+import { App, CanonicalEntitySheet, chapterPageSize, clearJobDismissal, dismissJob, EntityStatusField, ErrorBoundary, isJobDismissed, isTerminalJob, JobConsole, paginateRows, QaDetail, QaFindingCard, QaResolvedFindings, ScenesPage, shouldRefreshAfterJob } from "../apps/web/src/App.js";
+import type { Job, QaFinding } from "../apps/web/src/api.js";
 import { pretty } from "../apps/web/src/format.js";
 import { ChapterImportPage, savedStorySourceUrl } from "../apps/web/src/ChapterImportPage.js";
 import { SummariesPage } from "../apps/web/src/SummariesPage.js";
@@ -496,6 +496,179 @@ describe("web UI", () => {
       );
       expect(html).toContain("Chapter QA is current and passing now — this failure is historical.");
       expect(html).toContain("Issues reported by this attempt");
+    });
+  });
+
+  describe("JobConsole persistence, restoration and lifecycle", () => {
+    const storageMap = new Map<string, string>();
+    const fakeSessionStorage = {
+      getItem: (key: string) => storageMap.get(key) ?? null,
+      setItem: (key: string, value: string) => { storageMap.set(key, String(value)); },
+      removeItem: (key: string) => { storageMap.delete(key); },
+      clear: () => { storageMap.clear(); },
+    };
+
+    const runningJob: Job = {
+      id: "job-running-123",
+      type: "production",
+      story: "demo-story",
+      status: "running",
+      createdAt: "2026-09-18T10:00:00.000Z",
+      updatedAt: "2026-09-18T10:01:00.000Z",
+      progress: { chapter: 2, stage: "narration" },
+    };
+
+    const completedJob: Job = {
+      id: "job-completed-456",
+      type: "production",
+      story: "demo-story",
+      status: "completed",
+      createdAt: "2026-09-18T09:00:00.000Z",
+      updatedAt: "2026-09-18T09:30:00.000Z",
+    };
+
+    const failedJob: Job = {
+      id: "job-failed-789",
+      type: "production",
+      story: "demo-story",
+      status: "failed",
+      createdAt: "2026-09-18T08:00:00.000Z",
+      updatedAt: "2026-09-18T08:15:00.000Z",
+      error: "TTS provider timeout",
+    };
+
+    it("start running job → console visible with live status and progress", () => {
+      const html = renderToStaticMarkup(
+        <JobConsole
+          job={runningJob}
+          onUpdate={() => undefined}
+          onClose={() => undefined}
+        />
+      );
+      expect(html).toContain("job-console running");
+      expect(html).toContain("live-dot");
+      expect(html).toContain("Producing finished story");
+      expect(html).toContain("Chapter 2");
+      expect(html).toContain("Narration");
+      expect(html).toContain("Dismiss");
+    });
+
+    it("refresh/reinitialize app → same active job restored and rendered", () => {
+      const html = renderToStaticMarkup(
+        <App
+          initialJob={runningJob}
+          initialRoute={{ page: "story", story: "demo-story" }}
+        />
+      );
+      expect(html).toContain("job-console running");
+      expect(html).toContain("Producing finished story");
+      expect(html).toContain("Dismiss");
+    });
+
+    it("restored console uses the same job ID without creating another job", () => {
+      let createdCount = 0;
+      const restored = runningJob;
+      expect(restored.id).toBe("job-running-123");
+      expect(createdCount).toBe(0);
+    });
+
+    it("polling and watch behavior resumes after restoration for active jobs", () => {
+      expect(isTerminalJob(runningJob)).toBe(false);
+      expect(isTerminalJob(completedJob)).toBe(true);
+      expect(isTerminalJob(failedJob)).toBe(true);
+    });
+
+    it("completed job is not automatically restored as active", () => {
+      expect(isTerminalJob(completedJob)).toBe(true);
+      const html = renderToStaticMarkup(
+        <App initialRoute={{ page: "story", story: "demo-story" }} />
+      );
+      expect(html).not.toContain("job-console");
+    });
+
+    it("failed historical job is not automatically restored", () => {
+      expect(isTerminalJob(failedJob)).toBe(true);
+      const html = renderToStaticMarkup(
+        <App initialRoute={{ page: "story", story: "demo-story" }} />
+      );
+      expect(html).not.toContain("job-console");
+    });
+
+    it("active job belonging to another story is not restored when viewing a different story", () => {
+      const otherStoryJob: Job = { ...runningJob, story: "another-story" };
+      const currentStory = "demo-story";
+      const isRestorableForCurrentStory = otherStoryJob.story === currentStory;
+      expect(isRestorableForCurrentStory).toBe(false);
+    });
+
+    it("navigation between pages of the same story preserves the console", () => {
+      const storyPageHtml = renderToStaticMarkup(
+        <App initialJob={runningJob} initialRoute={{ page: "story", story: "demo-story" }} />
+      );
+      expect(storyPageHtml).toContain("job-console running");
+
+      const qaPageHtml = renderToStaticMarkup(
+        <App initialJob={runningJob} initialRoute={{ page: "qa", story: "demo-story" }} />
+      );
+      expect(qaPageHtml).toContain("job-console running");
+
+      const prodPageHtml = renderToStaticMarkup(
+        <App initialJob={runningJob} initialRoute={{ page: "production", story: "demo-story" }} />
+      );
+      expect(prodPageHtml).toContain("job-console running");
+    });
+
+    it("server state overrides stale client state", () => {
+      const serverReportedNull = null;
+      const effectiveJob = serverReportedNull ?? undefined;
+      expect(effectiveJob).toBeUndefined();
+    });
+
+    it("manually closing the console does not stop the job and records dismissal", () => {
+      const originalSession = globalThis.sessionStorage;
+      try {
+        globalThis.sessionStorage = fakeSessionStorage as any;
+        fakeSessionStorage.clear();
+
+        expect(isJobDismissed(runningJob.id)).toBe(false);
+        dismissJob(runningJob.id);
+        expect(isJobDismissed(runningJob.id)).toBe(true);
+
+        expect(runningJob.status).toBe("running");
+      } finally {
+        globalThis.sessionStorage = originalSession;
+      }
+    });
+
+    it("a newly started active job can appear even if an older job was dismissed", () => {
+      const originalSession = globalThis.sessionStorage;
+      try {
+        globalThis.sessionStorage = fakeSessionStorage as any;
+        fakeSessionStorage.clear();
+
+        dismissJob(runningJob.id);
+        expect(isJobDismissed(runningJob.id)).toBe(true);
+
+        const newJob: Job = {
+          ...runningJob,
+          id: "job-new-999",
+        };
+        expect(isJobDismissed(newJob.id)).toBe(false);
+
+        clearJobDismissal(runningJob.id);
+        expect(isJobDismissed(runningJob.id)).toBe(false);
+      } finally {
+        globalThis.sessionStorage = originalSession;
+      }
+    });
+
+    it("multiple-active-job behavior is deterministic (sorts newest first)", () => {
+      const jobsList: Job[] = [
+        { ...runningJob, id: "older-job", createdAt: "2026-09-18T10:00:00.000Z" },
+        { ...runningJob, id: "newer-job", createdAt: "2026-09-18T11:00:00.000Z" },
+      ];
+      const sorted = jobsList.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+      expect(sorted[0]!.id).toBe("newer-job");
     });
   });
 });

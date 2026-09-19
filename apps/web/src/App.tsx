@@ -104,11 +104,62 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
 
 type Route = { page: string; story?: string; chapter?: number };
 
-export function App() {
-  const [route, setRoute] = useState<Route>(() => parseRoute(location.pathname)); const [stories, setStories] = useState<StoryCard[]>([]); const [storiesError, setStoriesError] = useState(""); const [job, setJob] = useState<Job>(); const [jobRefreshVersion, setJobRefreshVersion] = useState(0); const latestJob = useRef<Job>();
+export function App({ initialJob, initialRoute }: { initialJob?: Job; initialRoute?: Route } = {}) {
+  const [route, setRoute] = useState<Route>(() => initialRoute ?? parseRoute(location.pathname));
+  const [stories, setStories] = useState<StoryCard[]>([]);
+  const [storiesError, setStoriesError] = useState("");
+  const [job, setJob] = useState<Job | undefined>(initialJob);
+  const [jobRefreshVersion, setJobRefreshVersion] = useState(0);
+  const latestJob = useRef<Job | undefined>(initialJob);
   useEffect(() => { const handler = () => setRoute(parseRoute(location.pathname)); addEventListener("popstate", handler); return () => removeEventListener("popstate", handler); }, []);
   useEffect(() => { setStoriesError(""); api<{ stories: StoryCard[]; warnings?: string[] }>("/stories").then((value) => { setStories(value.stories); setStoriesError(value.warnings?.join(" ") ?? ""); }).catch((error) => { setStories([]); setStoriesError(message(error)); }); }, [route.page, jobRefreshVersion]);
-  const updateJob = (next: Job) => { if (shouldRefreshAfterJob(latestJob.current, next)) setJobRefreshVersion((value) => value + 1); latestJob.current = next; setJob(next); };
+  useEffect(() => {
+    const storySlug = route.story;
+    if (!storySlug) {
+      if (latestJob.current?.story) {
+        latestJob.current = undefined;
+        setJob(undefined);
+      }
+      return;
+    }
+    if (latestJob.current && latestJob.current.story !== storySlug) {
+      latestJob.current = undefined;
+      setJob(undefined);
+    }
+    if (latestJob.current && latestJob.current.story === storySlug && !isTerminalJob(latestJob.current)) {
+      return;
+    }
+    let cancelled = false;
+    api<{ job: Job | null }>(`/stories/${storySlug}/jobs/active`)
+      .then((res) => {
+        if (cancelled) return;
+        const serverJob = res?.job;
+        if (serverJob && !isTerminalJob(serverJob)) {
+          if (!isJobDismissed(serverJob.id)) {
+            latestJob.current = serverJob;
+            setJob(serverJob);
+          }
+        } else {
+          if (latestJob.current?.story === storySlug && !isTerminalJob(latestJob.current)) {
+            if (serverJob) {
+              latestJob.current = serverJob;
+              setJob(serverJob);
+            } else {
+              latestJob.current = undefined;
+              setJob(undefined);
+            }
+          }
+        }
+      })
+      .catch(() => undefined);
+    return () => { cancelled = true; };
+  }, [route.story]);
+  const updateJob = (next: Job) => {
+    if (shouldRefreshAfterJob(latestJob.current, next)) setJobRefreshVersion((value) => value + 1);
+    if (isTerminalJob(next)) clearJobDismissal(next.id);
+    latestJob.current = next;
+    setJob(next);
+  };
   const navigate = (path: string) => { history.pushState({}, "", path); setRoute(parseRoute(path)); window.scrollTo({ top: 0, behavior: "smooth" }); };
   const active = route.story ? stories.find((story) => story.slug === route.story) : undefined;
   return <div className="studio-shell">
@@ -141,7 +192,11 @@ export function App() {
         {route.page === "import" && <ChapterImportPage storySlug={route.story} stories={stories} navigate={navigate} />}
       </ErrorBoundary>
     </main>
-    {job && <JobConsole job={job} onUpdate={updateJob} navigate={navigate} onClose={() => { latestJob.current = undefined; setJob(undefined); }} />}
+    {job && <JobConsole job={job} onUpdate={updateJob} navigate={navigate} onClose={() => {
+      if (job) dismissJob(job.id);
+      latestJob.current = undefined;
+      setJob(undefined);
+    }} />}
   </div>;
 }
 
@@ -2171,7 +2226,7 @@ export function JobConsole({ job, onUpdate, onClose, navigate, initialQaComparis
       )}
       {diagnostic?.chapter && <a href={`/stories/${job.story}/chapters/${diagnostic.chapter}`}>Open chapter</a>}
       {job.status === "running" && ["batch", "audio", "audiobook", "subtitles", "video", "scenes", "artwork", "production"].includes(job.type) && <button type="button" onClick={() => void pause()}>Pause after chapter</button>}
-      {["completed", "failed", "paused"].includes(job.status) && <button type="button" onClick={onClose}>Close</button>}
+      <button type="button" onClick={onClose}>{terminal ? "Close" : "Dismiss"}</button>
     </div>
     {actionError && diagnostic && <p className="incident-action-error">{actionError}</p>}
   </aside>;
@@ -2306,7 +2361,35 @@ function formatDuration(seconds: number) { if (!Number.isFinite(seconds) || seco
 function formatBytes(bytes: number) { if (bytes < 1024) return `${bytes} B`; if (bytes < 1024 ** 2) return `${(bytes / 1024).toFixed(1)} KB`; return `${(bytes / 1024 ** 2).toFixed(1)} MB`; }
 function formatTime(seconds: number) { const minutes = Math.floor(Math.max(0, seconds) / 60); const rest = Math.floor(Math.max(0, seconds) % 60); return `${minutes}:${String(rest).padStart(2, "0")}`; }
 
-function isTerminalJob(job: Job) { return ["completed", "failed", "paused"].includes(job.status); }
+export function isTerminalJob(job: Job) { return ["completed", "failed", "paused"].includes(job.status); }
+export function dismissJob(jobId: string) {
+  try {
+    if (typeof sessionStorage !== "undefined") {
+      sessionStorage.setItem(`dismissed_job_${jobId}`, "true");
+    }
+  } catch {
+    // sessionStorage unavailable or restricted
+  }
+}
+export function isJobDismissed(jobId: string): boolean {
+  try {
+    if (typeof sessionStorage !== "undefined") {
+      return sessionStorage.getItem(`dismissed_job_${jobId}`) === "true";
+    }
+  } catch {
+    return false;
+  }
+  return false;
+}
+export function clearJobDismissal(jobId: string) {
+  try {
+    if (typeof sessionStorage !== "undefined") {
+      sessionStorage.removeItem(`dismissed_job_${jobId}`);
+    }
+  } catch {
+    // ignore
+  }
+}
 export function shouldRefreshAfterJob(previous: Job | undefined, next: Job) {
   // These read-only jobs own their result in the current workspace. Remounting
   // on completion discards that result before the page can render it.

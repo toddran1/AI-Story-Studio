@@ -421,6 +421,11 @@ export function createApiHandler(operations: StudioOperations) {
       }
       const importMatch = /^\/api\/stories\/([a-z0-9-]+)\/source\/import$/.exec(url.pathname);
       if (importMatch && request.method === "POST") { const input = z.object({ inspectionId: z.string().uuid(), allowGaps: z.boolean().default(false), overwriteExisting: z.boolean().default(false) }).parse(await jsonBody(request)); return send(response, 200, await operations.importInspection(importMatch[1]!, input.inspectionId, input.allowGaps, input.overwriteExisting)); }
+      const activeJobMatch = /^\/api\/stories\/([a-z0-9-]+)\/jobs\/active$/.exec(url.pathname);
+      if (activeJobMatch && request.method === "GET") {
+        const job = operations.getActiveStoryJob(activeJobMatch[1]!);
+        return send(response, 200, { job: job ? publicJob(job, operations.root) : null });
+      }
       const batchMatch = /^\/api\/stories\/([a-z0-9-]+)\/jobs\/batch$/.exec(url.pathname);
       if (batchMatch && request.method === "POST") return send(response, 202, operations.startBatch(batchMatch[1]!, await jsonBody(request)));
       const qaRecheckMatch = /^\/api\/stories\/([a-z0-9-]+)\/chapters\/(\d+)\/qa\/recheck$/.exec(url.pathname);

@@ -59,6 +59,17 @@ export class JobManager {
   }
 
   get(id: string): Job | undefined { const job = this.jobs.get(id); return job ? structuredClone(job) : undefined; }
+  getActiveForStory(story: string): Job | undefined {
+    const activeId = this.activeStories.get(story);
+    if (activeId) {
+      const job = this.jobs.get(activeId);
+      if (job && (job.status === "queued" || job.status === "running")) return structuredClone(job);
+    }
+    const activeJobs = [...this.jobs.values()]
+      .filter((job) => job.story === story && (job.status === "queued" || job.status === "running"))
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+    return activeJobs[0] ? structuredClone(activeJobs[0]) : undefined;
+  }
   list(): Job[] { return [...this.jobs.values()].map((job) => structuredClone(job)).sort((a, b) => b.createdAt.localeCompare(a.createdAt)); }
   subscribe(id: string, listener: (job: Job) => void): (() => void) | undefined {
     const job = this.get(id); if (!job) return undefined;

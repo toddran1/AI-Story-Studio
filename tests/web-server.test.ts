@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { getAudioDashboard, getChapter, getChapterPage, getQaDashboard, getScenesDashboard, getStoryDashboard, getStoryOverview, getVideoDashboard, listStories, updateStorySettings } from "../apps/server/catalog.js";
 import { Job, JobManager } from "../apps/server/job-manager.js";
 import { StudioOperations } from "../apps/server/operations.js";
@@ -27,7 +27,9 @@ import { AudiobookProcessor } from "../src/audio/audiobook.js";
 import { VideoProcessor } from "../src/video/renderer.js";
 import { VideoExportProcessor } from "../src/video/video-export.js";
 import { ImageProvider } from "../src/artwork/provider.js";
-import { chapterParam, continuityStatusFilter, entitySortFilter, entityTypeFilter, integerParam, publicJob, statusFor, validateLocalRequest, validationIssues } from "../apps/server/api.js";
+import { chapterParam, continuityStatusFilter, createApiHandler, entitySortFilter, entityTypeFilter, integerParam, publicJob, statusFor, validateLocalRequest, validationIssues } from "../apps/server/api.js";
+import { PassThrough, Readable } from "node:stream";
+import type { IncomingMessage, ServerResponse } from "node:http";
 import { z } from "zod";
 import { SourceConflictError, SourceInputError, SourceUpstreamError, SourceValidationError } from "../src/source/errors.js";
 import { ConfigurationError, SceneError } from "../src/pipeline/errors.js";
@@ -404,6 +406,78 @@ describe("web service layer", () => {
     await operations.updateSummary(story.slug, id, { text: "A manual recap." }); expect((await operations.getSummary(story.slug, id)).manuallyEdited).toBe(true);
     const regenerated = await waitForJob(jobs, operations.regenerateSummary(story.slug, id, {}).id); expect(regenerated.status).toBe("completed");
     await operations.deleteSummary(story.slug, id); expect(await operations.listSummaries(story.slug)).toEqual([]); await operations.close();
+  });
+
+  it("discovers active story jobs and exposes them via GET /api/stories/:slug/jobs/active", async () => {
+    const { root, story } = await storyFixture();
+    const jobs = new JobManager();
+    const operations = new StudioOperations(root, env, jobs);
+    const handler = createApiHandler(operations);
+
+    const callApi = async (urlPath: string) => {
+      const req = Object.assign(Readable.from([]), {
+        method: "GET",
+        url: urlPath,
+        headers: { host: "localhost:3000" },
+      });
+      const headers: Record<string, unknown> = {};
+      let status = 0;
+      const chunks: Buffer[] = [];
+      const res = Object.assign(new PassThrough(), {
+        setHeader: (name: string, value: unknown) => { headers[name] = value; },
+        writeHead: (code: number, values?: object) => {
+          status = code;
+          if (values) Object.assign(headers, values);
+        },
+      });
+      res.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+      const done = new Promise<void>((resolve) => res.on("finish", resolve));
+      await handler(req as unknown as IncomingMessage, res as unknown as ServerResponse);
+      await done;
+      return { status, body: JSON.parse(Buffer.concat(chunks).toString() || "{}") };
+    };
+
+    // 1. Initial state: no active job for this story
+    expect(jobs.getActiveForStory(story.slug)).toBeUndefined();
+    const initialRes = await callApi(`/api/stories/${story.slug}/jobs/active`);
+    expect(initialRes.status).toBe(200);
+    expect(initialRes.body).toEqual({ job: null });
+
+    // 2. Start a running job
+    let finishJob!: (result: unknown) => void;
+    const runningJob = jobs.create("batch", story.slug, () => new Promise((resolve) => { finishJob = resolve; }));
+    expect(jobs.getActiveForStory(story.slug)?.id).toBe(runningJob.id);
+    expect(["queued", "running"]).toContain(jobs.getActiveForStory(story.slug)?.status);
+    await vi.waitFor(() => expect(jobs.getActiveForStory(story.slug)?.status).toBe("running"));
+
+    // 3. GET /api/stories/:slug/jobs/active returns the active job
+    const activeRes = await callApi(`/api/stories/${story.slug}/jobs/active`);
+    expect(activeRes.status).toBe(200);
+    expect(activeRes.body.job).toMatchObject({ id: runningJob.id, status: "running", story: story.slug });
+
+    // 4. Other story does not see this active job
+    expect(jobs.getActiveForStory("other-story")).toBeUndefined();
+    const otherRes = await callApi(`/api/stories/other-story/jobs/active`);
+    expect(otherRes.status).toBe(200);
+    expect(otherRes.body).toEqual({ job: null });
+
+    // 5. Complete the job: it is no longer active
+    finishJob({ ok: true });
+    await waitForJob(jobs, runningJob.id);
+    expect(jobs.getActiveForStory(story.slug)).toBeUndefined();
+    const completedRes = await callApi(`/api/stories/${story.slug}/jobs/active`);
+    expect(completedRes.status).toBe(200);
+    expect(completedRes.body).toEqual({ job: null });
+
+    // 6. Multiple active jobs: newest is returned deterministically
+    const jobOld: Job = { id: "11111111-1111-4111-8111-111111111111", type: "batch", story: story.slug, status: "running", createdAt: "2026-09-18T10:00:00.000Z", updatedAt: "2026-09-18T10:00:00.000Z" };
+    const jobNew: Job = { id: "22222222-2222-4222-8222-222222222222", type: "production", story: story.slug, status: "running", createdAt: "2026-09-18T11:00:00.000Z", updatedAt: "2026-09-18T11:00:00.000Z" };
+    (jobs as any).jobs.set(jobOld.id, jobOld);
+    (jobs as any).jobs.set(jobNew.id, jobNew);
+    (jobs as any).activeStories.delete(story.slug);
+    expect(jobs.getActiveForStory(story.slug)?.id).toBe(jobNew.id);
+
+    await operations.close();
   });
 });
 

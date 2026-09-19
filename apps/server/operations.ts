@@ -1058,6 +1058,11 @@ export class StudioOperations {
 
   startArtwork(slug: string, raw: unknown) { slugSchema.parse(slug); const input = artworkJobSchema.parse(raw); return this.jobs.create("artwork", slug, async (control) => withStoryLock(this.root, slug, "web artwork generation", async () => { const story = await loadStory(storyPaths(this.root, slug, 1).storyConfig); const selected = selectChapterRange((await loadImportedChapters(this.root, slug)).chapters, input.from, input.to); const shutdown = new ShutdownController(); control.setPause(() => shutdown.request()); let generated = 0; let estimate = 0; for (let index = 0; index < selected.length; index++) { if (shutdown.isRequested) return { status: "paused", generated, estimate }; const chapter = selected[index]!.chapter; const result = await withUsageScope({story:slug,chapter,stage:"artwork"},()=>generateStoredArtwork({ root: this.root, story, chapter, provider: this.image, sceneId: input.scene, force: input.force, dryRun: input.dryRun, onProgress: (event) => control.update({ ...event, chapterIndex: index + 1, chapterTotal: selected.length }) })); generated += "generated" in result ? result.generated ?? 0 : 0; estimate += result.imagesToGenerate; } return { dryRun: input.dryRun, generated, imageCountEstimate: estimate, chapters: selected.length }; }), raw); }
 
+  getActiveStoryJob(slug: string) {
+    slugSchema.parse(slug);
+    return this.jobs.getActiveForStory(slug);
+  }
+
   async retryJob(id: string) {
     const job = this.jobs.get(id);
     if (!job) throw new Error(`Job '${id}' was not found`);
