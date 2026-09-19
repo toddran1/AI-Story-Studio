@@ -119,3 +119,213 @@
 .qa-exception-reason{color:var(--muted);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .qa-exception-form{display:grid;grid-template-columns:repeat(4,1fr) auto;gap:10px;align-items:end}
 @media(max-width:900px){.qa-exception-form{grid-template-columns:1fr 1fr}.qa-attention-head{display:grid}}
+
+/* Chapter Workspace UX — Sticky Header, Stage Actions & Coordinated Compare */
+.chapter-workspace-header {
+  position: sticky;
+  top: 91px;
+  z-index: 9;
+  background: rgba(9, 9, 11, 0.95);
+  backdrop-filter: blur(16px);
+  border-bottom: 1px solid var(--line);
+  margin: -42px calc(-1 * clamp(24px, 4vw, 62px)) 24px;
+  padding: 18px clamp(24px, 4vw, 62px) 0;
+  transition: background 0.15s ease;
+}
+
+.chapter-workspace-main {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 14px;
+}
+
+.chapter-workspace-title-group h2 {
+  font: 500 clamp(22px, 2.5vw, 32px)/1.1 var(--serif);
+  margin: 3px 0 0;
+  letter-spacing: -0.02em;
+}
+
+.chapter-workspace-nav {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.chapter-workspace-sub {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.chapter-workspace-sub .tabs {
+  margin-bottom: 0;
+  border-bottom: none;
+}
+
+.chapter-stage-action {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  white-space: nowrap;
+  margin-bottom: 6px;
+}
+
+.stage-status-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font: 9px var(--mono);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.stage-status-indicator i {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  display: inline-block;
+}
+
+.stage-status-indicator.stage-status-current {
+  color: var(--pass);
+}
+
+.stage-status-indicator.stage-status-current i {
+  background: var(--pass);
+  box-shadow: 0 0 6px rgba(54, 184, 138, 0.4);
+}
+
+.stage-status-indicator.stage-status-stale {
+  color: var(--warn);
+}
+
+.stage-status-indicator.stage-status-stale i {
+  background: var(--warn);
+  box-shadow: 0 0 6px rgba(223, 166, 75, 0.4);
+}
+
+.stage-status-indicator.stage-status-missing {
+  color: var(--muted);
+}
+
+.stage-status-indicator.stage-status-missing i {
+  border: 1px solid var(--muted);
+  background: transparent;
+}
+
+.stage-status-indicator.stage-status-failed {
+  color: var(--fail);
+}
+
+.stage-status-indicator.stage-status-failed i {
+  background: var(--fail);
+  box-shadow: 0 0 6px rgba(219, 93, 104, 0.4);
+}
+
+.stage-status-indicator.stage-status-running {
+  color: var(--violet-soft);
+}
+
+.stage-status-indicator.stage-status-running i {
+  background: var(--violet-soft);
+  animation: stage-pulse-dot 1.2s infinite ease-in-out;
+}
+
+@keyframes stage-pulse-dot {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.35; transform: scale(0.75); }
+}
+
+/* 3-Column Coordinated Compare Layout */
+.manuscript-split.three {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+  align-items: start;
+  margin-top: 14px;
+}
+
+.manuscript-split.three .manuscript-header {
+  position: sticky;
+  top: 195px;
+  z-index: 7;
+  background: #16161c;
+  border-bottom: 1px solid var(--line);
+  border-top-left-radius: 7px;
+  border-top-right-radius: 7px;
+}
+
+.compare-text-editor {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.compare-text-editor textarea {
+  width: 100%;
+  min-height: 420px;
+  field-sizing: content;
+  background: #0e0e12;
+  border: none;
+  border-bottom: 1px solid var(--line);
+  color: #d8d6d2;
+  font: 400 16px/1.8 var(--serif);
+  padding: 20px;
+  box-sizing: border-box;
+  resize: vertical;
+  outline: none;
+}
+
+.compare-text-editor textarea:focus {
+  background: #111116;
+}
+
+.compare-editor-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  border-top: 1px solid var(--line);
+  background: #141419;
+  font-size: 11px;
+  color: var(--muted);
+  border-bottom-left-radius: 7px;
+  border-bottom-right-radius: 7px;
+}
+
+@media (max-width: 1100px) {
+  .manuscript-split.three {
+    grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  }
+  .chapter-workspace-main {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .chapter-workspace-sub {
+    flex-wrap: wrap;
+  }
+}
+
+@media (max-width: 720px) {
+  .chapter-workspace-header {
+    top: 72px;
+    margin: -28px -16px 20px;
+    padding: 14px 16px 0;
+  }
+  .manuscript-split.three {
+    grid-template-columns: 1fr;
+  }
+  .manuscript-split.three .manuscript-header {
+    top: 160px;
+  }
+  .chapter-stage-action {
+    width: 100%;
+    justify-content: space-between;
+    margin-top: 8px;
+    padding-bottom: 10px;
+  }
+}

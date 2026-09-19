@@ -1,4 +1,5 @@
 import { Component, ErrorInfo, FormEvent, ReactNode, useDeferredValue, useEffect, useRef, useState } from "react";
+import type { StageName } from "../../../src/domain/chapter.js";
 import { api, AudioDashboard, ChapterDetail, ChapterQaDetail, ChapterRow, CostAnalytics, Counts, del, ErrorDiagnostic, formatDiagnostic, Job, Model, OutputItem, post, put, ProductionManifest, ProductionPlan, QaException, QaExceptionMatchKind, QaFinding, QaRecheckSummary, QaResult, Scene, ScenesDashboard, StoryCard, StoryConfig, StoryDashboard, VideoDashboard } from "./api.js";
 import { ArtifactStatusNotice } from "./ArtifactStatusNotice.js";
 import { pretty } from "./format.js";
@@ -174,7 +175,7 @@ export function App({ initialJob, initialRoute }: { initialJob?: Job; initialRou
         {route.page === "review" && <NeedsReviewPage navigate={navigate} />}
         {route.page === "manage" && route.story && <ManageStoryPage slug={route.story} navigate={navigate} />}
         {route.page === "story" && route.story && <StoryPage slug={route.story} navigate={navigate} onJob={updateJob} />}
-        {route.page === "chapter" && route.story && route.chapter && <ChapterPage slug={route.story} chapter={route.chapter} navigate={navigate} onJob={updateJob} />}
+        {route.page === "chapter" && route.story && route.chapter && <ChapterPage slug={route.story} chapter={route.chapter} navigate={navigate} onJob={updateJob} activeJob={job} />}
         {route.page === "qa" && route.story && <QaPage slug={route.story} navigate={navigate} />}
         {route.page === "preview" && route.story && <PreviewPage slug={route.story} onJob={updateJob} />}
         {route.page === "bible" && route.story && <BiblePage slug={route.story} navigate={navigate} />}
@@ -313,29 +314,480 @@ function MarkCurrentDialog({ slug, chapters, onClose, onDone }: { slug: string; 
   return <div className="stage-modal-backdrop" role="presentation"><section className="stage-modal" role="dialog" aria-modal="true" aria-labelledby="mark-current-title"><header><div><span className="eyebrow">Artifact acceptance</span><h3 id="mark-current-title">Mark stages current</h3></div><button className="button" onClick={onClose}>Close</button></header><p>Keep existing artifact and accept it as valid for current configuration. No generation will run.</p>{error && <ErrorBox text={error} />}{!preview ? <Loading /> : <div className="stage-choices">{preview.stages.map((item: any) => <label key={item.stage} className={item.eligible ? "" : "disabled"}><input type="checkbox" disabled={!item.eligible} checked={stages.includes(item.stage)} onChange={(event) => setStages((current) => event.target.checked ? [...current, item.stage] : current.filter((stage) => stage !== item.stage))} /><span><b>{pretty(item.stage)}</b><small>{item.eligible} stale artifact{item.eligible === 1 ? "" : "s"} can be accepted · {item.current} already current{item.manuallyAccepted ? ` (${item.manuallyAccepted} manually accepted)` : ""} · {item.missing + item.ineligible} unavailable{item.reason ? ` · ${item.reason}` : ""}</small></span></label>)}</div>}<label className="field"><span>Acceptance note (optional)</span><input value={reason} maxLength={500} placeholder="Why this retained artifact is acceptable" onChange={(event) => setReason(event.target.value)} /></label><footer><small>Future input or settings changes will make accepted stages stale again.</small><button className="button primary" disabled={!stages.length || working} onClick={() => void accept()}>{working ? "Marking current…" : "Mark current"}</button></footer></section></div>;
 }
 
-function ChapterPage({ slug, chapter, navigate, onJob }: { slug: string; chapter: number; navigate: (path: string) => void; onJob: (job: Job) => void }) {
+export const EXECUTABLE_CHAPTER_STAGES: Record<string, { stage: StageName; label: string }> = {
+  translation: { stage: "translation", label: "Translation" },
+  narration: { stage: "narration", label: "Narration" },
+  quality: { stage: "qa", label: "QA" },
+  context: { stage: "storyBible", label: "Story Bible" },
+  audio: { stage: "audioMastering", label: "Audio" },
+  subtitles: { stage: "subtitles", label: "Subtitles" },
+  scenes: { stage: "scenePlanning", label: "Scenes" },
+  artwork: { stage: "artwork", label: "Artwork" },
+  video: { stage: "video", label: "Video" },
+};
+
+export function getStageActionDetails({
+  tab,
+  data,
+  working,
+  activeJob,
+  chapter,
+}: {
+  tab: string;
+  data: ChapterDetail;
+  working: string;
+  activeJob?: Job;
+  chapter: number;
+}): {
+  stage: StageName;
+  label: string;
+  statusClass: "pass" | "warn" | "fail" | "pending";
+  statusText: string;
+  buttonText: string;
+  actionLabel: string;
+  disabled: boolean;
+  isRunning: boolean;
+} | undefined {
+  const stageEntry = EXECUTABLE_CHAPTER_STAGES[tab];
+  if (!stageEntry) return undefined;
+  const { stage, label } = stageEntry;
+
+  const jobIsRunning = Boolean(
+    activeJob &&
+    !isTerminalJob(activeJob) &&
+    (activeJob.progress?.chapter === chapter || (!activeJob.progress?.chapter && activeJob.status === "running")) &&
+    (activeJob.progress?.stage === stage || activeJob.progress?.event?.stage === stage || activeJob.type === "stageExecution" || activeJob.type === "batch")
+  );
+  const isRunning = working === stage || jobIsRunning;
+
+  if (isRunning) {
+    return {
+      stage,
+      label,
+      statusClass: "pass",
+      statusText: "Running",
+      buttonText: `Processing…`,
+      actionLabel: `Processing ${label}`,
+      disabled: true,
+      isRunning: true,
+    };
+  }
+
+  const stageMeta = data.metadata?.stages?.[stage];
+  if (stageMeta?.status === "failed") {
+    return {
+      stage,
+      label,
+      statusClass: "fail",
+      statusText: "Failed",
+      buttonText: `Retry ${label}`,
+      actionLabel: `Retry ${label}`,
+      disabled: false,
+      isRunning: false,
+    };
+  }
+
+  let exists = false;
+  let isStale = false;
+  switch (stage) {
+    case "translation":
+      exists = Boolean(data.translation);
+      isStale = Boolean(data.stale || data.metadata?.stages?.translation?.staleReason);
+      break;
+    case "narration":
+      exists = Boolean(data.narration);
+      isStale = Boolean(data.stale || data.metadata?.stages?.narration?.staleReason);
+      break;
+    case "qa":
+      exists = Boolean(data.qa);
+      isStale = Boolean(data.qaStale);
+      break;
+    case "storyBible":
+      exists = Boolean(data.storyContext);
+      isStale = Boolean(data.storyContextStale);
+      break;
+    case "audioMastering":
+      exists = Boolean(data.audioAvailable || data.audioUrl);
+      isStale = Boolean(data.audioStale);
+      break;
+    case "subtitles":
+      exists = Boolean(data.subtitles || data.subtitleDocument);
+      isStale = Boolean(data.subtitlesStale);
+      break;
+    case "scenePlanning":
+      exists = Boolean(data.metadata?.stages?.scenePlanning?.status === "complete");
+      isStale = Boolean(data.metadata?.stages?.scenePlanning?.staleReason);
+      break;
+    case "artwork":
+      exists = Boolean(data.metadata?.stages?.artwork?.status === "complete");
+      isStale = Boolean(data.metadata?.stages?.artwork?.staleReason);
+      break;
+    case "video":
+      exists = Boolean(data.videoUrl);
+      isStale = Boolean(data.videoStale);
+      break;
+  }
+
+  if (exists) {
+    if (isStale) {
+      return {
+        stage,
+        label,
+        statusClass: "warn",
+        statusText: "Stale",
+        buttonText: stage === "qa" ? "Recheck QA" : stage === "storyBible" ? "Update Story Bible" : `Regenerate ${label}`,
+        actionLabel: stage === "qa" ? "Recheck QA" : stage === "storyBible" ? "Update Story Bible" : `Regenerate ${label}`,
+        disabled: false,
+        isRunning: false,
+      };
+    }
+    return {
+      stage,
+      label,
+      statusClass: "pass",
+      statusText: "Current",
+      buttonText: stage === "qa" ? "Recheck QA" : stage === "storyBible" ? "Update Story Bible" : `Regenerate ${label}`,
+      actionLabel: stage === "qa" ? "Recheck QA" : stage === "storyBible" ? "Update Story Bible" : `Regenerate ${label}`,
+      disabled: false,
+      isRunning: false,
+    };
+  }
+
+  return {
+    stage,
+    label,
+    statusClass: "pending",
+    statusText: "Not generated",
+    buttonText: stage === "translation" ? "Run Translation" : stage === "qa" ? "Run QA" : stage === "storyBible" ? "Update Story Bible" : `Generate ${label}`,
+    actionLabel: stage === "translation" ? "Run Translation" : stage === "qa" ? "Run QA" : stage === "storyBible" ? "Update Story Bible" : `Generate ${label}`,
+    disabled: false,
+    isRunning: false,
+  };
+}
+
+export function ChapterPage({
+  slug,
+  chapter,
+  navigate,
+  onJob,
+  activeJob,
+  initialData,
+  initialTab: propInitialTab,
+}: {
+  slug: string;
+  chapter: number;
+  navigate: (path: string) => void;
+  onJob: (job: Job) => void;
+  activeJob?: Job;
+  initialData?: ChapterDetail;
+  initialTab?: string;
+}) {
   const chapterTabs = ["compare", "original", "translation", "narration", "quality", "context", "audio", "subtitles", "scenes", "artwork", "video"] as const;
-  const initialTab = () => { const selected = new URLSearchParams(location.search).get("tab"); return chapterTabs.includes(selected as typeof chapterTabs[number]) ? selected! : "compare"; };
-  const [data, setData] = useState<ChapterDetail>(); const [error, setError] = useState(""); const [tab, setTab] = useState(initialTab); const [draft, setDraft] = useState(""); const [compareDrafts, setCompareDrafts] = useState({ translation: "", narration: "" }); const [saved, setSaved] = useState(""); const [cues, setCues] = useState<any[]>([]); const [working, setWorking] = useState(""); const [markCurrentOpen, setMarkCurrentOpen] = useState(false); const watcher = useRef<(() => void) | undefined>(undefined);
+  const initialTab = () => {
+    if (propInitialTab && chapterTabs.includes(propInitialTab as typeof chapterTabs[number])) return propInitialTab;
+    const selected = new URLSearchParams(typeof location !== "undefined" ? location.search : "").get("tab");
+    return chapterTabs.includes(selected as typeof chapterTabs[number]) ? selected! : "compare";
+  };
+  const [data, setData] = useState<ChapterDetail | undefined>(initialData);
+  const [error, setError] = useState("");
+  const [tab, setTab] = useState(initialTab);
+  const [draft, setDraft] = useState("");
+  const [compareDrafts, setCompareDrafts] = useState({ translation: "", narration: "" });
+  const [saved, setSaved] = useState("");
+  const [cues, setCues] = useState<any[]>([]);
+  const [working, setWorking] = useState("");
+  const [markCurrentOpen, setMarkCurrentOpen] = useState(false);
+  const watcher = useRef<(() => void) | undefined>(undefined);
+
   const load = () => api<ChapterDetail>(`/stories/${slug}/chapters/${chapter}`).then(setData);
-  useEffect(() => { setData(undefined); setError(""); void load().catch((value) => setError(message(value))); return () => watcher.current?.(); }, [slug, chapter]);
-  useEffect(() => { if (tab === "translation" || tab === "narration") setDraft(data?.[tab] ?? ""); }, [tab, data]);
-  useEffect(() => { setCompareDrafts({ translation: data?.translation ?? "", narration: data?.narration ?? "" }); }, [data?.translation, data?.narration]);
-  useEffect(() => { setCues(data?.subtitleDocument?.cues?.map((cue: any) => ({ ...cue })) ?? []); }, [data?.subtitleDocument]);
-  const saveText = async (field: "translation" | "narration", text: string) => { try { setError(""); setWorking(field); const result = await put<any>(`/stories/${slug}/chapters/${chapter}/text`, { field, text }); setSaved(`${pretty(field)} saved. Regenerate: ${result.invalidated.map(pretty).join(", ")}.`); await load(); } catch (value) { setError(message(value)); } finally { setWorking(""); } };
-  const runSubtitleJob = async (kind: "alignment" | "subtitles", forceEstimated = false) => { try { setError(""); setSaved(""); setWorking(kind); const body = kind === "alignment" ? { chapter, force: true, forceEstimated } : { from: chapter, to: chapter, force: true, forceEstimated }; const next = await post<Job>(`/stories/${slug}/jobs/${kind}`, body); onJob(next); watcher.current?.(); watcher.current = watchJob(next.id, async (job) => { onJob(job); if (job.status === "completed") { setWorking(""); await load(); } else if (job.status === "failed") { setWorking(""); setError(job.error ?? `${pretty(kind)} failed`); } }, (value) => { setWorking(""); setError(message(value)); }); } catch (value) { setWorking(""); setError(message(value)); } };
-  const saveCues = async () => { try { setError(""); setWorking("save"); await put(`/stories/${slug}/chapters/${chapter}/subtitles`, { cues: cues.map((cue, index) => ({ ...cue, index: index + 1, startSeconds: Number(cue.startSeconds), endSeconds: Number(cue.endSeconds) })) }); setSaved("Manual subtitle timing saved and protected from regeneration."); await load(); } catch (value) { setError(message(value)); } finally { setWorking(""); } };
-  const resetCues = async () => { if (!confirm("Discard protected manual subtitle edits and regenerate from the current alignment?")) return; try { setError(""); setWorking("reset"); await post(`/stories/${slug}/chapters/${chapter}/subtitles/reset`, {}); setSaved("Manual edits discarded and subtitles regenerated."); await load(); } catch (value) { setError(message(value)); } finally { setWorking(""); } };
-  const updateCue = (index: number, patch: Record<string, unknown>) => setCues((current) => current.map((cue, cueIndex) => cueIndex === index ? { ...cue, ...patch } : cue));
-  if (error) return <LoadFailure error={error} />; if (!data) return <Loading />;
-  const selectTab = (name: string) => { setTab(name); setSaved(""); const url = new URL(location.href); url.searchParams.set("tab", name); history.replaceState({}, "", url); };
+
+  useEffect(() => {
+    if (initialData) {
+      setData(initialData);
+      return;
+    }
+    setData(undefined);
+    setError("");
+    void load().catch((value) => setError(message(value)));
+    return () => watcher.current?.();
+  }, [slug, chapter]);
+
+  useEffect(() => {
+    if (tab === "translation" || tab === "narration") setDraft(data?.[tab] ?? "");
+  }, [tab, data]);
+
+  useEffect(() => {
+    setCompareDrafts({ translation: data?.translation ?? "", narration: data?.narration ?? "" });
+  }, [data?.translation, data?.narration]);
+
+  useEffect(() => {
+    setCues(data?.subtitleDocument?.cues?.map((cue: any) => ({ ...cue })) ?? []);
+  }, [data?.subtitleDocument]);
+
+  const saveText = async (field: "translation" | "narration", text: string) => {
+    try {
+      setError("");
+      setWorking(field);
+      const result = await put<any>(`/stories/${slug}/chapters/${chapter}/text`, { field, text });
+      setSaved(`${pretty(field)} saved. Regenerate: ${result.invalidated.map(pretty).join(", ")}.`);
+      await load();
+    } catch (value) {
+      setError(message(value));
+    } finally {
+      setWorking("");
+    }
+  };
+
+  const runStage = async (stage: StageName) => {
+    if (working) return;
+    try {
+      setError("");
+      setWorking(stage);
+      const next = await post<Job>(`/stories/${slug}/stages/run`, {
+        chapters: [chapter],
+        stage,
+        mode: "selected",
+      });
+      onJob(next);
+      watcher.current?.();
+      watcher.current = watchJob(
+        next.id,
+        async (job) => {
+          onJob(job);
+          if (isTerminalJob(job)) {
+            setWorking("");
+            await load();
+          }
+        },
+        (value) => {
+          setWorking("");
+          setError(message(value));
+        }
+      );
+    } catch (value) {
+      setWorking("");
+      setError(message(value));
+    }
+  };
+
+  const runSubtitleJob = async (kind: "alignment" | "subtitles", forceEstimated = false) => {
+    try {
+      setError("");
+      setSaved("");
+      setWorking(kind);
+      const body = kind === "alignment" ? { chapter, force: true, forceEstimated } : { from: chapter, to: chapter, force: true, forceEstimated };
+      const next = await post<Job>(`/stories/${slug}/jobs/${kind}`, body);
+      onJob(next);
+      watcher.current?.();
+      watcher.current = watchJob(
+        next.id,
+        async (job) => {
+          onJob(job);
+          if (job.status === "completed") {
+            setWorking("");
+            await load();
+          } else if (job.status === "failed") {
+            setWorking("");
+            setError(job.error ?? `${pretty(kind)} failed`);
+          }
+        },
+        (value) => {
+          setWorking("");
+          setError(message(value));
+        }
+      );
+    } catch (value) {
+      setWorking("");
+      setError(message(value));
+    }
+  };
+
+  const saveCues = async () => {
+    try {
+      setError("");
+      setWorking("save");
+      await put(`/stories/${slug}/chapters/${chapter}/subtitles`, {
+        cues: cues.map((cue, index) => ({
+          ...cue,
+          index: index + 1,
+          startSeconds: Number(cue.startSeconds),
+          endSeconds: Number(cue.endSeconds),
+        })),
+      });
+      setSaved("Manual subtitle timing saved and protected from regeneration.");
+      await load();
+    } catch (value) {
+      setError(message(value));
+    } finally {
+      setWorking("");
+    }
+  };
+
+  const resetCues = async () => {
+    if (!confirm("Discard protected manual subtitle edits and regenerate from the current alignment?")) return;
+    try {
+      setError("");
+      setWorking("reset");
+      await post(`/stories/${slug}/chapters/${chapter}/subtitles/reset`, {});
+      setSaved("Manual edits discarded and subtitles regenerated.");
+      await load();
+    } catch (value) {
+      setError(message(value));
+    } finally {
+      setWorking("");
+    }
+  };
+
+  const updateCue = (index: number, patch: Record<string, unknown>) =>
+    setCues((current) => current.map((cue, cueIndex) => (cueIndex === index ? { ...cue, ...patch } : cue)));
+
+  if (error) return <LoadFailure error={error} />;
+  if (!data) return <Loading />;
+
+  const selectTab = (name: string) => {
+    setTab(name);
+    setSaved("");
+    if (typeof location !== "undefined") {
+      const url = new URL(location.href);
+      url.searchParams.set("tab", name);
+      history.replaceState({}, "", url);
+    }
+  };
+
   const adjacentPath = (target: number) => `/stories/${slug}/chapters/${target}?tab=${encodeURIComponent(tab)}`;
-  return <section className="page reading-page"><div className="section-heading chapter-heading"><div><span className="eyebrow">Chapter {String(chapter).padStart(4, "0")}</span><h2>{data.metadata?.originalTitle ?? "Chapter review"}</h2></div><div className="chapter-heading-actions"><button className="button" onClick={() => setMarkCurrentOpen(true)}>Mark stages current</button><button className="chapter-step" disabled={!data.navigation?.previous} onClick={() => data.navigation?.previous && navigate(adjacentPath(data.navigation.previous.chapter))}><span aria-hidden="true">←</span><span><small>Previous</small>{data.navigation?.previous ? <b>Chapter {String(data.navigation.previous.chapter).padStart(4, "0")}</b> : <b>Start</b>}</span></button>{data.qa && <Status status={data.qaStale ? "warn" : data.qa.status} label={`${data.qaStale ? "retained · " : ""}${Math.round(data.qa.score * 100)} quality score`} />}<button className="chapter-step next" disabled={!data.navigation?.next} onClick={() => data.navigation?.next && navigate(adjacentPath(data.navigation.next.chapter))}><span><small>Next</small>{data.navigation?.next ? <b>Chapter {String(data.navigation.next.chapter).padStart(4, "0")}</b> : <b>End</b>}</span><span aria-hidden="true">→</span></button></div></div>{markCurrentOpen && <MarkCurrentDialog slug={slug} chapters={[chapter]} onClose={() => setMarkCurrentOpen(false)} onDone={() => { setMarkCurrentOpen(false); void load(); }} />}{data.stale && <ErrorBox text="This chapter's previous translation, narration, QA, and media were retained, but are marked stale because the import was classified as changed. Review them below or reprocess when you want to replace them." />}{data.metadata?.stages?.narration?.staleReason && <div className="naming-notice"><b>{data.metadata.stages.narration.manualReviewRequired ? "Manual narration preserved" : "AI narration is stale"}</b><br />{data.metadata.stages.narration.staleReason}. {data.metadata.stages.narration.manualReviewRequired ? "Review it and explicitly force narration regeneration only if you want to replace the manual edit." : "Start production to regenerate narration and its dependent outputs."}</div>}
-    <div className="tabs">{chapterTabs.map((name) => <button key={name} className={tab === name ? "active" : ""} onClick={() => selectTab(name)}>{name}</button>)}</div>
-    {tab === "compare" && <><div className="compare-edit-notice"><b>Correct while you compare</b><span>Edits preserve the original source and mark only dependent artifacts stale.</span></div><div className="manuscript-split three"><Manuscript title="Original" text={data.original} /><CompareTextEditor title="Translation" value={compareDrafts.translation} savedValue={data.translation} saving={working === "translation"} onChange={(translation) => setCompareDrafts((current) => ({ ...current, translation }))} onSave={() => void saveText("translation", compareDrafts.translation)} /><CompareTextEditor title="Narration" value={compareDrafts.narration} savedValue={data.narration} saving={working === "narration"} onChange={(narration) => setCompareDrafts((current) => ({ ...current, narration }))} onSave={() => void saveText("narration", compareDrafts.narration)} /></div>{saved && <p className="save-note">{saved}</p>}</>}
-    {tab === "original" && <Manuscript title="Original source" text={data.original} />}{(tab === "translation" || tab === "narration") && <>{data.metadata?.stages?.[tab]?.staleReason && <ArtifactStatusNotice status="stale" reason={`This ${tab} is stale: ${data.metadata.stages[tab].staleReason}. It remains visible and editable, but downstream artifacts will not treat it as current until it is regenerated or marked current.`} />}<div className="text-workspace"><div className="edit-warning"><b>Manual edit</b><span>Saving marks downstream artifacts stale. Paid stages will not run until you start production.</span></div><textarea value={draft} onChange={(event) => setDraft(event.target.value)} aria-label={`Edit ${tab}`} />{tab === "narration" && data.spokenText && data.spokenText !== data.narration && <details className="spoken-text-preview"><summary>View spoken text</summary><p>This provider-neutral TTS representation keeps your visible narration unchanged.</p><pre>{data.spokenText}</pre><VocalizationList transformations={data.speechTransformations} /></details>}{saved && <p className="save-note">{saved}</p>}<button className="button primary" disabled={!draft.trim() || draft === data[tab] || Boolean(working)} onClick={() => void saveText(tab, draft)}>{working === tab ? "Saving…" : `Save ${tab}`}</button></div></>}
-    {tab === "quality" && <><QaDetail slug={slug} chapter={chapter} onJob={onJob} onEditManually={() => selectTab("compare")} onChanged={() => void load()} />{saved && <p className="save-note">{saved}</p>}</>}{tab === "context" && (data.storyContext ? <>{data.storyContextStale && <ArtifactStatusNotice status="stale" reason="This context was generated from older chapter inputs or settings. You can still review it, but downstream processing will not treat it as current until it is regenerated or marked current." />}<div className="context-inspector"><div><span className="eyebrow">Bounded provider context</span><p>This exact structured subset was selected for the chapter from names, aliases, recent history, locks, and relationships.</p></div><pre>{JSON.stringify(data.storyContext, null, 2)}</pre></div></> : <Empty title="No context snapshot yet" text="Process this chapter to create an inspectable bounded Story Bible context." />)}{tab === "audio" && <>{data.audioStale && <ArtifactStatusNotice status="stale" reason="This master was rendered from older inputs or settings. You can still listen to it, but it will not be treated as current until it is regenerated or marked current." />}<AudioDeck src={data.audioUrl} title={`Chapter ${chapter} master`} /></>}{tab === "subtitles" && <SubtitleWorkspace data={data} cues={cues} working={working} onCue={updateCue} onAlign={(estimated) => void runSubtitleJob("alignment", estimated)} onGenerate={(estimated) => void runSubtitleJob("subtitles", estimated)} onSave={() => void saveCues()} onReset={() => void resetCues()} />}{(tab === "scenes" || tab === "artwork") && <>{(data.metadata?.stages?.[tab === "scenes" ? "scenePlanning" : "artwork"]?.staleReason) && <ArtifactStatusNotice status="stale" reason={`The ${tab} stage is stale: ${data.metadata.stages[tab === "scenes" ? "scenePlanning" : "artwork"].staleReason}. Existing ${tab} artifacts remain available in the visual development workspace.`} />}<Empty title={`Open ${tab} workspace`} text={`Review and edit Chapter ${chapter} ${tab} in the visual development workspace.`} action={<button className="button primary" onClick={() => navigate(`/stories/${slug}/scenes`)}>Open {tab}</button>} /></>}{tab === "video" && (data.videoUrl ? <>{data.videoStale && <ArtifactStatusNotice status="stale" reason="This video was rendered from older inputs or settings. You can still watch it, but it will not be treated as current until it is re-rendered or marked current." />}<video className="chapter-video-player" controls preload="metadata" src={data.videoUrl}><track kind="subtitles" src={data.subtitlesUrl} srcLang="en" label="English" /></video></> : <Empty title="No chapter video yet" text="Render this chapter from the Video workspace." />)}
-  </section>;
+  const stageAction = getStageActionDetails({ tab, data, working, activeJob, chapter });
+
+  return (
+    <section className="page reading-page">
+      <div className="chapter-workspace-header sticky">
+        <div className="chapter-workspace-main">
+          <div className="chapter-workspace-title">
+            <span className="eyebrow">Chapter {String(chapter).padStart(4, "0")}</span>
+            <h2>{data.metadata?.originalTitle ?? "Chapter review"}</h2>
+          </div>
+          <div className="chapter-heading-actions">
+            <button className="button" onClick={() => setMarkCurrentOpen(true)}>Mark stages current</button>
+            <button
+              className="chapter-step"
+              disabled={!data.navigation?.previous}
+              aria-label={data.navigation?.previous ? `Previous chapter ${data.navigation.previous.chapter}` : "Start of story"}
+              onClick={() => data.navigation?.previous && navigate(adjacentPath(data.navigation.previous.chapter))}
+            >
+              <span aria-hidden="true">←</span>
+              <span>
+                <small>Previous</small>
+                {data.navigation?.previous ? <b>Chapter {String(data.navigation.previous.chapter).padStart(4, "0")}</b> : <b>Start</b>}
+              </span>
+            </button>
+            {data.qa && <Status status={data.qaStale ? "warn" : data.qa.status} label={`${data.qaStale ? "retained · " : ""}${Math.round(data.qa.score * 100)} quality score`} />}
+            <button
+              className="chapter-step next"
+              disabled={!data.navigation?.next}
+              aria-label={data.navigation?.next ? `Next chapter ${data.navigation.next.chapter}` : "End of story"}
+              onClick={() => data.navigation?.next && navigate(adjacentPath(data.navigation.next.chapter))}
+            >
+              <span>
+                <small>Next</small>
+                {data.navigation?.next ? <b>Chapter {String(data.navigation.next.chapter).padStart(4, "0")}</b> : <b>End</b>}
+              </span>
+              <span aria-hidden="true">→</span>
+            </button>
+          </div>
+        </div>
+        <div className="chapter-workspace-sub">
+          <div className="tabs" role="tablist">
+            {chapterTabs.map((name) => (
+              <button
+                key={name}
+                role="tab"
+                aria-selected={tab === name}
+                className={tab === name ? "active" : ""}
+                onClick={() => selectTab(name)}
+              >
+                {name}
+              </button>
+            ))}
+          </div>
+          {stageAction && (
+            <div className="chapter-stage-action">
+              <Status status={stageAction.statusClass} label={stageAction.statusText} />
+              <button
+                type="button"
+                className={`button primary stage-action-button ${stageAction.isRunning ? "busy" : ""}`}
+                disabled={stageAction.disabled || Boolean(working)}
+                aria-busy={stageAction.isRunning}
+                aria-label={`${stageAction.actionLabel} for Chapter ${chapter}`}
+                onClick={() => void runStage(stageAction.stage)}
+              >
+                {stageAction.buttonText}
+              </button>
+            </div>
+          )}
+        </div>
+      </div>
+      {markCurrentOpen && <MarkCurrentDialog slug={slug} chapters={[chapter]} onClose={() => setMarkCurrentOpen(false)} onDone={() => { setMarkCurrentOpen(false); void load(); }} />}
+      {data.stale && <ErrorBox text="This chapter's previous translation, narration, QA, and media were retained, but are marked stale because the import was classified as changed. Review them below or reprocess when you want to replace them." />}
+      {data.metadata?.stages?.narration?.staleReason && <div className="naming-notice"><b>{data.metadata.stages.narration.manualReviewRequired ? "Manual narration preserved" : "AI narration is stale"}</b><br />{data.metadata.stages.narration.staleReason}. {data.metadata.stages.narration.manualReviewRequired ? "Review it and explicitly force narration regeneration only if you want to replace the manual edit." : "Start production to regenerate narration and its dependent outputs."}</div>}
+      {tab === "compare" && <>
+        <div className="compare-edit-notice"><b>Correct while you compare</b><span>Edits preserve the original source and mark only dependent artifacts stale.</span></div>
+        <div className="manuscript-split three">
+          <Manuscript title="Original" text={data.original} />
+          <CompareTextEditor title="Translation" value={compareDrafts.translation} savedValue={data.translation} saving={working === "translation"} onChange={(translation) => setCompareDrafts((current) => ({ ...current, translation }))} onSave={() => void saveText("translation", compareDrafts.translation)} />
+          <CompareTextEditor title="Narration" value={compareDrafts.narration} savedValue={data.narration} saving={working === "narration"} onChange={(narration) => setCompareDrafts((current) => ({ ...current, narration }))} onSave={() => void saveText("narration", compareDrafts.narration)} />
+        </div>
+        {saved && <p className="save-note">{saved}</p>}
+      </>}
+      {tab === "original" && <Manuscript title="Original source" text={data.original} />}
+      {(tab === "translation" || tab === "narration") && <>
+        {data.metadata?.stages?.[tab]?.staleReason && <ArtifactStatusNotice status="stale" reason={`This ${tab} is stale: ${data.metadata.stages[tab].staleReason}. It remains visible and editable, but downstream artifacts will not treat it as current until it is regenerated or marked current.`} />}
+        <div className="text-workspace">
+          <div className="edit-warning"><b>Manual edit</b><span>Saving marks downstream artifacts stale. Paid stages will not run until you start production.</span></div>
+          <textarea value={draft} onChange={(event) => setDraft(event.target.value)} aria-label={`Edit ${tab}`} />
+          {tab === "narration" && data.spokenText && data.spokenText !== data.narration && (
+            <details className="spoken-text-preview">
+              <summary>View spoken text</summary>
+              <p>This provider-neutral TTS representation keeps your visible narration unchanged.</p>
+              <pre>{data.spokenText}</pre>
+              <VocalizationList transformations={data.speechTransformations} />
+            </details>
+          )}
+          {saved && <p className="save-note">{saved}</p>}
+          <button className="button primary" disabled={!draft.trim() || draft === data[tab] || Boolean(working)} onClick={() => void saveText(tab, draft)}>
+            {working === tab ? "Saving…" : `Save ${tab}`}
+          </button>
+        </div>
+      </>}
+      {tab === "quality" && <>
+        <QaDetail slug={slug} chapter={chapter} onJob={onJob} onEditManually={() => selectTab("compare")} onChanged={() => void load()} />
+        {saved && <p className="save-note">{saved}</p>}
+      </>}
+      {tab === "context" && (data.storyContext ? <>
+        {data.storyContextStale && <ArtifactStatusNotice status="stale" reason="This context was generated from older chapter inputs or settings. You can still review it, but downstream processing will not treat it as current until it is regenerated or marked current." />}
+        <div className="context-inspector">
+          <div>
+            <span className="eyebrow">Bounded provider context</span>
+            <p>This exact structured subset was selected for the chapter from names, aliases, recent history, locks, and relationships.</p>
+          </div>
+          <pre>{JSON.stringify(data.storyContext, null, 2)}</pre>
+        </div>
+      </> : <Empty title="No context snapshot yet" text="Process this chapter to create an inspectable bounded Story Bible context." />)}
+      {tab === "audio" && <>
+        {data.audioStale && <ArtifactStatusNotice status="stale" reason="This master was rendered from older inputs or settings. You can still listen to it, but it will not be treated as current until it is regenerated or marked current." />}
+        <AudioDeck src={data.audioUrl} title={`Chapter ${chapter} master`} />
+      </>}
+      {tab === "subtitles" && <SubtitleWorkspace data={data} cues={cues} working={working} onCue={updateCue} onAlign={(estimated) => void runSubtitleJob("alignment", estimated)} onGenerate={(estimated) => void runSubtitleJob("subtitles", estimated)} onSave={() => void saveCues()} onReset={() => void resetCues()} />}
+      {(tab === "scenes" || tab === "artwork") && <>
+        {data.metadata?.stages?.[tab === "scenes" ? "scenePlanning" : "artwork"]?.staleReason && <ArtifactStatusNotice status="stale" reason={`The ${tab} stage is stale: ${data.metadata.stages[tab === "scenes" ? "scenePlanning" : "artwork"].staleReason}. Existing ${tab} artifacts remain available in the visual development workspace.`} />}
+        <Empty title={`Open ${tab} workspace`} text={`Review and edit Chapter ${chapter} ${tab} in the visual development workspace.`} action={<button className="button primary" onClick={() => navigate(`/stories/${slug}/scenes`)}>Open {tab}</button>} />
+      </>}
+      {tab === "video" && (data.videoUrl ? <>
+        {data.videoStale && <ArtifactStatusNotice status="stale" reason="This video was rendered from older inputs or settings. You can still watch it, but it will not be treated as current until it is re-rendered or marked current." />}
+        <video className="chapter-video-player" controls preload="metadata" src={data.videoUrl}>
+          <track kind="subtitles" src={data.subtitlesUrl} srcLang="en" label="English" />
+        </video>
+      </> : <Empty title="No chapter video yet" text="Render this chapter from the Video workspace." />)}
+    </section>
+  );
 }
 
 function SubtitleWorkspace({ data, cues, working, onCue, onAlign, onGenerate, onSave, onReset }: { data: any; cues: any[]; working: string; onCue: (index: number, patch: Record<string, unknown>) => void; onAlign: (estimated: boolean) => void; onGenerate: (estimated: boolean) => void; onSave: () => void; onReset: () => void }) {
@@ -2203,7 +2655,7 @@ export function JobConsole({ job, onUpdate, onClose, navigate, initialQaComparis
     }
   };
   const isSceneJob = job.type === "scenes" || stage === "scenePlanning" || stage === "scenes";
-  const label = ({ batch: "Processing chapters", preview: "Rendering comparison", metadataTranslation: "Translating reader metadata", qaRepair: "Repairing selected QA findings", qaRecheck: "Rechecking chapter QA", summary: "Building story recap", audio: "Mastering chapter audio", audiobook: "Building audiobook", alignment: "Aligning narration to audio", subtitles: "Timing subtitles", video: "Rendering chapter video", videoExport: "Building combined video", scenes: "Planning chapter scenes", artwork: "Generating scene artwork", production: "Producing finished story" } as Record<string, string>)[job.type] ?? "Working";
+  const label = ({ batch: "Processing chapters", preview: "Rendering comparison", metadataTranslation: "Translating reader metadata", qaRepair: "Repairing selected QA findings", qaRecheck: "Rechecking chapter QA", stageExecution: "Processing stage", summary: "Building story recap", audio: "Mastering chapter audio", audiobook: "Building audiobook", alignment: "Aligning narration to audio", subtitles: "Timing subtitles", video: "Rendering chapter video", videoExport: "Building combined video", scenes: "Planning chapter scenes", artwork: "Generating scene artwork", production: "Producing finished story" } as Record<string, string>)[job.type] ?? "Working";
   const modelBadge = [diagnostic?.provider, diagnostic?.model].filter(Boolean).join(" · ");
   const terminal = isTerminalJob(job);
   const title = terminal ? (job.status === "completed" ? `${label} — completed` : `${label} — ${job.status}`) : label;
@@ -2295,7 +2747,7 @@ export function JobConsole({ job, onUpdate, onClose, navigate, initialQaComparis
             <button type="button" onClick={() => navigate?.(`/stories/${job.story}/settings`) ?? (location.href = `/stories/${job.story}/settings`)}>Open model settings</button>
           )}
           {diagnostic?.chapter && <a href={`/stories/${job.story}/chapters/${diagnostic.chapter}`}>Open chapter</a>}
-          {job.status === "running" && ["batch", "audio", "audiobook", "subtitles", "video", "scenes", "artwork", "production"].includes(job.type) && <button type="button" onClick={() => void pause()}>Pause after chapter</button>}
+          {job.status === "running" && ["batch", "stageExecution", "audio", "audiobook", "subtitles", "video", "scenes", "artwork", "production"].includes(job.type) && <button type="button" onClick={() => void pause()}>Pause after chapter</button>}
           <button type="button" onClick={onClose}>{terminal ? "Close" : "Dismiss"}</button>
         </div>
         {actionError && diagnostic && <p className="incident-action-error">{actionError}</p>}
@@ -2307,8 +2759,39 @@ export function JobConsole({ job, onUpdate, onClose, navigate, initialQaComparis
 function PresetEditor({ label, value, onChange }: { label: string; value: any; onChange: (value: any) => void }) { return <div className="preset"><span className="eyebrow">{label}</span>{(["translation", "narration", "qa"] as const).map((key) => <ModelEditor key={key} label={pretty(key)} value={value[key]} onChange={(next) => onChange({ ...value, [key]: next })} />)}</div>; }
 function ModelEditor({ label, value, onChange }: { label: string; value: Model; onChange: (value: Model) => void }) { return <div className="model-editor">{label ? <label>{label}</label> : null}<select value={value.provider} onChange={(e) => onChange({ ...value, provider: e.target.value as Model["provider"] })}><option value="openai">OpenAI</option><option value="gemini">Gemini</option><option value="kimi">Kimi</option></select><input value={value.model} onChange={(e) => onChange({ ...value, model: e.target.value })} /></div>; }
 function PreviewResult({ choice, result, onChoose }: { choice: "a" | "b"; result: any; onChoose: () => void }) { const qa = result[choice === "a" ? "qaA" : "qaB"]; return <article className="preview-result"><div className="preview-result-head"><span className="option-letter">{choice.toUpperCase()}</span><Status status={qa.status} label={`${Math.round(qa.score * 100)} score`} /></div><Manuscript title="Translation" text={result[choice === "a" ? "translationA" : "translationB"]} compact /><Manuscript title="Narration" text={result[choice === "a" ? "narrationA" : "narrationB"]} compact />{result[choice === "a" ? "audioA" : "audioB"] && <AudioDeck src={`/api/stories/${result.manifest.story}/previews/${result.manifest.id}/audio-${choice}`} title={`Option ${choice.toUpperCase()} sample`} />}<button className="button primary" onClick={onChoose}>Use option {choice.toUpperCase()}</button></article>; }
-function Manuscript({ title, text, compact }: { title: string; text?: string; compact?: boolean }) { return <article className={`manuscript ${compact ? "compact" : ""}`}><header><span>{title}</span><small className="mono">{text?.split(/\s+/).filter(Boolean).length ?? 0} words</small></header><div>{text ? text.split(/\n\n+/).map((paragraph, index) => <p key={index}>{paragraph}</p>) : <p className="empty-line">This stage has not produced text yet.</p>}</div></article>; }
-function CompareTextEditor({ title, value, savedValue, saving, onChange, onSave }: { title: string; value: string; savedValue?: string; saving: boolean; onChange: (value: string) => void; onSave: () => void }) { const changed = value !== (savedValue ?? ""); return <article className="manuscript compare-text-editor"><header><span>{title}</span><small className="mono">{value.split(/\s+/).filter(Boolean).length} words</small></header><textarea aria-label={`Edit ${title}`} value={value} onChange={(event) => onChange(event.target.value)} /><footer><span>{changed ? "Unsaved correction" : "Current version"}</span><button className="button primary" disabled={!value.trim() || !changed || saving} onClick={onSave}>{saving ? "Saving…" : `Save ${title}`}</button></footer></article>; }
+function Manuscript({ title, text, compact }: { title: string; text?: string; compact?: boolean }) { return <article className={`manuscript ${compact ? "compact" : ""}`}><header className="manuscript-header"><span>{title}</span><small className="mono">{text?.split(/\s+/).filter(Boolean).length ?? 0} words</small></header><div>{text ? text.split(/\n\n+/).map((paragraph, index) => <p key={index}>{paragraph}</p>) : <p className="empty-line">This stage has not produced text yet.</p>}</div></article>; }
+function CompareTextEditor({ title, value, savedValue, saving, onChange, onSave }: { title: string; value: string; savedValue?: string; saving: boolean; onChange: (value: string) => void; onSave: () => void }) {
+  const changed = value !== (savedValue ?? "");
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+
+  useEffect(() => {
+    const el = textareaRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${Math.max(420, el.scrollHeight)}px`;
+  }, [value]);
+
+  return (
+    <article className="manuscript compare-text-editor">
+      <header className="manuscript-header">
+        <span>{title}</span>
+        <small className="mono">{value.split(/\s+/).filter(Boolean).length} words</small>
+      </header>
+      <textarea
+        ref={textareaRef}
+        aria-label={`Edit ${title}`}
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+      />
+      <footer className="compare-editor-footer">
+        <span>{changed ? "Unsaved correction" : "Current version"}</span>
+        <button className="button primary" disabled={!value.trim() || !changed || saving} onClick={onSave}>
+          {saving ? "Saving…" : `Save ${title}`}
+        </button>
+      </footer>
+    </article>
+  );
+}
 const QA_FINDING_OUTCOME: Record<string, string> = { fixed_manual: "Fixed manually", fixed_ai: "Fixed with AI", dismissed: "Dismissed", obsolete: "Obsolete" };
 
 function guessExceptionValue(messageText: string) {

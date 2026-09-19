@@ -1,7 +1,7 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
-import { App, CanonicalEntitySheet, chapterPageSize, clearJobDismissal, clearJobMinimized, dismissJob, EntityStatusField, ErrorBoundary, isJobConsoleMinimized, isJobDismissed, isTerminalJob, JobConsole, paginateRows, QaDetail, QaFindingCard, QaResolvedFindings, ScenesPage, setJobConsoleMinimized, shouldRefreshAfterJob } from "../apps/web/src/App.js";
-import type { Job, QaFinding } from "../apps/web/src/api.js";
+import { App, CanonicalEntitySheet, chapterPageSize, ChapterPage, clearJobDismissal, clearJobMinimized, dismissJob, EntityStatusField, ErrorBoundary, EXECUTABLE_CHAPTER_STAGES, getStageActionDetails, isJobConsoleMinimized, isJobDismissed, isTerminalJob, JobConsole, paginateRows, QaDetail, QaFindingCard, QaResolvedFindings, ScenesPage, setJobConsoleMinimized, shouldRefreshAfterJob } from "../apps/web/src/App.js";
+import type { ChapterDetail, Job, QaFinding } from "../apps/web/src/api.js";
 import { pretty } from "../apps/web/src/format.js";
 import { ChapterImportPage, savedStorySourceUrl } from "../apps/web/src/ChapterImportPage.js";
 import { SummariesPage } from "../apps/web/src/SummariesPage.js";
@@ -884,5 +884,298 @@ describe("web UI", () => {
       expect(minimizedHtml).toContain("aria-label=\"Expand job console\"");
     });
   });
+
+  describe("Chapter Workspace UX: sticky header, stage actions, and coordinated compare", () => {
+    const mockChapterDetail: ChapterDetail = {
+      chapter: 2,
+      original: "第二章 启程\n\n阳光穿过古老的森林。",
+      translation: "Chapter 2: Departure\n\nSunlight filtered through the ancient forest.",
+      narration: "Chapter 2: Departure. Sunlight filtered through the ancient forest.",
+      navigation: {
+        previous: { chapter: 1 },
+        next: { chapter: 3 },
+      },
+      stale: false,
+      metadata: {
+        originalTitle: "Chapter 2: The Journey Begins",
+        stages: {
+          translation: { status: "complete", model: "gpt-4o" },
+          narration: { status: "complete", model: "gpt-4o" },
+        },
+      },
+    };
+
+    it("maps all executable chapter stages and excludes non-executable views", () => {
+      expect(EXECUTABLE_CHAPTER_STAGES.translation).toEqual({ stage: "translation", label: "Translation" });
+      expect(EXECUTABLE_CHAPTER_STAGES.narration).toEqual({ stage: "narration", label: "Narration" });
+      expect(EXECUTABLE_CHAPTER_STAGES.quality).toEqual({ stage: "qa", label: "QA" });
+      expect(EXECUTABLE_CHAPTER_STAGES.context).toEqual({ stage: "storyBible", label: "Story Bible" });
+      expect(EXECUTABLE_CHAPTER_STAGES.audio).toEqual({ stage: "audioMastering", label: "Audio" });
+      expect(EXECUTABLE_CHAPTER_STAGES.subtitles).toEqual({ stage: "subtitles", label: "Subtitles" });
+      expect(EXECUTABLE_CHAPTER_STAGES.scenes).toEqual({ stage: "scenePlanning", label: "Scenes" });
+      expect(EXECUTABLE_CHAPTER_STAGES.artwork).toEqual({ stage: "artwork", label: "Artwork" });
+      expect(EXECUTABLE_CHAPTER_STAGES.video).toEqual({ stage: "video", label: "Video" });
+
+      expect(EXECUTABLE_CHAPTER_STAGES.compare).toBeUndefined();
+      expect(EXECUTABLE_CHAPTER_STAGES.original).toBeUndefined();
+    });
+
+    it("calculates accurate stage action details across all stage lifecycle states", () => {
+      // 1. Compare and Original tabs return undefined
+      expect(getStageActionDetails({ tab: "compare", data: mockChapterDetail, working: "", chapter: 2 })).toBeUndefined();
+      expect(getStageActionDetails({ tab: "original", data: mockChapterDetail, working: "", chapter: 2 })).toBeUndefined();
+
+      // 2. Missing stage (not generated)
+      const missingDetails = getStageActionDetails({
+        tab: "audio",
+        data: mockChapterDetail,
+        working: "",
+        chapter: 2,
+      });
+      expect(missingDetails).toMatchObject({
+        stage: "audioMastering",
+        statusClass: "pending",
+        statusText: "Not generated",
+        buttonText: "Generate Audio",
+        disabled: false,
+      });
+
+      // 3. Current completed stage
+      const currentDetails = getStageActionDetails({
+        tab: "translation",
+        data: mockChapterDetail,
+        working: "",
+        chapter: 2,
+      });
+      expect(currentDetails).toMatchObject({
+        stage: "translation",
+        statusClass: "pass",
+        statusText: "Current",
+        buttonText: "Regenerate Translation",
+        disabled: false,
+      });
+
+      // 4. Stale stage
+      const staleData: ChapterDetail = {
+        ...mockChapterDetail,
+        metadata: {
+          stages: {
+            narration: { status: "complete", stale: true, staleReason: "Translation changed" },
+          },
+        },
+      };
+      const staleDetails = getStageActionDetails({
+        tab: "narration",
+        data: staleData,
+        working: "",
+        chapter: 2,
+      });
+      expect(staleDetails).toMatchObject({
+        stage: "narration",
+        statusClass: "warn",
+        statusText: "Stale",
+        buttonText: "Regenerate Narration",
+        disabled: false,
+      });
+
+      // 5. Failed stage
+      const failedData: ChapterDetail = {
+        ...mockChapterDetail,
+        metadata: {
+          stages: {
+            audioMastering: { status: "failed", error: "TTS synthesis timeout" },
+          },
+        },
+      };
+      const failedDetails = getStageActionDetails({
+        tab: "audio",
+        data: failedData,
+        working: "",
+        chapter: 2,
+      });
+      expect(failedDetails).toMatchObject({
+        stage: "audioMastering",
+        statusClass: "fail",
+        statusText: "Failed",
+        buttonText: "Retry Audio",
+        disabled: false,
+      });
+
+      // 6. Running stage in active job
+      const runningJob: Job = {
+        id: "job-run-stage-1",
+        type: "stageExecution",
+        story: "demo-story",
+        status: "running",
+        progress: { currentChapter: 2, stage: "narration" },
+      };
+      const runningDetails = getStageActionDetails({
+        tab: "narration",
+        data: mockChapterDetail,
+        working: "",
+        activeJob: runningJob,
+        chapter: 2,
+      });
+      expect(runningDetails).toMatchObject({
+        stage: "narration",
+        statusClass: "pass",
+        statusText: "Running",
+        buttonText: "Processing…",
+        disabled: true,
+        isRunning: true,
+      });
+
+      // 7. Local working state disables button
+      const workingDetails = getStageActionDetails({
+        tab: "translation",
+        data: mockChapterDetail,
+        working: "translation",
+        chapter: 2,
+      });
+      expect(workingDetails?.disabled).toBe(true);
+    });
+
+    it("renders sticky workspace header with main metadata row and sub tab/action row", () => {
+      const html = renderToStaticMarkup(
+        <ChapterPage
+          slug="demo-story"
+          chapter={2}
+          initialData={mockChapterDetail}
+          initialTab="translation"
+          onJob={() => undefined}
+        />
+      );
+
+      // Workspace header structure and sticky class
+      expect(html).toContain("chapter-workspace-header sticky");
+      expect(html).toContain("chapter-workspace-main");
+      expect(html).toContain("chapter-workspace-sub");
+
+      // Main row elements
+      expect(html).toContain("Chapter 0002");
+      expect(html).toContain("Chapter 2: The Journey Begins");
+      expect(html).toContain("Mark stages current");
+      expect(html).toContain("Previous");
+      expect(html).toContain("Chapter 0001");
+      expect(html).toContain("Next");
+      expect(html).toContain("Chapter 0003");
+
+      // Sub row elements
+      expect(html).toContain("chapter-stage-action");
+      expect(html).toContain("status pass");
+      expect(html).toContain("Current");
+      expect(html).toContain("Regenerate Translation");
+    });
+
+    it("preserves active ?tab= parameter when clicking Previous or Next chapter navigation", () => {
+      const navigated: string[] = [];
+      const mockNavigate = (url: string) => {
+        navigated.push(url);
+      };
+
+      // With initialTab="narration"
+      const narrationHtml = renderToStaticMarkup(
+        <ChapterPage
+          slug="demo-story"
+          chapter={2}
+          initialData={mockChapterDetail}
+          initialTab="narration"
+          navigate={mockNavigate}
+          onJob={() => undefined}
+        />
+      );
+
+      // Verify buttons exist and are enabled for adjacent chapters
+      expect(narrationHtml).toContain("Previous");
+      expect(narrationHtml).toContain("Chapter 0001");
+      expect(narrationHtml).toContain("Next");
+      expect(narrationHtml).toContain("Chapter 0003");
+
+      // With initialTab="compare"
+      const compareHtml = renderToStaticMarkup(
+        <ChapterPage
+          slug="demo-story"
+          chapter={2}
+          initialData={mockChapterDetail}
+          initialTab="compare"
+          navigate={mockNavigate}
+          onJob={() => undefined}
+        />
+      );
+
+      expect(compareHtml).toContain("Previous");
+      expect(compareHtml).toContain("Chapter 0001");
+      expect(compareHtml).toContain("Next");
+      expect(compareHtml).toContain("Chapter 0003");
+    });
+
+    it("renders 3-column coordinated Compare workspace with sticky column headers and word counts", () => {
+      const html = renderToStaticMarkup(
+        <ChapterPage
+          slug="demo-story"
+          chapter={2}
+          initialData={mockChapterDetail}
+          initialTab="compare"
+          onJob={() => undefined}
+        />
+      );
+
+      // 3-column split layout
+      expect(html).toContain("manuscript-split three");
+
+      // 3 column headers with sticky manuscript-header class
+      expect(html).toContain("manuscript-header");
+      expect(html).toContain("<span>Original</span>");
+      expect(html).toContain("<span>Translation</span>");
+      expect(html).toContain("<span>Narration</span>");
+
+      // Word count chips in each header
+      expect(html).toContain("words");
+
+      // Compare view must NOT have a stage action button in header
+      expect(html).not.toContain("chapter-stage-action");
+    });
+
+    it("Original tab has no stage action button", () => {
+      const html = renderToStaticMarkup(
+        <ChapterPage
+          slug="demo-story"
+          chapter={2}
+          initialData={mockChapterDetail}
+          initialTab="original"
+          onJob={() => undefined}
+        />
+      );
+
+      expect(html).not.toContain("chapter-stage-action");
+    });
+
+    it("renders stage action button for other executable tabs like audio, subtitles, and scenes", () => {
+      const audioHtml = renderToStaticMarkup(
+        <ChapterPage
+          slug="demo-story"
+          chapter={2}
+          initialData={mockChapterDetail}
+          initialTab="audio"
+          onJob={() => undefined}
+        />
+      );
+      expect(audioHtml).toContain("chapter-stage-action");
+      expect(audioHtml).toContain("Generate Audio");
+
+      const subtitlesHtml = renderToStaticMarkup(
+        <ChapterPage
+          slug="demo-story"
+          chapter={2}
+          initialData={mockChapterDetail}
+          initialTab="subtitles"
+          onJob={() => undefined}
+        />
+      );
+      expect(subtitlesHtml).toContain("chapter-stage-action");
+      expect(subtitlesHtml).toContain("Generate Subtitles");
+    });
+  });
 });
+
 
