@@ -19,10 +19,12 @@ import { FfmpegCensorAudioService } from "../src/tts/censor-audio.js";
 import {
   QualityGuardTTSProvider, SpeechTranscriber, compareSpokenText, defaultQualityThresholds, deliveryIntensityForAttempt,
   TtsQualityReport, TtsSegmentQuality, summarizeQuality,
+  TtsQualityReport, TtsSegmentQuality, summarizeQuality, tokenizeSpoken,
 } from "../src/tts/quality-guard.js";
 import {
   acceptStoredChapterTtsSegment, loadChapterTtsQuality, persistChapterTtsQuality, regenerateStoredChapterTtsSegment, ttsQualityArtifactSchema, verifyStoredChapterTts,
 } from "../src/tts/chapter-quality.js";
+import { FishAudioProvider } from "../src/tts/fish/fish-audio.provider.js";
 import { TTSProvider } from "../src/tts/provider.js";
 import { adaptPronunciationText, pronunciationProvider, resolvePronunciations } from "../src/tts/pronunciation.js";
 import { splitForTTS } from "../src/tts/split-text.js";
@@ -556,5 +558,252 @@ describe("tts quality server operations", () => {
     expect(response.quality.segments[1]).toMatchObject({ status: "manually_accepted", acceptedReason: "reviewed by ear" });
     expect(response.quality.status).not.toBe("verified");
     await operations.close();
+  });
+});
+
+describe("tts reliability and provenance hardening", () => {
+  describe("tokenizeSpoken non-destructive parsing", () => {
+    it("preserves ordinary brackets and parentheses while stripping known cues and speaker tags", () => {
+      const text = "<|speaker:0|>Subject [REDACTED] engaged protocol (Variant Two) with [laugh] and [sigh].";
+      const tokens = tokenizeSpoken(text);
+      expect(tokens).toContain("subject");
+      expect(tokens).toContain("redacted");
+      expect(tokens).toContain("protocol");
+      expect(tokens).toContain("variant");
+      expect(tokens).toContain("two");
+      // Must not contain speaker tag
+      expect(tokens).not.toContain("speaker");
+      // Must not contain control cues
+      expect(tokens).not.toContain("laugh");
+      expect(tokens).not.toContain("sigh");
+    });
+  });
+
+  describe("FishAudioProvider exactChunk and segmentTexts", () => {
+    it("produces exact segmentTexts with pronunciation, normalizations, and multi-speaker casting", async () => {
+      const sentBodies: Array<{ text: string }> = [];
+      const fetcher: typeof fetch = async (_url, init) => {
+        sentBodies.push(JSON.parse(init?.body as string));
+        return new Response(new Uint8Array([1, 2, 3, 4]), {
+          status: 200,
+          headers: { "content-type": "audio/mpeg", "x-request-id": "req-1" },
+        });
+      };
+      const provider = new FishAudioProvider("fake-key", fetcher);
+      const text = "Mr. Darcy said, \"Hello, Mara.\" The temperature was 100°F [laugh].";
+      const pronunciations = [{
+        entityId: "e1", surfaceText: "Mara", start: 24, end: 28,
+        pronunciation: { mode: "custom" as const, customPronunciation: "Mah-rah", source: "manual" as const },
+      }];
+      const result = await provider.synthesize({
+        text,
+        model: "s2-pro",
+        referenceId: "ref1",
+        secondaryReferenceId: "ref2",
+        voiceMode: "narrator-dialogue",
+        speed: 1,
+        format: "mp3",
+        sampleRate: 44100,
+        bitrate: 128,
+        normalize: true,
+        maxCharsPerRequest: 1750,
+        pronunciation: pronunciations,
+      });
+
+      expect(result.segmentTexts).toBeDefined();
+      expect(result.segmentTexts).toHaveLength(1);
+      const chunk = result.segmentTexts![0]!;
+      // Contains title replacement
+      expect(chunk).toContain("Mister Darcy");
+      // Contains pronunciation replacement
+      expect(chunk).toContain("Mah-rah");
+      // Contains unit replacement
+      expect(chunk).toContain("100 degrees Fahrenheit");
+      // Contains speaker tags from dialogue casting
+      expect(chunk).toContain("<|speaker:");
+      // Contains control cue disambiguation
+      expect(chunk).toContain("[laugh]");
+    });
+
+    it("synthesizes exactChunk without re-splitting, re-casting, or re-normalizing, preserving maxCharsPerRequest", async () => {
+      const sentBodies: Array<{ text: string }> = [];
+      const fetcher: typeof fetch = async (_url, init) => {
+        sentBodies.push(JSON.parse(init?.body as string));
+        return new Response(new Uint8Array([1, 2, 3, 4]), {
+          status: 200,
+          headers: { "content-type": "audio/mpeg", "x-request-id": "req-retry" },
+        });
+      };
+      const provider = new FishAudioProvider("fake-key", fetcher);
+      const exactText = "<|speaker:1|>Mister Darcy said, <|speaker:2|>\"Hello.\"";
+      const result = await provider.synthesize({
+        text: exactText,
+        exactChunk: true,
+        model: "s2-pro",
+        referenceId: "ref1",
+        secondaryReferenceId: "ref2",
+        voiceMode: "narrator-dialogue",
+        speed: 1,
+        format: "mp3",
+        sampleRate: 44100,
+        bitrate: 128,
+        normalize: true,
+        maxCharsPerRequest: 1750,
+      });
+      expect(sentBodies).toHaveLength(1);
+      expect(sentBodies[0]!.text).toBe(exactText);
+      expect(result.segmentTexts).toEqual([exactText]);
+    });
+  });
+
+  describe("QualityGuard chunk boundaries on retry", () => {
+    it("preserves original chunk limit on retry without inflating maxCharsPerRequest and passes exactChunk", async () => {
+      const chunk1 = "First segment of speech.";
+      const chunk2 = "Second segment of speech with error.";
+      const inner = new ScriptedTTS((req, call) => {
+        if (call === 1) {
+          const a = bytes("a");
+          const b = bytes("b");
+          return { audio: new Uint8Array([...a, ...b]), segments: [a, b], segmentTexts: [chunk1, chunk2], providerRequests: 2 };
+        }
+        // Retry call
+        expect(req.exactChunk).toBe(true);
+        expect(req.maxCharsPerRequest).toBe(1750); // NOT inflated
+        return singleSegment(req.text, "good");
+      });
+      const transcriber = new FakeTranscriber((audio) => {
+        const str = String.fromCharCode(audio[0]!);
+        if (str === "a") return say(chunk1);
+        if (str === "b") return say("corrupted gibberish words here");
+        return say(chunk2);
+      });
+      const result = await guard(inner, transcriber, 2).synthesize(request({ text: `${chunk1} ${chunk2}`, maxCharsPerRequest: 1750 }));
+      expect(inner.calls).toHaveLength(2);
+      expect(inner.calls[1]!.exactChunk).toBe(true);
+      expect(inner.calls[1]!.maxCharsPerRequest).toBe(1750);
+      expect(result.quality?.status).toBe("verified");
+    });
+  });
+
+  describe("Quality Guard lifecycle when transcriber unavailable", () => {
+    it("keeps audio usable and marks status unverified when transcriber is unavailable", async () => {
+      const text = "The rain stopped outside the station.";
+      const inner = new ScriptedTTS(() => singleSegment(text, "audio"));
+      const transcriber: SpeechTranscriber = {
+        name: "unavailable-whisper",
+        async validateConfiguration() { throw new ConfigurationError("whisper missing"); },
+        async transcribe() { throw new Error("not reachable"); },
+      };
+      const result = await new QualityGuardTTSProvider(inner, transcriber, { maxRetries: 2, language: "en-US" })
+        .synthesize(request({ text, qualityGuard: true }));
+      expect(result.audio).toBeDefined();
+      expect(result.segments).toHaveLength(1);
+      expect(result.quality).toBeDefined();
+      expect(result.quality?.status).toBe("unverified");
+      expect(result.quality?.segments[0]?.status).toBe("unverified");
+      expect(result.quality?.segments[0]?.issues[0]?.type).toBe("transcription_failed");
+    });
+
+    it("works with optional undefined transcriber and marks unverified", async () => {
+      const text = "The rain stopped outside the station.";
+      const inner = new ScriptedTTS(() => singleSegment(text, "audio"));
+      const result = await new QualityGuardTTSProvider(inner, undefined, { maxRetries: 2, language: "en-US" })
+        .synthesize(request({ text, qualityGuard: true }));
+      expect(result.quality?.status).toBe("unverified");
+      expect(result.quality?.segments[0]?.status).toBe("unverified");
+    });
+
+    it("skips quality report completely when qualityGuard is false", async () => {
+      const text = "The rain stopped outside the station.";
+      const inner = new ScriptedTTS(() => singleSegment(text, "audio"));
+      const transcriber = new FakeTranscriber(() => say(text));
+      const result = await guard(inner, transcriber).synthesize(request({ text, qualityGuard: false }));
+      expect(result.quality).toBeUndefined();
+    });
+  });
+
+  describe("Reverification and manual acceptance provenance", () => {
+    const goodText = "Mara opened the gate and walked through the yard.";
+    const badText = "The tower collapsed into the sea before dawn.";
+
+    async function qualityFixture() {
+      const root = await mkdtemp(join(tmpdir(), "tts-quality-regress-"));
+      const story = testStory();
+      const paths = storyPaths(root, story.slug, 1);
+      const now = new Date().toISOString();
+      const complete = { status: "complete" as const };
+      await atomicWriteJson(paths.chapterMeta, chapterSchema.parse({
+        chapter: 1, sourceLanguage: story.sourceLanguage, outputLanguage: story.outputLanguage,
+        counts: { originalCharacters: 10, englishWords: 10, narrationWords: 10 }, createdAt: now, updatedAt: now,
+        stages: { ingestion: complete, translation: complete, narration: complete, storyBible: complete, tts: complete, audioMastering: complete, alignment: complete, subtitles: complete },
+      }));
+      await atomicWrite(join(paths.segments, "0001.mp3"), bytes("aa"));
+      await atomicWrite(join(paths.segments, "0002.mp3"), bytes("bb"));
+      const report: TtsQualityReport = { version: 1, status: "needs_review", retried: 1, segments: [
+        { index: 0, expectedText: goodText, status: "verified", score: 1, issues: [], attempts: [{ attempt: 1, settings: { deliveryIntensity: "restrained" }, status: "pass", score: 1, issues: [] }], finalAttempt: 1 },
+        { index: 1, expectedText: badText, status: "needs_review", score: .2, issues: [{ type: "missing_speech", severity: .8 }], attempts: [{ attempt: 1, settings: { deliveryIntensity: "restrained" }, status: "needs_review", score: .2, issues: [] }], finalAttempt: 3 },
+      ] };
+      await persistChapterTtsQuality({ root, story, chapter: 1, report, maxRetries: 2, transcriber: "fake-transcriber" });
+      return { root, story, paths };
+    }
+
+    it("updates policy fingerprint and updatedAt without TTS call when re-verifying with new thresholds", async () => {
+      const { root, story } = await qualityFixture();
+      const transcriber = new FakeTranscriber(() => say(goodText));
+      const before = await loadChapterTtsQuality(root, story.slug, 1);
+      expect(before).toBeDefined();
+
+      await new Promise((r) => setTimeout(r, 10));
+
+      const updated = await verifyStoredChapterTts({
+        root, story, chapter: 1, transcriber,
+        thresholds: { passScore: 0.99 },
+      });
+      expect(updated.updatedAt).not.toBe(before!.updatedAt);
+      expect(updated.verificationPolicy.thresholds.passScore).toBe(0.99);
+      expect(updated.verificationPolicy.fingerprint).not.toBe(before!.verificationPolicy.fingerprint);
+      const meta = chapterSchema.parse(JSON.parse(await readFile(storyPaths(root, story.slug, 1).chapterMeta, "utf8")));
+      expect(meta.stages.tts.status).toBe("complete");
+    });
+
+    it("discards manual acceptance if segment audio on disk changed", async () => {
+      const { root, story, paths } = await qualityFixture();
+      const accepted = await acceptStoredChapterTtsSegment({ root, slug: story.slug, chapter: 1, segment: 1, reason: "approved" });
+      expect(accepted.segments[1]?.status).toBe("manually_accepted");
+      expect(accepted.segments[1]?.acceptedAudioFingerprint).toBeDefined();
+
+      await atomicWrite(join(paths.segments, "0002.mp3"), bytes("different-audio-bytes"));
+
+      const transcriber = new FakeTranscriber(() => say("different words spoken entirely"));
+      const reverified = await verifyStoredChapterTts({ root, story, chapter: 1, transcriber });
+
+      expect(reverified.segments[1]?.status).not.toBe("manually_accepted");
+      expect(reverified.segments[1]?.status).toBe("needs_review");
+    });
+
+    it("discards manual acceptance when segment is regenerated", async () => {
+      const { root, story } = await qualityFixture();
+      await acceptStoredChapterTtsSegment({ root, slug: story.slug, chapter: 1, segment: 1 });
+      const before = await loadChapterTtsQuality(root, story.slug, 1);
+      expect(before?.segments[1]?.status).toBe("manually_accepted");
+
+      const inner = new ScriptedTTS(() => singleSegment(badText, "new-regen-audio"));
+      const transcriber = new FakeTranscriber(() => say(badText));
+      const regenerated = await regenerateStoredChapterTtsSegment({
+        root, story, chapter: 1, segment: 1, provider: guard(inner, transcriber), maxRetries: 2,
+      });
+
+      expect(regenerated.segments[1]?.status).toBe("verified");
+      expect(regenerated.segments[1]?.acceptedAt).toBeUndefined();
+      expect(regenerated.segments[1]?.acceptedAudioFingerprint).toBeUndefined();
+    });
+
+    it("preserves manual acceptance across identical re-verification when audio is unchanged", async () => {
+      const { root, story } = await qualityFixture();
+      await acceptStoredChapterTtsSegment({ root, slug: story.slug, chapter: 1, segment: 1 });
+      const transcriber = new FakeTranscriber(() => say("words"));
+      const reverified = await verifyStoredChapterTts({ root, story, chapter: 1, transcriber });
+      expect(reverified.segments[1]?.status).toBe("manually_accepted");
+    });
   });
 });

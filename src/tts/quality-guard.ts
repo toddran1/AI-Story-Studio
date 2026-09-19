@@ -5,7 +5,9 @@ import { z } from "zod";
 import type { AlignmentObservation } from "../alignment/types.js";
 import { FfmpegTools } from "../audio/ffmpeg.js";
 import { atomicWrite } from "../storage/atomic-write.js";
+import { fingerprint } from "../utils/hash.js";
 import { logger } from "../utils/logger.js";
+import { FISH_S2_CONTROL_CUES } from "./fish/control-cues.js";
 import type { TTSProvider } from "./provider.js";
 import type { TTSRequest, TTSResult } from "./types.js";
 import { scanVocalizations } from "./vocalizations.js";
@@ -60,6 +62,10 @@ export const ttsSegmentQualitySchema = z.object({
   issues: z.array(ttsQualityIssueSchema).default([]),
   attempts: z.array(ttsQualityAttemptSchema).default([]),
   finalAttempt: z.number().int().nonnegative().default(0),
+  /** SHA-256 fingerprint of the current segment audio on disk. */
+  audioFingerprint: z.string().optional(),
+  /** Audio fingerprint at the time of manual acceptance. If audio changes, acceptance is discarded. */
+  acceptedAudioFingerprint: z.string().optional(),
   /** Set when a human deliberately accepts audio the guard could not verify. */
   acceptedAt: z.string().optional(),
   acceptedReason: z.string().max(500).optional(),
@@ -147,11 +153,29 @@ function numberToWords(value: number): string[] {
   return rest ? [wordsToNumber.get(tens)!, wordsToNumber.get(rest)!] : [wordsToNumber.get(tens)!];
 }
 
+const fishControlCueSet = new Set<string>(FISH_S2_CONTROL_CUES);
+
+export function isKnownFishControlCue(cue: string): boolean {
+  return fishControlCueSet.has(cue.trim().toLowerCase());
+}
+
+export function hasFishControlCues(text: string): boolean {
+  return /\[([^\]]+)\]/.test(text) && Array.from(text.matchAll(/\[([^\]]+)\]/g)).some((m) => isKnownFishControlCue(m[1]!));
+}
+
 /** Normalizes both sides the same way: lowercase, contraction expansion,
  * punctuation stripped, digit tokens expanded to number words. Bracketed and
  * parenthesized spans (delivery/vocalization instructions) are not spoken words. */
+ * punctuation stripped, digit tokens expanded to number words.
+ * Strips speaker syntax (<|speaker:\d+|>) and known Fish S2 control cues in brackets.
+ * Preserves ordinary bracketed words like [REDACTED] and parenthesized phrases like (Variant Two). */
 export function tokenizeSpoken(text: string): string[] {
   let normalized = text.replace(/\[[^\]]*\]|\([^)]*\)/g, " ").toLocaleLowerCase();
+  let normalized = text.replace(/<\|speaker:\d+\|>/g, " ");
+  normalized = normalized.replace(/\[([^\]]+)\]/g, (_, cue: string) => {
+    return isKnownFishControlCue(cue) ? " " : ` ${cue} `;
+  });
+  normalized = normalized.toLocaleLowerCase();
   for (const [pattern, replacement] of contractions) normalized = normalized.replace(pattern, replacement);
   const tokens = normalized.match(/[\p{L}\p{N}]+/gu) ?? [];
   const output: string[] = [];
@@ -328,6 +352,8 @@ export class QualityGuardTTSProvider implements TTSProvider {
     private readonly inner: TTSProvider,
     private readonly transcriber: SpeechTranscriber,
     private readonly options: QualityGuardOptions,
+    private readonly transcriber?: SpeechTranscriber,
+    private readonly options: QualityGuardOptions = { maxRetries: 2, language: "en-US" },
   ) {
     this.name = inner.name; this.inputNormalizationVersion = inner.inputNormalizationVersion;
     this.pronunciationCapabilities = inner.pronunciationCapabilities; this.vocalizationCapabilities = inner.vocalizationCapabilities;
@@ -337,6 +363,8 @@ export class QualityGuardTTSProvider implements TTSProvider {
   validateConfiguration() { return this.inner.validateConfiguration(); }
 
   private transcriberAvailable() {
+  private transcriberAvailable(): Promise<boolean> {
+    if (!this.transcriber) return Promise.resolve(false);
     return this.availability ??= this.transcriber.validateConfiguration().then(() => true).catch((error) => {
       logger.warn({ event: "tts.quality.transcriber_unavailable", err: error instanceof Error ? error.message : String(error) }, "TTS quality guard transcriber is unavailable; segments will be marked unverified");
       return false;
@@ -368,14 +396,20 @@ export class QualityGuardTTSProvider implements TTSProvider {
     const configuredIntensity = request.deliveryIntensity ?? "restrained";
     const attempts: TtsQualityAttempt[] = [];
     if (!segments[index]!.byteLength) {
+    const initialAudio = segments[index]!;
+    const audioFingerprint = fingerprint(Buffer.from(initialAudio).toString("base64"));
+    if (!initialAudio.byteLength) {
       attempts.push({ attempt: 1, settings: { deliveryIntensity: configuredIntensity }, status: "needs_review", issues: [{ type: "invalid_audio", severity: 1, detail: "Provider returned an empty segment" }] });
       return { index, expectedText, status: "needs_review", issues: attempts[0]!.issues, attempts, finalAttempt: 1 };
+      return { index, expectedText, audioFingerprint, status: "needs_review", issues: attempts[0]!.issues, attempts, finalAttempt: 1 };
     }
     if (!context.available) {
       attempts.push({ attempt: 1, settings: { deliveryIntensity: configuredIntensity }, status: "unverified", issues: [{ type: "transcription_failed", severity: 0.5, detail: "Speech transcriber is unavailable" }] });
       return { index, expectedText, status: "unverified", issues: attempts[0]!.issues, attempts, finalAttempt: 1 };
+      return { index, expectedText, audioFingerprint, status: "unverified", issues: attempts[0]!.issues, attempts, finalAttempt: 1 };
     }
     let current = segments[index]!;
+    let current = initialAudio;
     let best: { audio: Uint8Array; score: number; transcription?: string; issues: TtsQualityIssue[] } = { audio: current, score: -1, issues: [] };
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       const path = join(directory, `segment-${String(index + 1).padStart(4, "0")}-attempt-${attempt}.mp3`);
@@ -383,17 +417,22 @@ export class QualityGuardTTSProvider implements TTSProvider {
       let observations: AlignmentObservation[];
       try {
         observations = await this.transcriber.transcribe({ audioPath: path, language: this.options.language });
+        observations = await this.transcriber!.transcribe({ audioPath: path, language: this.options.language });
         if (!observations.length) throw new Error("Transcription produced no speech tokens");
       } catch (error) {
         logger.warn({ event: "tts.quality.transcription_failed", segment: index + 1, attempt, err: error instanceof Error ? error.message : String(error) }, "TTS quality transcription failed; keeping generated audio");
         attempts.push({ attempt, settings: { deliveryIntensity: deliveryIntensityForAttempt(request.deliveryIntensity, attempt) }, status: "unverified", issues: [{ type: "transcription_failed", severity: 0.5, detail: error instanceof Error ? error.message.slice(0, 300) : String(error) }] });
         segments[index] = best.score >= 0 ? best.audio : current;
         return { index, expectedText, transcription: best.transcription, score: best.score >= 0 ? best.score : undefined, status: "unverified", issues: attempts.at(-1)!.issues, attempts, finalAttempt: attempt };
+        const finalAudio = best.score >= 0 ? best.audio : current;
+        segments[index] = finalAudio;
+        return { index, expectedText, audioFingerprint: fingerprint(Buffer.from(finalAudio).toString("base64")), transcription: best.transcription, score: best.score >= 0 ? best.score : undefined, status: "unverified", issues: attempts.at(-1)!.issues, attempts, finalAttempt: attempt };
       }
       const durationSeconds = this.options.durationProbe ? await this.options.durationProbe(path).catch(() => undefined) : undefined;
       const comparison = compareSpokenText(expectedText, observations, {
         thresholds: this.options.thresholds, durationSeconds,
         expectedVocalizations: scanVocalizations(expectedText).length > 0 || /\[[^\]]+\]|\([^)]+\)/.test(expectedText),
+        expectedVocalizations: scanVocalizations(expectedText).length > 0 || hasFishControlCues(expectedText),
         toleratedTerms: this.options.toleratedTerms?.(expectedText),
       });
       const transcription = observations.map((observation) => observation.text).join(" ").trim() || undefined;
@@ -403,15 +442,24 @@ export class QualityGuardTTSProvider implements TTSProvider {
         attempts.push({ attempt, settings, status: "pass", score: comparison.score, issues: comparison.issues });
         segments[index] = current;
         return { index, expectedText, transcription, score: comparison.score, status: "verified", issues: comparison.issues, attempts, finalAttempt: attempt };
+        return { index, expectedText, audioFingerprint: fingerprint(Buffer.from(current).toString("base64")), transcription, score: comparison.score, status: "verified", issues: comparison.issues, attempts, finalAttempt: attempt };
       }
       if (attempt >= maxAttempts) {
         attempts.push({ attempt, settings, status: "needs_review", score: comparison.score, issues: comparison.issues });
         // Retry exhaustion keeps the best-scoring audio; usable work is never deleted.
         segments[index] = best.audio;
         return { index, expectedText, transcription: best.transcription, score: best.score >= 0 ? best.score : undefined, status: "needs_review", issues: best.issues, attempts, finalAttempt: attempt };
+        return { index, expectedText, audioFingerprint: fingerprint(Buffer.from(best.audio).toString("base64")), transcription: best.transcription, score: best.score >= 0 ? best.score : undefined, status: "needs_review", issues: best.issues, attempts, finalAttempt: attempt };
       }
       const retried = await this.inner.synthesize({ ...request, text: expectedText, deliveryIntensity: deliveryIntensityForAttempt(request.deliveryIntensity, attempt + 1),
         maxCharsPerRequest: Math.max(request.maxCharsPerRequest, [...expectedText].length + 1) });
+      const retried = await this.inner.synthesize({
+        ...request,
+        text: expectedText,
+        exactChunk: true,
+        deliveryIntensity: deliveryIntensityForAttempt(request.deliveryIntensity, attempt + 1),
+        maxCharsPerRequest: request.maxCharsPerRequest,
+      });
       const requestId = retried.requestIds?.join(",");
       attempts.push({ attempt, settings, status: "retry", score: comparison.score, issues: comparison.issues, ...(requestId ? { requestId } : {}) });
       const replacement = retried.segments.length === 1 ? retried.segments[0]! : retried.audio;
@@ -419,6 +467,7 @@ export class QualityGuardTTSProvider implements TTSProvider {
         attempts.push({ attempt: attempt + 1, settings: { deliveryIntensity: deliveryIntensityForAttempt(request.deliveryIntensity, attempt + 1) }, status: "needs_review", issues: [{ type: "invalid_audio", severity: 1, detail: "Retry returned empty audio" }] });
         segments[index] = best.audio;
         return { index, expectedText, transcription: best.transcription, score: best.score >= 0 ? best.score : undefined, status: "needs_review", issues: attempts.at(-1)!.issues, attempts, finalAttempt: attempt + 1 };
+        return { index, expectedText, audioFingerprint: fingerprint(Buffer.from(best.audio).toString("base64")), transcription: best.transcription, score: best.score >= 0 ? best.score : undefined, status: "needs_review", issues: attempts.at(-1)!.issues, attempts, finalAttempt: attempt + 1 };
       }
       current = replacement;
     }

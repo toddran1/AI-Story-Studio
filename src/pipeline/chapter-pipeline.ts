@@ -296,6 +296,8 @@ export class ChapterPipeline {
     // tracked provider and are usage-recorded with attempt numbers.
     const ttsProvider = this.qualityVerification?.transcriber && ttsConfig.qualityGuard
       ? new QualityGuardTTSProvider(baseTtsProvider, this.qualityVerification.transcriber, { maxRetries: ttsConfig.maxQualityRetries, language: options.story.outputLanguage })
+    const ttsProvider = ttsConfig.qualityGuard
+      ? new QualityGuardTTSProvider(baseTtsProvider, this.qualityVerification?.transcriber, { maxRetries: ttsConfig.maxQualityRetries, language: options.story.outputLanguage })
       : baseTtsProvider;
     const speech = normalizeSpeechForProvider(ttsScript, options.story.outputLanguage, options.story.narrationSettings, ttsProvider, ttsConfig.model);
     const pronunciationFp = pronunciationFingerprint(resolvePronunciations(speech.normalized.text, pronunciationData.entities));

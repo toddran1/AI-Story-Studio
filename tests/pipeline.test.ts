@@ -262,4 +262,17 @@ describe("chapter pipeline", () => {
     const result = await pipeline.run({ root, story: testStory(), chapter: 1, inputPath: input });
     expect(result.quality?.status).toBe("warn"); expect(tts.calls).toBe(1);
   });
+
+  it("never copies mastered audio into raw tts when raw tts is missing", async () => {
+    const ctx = await setup();
+    const story = testStory();
+    await ctx.pipeline.run({ root: ctx.root, story, chapter: 1, inputPath: ctx.input });
+    const { rm } = await import("node:fs/promises");
+    await rm(ctx.paths.audioRaw);
+
+    const ttsBefore = ctx.tts.calls;
+    await ctx.pipeline.run({ root: ctx.root, story, chapter: 1, inputPath: ctx.input });
+    // Raw TTS must be synthesized anew by TTS provider, never copied from mastered audio
+    expect(ctx.tts.calls).toBe(ttsBefore + 1);
+  });
 });
