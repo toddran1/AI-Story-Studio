@@ -1,5 +1,6 @@
 import { z } from "zod";
-import { stageNameSchema } from "../domain/chapter.js";
+import { StageName, stageNameSchema } from "../domain/chapter.js";
+import type { ArtifactAvailability, ArtifactFreshness } from "../studio/artifact-state.js";
 
 export const productionOutputSchema = z.enum(["audio", "audiobook", "video"]);
 export const productionProfileSchema = z.object({
@@ -34,6 +35,9 @@ export type ProductionOperation = z.infer<typeof operationSchema>;
 
 export type ProductionPlan = {
   story: string; from: number; to: number; chapters: number[]; requiredChapters: number[]; chapterRequirements: Record<string, ProductionStage[]>; outputs: ProductionOutput[]; artwork: boolean; stages: ProductionStage[];
+  /** Per-chapter artifact classification: a required stage is missing/invalid,
+   * available-but-stale (rebuilt by production policy), or reusable-current. */
+  stageStates?: Record<string, Partial<Record<StageName, { availability: ArtifactAvailability; freshness?: ArtifactFreshness; reusable: boolean }>>>;
   counts: Record<string, { required: number; reusable: number }>; estimates: { llmOperations: number; ttsOperations: number; imageOperations: number; imagesPendingPlanning: number };
   finalOutputs: string[];
 };

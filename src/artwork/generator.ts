@@ -19,6 +19,7 @@ import { emptyStoryBible, storyBibleSchema, StoryBible } from "../domain/story-b
 import { assertImageModelCompatible, MAX_REFERENCE_IMAGES, MAX_REFERENCE_IMAGE_BYTES, MAX_REFERENCE_TOTAL_BYTES, providerSupportsReferenceImages } from "./providers.js";
 import { findVisualReferenceFile, mimeForVisualReferenceExtension } from "../visual-canon/assets.js";
 import { VisualReferenceImage } from "../domain/visual-profile.js";
+import { stageFreshness, stalePrerequisiteWarning } from "../studio/artifact-state.js";
 
 export async function generateStoredArtwork(options: {
   root: string;
@@ -28,7 +29,7 @@ export async function generateStoredArtwork(options: {
   sceneId?: string;
   force?: boolean;
   dryRun?: boolean;
-  onProgress?: (event: { type: string; chapter: number; scene?: string; index?: number; total?: number }) => void;
+  onProgress?: (event: { type: string; chapter: number; scene?: string; index?: number; total?: number; warnings?: string[] }) => void;
 }) {
   const paths = storyPaths(options.root, options.story.slug, options.chapter);
   const raw = await readJsonIfExists<SceneManifest>(paths.scenesManifest);
@@ -45,6 +46,10 @@ export async function generateStoredArtwork(options: {
   const rawChapter = await readJsonIfExists<Chapter>(paths.chapterMeta);
   if (!rawChapter) throw new ArtworkError(`Chapter ${options.chapter} has no pipeline metadata`);
   const chapter = chapterSchema.parse(rawChapter);
+
+  const warnings: string[] = [];
+  if (stageFreshness(chapter, "scenePlanning") === "stale") warnings.push(stalePrerequisiteWarning("scenePlanning"));
+  if (warnings.length) options.onProgress?.({ type: "artwork.prerequisites", chapter: options.chapter, warnings });
 
   const rawBible = await readJsonIfExists<StoryBible>(paths.bible);
   const bible = rawBible ? storyBibleSchema.parse(rawBible) : emptyStoryBible();
@@ -144,6 +149,7 @@ export async function generateStoredArtwork(options: {
       selected: selected.length,
       imagesToGenerate: candidates.length,
       sceneIds: candidates.map((item) => item.scene.id),
+      warnings,
     };
   }
 
@@ -156,6 +162,7 @@ export async function generateStoredArtwork(options: {
       imagesToGenerate: 0,
       generated: 0,
       reused: selected.length,
+      warnings,
     };
   }
 
@@ -335,6 +342,7 @@ export async function generateStoredArtwork(options: {
     imagesToGenerate: candidates.length,
     generated,
     reused,
+    warnings,
   };
 }
 

@@ -1,12 +1,7 @@
-import { stat } from "node:fs/promises";
 import { z } from "zod";
-import { Chapter, StageName, stageNameSchema } from "../domain/chapter.js";
-import { qaResultSchema } from "../domain/qa.js";
-import { storyBibleUpdateSchema } from "../domain/story-bible.js";
-import { sceneManifestSchema } from "../scenes/types.js";
-import { readJsonIfExists, readTextIfExists } from "../storage/story-files.js";
-import { sceneImagePath, storyPaths } from "../storage/paths.js";
+import { StageName, stageNameSchema } from "../domain/chapter.js";
 import type { Story } from "../domain/story.js";
+import { inspectStageArtifact } from "./artifact-state.js";
 import type { PipelineOptions } from "../pipeline/chapter-pipeline.js";
 import { alignStoredChapter } from "../alignment/chapter-alignment.js";
 import type { AlignmentConfig, AlignmentEngine } from "../alignment/types.js";
@@ -32,13 +27,8 @@ export const stageExecutionInputSchema = z.object({
   dryRun: z.boolean().default(false),
 }).strict();
 
-export type ArtifactAvailability = "available" | "missing" | "invalid";
-export type ArtifactFreshness = "current" | "stale";
-export type StageArtifactState = {
-  stage: StageExecutionNode;
-  availability: ArtifactAvailability;
-  freshness?: ArtifactFreshness;
-};
+export type { ArtifactAvailability, ArtifactFreshness, StageArtifactState } from "./artifact-state.js";
+import type { ArtifactAvailability, ArtifactFreshness, StageArtifactState } from "./artifact-state.js";
 export type StageExecutionPlan = {
   selectedStage: StageName;
   mode: StageExecutionMode;
@@ -117,56 +107,8 @@ export async function planStageExecution(options: { root: string; story: string;
 }
 
 async function inspectArtifact(root: string, story: string, chapterNumber: number, stage: StageExecutionNode): Promise<StageArtifactState> {
-  const paths = storyPaths(root, story, chapterNumber);
-  const chapter = await readJsonIfExists<Chapter>(paths.chapterMeta);
-  const freshness = stage === "context" ? contextFreshness(chapter) : chapter?.stages?.[stage]?.status === "complete" && !chapter.stages[stage].staleReason ? "current" : "stale";
-  try {
-    const valid = await artifactIsValid(stage, paths, root, story, chapterNumber);
-    return valid ? { stage, availability: "available", freshness } : { stage, availability: await artifactExists(stage, paths) ? "invalid" : "missing" };
-  } catch {
-    return { stage, availability: "invalid" };
-  }
+  return inspectStageArtifact(root, story, chapterNumber, stage);
 }
-
-function contextFreshness(chapter: Chapter | undefined): ArtifactFreshness {
-  return chapter?.stages.storyBible?.status === "complete" && !chapter.stages.storyBible.staleReason ? "current" : "stale";
-}
-
-async function artifactExists(stage: StageExecutionNode, paths: ReturnType<typeof storyPaths>): Promise<boolean> {
-  const path = artifactPath(stage, paths);
-  if (!path) return false;
-  try { return (await stat(path)).size > 0; } catch { return false; }
-}
-
-function artifactPath(stage: StageExecutionNode, paths: ReturnType<typeof storyPaths>): string | undefined {
-  return ({ ingestion: paths.original, translation: paths.english, narration: paths.narration, qa: paths.qa,
-    storyBible: paths.bibleUpdate, context: paths.storyContext, continuity: paths.continuityAnalysis,
-    tts: paths.audioRaw, audioMastering: paths.audio, alignment: paths.alignment, subtitles: paths.subtitlesDocument,
-    scenePlanning: paths.scenesManifest, video: paths.video } as Partial<Record<StageExecutionNode, string>>)[stage];
-}
-
-async function artifactIsValid(stage: StageExecutionNode, paths: ReturnType<typeof storyPaths>, root: string, story: string, chapter: number): Promise<boolean> {
-  if (["ingestion", "translation", "narration"].includes(stage)) return Boolean((await readTextIfExists(artifactPath(stage, paths)!))?.trim());
-  if (["tts", "audioMastering", "video"].includes(stage)) return artifactExists(stage, paths);
-  if (stage === "qa") return qaResultSchema.safeParse(await readJsonIfExists(paths.qa)).success;
-  if (stage === "storyBible") return storyBibleUpdateSchema.safeParse(await readJsonIfExists(paths.bibleUpdate)).success;
-  if (stage === "context" || stage === "continuity" || stage === "alignment" || stage === "subtitles") {
-    const data = await readJsonIfExists(artifactPath(stage, paths)!);
-    return Boolean(data && typeof data === "object");
-  }
-  if (stage === "scenePlanning" || stage === "artwork") {
-    const parsed = sceneManifestSchema.safeParse(await readJsonIfExists(paths.scenesManifest));
-    if (!parsed.success || !parsed.data.scenes.length) return false;
-    if (stage === "scenePlanning") return true;
-    for (const scene of parsed.data.scenes) {
-      if (scene.artwork.status !== "complete" || !(await artifactFileExists(sceneImagePath(root, story, chapter, scene.id)))) return false;
-    }
-    return true;
-  }
-  return false;
-}
-
-async function artifactFileExists(path: string): Promise<boolean> { try { return (await stat(path)).size > 0; } catch { return false; } }
 
 export type StageExecutionProcessor = { run(options: PipelineOptions): Promise<unknown> };
 export type StageExecutionRuntime = {

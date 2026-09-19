@@ -8,6 +8,7 @@ import { readJsonIfExists } from "../storage/story-files.js";
 import { fingerprint } from "../utils/hash.js";
 import { fileFingerprint, filesFingerprint } from "../utils/file-fingerprint.js";
 import { ProductionForce, ProductionOutput, ProductionPlan, ProductionProfile, ProductionStage, defaultProductionProfiles, productionProfileSchema } from "./types.js";
+import { inspectStageArtifact } from "../studio/artifact-state.js";
 
 const core: StageName[] = ["ingestion", "translation", "narration", "qa", "storyBible", "continuity", "tts", "audioMastering"];
 
@@ -28,7 +29,7 @@ export function requiredProductionStages(outputs: ProductionOutput[], artwork: b
 export async function buildProductionPlan(options: { root: string; story: Story; chapters: number[]; outputs: ProductionOutput[]; artwork: boolean; alignment?: boolean; force?: ProductionForce }): Promise<ProductionPlan> {
   if (!options.chapters.length) throw new Error("Production requires at least one chapter"); const stages = requiredProductionStages(options.outputs, options.artwork, options.alignment); const counts: ProductionPlan["counts"] = {};
   for (const stage of stages) counts[stage] = { required: 0, reusable: 0 };
-  let imageOperations = 0; let imagesPendingPlanning = 0; const requiredChapters: number[] = []; const chapterRequirements: Record<string, ProductionStage[]> = {};
+  let imageOperations = 0; let imagesPendingPlanning = 0; const requiredChapters: number[] = []; const chapterRequirements: Record<string, ProductionStage[]> = {}; const stageStates: ProductionPlan["stageStates"] = {};
   let qaDeterministicDeps: DeterministicQaDependencies | undefined;
   const currentQaFingerprint = async (chapter: number) => {
     qaDeterministicDeps ??= await loadQaDeterministicDependencies(options.root, options.story.slug);
@@ -36,12 +37,15 @@ export async function buildProductionPlan(options: { root: string; story: Story;
   };
   for (const number of options.chapters) {
     const paths = storyPaths(options.root, options.story.slug, number); const raw = await readJsonIfExists<Chapter>(paths.chapterMeta); const chapter = raw ? chapterSchema.safeParse(raw) : undefined;
-    let chapterRequired = false; const requiredStages: ProductionStage[] = [];
+    let chapterRequired = false; const requiredStages: ProductionStage[] = []; const states: NonNullable<ProductionPlan["stageStates"]>[string] = {};
     for (const stage of stages.filter((value): value is StageName => !["audiobook", "videoExport", "refresh"].includes(value))) {
       const reusable = !isProductionStageForced(options.force, stage) && chapter?.success === true && await stageLooksReusable(chapter.data, stage, paths, stage === "qa" ? () => currentQaFingerprint(number) : undefined);
       counts[stage]![reusable ? "reusable" : "required"]++;
       if (!reusable) { chapterRequired = true; requiredStages.push(stage); }
+      const artifact = await inspectStageArtifact(options.root, options.story.slug, number, stage);
+      states[stage] = { availability: artifact.availability, freshness: artifact.freshness, reusable };
     }
+    stageStates[String(number)] = states;
     if (stages.includes("artwork")) {
       const manifestRaw = await readJsonIfExists(paths.scenesManifest); const manifest = manifestRaw ? sceneManifestSchema.safeParse(manifestRaw) : undefined;
       if (!manifest?.success) { imagesPendingPlanning++; chapterRequired = true; if (!requiredStages.includes("artwork")) requiredStages.push("artwork"); }
@@ -51,7 +55,7 @@ export async function buildProductionPlan(options: { root: string; story: Story;
   }
   for (const stage of ["audiobook", "videoExport"] as const) if (stages.includes(stage)) counts[stage] = { required: 1, reusable: 0 };
   const llmOperations = ["translation", "narration", "qa", "storyBible", "scenePlanning"].reduce((sum, stage) => sum + (counts[stage]?.required ?? 0), 0);
-  return { story: options.story.slug, from: options.chapters[0]!, to: options.chapters.at(-1)!, chapters: options.chapters, requiredChapters, chapterRequirements, outputs: options.outputs, artwork: options.artwork, stages, counts,
+  return { story: options.story.slug, from: options.chapters[0]!, to: options.chapters.at(-1)!, chapters: options.chapters, requiredChapters, chapterRequirements, stageStates, outputs: options.outputs, artwork: options.artwork, stages, counts,
     estimates: { llmOperations, ttsOperations: counts.tts?.required ?? 0, imageOperations, imagesPendingPlanning }, finalOutputs: [options.outputs.includes("audiobook") ? `Audiobook (${options.story.slug})` : "", options.outputs.includes("video") ? `Combined video (${options.story.slug})` : "", options.outputs.includes("audio") ? "Mastered chapter audio" : ""].filter(Boolean) };
 }
 

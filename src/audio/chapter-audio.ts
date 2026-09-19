@@ -7,6 +7,7 @@ import { AudioError } from "../pipeline/errors.js";
 import { atomicWrite, atomicWriteJson } from "../storage/atomic-write.js";
 import { storyPaths } from "../storage/paths.js";
 import { exists, readJsonIfExists } from "../storage/story-files.js";
+import { stageFreshness, stalePrerequisiteWarning } from "../studio/artifact-state.js";
 import { fingerprint } from "../utils/hash.js";
 import { fileFingerprint } from "../utils/file-fingerprint.js";
 import { AudioProbe } from "./ffmpeg.js";
@@ -19,12 +20,14 @@ export async function masterStoredChapter(options: { root: string; story: Story;
   const chapter = chapterSchema.parse(raw);
   const hasRawOrSegments = (await exists(paths.audioRaw)) || (await exists(paths.segments)) || (await exists(paths.audio));
   if (chapter.stages.tts.status !== "complete" && !hasRawOrSegments) throw new AudioError(`Chapter ${options.chapter} TTS is not complete`);
+  const warnings: string[] = [];
+  if (stageFreshness(chapter, "tts") === "stale") warnings.push(stalePrerequisiteWarning("tts"));
   if (!(await exists(paths.audioRaw)) && await exists(paths.audio) && chapter.stages.audioMastering.status !== "complete") await atomicWrite(paths.audioRaw, await readFile(paths.audio));
   const inputs = await masteringInputs(paths.segments, paths.audioRaw); const fp = audioMasteringFingerprint(chapter.stages.tts.outputFingerprint, options.story.audio, options.processor.version, await inputFingerprints(inputs));
   const currentOutput = await fileFingerprint(paths.audio);
   if (!options.force && chapter.stages.audioMastering.status === "complete" && chapter.stages.audioMastering.fingerprint === fp && currentOutput
     && chapter.stages.audioMastering.outputFingerprint === currentOutput && chapter.audio) {
-    options.onEvent?.({ status: "reused", chapter: options.chapter, state: chapter.stages.audioMastering }); return { chapter, reused: true, probe: chapter.audio };
+    options.onEvent?.({ status: "reused", chapter: options.chapter, state: chapter.stages.audioMastering }); return { chapter, reused: true, probe: chapter.audio, warnings };
   }
   const started = Date.now(); chapter.audio = undefined; chapter.alignment = undefined; chapter.subtitle = undefined; chapter.video = undefined; chapter.scenes = undefined; chapter.stages.alignment = { status: "pending" }; chapter.stages.subtitles = { status: "pending" }; chapter.stages.scenePlanning = { status: "pending" }; chapter.stages.artwork = { status: "pending" }; chapter.stages.video = { status: "pending" }; chapter.stages.audioMastering = { status: "running", provider: "ffmpeg", model: options.processor.version, fingerprint: fp, startedAt: new Date().toISOString() };
   await persist(paths.chapterMeta, chapter); options.onEvent?.({ status: "started", chapter: options.chapter, state: chapter.stages.audioMastering });
@@ -34,7 +37,7 @@ export async function masterStoredChapter(options: { root: string; story: Story;
     const outputFingerprint = await fileFingerprint(paths.audio); if (!outputFingerprint) throw new AudioError(`Mastering produced an empty output for Chapter ${options.chapter}`);
     chapter.audio = probe; chapter.stages.audioMastering = { ...chapter.stages.audioMastering, status: "complete", outputFingerprint,
       completedAt: new Date().toISOString(), durationMs: Date.now() - started };
-    await persist(paths.chapterMeta, chapter); options.onEvent?.({ status: "completed", chapter: options.chapter, state: chapter.stages.audioMastering }); return { chapter, reused: false, probe };
+    await persist(paths.chapterMeta, chapter); options.onEvent?.({ status: "completed", chapter: options.chapter, state: chapter.stages.audioMastering }); return { chapter, reused: false, probe, warnings };
   } catch (error) {
     await rm(staged, { force: true }); chapter.stages.audioMastering = { ...chapter.stages.audioMastering, status: "failed", durationMs: Date.now() - started,
       error: { message: error instanceof Error ? error.message : String(error) } }; await persist(paths.chapterMeta, chapter);
