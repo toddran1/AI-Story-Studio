@@ -37,6 +37,9 @@ export const fishTtsStageConfigSchema = z.object({
   secondaryReferenceId: z.string().min(1).optional(),
   deliveryIntensity: z.enum(["none", "restrained", "expressive"]).default("restrained"),
   qualityGuard: z.boolean().default(true),
+  /** Upstream provider-native quality feature (e.g. Fish features: ["quality-guard"]).
+   * Affects what is sent to the provider, so it is part of the synthesis fingerprint. */
+  providerQualityGuard: z.boolean().default(true),
   /** Post-generation verification retries per failed segment (verification-only;
    * never part of the synthesis fingerprint). */
   maxQualityRetries: z.number().int().min(0).max(5).default(2),

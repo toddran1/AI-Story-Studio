@@ -197,6 +197,7 @@ export async function regenerateStoredChapterTtsSegment(options: { root: string;
   const result = await provider.synthesize({
     text: current.expectedText, exactChunk: true, model: config.model, referenceId: config.referenceId, secondaryReferenceId: config.secondaryReferenceId,
     voiceMode: config.voiceMode, deliveryIntensity: config.deliveryIntensity, qualityGuard: true,
+    providerQualityGuard: config.providerQualityGuard,
     speed: config.speed, format: config.format, sampleRate: config.sampleRate, bitrate: config.bitrate,
     normalize: config.normalize, maxCharsPerRequest: config.maxCharsPerRequest,
   });

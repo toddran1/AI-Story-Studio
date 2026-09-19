@@ -96,12 +96,39 @@ describe("Fish TTS", () => {
   });
 
   it("supports expressive sampling and disabling quality guard", async () => {
+  it("supports expressive sampling and disabling provider quality guard", async () => {
     const fetcher = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => new Response(new Uint8Array([1]), { headers: { "content-type": "audio/mpeg" } }));
     const provider = new FishAudioProvider("test-key", fetcher as typeof fetch);
     await provider.synthesize({ text: "Hello", model: "s2.1-pro", deliveryIntensity: "expressive", qualityGuard: false, speed: 1, format: "mp3", sampleRate: 44100, bitrate: 128, normalize: true, maxCharsPerRequest: 500 });
+    await provider.synthesize({ text: "Hello", model: "s2.1-pro", deliveryIntensity: "expressive", providerQualityGuard: false, speed: 1, format: "mp3", sampleRate: 44100, bitrate: 128, normalize: true, maxCharsPerRequest: 500 });
     const body = JSON.parse(String((fetcher.mock.calls[0]?.[1] as RequestInit).body));
     expect(body).toMatchObject({ temperature: .7, top_p: .7 });
     expect(body).not.toHaveProperty("features");
+  });
+
+  it("uses only providerQualityGuard for Fish features and ignores qualityGuard", async () => {
+    const fetcher = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => new Response(new Uint8Array([1]), { headers: { "content-type": "audio/mpeg" } }));
+    const provider = new FishAudioProvider("test-key", fetcher as typeof fetch);
+
+    // 1. qualityGuard: false alone does NOT remove features: ["quality-guard"]
+    await provider.synthesize({ text: "Hello", model: "s2.1-pro", qualityGuard: false, speed: 1, format: "mp3", sampleRate: 44100, bitrate: 128, normalize: true, maxCharsPerRequest: 500 });
+    let body = JSON.parse(String((fetcher.mock.calls[0]?.[1] as RequestInit).body));
+    expect(body.features).toEqual(["quality-guard"]);
+
+    // 2. providerQualityGuard: false with qualityGuard: true DOES remove features
+    await provider.synthesize({ text: "Hello", model: "s2.1-pro", qualityGuard: true, providerQualityGuard: false, speed: 1, format: "mp3", sampleRate: 44100, bitrate: 128, normalize: true, maxCharsPerRequest: 500 });
+    body = JSON.parse(String((fetcher.mock.calls[1]?.[1] as RequestInit).body));
+    expect(body).not.toHaveProperty("features");
+
+    // 3. Both false removes features
+    await provider.synthesize({ text: "Hello", model: "s2.1-pro", qualityGuard: false, providerQualityGuard: false, speed: 1, format: "mp3", sampleRate: 44100, bitrate: 128, normalize: true, maxCharsPerRequest: 500 });
+    body = JSON.parse(String((fetcher.mock.calls[2]?.[1] as RequestInit).body));
+    expect(body).not.toHaveProperty("features");
+
+    // 4. Both true includes features
+    await provider.synthesize({ text: "Hello", model: "s2.1-pro", qualityGuard: true, providerQualityGuard: true, speed: 1, format: "mp3", sampleRate: 44100, bitrate: 128, normalize: true, maxCharsPerRequest: 500 });
+    body = JSON.parse(String((fetcher.mock.calls[3]?.[1] as RequestInit).body));
+    expect(body.features).toEqual(["quality-guard"]);
   });
 
   it("keeps approved S2 cues but makes bracketed story notifications ordinary speech", async () => {

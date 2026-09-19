@@ -21,7 +21,7 @@ export function defaultStory(slug: string, env: Environment): Story {
       scenePlanner: { provider: "openai", model: env.OPENAI_DEFAULT_MODEL },
       tts: {
         provider: "fish", model: env.FISH_AUDIO_MODEL, referenceId: env.FISH_AUDIO_REFERENCE_ID,
-        voiceMode: "same-voice-dialogue", deliveryIntensity: "restrained", qualityGuard: true,
+        voiceMode: "same-voice-dialogue", deliveryIntensity: "restrained", qualityGuard: true, providerQualityGuard: true,
         speed: env.FISH_AUDIO_SPEED, format: "mp3", sampleRate: env.FISH_AUDIO_SAMPLE_RATE,
         bitrate: env.FISH_AUDIO_MP3_BITRATE, normalize: env.FISH_AUDIO_NORMALIZE,
         maxCharsPerRequest: env.FISH_AUDIO_MAX_CHARS,

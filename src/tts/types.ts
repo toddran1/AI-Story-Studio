@@ -7,7 +7,10 @@ export type TTSRequest = {
    * and verified against expected text by AI Story Studio's QualityGuardTTSProvider.
    * Also passed to providers supporting upstream quality features (e.g. Fish features: ["quality-guard"]).
    * Set false to disable both. */
+   * Set false to disable post-generation verification. */
   qualityGuard?: boolean;
+  /** Enables provider-native quality assistance when supported (e.g. Fish features: ["quality-guard"]). */
+  providerQualityGuard?: boolean;
   bleepStrongProfanity?: boolean; speed: number; format: "mp3";
   sampleRate: 32000 | 44100; bitrate: 64 | 128 | 192; normalize: boolean; maxCharsPerRequest: number;
   /** When true, `text` is an exact pre-split chunk (e.g. retry from Quality Guard).

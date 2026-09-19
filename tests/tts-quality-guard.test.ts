@@ -308,6 +308,9 @@ describe("tts quality settings and fingerprints", () => {
     expect(fingerprint({ config: { ...ttsSynthesisSettings(base), referenceId: "voice" } }))
       .toBe(fingerprint({ config: { ...ttsSynthesisSettings(changed), referenceId: "voice" } }));
     expect(fingerprint({ config: ttsSynthesisSettings({ ...base, speed: 1.2 }) })).not.toBe(fingerprint({ config: ttsSynthesisSettings(base) }));
+    // Changing providerQualityGuard changes the synthesis fingerprint
+    expect(fingerprint({ config: ttsSynthesisSettings({ ...base, providerQualityGuard: false }) }))
+      .not.toBe(fingerprint({ config: ttsSynthesisSettings(base) }));
   });
 
   it("does not stale tts for verification-only config changes but stales synthesis changes", async () => {
@@ -325,6 +328,19 @@ describe("tts quality settings and fingerprints", () => {
     await invalidateStoryForConfigChange(root, story.slug, story, verificationOnly);
     let meta = chapterSchema.parse(JSON.parse(await readFile(paths.chapterMeta, "utf8")));
     expect(meta.stages.tts.status).toBe("complete");
+
+    // Changing providerQualityGuard stales synthesis (tts and audioMastering pending)
+    const providerQualityChanged = { ...story, pipeline: { ...story.pipeline, tts: { ...story.pipeline.tts, providerQualityGuard: false } } };
+    await invalidateStoryForConfigChange(root, story.slug, story, providerQualityChanged);
+    meta = chapterSchema.parse(JSON.parse(await readFile(paths.chapterMeta, "utf8")));
+    expect(meta.stages.tts.status).toBe("pending");
+    expect(meta.stages.audioMastering.status).toBe("pending");
+
+    // Reset back to complete
+    await atomicWriteJson(paths.chapterMeta, chapterSchema.parse({
+      ...meta, stages: { ...meta.stages, tts: complete, audioMastering: complete },
+    }));
+
     const synthesisChanged = { ...story, pipeline: { ...story.pipeline, tts: { ...story.pipeline.tts, speed: 1.2 } } };
     await invalidateStoryForConfigChange(root, story.slug, story, synthesisChanged);
     meta = chapterSchema.parse(JSON.parse(await readFile(paths.chapterMeta, "utf8")));
@@ -803,6 +819,50 @@ describe("tts reliability and provenance hardening", () => {
       const transcriber = new FakeTranscriber(() => say("words"));
       const reverified = await verifyStoredChapterTts({ root, story, chapter: 1, transcriber });
       expect(reverified.segments[1]?.status).toBe("manually_accepted");
+    });
+  });
+
+  describe("Quality Guard separation from providerQualityGuard", () => {
+    it("runs post-generation verification when qualityGuard=true regardless of providerQualityGuard", async () => {
+      const text = "The quiet morning settled over the misty valley.";
+      const inner = new ScriptedTTS(() => singleSegment(text, "audio"));
+      const transcriber = new FakeTranscriber(() => say(text));
+
+      // Case 1: qualityGuard: true, providerQualityGuard: false -> verification runs
+      const res1 = await guard(inner, transcriber).synthesize(request({ text, qualityGuard: true, providerQualityGuard: false }));
+      expect(res1.quality).toBeDefined();
+      expect(res1.quality?.status).toBe("verified");
+
+      // Case 2: qualityGuard: true, providerQualityGuard: true -> verification runs
+      const res2 = await guard(inner, transcriber).synthesize(request({ text, qualityGuard: true, providerQualityGuard: true }));
+      expect(res2.quality).toBeDefined();
+      expect(res2.quality?.status).toBe("verified");
+    });
+
+    it("skips post-generation verification when qualityGuard=false regardless of providerQualityGuard", async () => {
+      const text = "The quiet morning settled over the misty valley.";
+      const inner = new ScriptedTTS(() => singleSegment(text, "audio"));
+      const transcriber = new FakeTranscriber(() => say(text));
+
+      // Case 3: qualityGuard: false, providerQualityGuard: true -> verification does NOT run
+      const res3 = await guard(inner, transcriber).synthesize(request({ text, qualityGuard: false, providerQualityGuard: true }));
+      expect(res3.quality).toBeUndefined();
+
+      // Case 4: qualityGuard: false, providerQualityGuard: false -> verification does NOT run
+      const res4 = await guard(inner, transcriber).synthesize(request({ text, qualityGuard: false, providerQualityGuard: false }));
+      expect(res4.quality).toBeUndefined();
+    });
+
+    it("passes providerQualityGuard untouched to the inner provider", async () => {
+      const text = "Checking provider passthrough.";
+      const inner = new ScriptedTTS(() => singleSegment(text, "audio"));
+      const transcriber = new FakeTranscriber(() => say(text));
+
+      await guard(inner, transcriber).synthesize(request({ text, qualityGuard: true, providerQualityGuard: false }));
+      expect(inner.calls[0]?.providerQualityGuard).toBe(false);
+
+      await guard(inner, transcriber).synthesize(request({ text, qualityGuard: false, providerQualityGuard: true }));
+      expect(inner.calls[1]?.providerQualityGuard).toBe(true);
     });
   });
 });

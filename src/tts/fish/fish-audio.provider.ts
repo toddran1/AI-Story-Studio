@@ -66,6 +66,9 @@ export class FishAudioProvider implements TTSProvider {
             // output quality checking. This is separate from AI Story Studio's post-generation
             // speech transcriber verification guard.
             ...(request.qualityGuard === false ? {} : { features: ["quality-guard"] }),
+            // output quality checking when providerQualityGuard is enabled. This is separate
+            // from AI Story Studio's post-generation speech transcriber verification guard (qualityGuard).
+            ...(request.providerQualityGuard === false ? {} : { features: ["quality-guard"] }),
             ...fishS2Defaults(request.model, request.deliveryIntensity) }),
         });
       } catch (error) { throw new ProviderError("Fish Audio network request failed", { cause: error }); }
