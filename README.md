@@ -523,7 +523,7 @@ Artwork configuration lives in `story.json`:
   },
   "artwork": {
     "provider": "openai",
-    "model": "gpt-image-1",
+    "model": "gpt-image-2.5-flare",
     "stylePrompt": "cinematic illustrated fiction, dramatic natural lighting, consistent character design, widescreen composition",
     "aspectRatio": "16:9",
     "quality": "medium",
