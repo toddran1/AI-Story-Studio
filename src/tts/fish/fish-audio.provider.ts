@@ -44,11 +44,6 @@ export class FishAudioProvider implements TTSProvider {
     const multiSpeaker = request.voiceMode === "narrator-dialogue" && Boolean(referenceId) && Boolean(secondaryReferenceId) && isFishS2Model(request.model);
     const directedSingleVoice = request.voiceMode === "same-voice-dialogue" && request.deliveryIntensity !== "none" && isFishS2Model(request.model);
     const segments: Uint8Array[] = []; const requestIds: string[] = [];
-    const speechText = normalizeFishSpeechText(adaptPronunciationText(request.text, request.pronunciation ?? [], this.pronunciationCapabilities), request.model);
-    if (!speechText) throw new ProviderError("Fish Audio narration is empty after speech normalization");
-    const castText = multiSpeaker ? castQuotedDialogue(speechText) : directedSingleVoice ? directQuotedDialogue(speechText) : speechText;
-    const splitText = splitForTTS(castText, request.maxCharsPerRequest);
-    const chunks = multiSpeaker ? ensureChunkSpeakers(splitText) : splitText;
     const chunks = request.exactChunk
       ? [request.text]
       : (() => {

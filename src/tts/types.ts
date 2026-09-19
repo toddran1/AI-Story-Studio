@@ -3,7 +3,6 @@ export type TTSRequest = {
   text: string; model: string; referenceId?: string; secondaryReferenceId?: string;
   voiceMode?: "narrator-only" | "same-voice-dialogue" | "narrator-dialogue";
   deliveryIntensity?: "none" | "restrained" | "expressive";
-  qualityGuard?: boolean; bleepStrongProfanity?: boolean; speed: number; format: "mp3";
   /** Post-generation quality guard: when true or omitted, speech is transcribed
    * and verified against expected text by AI Story Studio's QualityGuardTTSProvider.
    * Also passed to providers supporting upstream quality features (e.g. Fish features: ["quality-guard"]).

@@ -13,7 +13,6 @@ import { dependentProcessingStages } from "../studio/stage-execution.js";
 import type { TTSProvider } from "./provider.js";
 import {
   QualityThresholds, SpeechTranscriber, TTS_QUALITY_GUARD_VERSION, TtsQualityReport, TtsSegmentQuality,
-  compareSpokenText, defaultQualityThresholds, summarizeQuality, ttsSegmentQualitySchema, ttsQualitySummaryStatusSchema,
   compareSpokenText, defaultQualityThresholds, hasFishControlCues, summarizeQuality, ttsSegmentQualitySchema, ttsQualitySummaryStatusSchema,
 } from "./quality-guard.js";
 import { scanVocalizations } from "./vocalizations.js";
@@ -67,12 +66,10 @@ export async function persistChapterTtsQuality(options: {
     provider: config.provider, model: config.model, referenceId: config.referenceId, voiceMode: config.voiceMode, deliveryIntensity: config.deliveryIntensity,
     status: options.report.status,
     verificationPolicy: { transcriber: options.transcriber, maxRetries: options.maxRetries, thresholds: { ...defaultQualityThresholds, ...options.thresholds }, fingerprint: verificationPolicyFingerprint({ transcriber: options.transcriber, maxRetries: options.maxRetries, thresholds: options.thresholds }) },
-    // Human acceptances survive regeneration of the verification state.
     // Human acceptances survive regeneration of the verification state UNLESS the
     // audio artifact has changed (acceptedAudioFingerprint does not match segment.audioFingerprint).
     segments: options.report.segments.map((segment) => {
       const accepted = previous?.segments.find((item) => item.index === segment.index && item.status === "manually_accepted" && item.expectedText === segment.expectedText);
-      return accepted && segment.status !== "verified" ? accepted : segment;
       const audioChanged = Boolean(
         accepted?.acceptedAudioFingerprint &&
         segment.audioFingerprint &&
@@ -101,8 +98,6 @@ const segmentFile = (root: string, slug: string, chapter: number, index: number)
 
 /** Re-runs verification against the EXISTING segment audio using the persisted
  * expected texts. Never calls a TTS provider. Manually accepted segments are
- * preserved exactly and never reported as objectively passed. */
-export async function verifyStoredChapterTts(options: { root: string; story: Story; chapter: number; transcriber: SpeechTranscriber }): Promise<TtsQualityArtifact> {
  * preserved exactly as accepted provided their audio artifact has not changed on disk. */
 export async function verifyStoredChapterTts(options: {
   root: string;
@@ -121,11 +116,7 @@ export async function verifyStoredChapterTts(options: {
   const thresholds = { ...defaultQualityThresholds, ...artifact.verificationPolicy.thresholds, ...options.thresholds };
   const segments: TtsSegmentQuality[] = [];
   for (const segment of artifact.segments) {
-    if (segment.status === "manually_accepted") { segments.push(segment); continue; }
     const file = segmentFile(root, story.slug, chapter, segment.index);
-    if (!available || !(await exists(file))) {
-      segments.push({ ...segment, status: "unverified", score: undefined, transcription: undefined,
-        issues: [{ type: "transcription_failed", severity: 0.5, detail: available ? "Segment audio file is missing" : "Speech transcriber is unavailable" }] });
     const diskFingerprint = await fileFingerprint(file);
     if (segment.status === "manually_accepted") {
       if (diskFingerprint && segment.acceptedAudioFingerprint && diskFingerprint === segment.acceptedAudioFingerprint) {
@@ -150,13 +141,9 @@ export async function verifyStoredChapterTts(options: {
       const observations = await transcriber.transcribe({ audioPath: file, language: story.outputLanguage });
       if (!observations.length) throw new Error("Transcription produced no speech tokens");
       const comparison = compareSpokenText(segment.expectedText, observations, {
-        expectedVocalizations: scanVocalizations(segment.expectedText).length > 0 || /\[[^\]]+\]|\([^)]+\)/.test(segment.expectedText),
         thresholds,
         expectedVocalizations: scanVocalizations(segment.expectedText).length > 0 || hasFishControlCues(segment.expectedText),
       });
-      const passed = comparison.score >= defaultQualityThresholds.passScore && !comparison.issues.some((issue) => ["unexpected_speech", "missing_speech", "repetition", "truncated", "suspected_gibberish", "invalid_audio"].includes(issue.type));
-      segments.push({ ...segment, status: passed ? "verified" : "needs_review", score: comparison.score,
-        transcription: observations.map((observation) => observation.text).join(" ").trim() || undefined, issues: comparison.issues });
       const passed = comparison.score >= thresholds.passScore && !comparison.issues.some((issue) => ["unexpected_speech", "missing_speech", "repetition", "truncated", "suspected_gibberish", "invalid_audio"].includes(issue.type));
       segments.push({
         ...segment,
@@ -167,7 +154,6 @@ export async function verifyStoredChapterTts(options: {
         issues: comparison.issues,
       });
     } catch {
-      segments.push({ ...segment, status: "unverified", score: undefined, transcription: undefined, issues: [{ type: "transcription_failed", severity: 0.5, detail: "Segment audio could not be transcribed" }] });
       segments.push({
         ...segment,
         audioFingerprint: diskFingerprint,
@@ -178,7 +164,6 @@ export async function verifyStoredChapterTts(options: {
       });
     }
   }
-  const updated: TtsQualityArtifact = { ...artifact, segments, status: summarizeQuality(segments).status, updatedAt: new Date().toISOString() };
   const policy = {
     transcriber: transcriber.name,
     maxRetries,
@@ -210,11 +195,9 @@ export async function regenerateStoredChapterTtsSegment(options: { root: string;
   if (!(await exists(file))) throw new StorageError(`Chapter ${chapter} segment ${current.index + 1} audio is missing; rerun the TTS stage`);
   const config = story.pipeline.tts;
   const result = await provider.synthesize({
-    text: current.expectedText, model: config.model, referenceId: config.referenceId, secondaryReferenceId: config.secondaryReferenceId,
     text: current.expectedText, exactChunk: true, model: config.model, referenceId: config.referenceId, secondaryReferenceId: config.secondaryReferenceId,
     voiceMode: config.voiceMode, deliveryIntensity: config.deliveryIntensity, qualityGuard: true,
     speed: config.speed, format: config.format, sampleRate: config.sampleRate, bitrate: config.bitrate,
-    normalize: config.normalize, maxCharsPerRequest: Math.max(config.maxCharsPerRequest, [...current.expectedText].length + 1),
     normalize: config.normalize, maxCharsPerRequest: config.maxCharsPerRequest,
   });
   const replacement = result.segments.length === 1 ? result.segments[0]! : result.audio;
@@ -223,7 +206,6 @@ export async function regenerateStoredChapterTtsSegment(options: { root: string;
   const newFingerprint = await fileFingerprint(file);
   const verified = result.quality?.segments[0];
   const segments = artifact.segments.map((segment) => segment.index === current.index
-    ? { ...(verified ?? { expectedText: current.expectedText, status: "unverified" as const, issues: [{ type: "transcription_failed" as const, severity: 0.5, detail: "Regenerated segment was not verified" }], attempts: [], finalAttempt: 0 }), index: current.index, acceptedAt: undefined, acceptedReason: undefined }
     ? {
         ...(verified ?? { expectedText: current.expectedText, status: "unverified" as const, issues: [{ type: "transcription_failed" as const, severity: 0.5, detail: "Regenerated segment was not verified" }], attempts: [], finalAttempt: 0 }),
         index: current.index,
@@ -253,7 +235,6 @@ export async function acceptStoredChapterTtsSegment(options: { root: string; slu
   const diskFingerprint = await fileFingerprint(file);
   const acceptedAudioFingerprint = diskFingerprint ?? current.audioFingerprint;
   const segments = artifact.segments.map((segment) => segment.index === current.index
-    ? { ...segment, status: "manually_accepted" as const, acceptedAt: new Date().toISOString(), acceptedReason: options.reason }
     ? {
         ...segment,
         status: "manually_accepted" as const,

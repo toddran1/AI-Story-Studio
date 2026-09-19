@@ -294,8 +294,6 @@ export class ChapterPipeline {
     // Verification wraps the pronunciation layer so the guard sees the final
     // spoken text and per-segment audio; retry calls flow back through the same
     // tracked provider and are usage-recorded with attempt numbers.
-    const ttsProvider = this.qualityVerification?.transcriber && ttsConfig.qualityGuard
-      ? new QualityGuardTTSProvider(baseTtsProvider, this.qualityVerification.transcriber, { maxRetries: ttsConfig.maxQualityRetries, language: options.story.outputLanguage })
     const ttsProvider = ttsConfig.qualityGuard
       ? new QualityGuardTTSProvider(baseTtsProvider, this.qualityVerification?.transcriber, { maxRetries: ttsConfig.maxQualityRetries, language: options.story.outputLanguage })
       : baseTtsProvider;
@@ -309,7 +307,6 @@ export class ChapterPipeline {
     const ttsFp = fingerprint({ narration: fingerprint(ttsScript), speech: speech.fingerprint, config: { ...ttsSynthesisSettings(ttsConfig), referenceId }, deliveryProfile, inputNormalizationVersion: ttsProvider.inputNormalizationVersion,
       ...(pronunciationFp ? { pronunciation: pronunciationFp } : {}),
       ...(bleepStrongProfanity ? { bleepStrongProfanity: true, censor: { version: this.censor.version || CENSOR_AUDIO_VERSION, config: censorToneConfig } } : {}) });
-    if (!(await fileFingerprint(paths.audioRaw)) && chapter.stages.tts.status === "complete" && await fileFingerprint(paths.audio)) await atomicWrite(paths.audioRaw, await readFile(paths.audio));
     await runStage("tts", ttsFp, paths.audioRaw, { provider: ttsConfig.provider, model: ttsConfig.model }, async () => {
       const result = await this.censor.synthesize(ttsProvider, { text: speech.normalized.text, model: ttsConfig.model, referenceId, secondaryReferenceId: ttsConfig.secondaryReferenceId,
         voiceMode: ttsConfig.voiceMode, deliveryIntensity: ttsConfig.deliveryIntensity, qualityGuard: ttsConfig.qualityGuard, bleepStrongProfanity,

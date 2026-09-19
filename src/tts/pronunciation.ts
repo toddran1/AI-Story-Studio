@@ -25,7 +25,6 @@ export function pronunciationProvider(provider: TTSProvider, entities: readonly 
     vocalizationStrategy: provider.vocalizationStrategy?.bind(provider),
     resolveReferenceId: provider.resolveReferenceId?.bind(provider),
     validateConfiguration: () => provider.validateConfiguration(),
-    synthesize: request => provider.synthesize({ ...request, pronunciation: resolvePronunciations(request.text, entities) }),
     synthesize: request => provider.synthesize({
       ...request,
       pronunciation: request.exactChunk ? [] : (request.pronunciation ?? resolvePronunciations(request.text, entities)),

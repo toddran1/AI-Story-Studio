@@ -18,7 +18,6 @@ import { invalidateStoryForConfigChange } from "../src/studio/projects.js";
 import { FfmpegCensorAudioService } from "../src/tts/censor-audio.js";
 import {
   QualityGuardTTSProvider, SpeechTranscriber, compareSpokenText, defaultQualityThresholds, deliveryIntensityForAttempt,
-  TtsQualityReport, TtsSegmentQuality, summarizeQuality,
   TtsQualityReport, TtsSegmentQuality, summarizeQuality, tokenizeSpoken,
 } from "../src/tts/quality-guard.js";
 import {
