@@ -35,7 +35,7 @@ async function main() {
   if (command.dryRun) { process.stdout.write(`${JSON.stringify(plan)}\n`); return; }
   const source = (await loadImportedChapters(root, command.story)).chapters.find((item) => item.chapter === command.chapter); if (!source) throw new Error(`Chapter ${command.chapter} is not imported for story '${command.story}'`);
   const runtime = createPipelineRuntime(env); const config = alignmentConfig(env, root);
-  await withStoryLock(root, command.story, "manual stage processing", () => executeStagePlan({ root, story, chapter: command.chapter, inputPath: source.path, source: source.source, plan, runtime: { pipeline: runtime.pipeline, alignment: { config, engine: createAlignmentEngine(config) }, scenePlanner: runtime.router.forStage(story.pipeline.scenePlanner), image: runtime.images.forName("openai"), video: new FfmpegVideoProcessor() }, onStageEvent: (event) => process.stdout.write(`${event.status}\t${event.stage}\n`) }));
+  await withStoryLock(root, command.story, "manual stage processing", () => executeStagePlan({ root, story, chapter: command.chapter, inputPath: source.path, source: source.source, plan, runtime: { pipeline: runtime.pipeline, alignment: { config, engine: createAlignmentEngine(config) }, scenePlanner: runtime.router.forStage(story.pipeline.scenePlanner), image: runtime.images.forName(story.artwork.provider), video: new FfmpegVideoProcessor() }, onStageEvent: (event) => process.stdout.write(`${event.status}\t${event.stage}\n`) }));
   process.stdout.write(`${JSON.stringify(plan)}\n`);
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) main().catch((error) => { process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`); process.exitCode = 1; });

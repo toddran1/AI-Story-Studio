@@ -9,13 +9,16 @@ import { fingerprint } from "../utils/hash.js";
 import { sceneContentFingerprint } from "../scenes/manifest.js";
 import { loadCharacterVisualReferences } from "../scenes/visual-references.js";
 import { artworkReviewSchema, ArtworkVersion, Scene, SceneManifest, sceneManifestSchema } from "../scenes/types.js";
-import { ImageProvider } from "./provider.js";
+import { ImageProvider, ImageReferenceImage } from "./provider.js";
 import { withRetry } from "../batch/retry.js";
 import { retryConfigSchema } from "../batch/types.js";
 import { loadVisualProfiles } from "../visual-canon/profiles.js";
 import { loadStoryArtDirection, resolveActiveArtDirection } from "../visual-canon/art-direction.js";
 import { resolveVisualCanonPrompt, ResolvedSceneVisualPrompt } from "../visual-canon/resolver.js";
 import { emptyStoryBible, storyBibleSchema, StoryBible } from "../domain/story-bible.js";
+import { assertImageModelCompatible, MAX_REFERENCE_IMAGES, MAX_REFERENCE_IMAGE_BYTES, MAX_REFERENCE_TOTAL_BYTES, providerSupportsReferenceImages } from "./providers.js";
+import { findVisualReferenceFile, mimeForVisualReferenceExtension } from "../visual-canon/assets.js";
+import { VisualReferenceImage } from "../domain/visual-profile.js";
 
 export async function generateStoredArtwork(options: {
   root: string;
@@ -31,6 +34,13 @@ export async function generateStoredArtwork(options: {
   const raw = await readJsonIfExists<SceneManifest>(paths.scenesManifest);
   if (!raw) throw new ArtworkError(`Chapter ${options.chapter} has no scene plan`);
   const manifest = sceneManifestSchema.parse(raw);
+
+  if (options.provider.name !== options.story.artwork.provider) {
+    throw new ArtworkError(
+      `Artwork provider mismatch: story '${options.story.slug}' is configured for '${options.story.artwork.provider}' but the resolved provider is '${options.provider.name}'`
+    );
+  }
+  assertImageModelCompatible(options.story.artwork.provider, options.story.artwork.model);
 
   const rawChapter = await readJsonIfExists<Chapter>(paths.chapterMeta);
   if (!rawChapter) throw new ArtworkError(`Chapter ${options.chapter} has no pipeline metadata`);
@@ -128,6 +138,8 @@ export async function generateStoredArtwork(options: {
     return {
       dryRun: true,
       chapter: options.chapter,
+      provider: options.story.artwork.provider,
+      model: options.story.artwork.model,
       planned: manifest.scenes.length,
       selected: selected.length,
       imagesToGenerate: candidates.length,
@@ -187,7 +199,11 @@ export async function generateStoredArtwork(options: {
     });
 
     try {
-      const result = await generateSceneImage(options.provider, options.story, item.prompt);
+      const references = await loadSceneReferenceImages(options.root, options.story, item.resolved);
+      const result = await generateSceneImage(options.provider, options.story, item.prompt, {
+        negativePrompt: item.resolved.negativePrompt || undefined,
+        referenceImages: references.images,
+      });
       const imageFingerprint = fingerprint(result.data.toString("base64"));
 
       // Determine next version number
@@ -229,6 +245,11 @@ export async function generateStoredArtwork(options: {
           size: options.story.artwork.size,
           aspectRatio: options.story.artwork.aspectRatio,
           outputFormat: options.story.artwork.outputFormat,
+        },
+        provenance: {
+          referencesUsed: references.mode,
+          referenceImageCount: references.images.length,
+          availableReferenceCount: references.available,
         },
         review: "unreviewed",
       };
@@ -514,20 +535,60 @@ export function artworkPrompt(
     .join("\n");
 }
 
-export async function generateSceneImage(provider: ImageProvider, story: Story, prompt: string) {
+export async function generateSceneImage(
+  provider: ImageProvider,
+  story: Story,
+  prompt: string,
+  extras?: { negativePrompt?: string; referenceImages?: ImageReferenceImage[] }
+) {
   const result = await withRetry(
     () =>
       provider.generate({
         model: story.artwork.model,
         prompt,
+        negativePrompt: extras?.negativePrompt,
+        aspectRatio: story.artwork.aspectRatio,
         quality: story.artwork.quality,
         size: story.artwork.size,
         outputFormat: story.artwork.outputFormat,
+        referenceImages: extras?.referenceImages,
       }),
     retryConfigSchema.parse({})
   );
   validatePng(result.data);
   return result;
+}
+
+type SceneReferencePayload = { images: ImageReferenceImage[]; available: number; mode: "images" | "text-only" | "none" };
+
+/** Collect Visual Canon reference images for a scene. Bytes are resolved only
+ * through the controlled asset directory (never persisted paths). When the
+ * effective provider/model cannot consume image input, the textual canon stays
+ * in the prompt and provenance records the text-only fallback. */
+async function loadSceneReferenceImages(root: string, story: Story, resolved: ResolvedSceneVisualPrompt): Promise<SceneReferencePayload> {
+  const wanted: VisualReferenceImage[] = [];
+  for (const entity of resolved.resolvedEntities) {
+    const refs = entity.references ?? [];
+    wanted.push(...refs.filter((ref) => ref.approved), ...refs.filter((ref) => !ref.approved));
+  }
+  const available = wanted.length;
+  if (!available) return { images: [], available: 0, mode: "none" };
+  if (!providerSupportsReferenceImages(story.artwork.provider, story.artwork.model)) {
+    return { images: [], available, mode: "text-only" };
+  }
+  const images: ImageReferenceImage[] = [];
+  let totalBytes = 0;
+  for (const ref of wanted) {
+    if (images.length >= MAX_REFERENCE_IMAGES) break;
+    const hint = /\.([a-zA-Z0-9]+)$/.exec(ref.imagePath)?.[1];
+    const file = await findVisualReferenceFile(root, story.slug, ref.entityId, ref.id, hint);
+    if (!file) continue;
+    const data = await readFile(file.path);
+    if (!data.length || data.length > MAX_REFERENCE_IMAGE_BYTES || totalBytes + data.length > MAX_REFERENCE_TOTAL_BYTES) continue;
+    totalBytes += data.length;
+    images.push({ data, mimeType: mimeForVisualReferenceExtension(file.ext), role: ref.role });
+  }
+  return { images, available, mode: images.length ? "images" : "text-only" };
 }
 
 function validatePng(data: Buffer) {

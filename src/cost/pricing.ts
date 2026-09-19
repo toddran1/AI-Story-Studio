@@ -9,8 +9,31 @@ const prices: Array<{ provider: string; model: string; snapshot: PricingSnapshot
   { provider: "fish", model: "s1", snapshot: { catalogVersion: PRICING_CATALOG_VERSION, priceId: "fish-s1-2026", effectiveFrom: "2026-09-10", currency: "USD", sourceUrl: "https://docs.fish.audio/developer-guide/models-pricing/pricing-and-rate-limits", basis: "utf8_bytes", utf8BytesPerMillion: 15 } },
 ];
 
+const GPT_IMAGE_1_PRICES: Record<string, Record<string, number>> = {
+  low: { "1024x1024": .011, "1024x1536": .016, "1536x1024": .016 },
+  medium: { "1024x1024": .042, "1024x1536": .063, "1536x1024": .063 },
+  high: { "1024x1024": .167, "1024x1536": .25, "1536x1024": .25 },
+};
+function scaledImagePrices(multiplier: number): Record<string, Record<string, number>> {
+  return Object.fromEntries(Object.entries(GPT_IMAGE_1_PRICES).map(([quality, sizes]) => [quality, Object.fromEntries(Object.entries(sizes).map(([size, price]) => [size, price * multiplier]))]));
+}
+const OPENAI_IMAGE_PRICE_TABLES: Record<string, Record<string, Record<string, number>>> = {
+  "gpt-image-1": GPT_IMAGE_1_PRICES,
+  "gpt-image-2.5-flare": scaledImagePrices(.5),
+  "gpt-image-2.5-sunburst": scaledImagePrices(1.5),
+};
+// Gemini image models price per image by output resolution (quality intent maps to 1K/2K/4K).
+const GEMINI_IMAGE_PRICES: Record<string, number> = { low: .02, medium: .045, high: .09 };
+
 export function pricingFor(provider: string, model: string, image?: {quality?:string;size?:string}): PricingSnapshot | undefined {
-  if(provider==="openai"&&model==="gpt-image-1"&&image?.quality&&image.size){const table:Record<string,Record<string,number>>={low:{"1024x1024":.011,"1024x1536":.016,"1536x1024":.016},medium:{"1024x1024":.042,"1024x1536":.063,"1536x1024":.063},high:{"1024x1024":.167,"1024x1536":.25,"1536x1024":.25}};const imagePrice=table[image.quality]?.[image.size];if(imagePrice!==undefined)return{catalogVersion:PRICING_CATALOG_VERSION,priceId:`openai-gpt-image-1-${image.quality}-${image.size}-2026-09`,effectiveFrom:"2026-09-10",currency:"USD",sourceUrl:"https://developers.openai.com/api/docs/models/gpt-image-1",basis:"image",imagePrice};}
+  if (provider === "openai" && image?.quality && image.size) {
+    const imagePrice = OPENAI_IMAGE_PRICE_TABLES[model]?.[image.quality]?.[image.size];
+    if (imagePrice !== undefined) return { catalogVersion: PRICING_CATALOG_VERSION, priceId: `openai-${model}-${image.quality}-${image.size}-2026-09`, effectiveFrom: "2026-09-10", currency: "USD", sourceUrl: `https://developers.openai.com/api/docs/models/${model}`, basis: "image", imagePrice };
+  }
+  if (provider === "gemini" && model === "gemini-3.1-flash-image" && image?.quality) {
+    const imagePrice = GEMINI_IMAGE_PRICES[image.quality];
+    if (imagePrice !== undefined) return { catalogVersion: PRICING_CATALOG_VERSION, priceId: `gemini-${model}-${image.quality}-2026-09`, effectiveFrom: "2026-09-19", currency: "USD", sourceUrl: "https://ai.google.dev/gemini-api/docs/pricing", basis: "image", imagePrice };
+  }
   return prices.find((item) => item.provider === provider && item.model === model)?.snapshot;
 }
 export function calculateCost(snapshot: PricingSnapshot | undefined, usage: { inputTokens?: number; cachedInputTokens?: number; outputTokens?: number; inputUtf8Bytes?: number; imageCount?: number }): number | undefined {

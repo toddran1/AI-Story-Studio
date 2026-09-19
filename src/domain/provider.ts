@@ -15,7 +15,7 @@ export type ProviderCapability =
 
 export const PROVIDER_CAPABILITIES: Record<string, ReadonlySet<ProviderCapability>> = {
   openai: new Set(["text_generation", "structured_output", "image_generation", "vision"]),
-  gemini: new Set(["text_generation", "structured_output", "vision"]),
+  gemini: new Set(["text_generation", "structured_output", "image_generation", "vision"]),
   kimi: new Set(["text_generation", "structured_output"]),
   fish: new Set(["tts"]),
 };

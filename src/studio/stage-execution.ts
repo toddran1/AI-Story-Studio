@@ -15,7 +15,8 @@ import { planStoredScenes } from "../scenes/manifest.js";
 import { generateStoredArtwork } from "../artwork/generator.js";
 import { renderStoredChapterVideo } from "../video/chapter-video.js";
 import type { LLMProvider } from "../llm/provider.js";
-import type { ImageProvider } from "../artwork/provider.js";
+import type { ImageProviderSource } from "../artwork/providers.js";
+import { resolveImageProvider } from "../artwork/providers.js";
 import type { VideoProcessor } from "../video/renderer.js";
 
 /** `context` is a local, derived artifact. It is deliberately visible in plans
@@ -172,7 +173,7 @@ export type StageExecutionRuntime = {
   pipeline: StageExecutionProcessor;
   alignment: { config: AlignmentConfig; engine?: AlignmentEngine };
   scenePlanner?: LLMProvider;
-  image?: ImageProvider;
+  image?: ImageProviderSource;
   video: VideoProcessor;
 };
 
@@ -203,7 +204,7 @@ export async function executeStagePlan(options: {
     }
     if (stage === "artwork") {
       if (!options.runtime.image) throw new Error("Artwork provider is not configured");
-      await generateStoredArtwork({ root: options.root, story: options.story, chapter: options.chapter, provider: options.runtime.image, force: true });
+      await generateStoredArtwork({ root: options.root, story: options.story, chapter: options.chapter, provider: resolveImageProvider(options.runtime.image, options.story), force: true });
     }
     if (stage === "video") await renderStoredChapterVideo({ root: options.root, story: options.story, chapter: options.chapter, processor: options.runtime.video, force: true });
   }

@@ -27,6 +27,7 @@ import { applyManualBibleOverlay } from "../../src/studio/workflow.js";
 import { getStorageUsage, invalidateStoryForConfigChange, loadGlobalSettings, readActivity } from "../../src/studio/projects.js";
 import { loadEnvironment } from "../../src/config/env.js";
 import { resolveModelRouting, resolveAllModelRoutings } from "../../src/config/model-routing.js";
+import { defaultImageModel, IMAGE_PROVIDER_CATALOG, imageModelCompatible } from "../../src/artwork/providers.js";
 import { fingerprint } from "../../src/utils/hash.js";
 import { fileFingerprint } from "../../src/utils/file-fingerprint.js";
 import { logger } from "../../src/utils/logger.js";
@@ -283,11 +284,13 @@ export async function updateStorySettings(root: string, slug: string, input: unk
   slugSchema.parse(slug); const update = settingsUpdateSchema.parse(input); const paths = storyPaths(root, slug, 1);
   return withStoryLock(root, slug, "web settings update", async () => {
     const current = await loadStory(paths.storyConfig);
+    const artwork = { ...current.artwork, ...update.artwork };
+    if (!imageModelCompatible(artwork.provider, artwork.model)) artwork.model = defaultImageModel(artwork.provider);
     const story = storySchema.parse({ ...current, title: update.title, author: update.author || undefined, description: update.description, tags: update.tags, notes: update.notes, sourceLanguage: update.sourceLanguage, outputLanguage: update.outputLanguage,
       context: { ...current.context, recentChapterSummaries: update.recentChapterSummaries },
       qaMode: update.qaMode ?? current.qaMode,
       narrationSettings: update.narrationSettings ?? current.narrationSettings,
-      audio: { ...current.audio, ...update.audio }, subtitles: { ...current.subtitles, ...update.subtitles }, video: { ...current.video, ...update.video }, scenes: { ...current.scenes, ...update.scenes }, artwork: { ...current.artwork, ...update.artwork },
+      audio: { ...current.audio, ...update.audio }, subtitles: { ...current.subtitles, ...update.subtitles }, video: { ...current.video, ...update.video }, scenes: { ...current.scenes, ...update.scenes }, artwork,
       pipeline: {
         ...current.pipeline,
         translation: update.translation,
@@ -515,6 +518,15 @@ export async function getScenesDashboard(root: string, slug: string, selectedCha
   return {
     settings: story.scenes,
     artwork: story.artwork,
+    artworkRouting: {
+      provider: story.artwork.provider,
+      model: story.artwork.model,
+      availableProviders: Object.entries(IMAGE_PROVIDER_CATALOG).map(([name, entry]) => ({
+        name,
+        models: entry.models,
+        defaultModel: entry.defaultModel,
+      })),
+    },
     planner: story.pipeline.scenePlanner,
     scenePlannerRouting,
     selectedChapter: chapterNumber,

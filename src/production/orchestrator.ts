@@ -10,7 +10,7 @@ import { withRetry } from "../batch/retry.js";
 import { generateStoredSubtitles } from "../subtitles/chapter-subtitles.js";
 import { planStoredScenes } from "../scenes/manifest.js";
 import { generateStoredArtwork } from "../artwork/generator.js";
-import { ImageProvider } from "../artwork/provider.js";
+import { ImageProviderSource, resolveImageProvider } from "../artwork/providers.js";
 import { renderStoredChapterVideo } from "../video/chapter-video.js";
 import { VideoProcessor } from "../video/renderer.js";
 import { assembleVideoExport, VideoExportProcessor } from "../video/video-export.js";
@@ -28,7 +28,7 @@ import { AlignmentConfig, AlignmentEngine } from "../alignment/types.js";
 type Processor = { run(options: PipelineOptions): Promise<unknown> };
 export type ProductionDependencies = {
   pipeline: Processor; loadChapters: () => Promise<DiscoveredChapter[]>; refresh?: (from: number, to: number) => Promise<unknown>;
-  scenePlanner?: LLMProvider; image?: ImageProvider; video: VideoProcessor; videoExport: VideoExportProcessor; audiobook: AudiobookProcessor;
+  scenePlanner?: LLMProvider; image?: ImageProviderSource; video: VideoProcessor; videoExport: VideoExportProcessor; audiobook: AudiobookProcessor;
   alignmentEngine?: AlignmentEngine; alignmentConfig?: AlignmentConfig;
 };
 export type ProductionRequest = { root: string; story: Story; from: number; to: number; profile?: string; outputs?: ProductionOutput[]; artwork?: boolean; repairQa?: boolean; alignment?: boolean; refresh?: boolean; dryRun?: boolean; force?: ProductionForce; audiobookFormat?: "mp3" | "m4b"; resume?: boolean; deferExports?: boolean; propagateChapterErrors?: boolean; productionRunId?: string; queueJobId?: string; maxProviderBudgetUsd?: number; recordedCost?: () => Promise<number>; pause?: { readonly isRequested: boolean }; onProgress?: (event: Record<string, unknown>) => void };
@@ -67,7 +67,7 @@ export async function runProduction(request: ProductionRequest, dependencies: Pr
         if (plan.stages.includes("alignment")) await execute(run, manifest, source.chapter, "alignment", request, () => alignStoredChapter({ root: request.root, storySlug: request.story.slug, chapter: source.chapter, language: request.story.outputLanguage, config: dependencies.alignmentConfig ?? fallbackAlignmentConfig(), engine: dependencies.alignmentEngine, force: isProductionStageForced(request.force, "alignment") }));
         if (plan.stages.includes("subtitles")) await execute(run, manifest, source.chapter, "subtitles", request, () => generateStoredSubtitles({ root: request.root, story: request.story, chapter: source.chapter, force: isProductionStageForced(request.force, "subtitles"), forceEstimated: !resolved.alignment }));
         if (plan.stages.includes("scenePlanning")) { if (!dependencies.scenePlanner) throw new Error("Scene planner is not configured"); await execute(run, manifest, source.chapter, "scenePlanning", request, () => planStoredScenes({ root: request.root, story: request.story, chapter: source.chapter, provider: dependencies.scenePlanner!, force: isProductionStageForced(request.force, "scenePlanning") })); }
-        if (plan.stages.includes("artwork")) { if (!dependencies.image) throw new Error("Image provider is not configured"); await execute(run, manifest, source.chapter, "artwork", request, () => generateStoredArtwork({ root: request.root, story: request.story, chapter: source.chapter, provider: dependencies.image!, force: isProductionStageForced(request.force, "artwork"), onProgress: (event) => request.onProgress?.(event) })); }
+        if (plan.stages.includes("artwork")) { if (!dependencies.image) throw new Error("Image provider is not configured"); await execute(run, manifest, source.chapter, "artwork", request, () => generateStoredArtwork({ root: request.root, story: request.story, chapter: source.chapter, provider: resolveImageProvider(dependencies.image!, request.story), force: isProductionStageForced(request.force, "artwork"), onProgress: (event) => request.onProgress?.(event) })); }
         if (plan.stages.includes("video")) await execute(run, manifest, source.chapter, "video", request, () => renderStoredChapterVideo({ root: request.root, story: request.story, chapter: source.chapter, processor: dependencies.video, force: isProductionStageForced(request.force, "video") }));
         run.status = run.qa === "warn" ? "needs-review" : "complete";
       }

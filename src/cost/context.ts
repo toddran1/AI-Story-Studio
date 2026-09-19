@@ -49,7 +49,7 @@ export class TrackedTTSProvider implements TTSProvider {
 }
 
 export class TrackedImageProvider implements ImageProvider {
-  readonly name; readonly version; constructor(private readonly inner: ImageProvider, private readonly sink: UsageSink) { this.name = inner.name; this.version = inner.version; }
+  readonly name; readonly version; readonly capabilities; constructor(private readonly inner: ImageProvider, private readonly sink: UsageSink) { this.name = inner.name; this.version = inner.version; this.capabilities = inner.capabilities; }
   validateConfiguration() { return this.inner.validateConfiguration(); }
   async generate(request: ImageGenerationRequest): Promise<ImageGenerationResult> { const scope = next("image", request.model); if (!scope) return this.inner.generate(request); const attemptedAt = new Date().toISOString();
     try { const result = await this.inner.generate(request); await persist(this.sink, { ...base(scope, this.name, request.model, "image", attemptedAt, true, result.requestId), inputCharacters: [...request.prompt].length, inputUtf8Bytes: Buffer.byteLength(request.prompt), outputBytes: result.data.byteLength, imageCount: 1, imageQuality: request.quality, imageSize: request.size }); return result; }

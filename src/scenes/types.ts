@@ -10,14 +10,14 @@ export const sceneSettingsSchema = z.object({
   .default({ targetDurationSeconds: 20, minimumDurationSeconds: 10, maximumDurationSeconds: 30, maximumScenesPerChapter: 50 });
 
 export const artworkSettingsSchema = z.object({
-  provider: z.literal("openai").default("openai"),
-  model: z.string().trim().min(1).default("gpt-image-1"),
+  provider: z.enum(["openai", "gemini"]).default("openai"),
+  model: z.string().trim().min(1).default("gpt-image-2.5-flare"),
   stylePrompt: z.string().trim().min(1).max(4000).default("cinematic illustrated fiction, dramatic natural lighting, consistent character design, widescreen composition"),
-  aspectRatio: z.literal("16:9").default("16:9"),
+  aspectRatio: z.enum(["16:9", "1:1", "9:16"]).default("16:9"),
   quality: z.enum(["low", "medium", "high"]).default("medium"),
   size: z.enum(["1536x1024", "1024x1024", "1024x1536"]).default("1536x1024"),
   outputFormat: z.literal("png").default("png"),
-}).default({ provider: "openai", model: "gpt-image-1", stylePrompt: "cinematic illustrated fiction, dramatic natural lighting, consistent character design, widescreen composition", aspectRatio: "16:9", quality: "medium", size: "1536x1024", outputFormat: "png" });
+}).default({ provider: "openai", model: "gpt-image-2.5-flare", stylePrompt: "cinematic illustrated fiction, dramatic natural lighting, consistent character design, widescreen composition", aspectRatio: "16:9", quality: "medium", size: "1536x1024", outputFormat: "png" });
 
 export const artworkReviewSchema = z.enum(["unreviewed", "approved", "rejected", "needs-regeneration"]);
 export const sceneImportanceSchema = z.enum(["transition", "standard", "major"]);

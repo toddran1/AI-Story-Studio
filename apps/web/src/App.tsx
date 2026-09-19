@@ -17,7 +17,7 @@ import { VocalizationList } from "./VocalizationList.js";
 import { getEntityStatusOptions, isStandardEntityStatus, statusKey } from "../../../src/story-bible/entity-status.js";
 import { VisualProfileModal } from "./VisualProfileModal.js";
 import { ArtDirectionModal } from "./ArtDirectionModal.js";
-import { reviewArtworkVersion, ShotType, CameraAngle, CompositionTendency } from "./api.js";
+import { reviewArtworkVersion, ShotType, CameraAngle, CompositionTendency, ARTWORK_PROVIDERS } from "./api.js";
 import "./entity-sheet-actions.css";
 import "./stage-execution.css";
 import "./scenes.css";
@@ -1445,6 +1445,24 @@ function getSceneProductionState(scene: Scene): { label: string; cls: string } {
   return { label: "Planned", cls: "state-planned" };
 }
 
+export type ArtworkEstimate = { count: number; provider: string; model: string };
+
+export function ArtworkEstimateSummary({ estimate }: { estimate: ArtworkEstimate }) {
+  return (
+    <div className="cost-estimate">
+      <b>{estimate.count}</b>
+      <span>scene{estimate.count === 1 ? "" : "s"} to generate</span>
+      <small>{estimate.provider}{estimate.model ? ` · ${estimate.model}` : ""} · paid image request{estimate.count === 1 ? "" : "s"} · dry run only — nothing generated.</small>
+    </div>
+  );
+}
+
+export function artworkModelOptionsFor(provider: string, currentModel: string): string[] {
+  const entry = ARTWORK_PROVIDERS.find((item) => item.name === provider);
+  if (!entry) return currentModel ? [currentModel] : [];
+  return entry.models.includes(currentModel) ? entry.models : [...entry.models, currentModel];
+}
+
 export function ScenesPage({ slug, onJob, navigate, initialData }: { slug: string; onJob: (job: Job) => void; navigate?: (path: string) => void; initialData?: ScenesDashboard }) {
   const [data, setData] = useState<ScenesDashboard | undefined>(initialData);
   const [draft, setDraft] = useState<Scene[]>(() => (initialData?.manifest?.scenes ? structuredClone(initialData.manifest.scenes) : []));
@@ -1452,7 +1470,7 @@ export function ScenesPage({ slug, onJob, navigate, initialData }: { slug: strin
   const [range, setRange] = useState({ from: "", to: "" });
   const [rangeError, setRangeError] = useState("");
   const [error, setError] = useState("");
-  const [estimate, setEstimate] = useState<number>();
+  const [estimate, setEstimate] = useState<ArtworkEstimate>();
   const [saving, setSaving] = useState(false);
   const [sceneFilter, setSceneFilter] = useState<"all" | "needs-review" | "approved" | "video-ready">("all");
   const [selectedVersionByScene, setSelectedVersionByScene] = useState<Record<string, string>>({});
@@ -1513,7 +1531,13 @@ export function ScenesPage({ slug, onJob, navigate, initialData }: { slug: strin
       watcher.current = watchJob(job.id, async (next) => {
         onJob(next);
         if (next.status === "completed") {
-          if (next.result?.dryRun) setEstimate(next.result.imageCountEstimate);
+          if (next.result?.dryRun) {
+            setEstimate({
+              count: next.result.imageCountEstimate,
+              provider: next.result.provider ?? data?.artworkRouting?.provider ?? data?.artwork?.provider ?? "openai",
+              model: next.result.model ?? data?.artworkRouting?.model ?? data?.artwork?.model ?? "",
+            });
+          }
           await load(data?.selectedChapter);
         } else if (next.status === "failed") {
           setError(next.error ?? `${pretty(kind)} job failed`);
@@ -1571,6 +1595,11 @@ export function ScenesPage({ slug, onJob, navigate, initialData }: { slug: strin
   if (error && !data) return <LoadFailure error={error} />;
   if (!data) return <Loading />;
   const plannerNotReady = Boolean(data.scenePlannerRouting && !data.scenePlannerRouting.ready);
+  const artworkRouting = data.artworkRouting ?? {
+    provider: data.artwork?.provider ?? "openai",
+    model: data.artwork?.model ?? "",
+    availableProviders: ARTWORK_PROVIDERS,
+  };
 
   const filteredScenes = draft.filter((scene) => {
     if (sceneFilter === "all") return true;
@@ -1608,6 +1637,12 @@ export function ScenesPage({ slug, onJob, navigate, initialData }: { slug: strin
             <span className={`routing-badge ${data.scenePlannerRouting?.source === "override" ? "override" : "inherited"}`}>
               {data.scenePlannerRouting?.source === "override" ? "Book override" : "Studio default"}
             </span>
+            <button type="button" className="button small text-btn" onClick={() => navigate?.(`/stories/${slug}/settings`) ?? (location.href = `/stories/${slug}/settings`)}>Settings</button>
+          </div>
+          <div className="scene-planner-badge" title={`Effective artwork provider and model: ${artworkRouting.provider} · ${artworkRouting.model}`}>
+            <span className="eyebrow">Artwork</span>
+            <b>{artworkRouting.provider} · {artworkRouting.model}</b>
+            <span className="routing-badge inherited">Story settings</span>
             <button type="button" className="button small text-btn" onClick={() => navigate?.(`/stories/${slug}/settings`) ?? (location.href = `/stories/${slug}/settings`)}>Settings</button>
           </div>
         </div>
@@ -1716,13 +1751,7 @@ export function ScenesPage({ slug, onJob, navigate, initialData }: { slug: strin
           </div>
         )}
 
-        {estimate !== undefined && (
-          <div className="cost-estimate">
-            <b>{estimate}</b>
-            <span>paid image request{estimate === 1 ? "" : "s"}</span>
-            <small>Dry run only—nothing generated.</small>
-          </div>
-        )}
+        {estimate !== undefined && <ArtworkEstimateSummary estimate={estimate} />}
       </div>
 
       {error && <ErrorBox text={error} />}
@@ -1842,9 +1871,9 @@ export function ScenesPage({ slug, onJob, navigate, initialData }: { slug: strin
                                 type="button"
                                 className={`version-tab ${isSelected ? "active" : ""} ${isApproved ? "is-approved" : ""}`}
                                 onClick={() => setSelectedVersionByScene({ ...selectedVersionByScene, [scene.id]: ver.id })}
-                                title={`Version ${ver.versionNumber}: ${new Date(ver.createdAt).toLocaleTimeString()} (${ver.provider}/${ver.model})`}
+                                title={`Version ${ver.versionNumber}: ${new Date(ver.createdAt).toLocaleTimeString()} (${ver.provider}/${ver.model})${ver.provenance?.referencesUsed ? ` · references: ${ver.provenance.referencesUsed}${ver.provenance.referenceImageCount ? ` (${ver.provenance.referenceImageCount} image${ver.provenance.referenceImageCount === 1 ? "" : "s"})` : ""}` : ""}${isApproved ? " · approved" : ""}`}
                               >
-                                v{ver.versionNumber} {isApproved ? "✓" : ""}
+                                v{ver.versionNumber}{isApproved ? " ✓" : ""}
                               </button>
                             );
                           })}
@@ -1852,12 +1881,11 @@ export function ScenesPage({ slug, onJob, navigate, initialData }: { slug: strin
                         {displayedVersion && (
                           <div className="version-approve-action">
                             {scene.artwork?.approvedVersionId === displayedVersion.id ? (
-                              <span style={{ color: "#4caf50", fontWeight: 600 }}>✓ Approved Canon Version</span>
+                              <span className="version-approved-note">✓ Approved Canon Version</span>
                             ) : (
                               <button
                                 type="button"
-                                className="button"
-                                style={{ fontSize: "9px", padding: "3px 8px" }}
+                                className="button small text-btn"
                                 onClick={() => handleApproveVersion(scene, displayedVersion.id)}
                               >
                                 Approve v{displayedVersion.versionNumber}
@@ -2402,6 +2430,7 @@ function SettingsPage({ slug, onJob }: { slug: string; onJob: (job: Job) => void
   const metadataAtSourceLanguage = Boolean(
     story.metadataTranslationSource && languagesMatch(story.metadataTranslationSource.language, story.outputLanguage)
   );
+  const artworkModelOptions = artworkModelOptionsFor(story.artwork.provider, story.artwork.model);
   const stages = ["translation", "narration", "qa", "storyBible", "scenePlanner"] as const;
   return <section className="page settings-page">
     <div className="section-heading"><div><h2>Story settings</h2><p>Credentials remain in the server environment and are never sent here.</p></div>{saved && <Status status="pass" label="Changes saved" />}</div>
@@ -2498,6 +2527,29 @@ function SettingsPage({ slug, onJob }: { slug: string; onJob: (job: Job) => void
         <Field label="Vocalizations"><select value={story.narrationSettings.speechVocalizations?.mode ?? "automatic"} disabled={story.narrationSettings.speechNormalization === "disabled"} onChange={(event) => setStory({ ...story, narrationSettings: { ...story.narrationSettings, speechVocalizations: { ...story.narrationSettings.speechVocalizations, mode: event.target.value as "automatic" | "preserve" | "disabled" } } })}><option value="automatic">Automatic · rewrite or tag laughter, sighs, and gasps</option><option value="preserve">Preserve · record diagnostics only</option><option value="disabled">Disabled · ignore vocalizations</option></select><small className="field-note">Detects expressive interjections (Hahaha, sigh, ugh) and renders them for TTS. Visible narration is never changed.</small></Field>
         <Field label="Vocalization fallback"><select value={story.narrationSettings.speechVocalizations?.fallback ?? "safe_normalize"} disabled={story.narrationSettings.speechNormalization === "disabled" || (story.narrationSettings.speechVocalizations?.mode ?? "automatic") !== "automatic"} onChange={(event) => setStory({ ...story, narrationSettings: { ...story.narrationSettings, speechVocalizations: { ...story.narrationSettings.speechVocalizations, fallback: event.target.value as "safe_normalize" | "omit_unsupported" | "preserve" } } })}><option value="safe_normalize">Safe normalize · canonical short spoken form</option><option value="omit_unsupported">Omit unsupported · drop the vocalization</option><option value="preserve">Preserve · leave text unchanged</option></select><small className="field-note">Applies when the TTS provider has no native expressive tag for a detected vocalization.</small></Field>
         <Field label="Abbreviation speech overrides"><textarea value={formatSpeechAbbreviations(story.narrationSettings.speechAbbreviations)} placeholder={"EXP = experience points\nNPC = non-player character"} onChange={(event) => setStory({ ...story, narrationSettings: { ...story.narrationSettings, speechAbbreviations: parseSpeechAbbreviations(event.target.value) } })} /><small className="field-note">One <code>WRITTEN = spoken form</code> per line. Defaults cover EXP, XP, HP, MP, and NPC; overrides affect TTS only.</small></Field>
+      </div>
+      <div className="settings-group artwork-settings"><h3>Artwork</h3>
+        <Field label="Image provider">
+          <select
+            value={story.artwork.provider}
+            onChange={(event) => {
+              const provider = event.target.value as StoryConfig["artwork"]["provider"];
+              const entry = ARTWORK_PROVIDERS.find((item) => item.name === provider);
+              setStory({ ...story, artwork: { ...story.artwork, provider, model: entry?.defaultModel ?? story.artwork.model } });
+            }}
+          >
+            {ARTWORK_PROVIDERS.map((item) => <option key={item.name} value={item.name}>{item.name === "openai" ? "OpenAI" : "Gemini"}</option>)}
+          </select>
+        </Field>
+        <Field label="Image model">
+          <select
+            value={story.artwork.model}
+            onChange={(event) => setStory({ ...story, artwork: { ...story.artwork, model: event.target.value } })}
+          >
+            {artworkModelOptions.map((value) => <option key={value} value={value}>{value}</option>)}
+          </select>
+          <small className="field-note">Switching the provider preselects its default model. Style, aspect ratio, and quality settings are unchanged.</small>
+        </Field>
       </div>
       <div className="settings-group"><h3>Voice</h3>
         <Field label="Audio provider"><select value={story.pipeline.tts.provider} disabled={audioProviderIds.length === 1}>{audioProviderIds.map((id) => <option key={id} value={id}>{audioProviderCatalog[id].label}</option>)}</select></Field>

@@ -1,6 +1,6 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
-import { App, CanonicalEntitySheet, chapterPageSize, ChapterPage, clearJobDismissal, clearJobMinimized, dismissJob, EntityStatusField, ErrorBoundary, EXECUTABLE_CHAPTER_STAGES, getStageActionDetails, isJobConsoleMinimized, isJobDismissed, isTerminalJob, JobConsole, paginateRows, QaDetail, QaFindingCard, QaResolvedFindings, ScenesPage, setJobConsoleMinimized, shouldRefreshAfterJob } from "../apps/web/src/App.js";
+import { App, ArtworkEstimateSummary, artworkModelOptionsFor, CanonicalEntitySheet, chapterPageSize, ChapterPage, clearJobDismissal, clearJobMinimized, dismissJob, EntityStatusField, ErrorBoundary, EXECUTABLE_CHAPTER_STAGES, getStageActionDetails, isJobConsoleMinimized, isJobDismissed, isTerminalJob, JobConsole, paginateRows, QaDetail, QaFindingCard, QaResolvedFindings, ScenesPage, setJobConsoleMinimized, shouldRefreshAfterJob } from "../apps/web/src/App.js";
 import type { ChapterDetail, Job, QaFinding } from "../apps/web/src/api.js";
 import { pretty } from "../apps/web/src/format.js";
 import { ChapterImportPage, savedStorySourceUrl } from "../apps/web/src/ChapterImportPage.js";
@@ -1179,3 +1179,107 @@ describe("web UI", () => {
 });
 
 
+
+
+describe("Scene Reel artwork routing and versions", () => {
+  const baseDashboard = {
+    settings: { enabled: true },
+    artwork: { provider: "openai", model: "gpt-image-2.5-flare" },
+    artworkRouting: {
+      provider: "gemini",
+      model: "gemini-3.1-flash-image",
+      availableProviders: [
+        { name: "openai", models: ["gpt-image-2.5-flare", "gpt-image-2.5-sunburst"], defaultModel: "gpt-image-2.5-flare" },
+        { name: "gemini", models: ["gemini-3.1-flash-image"], defaultModel: "gemini-3.1-flash-image" },
+      ],
+    },
+    planner: { provider: "mock", model: "mock" },
+    selectedChapter: 1,
+    chapters: [{ chapter: 1, title: "Chapter 1", durationSeconds: 60, sceneStatus: "complete", artworkStatus: "complete" }],
+    counts: { chapters: 1, planned: 1, artworkReady: 1 },
+    manifest: {
+      version: 1,
+      chapter: 1,
+      durationSeconds: 60,
+      planningFingerprint: "fp",
+      manualRevision: 0,
+      manuallyEdited: false,
+      updatedAt: new Date().toISOString(),
+      scenes: [
+        {
+          id: "scene-001",
+          summary: "Hero arrives at the gate",
+          startSeconds: 0,
+          endSeconds: 30,
+          characters: [],
+          visualPrompt: "A dark castle gate",
+          importance: "major",
+          artwork: {
+            status: "complete",
+            review: "approved",
+            approvedVersionId: "ver-2",
+            versions: [
+              { id: "ver-1", versionNumber: 1, sceneId: "scene-001", imagePath: "a.png", imageFingerprint: "f1", createdAt: new Date().toISOString(), provider: "openai", model: "gpt-image-1", prompt: "p", promptFingerprint: "pf1", review: "rejected" },
+              { id: "ver-2", versionNumber: 2, sceneId: "scene-001", imagePath: "b.png", imageFingerprint: "f2", createdAt: new Date().toISOString(), provider: "gemini", model: "gemini-3.1-flash-image", prompt: "p", promptFingerprint: "pf2", review: "approved", provenance: { referencesUsed: "images", referenceImageCount: 2 } },
+            ],
+          },
+        },
+      ],
+    },
+  };
+
+  const renderScenes = (data: any) =>
+    renderToStaticMarkup(
+      <ScenesPage slug="demo-story" onJob={() => undefined} navigate={() => undefined} initialData={data} />
+    );
+
+  it("renders the artwork routing badge with provider and model from artworkRouting", () => {
+    const html = renderScenes(baseDashboard);
+    expect(html).toContain("gemini · gemini-3.1-flash-image");
+  });
+
+  it("falls back to artwork settings when artworkRouting is absent", () => {
+    const { artworkRouting, ...rest } = baseDashboard;
+    const html = renderScenes(rest);
+    expect(html).toContain("openai · gpt-image-2.5-flare");
+  });
+
+  it("renders the dry-run estimate summary with provider, model, and scene count", () => {
+    const html = renderToStaticMarkup(
+      <ArtworkEstimateSummary estimate={{ count: 3, provider: "openai", model: "gpt-image-2.5-flare" }} />
+    );
+    expect(html).toContain("3");
+    expect(html).toContain("scenes to generate");
+    expect(html).toContain("openai · gpt-image-2.5-flare");
+    expect(html).toContain("dry run only");
+
+    const singular = renderToStaticMarkup(
+      <ArtworkEstimateSummary estimate={{ count: 1, provider: "gemini", model: "gemini-3.1-flash-image" }} />
+    );
+    expect(singular).toContain("scene to generate");
+    expect(singular).toContain("gemini · gemini-3.1-flash-image");
+  });
+
+  it("marks the approved version in the version strip", () => {
+    const html = renderScenes(baseDashboard);
+    expect(html).toContain("v1");
+    expect(html).toContain("v2 ✓");
+    expect(html).toContain("is-approved");
+    expect(html).toContain("Approved Canon Version");
+    expect(html).toContain("references: images (2 images)");
+  });
+
+  it("switches model options per provider and keeps an unlisted current model selectable", () => {
+    expect(artworkModelOptionsFor("openai", "gpt-image-2.5-flare")).toEqual([
+      "gpt-image-2.5-flare",
+      "gpt-image-2.5-sunburst",
+      "gpt-image-1",
+      "gpt-image-1-mini",
+    ]);
+    expect(artworkModelOptionsFor("gemini", "gpt-image-2.5-flare")).toEqual([
+      "gemini-3.1-flash-image",
+      "gpt-image-2.5-flare",
+    ]);
+    expect(artworkModelOptionsFor("unknown-provider", "custom-model")).toEqual(["custom-model"]);
+  });
+});

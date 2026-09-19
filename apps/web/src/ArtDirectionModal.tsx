@@ -156,6 +156,7 @@ export function ArtDirectionModal({
       setError("Cannot delete the only art direction preset.");
       return;
     }
+    if (!window.confirm(`Delete preset "${activePreset.name}"? This cannot be undone.`)) return;
     setSaving(true);
     setError(null);
     try {
@@ -229,7 +230,7 @@ export function ArtDirectionModal({
               <strong>Presets</strong>
               <button
                 type="button"
-                className="btn btn-sm btn-outline"
+                className="button small text-btn"
                 onClick={handleCreatePreset}
                 disabled={saving}
               >
@@ -263,7 +264,7 @@ export function ArtDirectionModal({
                     ) : (
                       <button
                         type="button"
-                        className="btn btn-sm btn-secondary"
+                        className="button small text-btn"
                         onClick={handleSetDefault}
                         disabled={saving}
                       >
@@ -271,27 +272,11 @@ export function ArtDirectionModal({
                       </button>
                     )}
                   </div>
-                  <div className="preset-toolbar-btns">
-                    <button
-                      type="button"
-                      className="btn btn-sm btn-outline"
-                      onClick={handleDuplicate}
-                      disabled={saving}
-                    >
-                      Duplicate
-                    </button>
-                    <button
-                      type="button"
-                      className="btn btn-sm btn-danger"
-                      onClick={handleDelete}
-                      disabled={saving || artDirection.presets.length <= 1}
-                    >
-                      Delete
-                    </button>
-                  </div>
                 </div>
 
-                <div className="form-grid-2col">
+                <section className="preset-section">
+                  <h4>Style</h4>
+                  <div className="form-grid-2col">
                   <div>
                     <label>Preset Name</label>
                     <input
@@ -326,8 +311,11 @@ export function ArtDirectionModal({
                     placeholder="e.g. cinematic digital manhwa art, high quality webtoon illustration, crisp line art"
                   />
                 </div>
+                </section>
 
-                <div className="form-grid-2col">
+                <section className="preset-section">
+                  <h4>Visual Tone</h4>
+                  <div className="form-grid-2col">
                   <div>
                     <label>Visual Tone</label>
                     <input
@@ -367,20 +355,26 @@ export function ArtDirectionModal({
                     />
                   </div>
                 </div>
+                </section>
 
-                <div className="form-row">
-                  <label>Composition Tendencies</label>
-                  <input
-                    type="text"
-                    value={activePreset.compositionTendencies}
-                    onChange={(e) =>
-                      handleUpdatePresetField("compositionTendencies", e.target.value)
-                    }
-                    placeholder="e.g. Character-focused foreground, expansive background scale"
-                  />
-                </div>
+                <section className="preset-section">
+                  <h4>Composition</h4>
+                  <div className="form-row">
+                    <label>Composition Tendencies</label>
+                    <input
+                      type="text"
+                      value={activePreset.compositionTendencies}
+                      onChange={(e) =>
+                        handleUpdatePresetField("compositionTendencies", e.target.value)
+                      }
+                      placeholder="e.g. Character-focused foreground, expansive background scale"
+                    />
+                  </div>
+                </section>
 
-                <div className="form-grid-2col">
+                <section className="preset-section">
+                  <h4>Character &amp; Environment</h4>
+                  <div className="form-grid-2col">
                   <div>
                     <label>Character Rendering Guidance</label>
                     <input
@@ -404,55 +398,59 @@ export function ArtDirectionModal({
                     />
                   </div>
                 </div>
+                </section>
 
-                <div className="form-grid-2col">
-                  <div>
-                    <label>Aspect Ratio</label>
-                    <select
-                      value={activePreset.aspectRatio}
-                      onChange={(e) =>
-                        handleUpdatePresetField(
-                          "aspectRatio",
-                          e.target.value as "16:9" | "1:1" | "9:16" | "4:3" | "21:9"
-                        )
-                      }
-                    >
-                      {ASPECT_RATIOS.map((r) => (
-                        <option key={r} value={r}>{r}</option>
-                      ))}
-                    </select>
+                <section className="preset-section">
+                  <h4>Output</h4>
+                  <div className="form-grid-2col">
+                    <div>
+                      <label>Aspect Ratio</label>
+                      <select
+                        value={activePreset.aspectRatio}
+                        onChange={(e) =>
+                          handleUpdatePresetField(
+                            "aspectRatio",
+                            e.target.value as "16:9" | "1:1" | "9:16" | "4:3" | "21:9"
+                          )
+                        }
+                      >
+                        {ASPECT_RATIOS.map((r) => (
+                          <option key={r} value={r}>{r}</option>
+                        ))}
+                      </select>
+                    </div>
+                    <div>
+                      <label>
+                        Character Consistency Strength ({activePreset.characterConsistencyStrength})
+                      </label>
+                      <input
+                        type="range"
+                        min="0.1"
+                        max="1.0"
+                        step="0.05"
+                        value={activePreset.characterConsistencyStrength}
+                        onChange={(e) =>
+                          handleUpdatePresetField(
+                            "characterConsistencyStrength",
+                            parseFloat(e.target.value)
+                          )
+                        }
+                      />
+                    </div>
                   </div>
-                  <div>
-                    <label>
-                      Character Consistency Strength ({activePreset.characterConsistencyStrength})
-                    </label>
-                    <input
-                      type="range"
-                      min="0.1"
-                      max="1.0"
-                      step="0.05"
-                      value={activePreset.characterConsistencyStrength}
+
+                  <div className="form-row">
+                    <label>Global Negative Prompt</label>
+                    <textarea
+                      rows={2}
+                      value={activePreset.globalNegativePrompt}
                       onChange={(e) =>
-                        handleUpdatePresetField(
-                          "characterConsistencyStrength",
-                          parseFloat(e.target.value)
-                        )
+                        handleUpdatePresetField("globalNegativePrompt", e.target.value)
                       }
+                      placeholder="e.g. text, watermark, signature, logo, malformed anatomy, blurry"
                     />
                   </div>
-                </div>
-
-                <div className="form-row">
-                  <label>Global Negative Prompt</label>
-                  <textarea
-                    rows={2}
-                    value={activePreset.globalNegativePrompt}
-                    onChange={(e) =>
-                      handleUpdatePresetField("globalNegativePrompt", e.target.value)
-                    }
-                    placeholder="e.g. text, watermark, signature, logo, malformed anatomy, blurry"
-                  />
-                </div>
+                </section>
               </div>
             ) : (
               <div className="empty-state">Select a preset to edit</div>
@@ -461,12 +459,30 @@ export function ArtDirectionModal({
         </div>
 
         <div className="modal-footer">
-          <button type="button" className="btn btn-secondary" onClick={onClose}>
+          <div className="modal-footer-danger">
+            <button
+              type="button"
+              className="button"
+              onClick={handleDuplicate}
+              disabled={saving || !activePreset}
+            >
+              Duplicate
+            </button>
+            <button
+              type="button"
+              className="button danger"
+              onClick={handleDelete}
+              disabled={saving || !activePreset || artDirection.presets.length <= 1}
+            >
+              Delete
+            </button>
+          </div>
+          <button type="button" className="button" onClick={onClose}>
             Close
           </button>
           <button
             type="button"
-            className="btn btn-primary"
+            className="button primary"
             disabled={saving}
             onClick={handleSave}
           >

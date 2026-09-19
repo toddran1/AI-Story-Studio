@@ -53,7 +53,13 @@ export type AudioSettings = { loudnessTarget: number; truePeak: number; segmentG
 export type SubtitleSettings = { maxCharactersPerLine: number; maxLines: number; minimumDurationSeconds: number; maximumDurationSeconds: number };
 export type VideoSettings = { width: number; height: number; fps: 24 | 25 | 30 | 60; codec: "libx264"; quality: number; subtitleMode: "none" | "burn" | "soft" | "both"; subtitleStyle: "default" | "large" | "minimal"; backgroundMode: "cover" | "gradient" | "kenBurns"; introDurationSeconds: number };
 export type SceneSettings = { targetDurationSeconds: number; minimumDurationSeconds: number; maximumDurationSeconds: number; maximumScenesPerChapter: number };
-export type ArtworkSettings = { provider: "openai"; model: string; stylePrompt: string; aspectRatio: "16:9"; quality: "low" | "medium" | "high"; size: "1536x1024" | "1024x1024" | "1024x1536"; outputFormat: "png" };
+export type ArtworkSettings = { provider: "openai" | "gemini"; model: string; stylePrompt: string; aspectRatio: "16:9" | "1:1" | "9:16"; quality: "low" | "medium" | "high"; size: "1536x1024" | "1024x1024" | "1024x1536"; outputFormat: "png" };
+export type ArtworkRouting = { provider: string; model: string; availableProviders: Array<{ name: string; models: string[]; defaultModel: string }> };
+// Mirrors the server IMAGE_PROVIDER_CATALOG; used where artworkRouting is unavailable (e.g. the settings page).
+export const ARTWORK_PROVIDERS: ArtworkRouting["availableProviders"] = [
+  { name: "openai", models: ["gpt-image-2.5-flare", "gpt-image-2.5-sunburst", "gpt-image-1", "gpt-image-1-mini"], defaultModel: "gpt-image-2.5-flare" },
+  { name: "gemini", models: ["gemini-3.1-flash-image"], defaultModel: "gemini-3.1-flash-image" },
+];
 export type VisualRole =
   | "front"
   | "three_quarter"
@@ -283,6 +289,7 @@ export type ArtworkVersion = {
     referenceId?: string;
   }>;
   artDirectionFingerprint?: string;
+  provenance?: { referencesUsed?: "images" | "text-only" | "none"; referenceImageCount?: number; availableReferenceCount?: number };
   settings?: {
     quality?: string;
     size?: string;
@@ -337,6 +344,7 @@ export type SceneManifest = { version: 1; chapter: number; durationSeconds: numb
 export type ScenesDashboard = {
   settings: SceneSettings;
   artwork: ArtworkSettings;
+  artworkRouting?: ArtworkRouting;
   planner: Model;
   scenePlannerRouting?: ResolvedModelRouting;
   selectedChapter?: number;
@@ -452,6 +460,6 @@ export async function setDefaultArtDirectionPreset(slug: string, id: string): Pr
 }
 
 export async function reviewArtworkVersion(slug: string, chapter: number, sceneId: string, versionId: string, review: string): Promise<SceneArtwork> {
-  return post<SceneArtwork>(`/stories/${encodeURIComponent(slug)}/scenes/${chapter}/artwork/${encodeURIComponent(sceneId)}/versions/${encodeURIComponent(versionId)}/review`, { review });
+  return post<SceneArtwork>(`/stories/${encodeURIComponent(slug)}/chapters/${chapter}/scenes/${encodeURIComponent(sceneId)}/versions/${encodeURIComponent(versionId)}/review`, { review });
 }
 

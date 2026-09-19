@@ -45,7 +45,7 @@ import { LLMProvider } from "../../src/llm/provider.js";
 import { planStoredScenes, updateStoredSceneManifest } from "../../src/scenes/manifest.js";
 import { generateStoredArtwork, reviewStoredArtwork, reviewStoredArtworkVersion } from "../../src/artwork/generator.js";
 import { ImageProvider } from "../../src/artwork/provider.js";
-import { OpenAIImageProvider } from "../../src/artwork/openai-image.provider.js";
+import { ImageProviderSource, resolveImageProvider } from "../../src/artwork/providers.js";
 import {
   loadVisualProfiles,
   getVisualProfile as loadVisualProfileEntity,
@@ -140,7 +140,7 @@ const artworkJobSchema = z.object({ from: z.number().int().positive(), to: z.num
 const productionInputSchema = z.object({ from: z.number().int().positive(), to: z.number().int().positive(), profile: z.string().optional(), outputs: z.array(productionOutputSchema).min(1).optional(), artwork: z.boolean().optional(), repairQa: z.boolean().optional(), alignment: z.boolean().optional(), refresh: z.boolean().default(false), dryRun: z.boolean().default(false), force: productionForceSchema.optional(), audiobookFormat: z.enum(["mp3", "m4b"]).optional(), maxProviderBudgetUsd: z.number().positive().max(1_000_000).optional() }).strict().refine((value) => value.to >= value.from, { message: "Range end must be at or after range start" });
 
 type InspectionRecord = { inspection: SourceInspection; temporaryDirectory?: string; createdAt: number; bytes: number };
-export type OperationsDependencies = { pipeline?: ChapterProcessor; preview?: PreviewRunner; registry?: SourceProviderRegistry; llm?: LLMRouter; audio?: AudioMasteringProcessor; audiobook?: AudiobookProcessor; video?: VideoProcessor; videoExport?: VideoExportProcessor; scenePlanner?: LLMProvider; image?: ImageProvider; tts?: TTSProvider | TTSProviderRouter; censor?: CensorAudioService; alignment?: AlignmentEngine; queue?: ProductionQueueService; usage?: PostgresUsageRepository };
+export type OperationsDependencies = { pipeline?: ChapterProcessor; preview?: PreviewRunner; registry?: SourceProviderRegistry; llm?: LLMRouter; audio?: AudioMasteringProcessor; audiobook?: AudiobookProcessor; video?: VideoProcessor; videoExport?: VideoExportProcessor; scenePlanner?: LLMProvider; image?: ImageProviderSource; tts?: TTSProvider | TTSProviderRouter; censor?: CensorAudioService; alignment?: AlignmentEngine; queue?: ProductionQueueService; usage?: PostgresUsageRepository };
 
 async function attemptRollback(
   phase: string,
@@ -162,7 +162,7 @@ export class StudioOperations {
   private readonly audio: AudioMasteringProcessor; private readonly audiobook: AudiobookProcessor;
   private readonly video: VideoProcessor; private readonly videoExport: VideoExportProcessor;
   private readonly llm: LLMRouter;
-  private readonly scenePlanner?: LLMProvider; private readonly image: ImageProvider; private readonly tts: TTSProviderRouter; private readonly censor: CensorAudioService; private readonly runtime: ReturnType<typeof createPipelineRuntime>;
+  private readonly scenePlanner?: LLMProvider; private readonly image: ImageProviderSource; private readonly tts: TTSProviderRouter; private readonly censor: CensorAudioService; private readonly runtime: ReturnType<typeof createPipelineRuntime>;
   private readonly alignConfig; private readonly aligner?: AlignmentEngine;
   private readonly summaryImages: ReturnType<typeof createPipelineRuntime>["images"] | ImageProvider;
   private readonly inspectionTimer: NodeJS.Timeout; private inspectionBytes = 0;
@@ -172,7 +172,7 @@ export class StudioOperations {
     this.registry = dependencies.registry ?? new SourceProviderRegistry(undefined, createWebHttpClient(root, env));
     this.audio = dependencies.audio ?? runtime.audio ?? new FfmpegMasteringProcessor(); this.audiobook = dependencies.audiobook ?? new FfmpegAudiobookProcessor();
     this.video = dependencies.video ?? new FfmpegVideoProcessor(); this.videoExport = dependencies.videoExport ?? new FfmpegVideoExportProcessor();
-    this.scenePlanner = dependencies.scenePlanner; this.image = dependencies.image ?? runtime.images.forName("openai"); this.summaryImages = dependencies.image ?? runtime.images; this.tts = dependencies.tts instanceof TTSProviderRouter ? dependencies.tts : dependencies.tts ? new TTSProviderRouter(dependencies.tts) : runtime.tts;
+    this.scenePlanner = dependencies.scenePlanner; this.image = dependencies.image ?? runtime.images; this.summaryImages = dependencies.image && typeof dependencies.image !== "function" ? dependencies.image : runtime.images; this.tts = dependencies.tts instanceof TTSProviderRouter ? dependencies.tts : dependencies.tts ? new TTSProviderRouter(dependencies.tts) : runtime.tts;
     this.queue = dependencies.queue; this.alignConfig = alignmentConfig(env, root); this.aligner = dependencies.alignment ?? createAlignmentEngine(this.alignConfig);
     this.inspectionTimer = setInterval(() => this.expireInspections(), 60_000); this.inspectionTimer.unref();
   }
@@ -1056,7 +1056,7 @@ export class StudioOperations {
 
   startScenes(slug: string, raw: unknown) { slugSchema.parse(slug); const input = explicitRangeJobSchema.parse(raw); return this.jobs.create("scenes", slug, async (control) => withStoryLock(this.root, slug, "web scene planning", async () => { const story = await loadStory(storyPaths(this.root, slug, 1).storyConfig); const selected = selectChapterRange((await loadImportedChapters(this.root, slug)).chapters, input.from, input.to); const shutdown = new ShutdownController(); control.setPause(() => shutdown.request()); let planned = 0; let reused = 0; for (let index = 0; index < selected.length; index++) { if (shutdown.isRequested) return { status: "paused", planned, reused }; const chapter = selected[index]!.chapter; control.update({ type: "scenes.chapter.started", chapter, index: index + 1, total: selected.length }); const provider = this.scenePlanner ?? this.runtime.router.forStage(story.pipeline.scenePlanner); const result = await withUsageScope({story:slug,chapter,stage:"scenePlanning"},()=>planStoredScenes({ root: this.root, story, chapter, provider, force: input.force })); result.reused ? reused++ : planned++; control.update({ type: "scenes.chapter.completed", chapter, index: index + 1, total: selected.length, scenes: result.manifest.scenes.length, reused: result.reused }); } return { planned, reused, total: selected.length }; }), raw); }
 
-  startArtwork(slug: string, raw: unknown) { slugSchema.parse(slug); const input = artworkJobSchema.parse(raw); return this.jobs.create("artwork", slug, async (control) => withStoryLock(this.root, slug, "web artwork generation", async () => { const story = await loadStory(storyPaths(this.root, slug, 1).storyConfig); const selected = selectChapterRange((await loadImportedChapters(this.root, slug)).chapters, input.from, input.to); const shutdown = new ShutdownController(); control.setPause(() => shutdown.request()); let generated = 0; let estimate = 0; for (let index = 0; index < selected.length; index++) { if (shutdown.isRequested) return { status: "paused", generated, estimate }; const chapter = selected[index]!.chapter; const result = await withUsageScope({story:slug,chapter,stage:"artwork"},()=>generateStoredArtwork({ root: this.root, story, chapter, provider: this.image, sceneId: input.scene, force: input.force, dryRun: input.dryRun, onProgress: (event) => control.update({ ...event, chapterIndex: index + 1, chapterTotal: selected.length }) })); generated += "generated" in result ? result.generated ?? 0 : 0; estimate += result.imagesToGenerate; } return { dryRun: input.dryRun, generated, imageCountEstimate: estimate, chapters: selected.length }; }), raw); }
+  startArtwork(slug: string, raw: unknown) { slugSchema.parse(slug); const input = artworkJobSchema.parse(raw); return this.jobs.create("artwork", slug, async (control) => withStoryLock(this.root, slug, "web artwork generation", async () => { const story = await loadStory(storyPaths(this.root, slug, 1).storyConfig); const selected = selectChapterRange((await loadImportedChapters(this.root, slug)).chapters, input.from, input.to); const shutdown = new ShutdownController(); control.setPause(() => shutdown.request()); let generated = 0; let estimate = 0; for (let index = 0; index < selected.length; index++) { if (shutdown.isRequested) return { status: "paused", generated, estimate }; const chapter = selected[index]!.chapter; const result = await withUsageScope({story:slug,chapter,stage:"artwork"},()=>generateStoredArtwork({ root: this.root, story, chapter, provider: resolveImageProvider(this.image, story), sceneId: input.scene, force: input.force, dryRun: input.dryRun, onProgress: (event) => control.update({ ...event, chapterIndex: index + 1, chapterTotal: selected.length }) })); generated += "generated" in result ? result.generated ?? 0 : 0; estimate += result.imagesToGenerate; } return { dryRun: input.dryRun, generated, imageCountEstimate: estimate, chapters: selected.length, provider: story.artwork.provider, model: story.artwork.model }; }), raw); }
 
   getActiveStoryJob(slug: string) {
     slugSchema.parse(slug);
@@ -1160,7 +1160,7 @@ export class StudioOperations {
     canonicalEntitySchema.shape.id.parse(entityId);
     return withStoryLock(this.root, slug, "generate style sheet", async () => {
       const story = await loadStory(storyPaths(this.root, slug, 1).storyConfig);
-      const provider = new OpenAIImageProvider();
+      const provider = resolveImageProvider(this.image, story);
       return generateStyleSheet(this.root, slug, entityId, provider, story, options);
     });
   }

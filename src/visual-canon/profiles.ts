@@ -14,6 +14,7 @@ import { canonicalEntitySchema } from "../domain/story-bible.js";
 import { requireCanonicalStoryBibleEntity } from "../story-bible/canonical.js";
 import { Story } from "../domain/story.js";
 import { ImageProvider } from "../artwork/provider.js";
+import { assertImageModelCompatible, imageProviderNameSchema } from "../artwork/providers.js";
 import { atomicWrite, atomicWriteJson } from "../storage/atomic-write.js";
 import { storyPaths, visualProfileRefPath } from "../storage/paths.js";
 import { exists, readJsonIfExists } from "../storage/story-files.js";
@@ -248,6 +249,7 @@ export async function generateStyleSheet(
   await requireCanonicalStoryBibleEntity(root, slug, entityId);
   const profile = await getVisualProfile(root, slug, entityId);
   if (!profile) throw new Error(`Visual profile for entity '${entityId}' was not found`);
+  if (imageProviderNameSchema.safeParse(provider.name).success) assertImageModelCompatible(provider.name, story.artwork.model);
 
   const artDirectionDoc = await loadStoryArtDirection(root, slug);
   const activePreset = resolveActiveArtDirection(artDirectionDoc, options.presetId);
@@ -330,6 +332,8 @@ export async function generateStyleSheet(
   const result = await provider.generate({
     model: story.artwork.model,
     prompt: sheetPrompt,
+    negativePrompt: combinedNegativePrompt || undefined,
+    aspectRatio: story.artwork.aspectRatio,
     quality: story.artwork.quality,
     size: story.artwork.size,
     outputFormat: story.artwork.outputFormat,
