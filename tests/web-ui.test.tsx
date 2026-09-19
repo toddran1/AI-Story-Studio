@@ -1,7 +1,7 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
-import { App, ArtworkEstimateSummary, artworkModelOptionsFor, CanonicalEntitySheet, chapterPageSize, ChapterPage, clearJobDismissal, clearJobMinimized, dismissJob, EntityStatusField, ErrorBoundary, EXECUTABLE_CHAPTER_STAGES, getStageActionDetails, isJobConsoleMinimized, isJobDismissed, isTerminalJob, JobConsole, paginateRows, QaDetail, QaFindingCard, QaResolvedFindings, ScenesPage, setJobConsoleMinimized, shouldRefreshAfterJob } from "../apps/web/src/App.js";
-import type { ChapterDetail, Job, QaFinding } from "../apps/web/src/api.js";
+import { App, ArtworkEstimateSummary, artworkModelOptionsFor, CanonicalEntitySheet, chapterPageSize, ChapterPage, chunkPresetFor, clearJobDismissal, clearJobMinimized, dismissJob, EntityStatusField, ErrorBoundary, EXECUTABLE_CHAPTER_STAGES, getStageActionDetails, isJobConsoleMinimized, isJobDismissed, isTerminalJob, JobConsole, paginateRows, QaDetail, QaFindingCard, QaResolvedFindings, ScenesPage, setJobConsoleMinimized, shouldRefreshAfterJob, TtsQualityBadge, TtsSegmentRow } from "../apps/web/src/App.js";
+import type { ChapterDetail, Job, QaFinding, TtsQualityArtifact, TtsSegmentQuality } from "../apps/web/src/api.js";
 import { pretty } from "../apps/web/src/format.js";
 import { ChapterImportPage, savedStorySourceUrl } from "../apps/web/src/ChapterImportPage.js";
 import { SummariesPage } from "../apps/web/src/SummariesPage.js";
@@ -1281,5 +1281,83 @@ describe("Scene Reel artwork routing and versions", () => {
       "gpt-image-2.5-flare",
     ]);
     expect(artworkModelOptionsFor("unknown-provider", "custom-model")).toEqual(["custom-model"]);
+  });
+});
+
+describe("TTS quality guard UI", () => {
+  const segment = (overrides: Partial<TtsSegmentQuality>): TtsSegmentQuality => ({
+    index: 0,
+    expectedText: "The bell rang twice before dawn.",
+    status: "verified",
+    score: 0.98,
+    issues: [],
+    attempts: [{ attempt: 1, settings: { deliveryIntensity: "restrained" }, status: "pass", score: 0.98, issues: [] }],
+    finalAttempt: 1,
+    ...overrides,
+  });
+  const artifact = (overrides: Partial<TtsQualityArtifact>): TtsQualityArtifact => ({
+    version: 1,
+    chapter: 1,
+    createdAt: "2026-09-19T00:00:00.000Z",
+    updatedAt: "2026-09-19T00:00:00.000Z",
+    provider: "fish",
+    model: "speech-1.5",
+    status: "verified",
+    verificationPolicy: { transcriber: "whisper.cpp", maxRetries: 2, thresholds: { passScore: 0.9 }, fingerprint: "fp" },
+    segments: [segment({})],
+    ...overrides,
+  });
+
+  it("maps chunk sizes to presets and treats other values as custom", () => {
+    expect(chunkPresetFor(1000)).toBe("conservative");
+    expect(chunkPresetFor(1750)).toBe("balanced");
+    expect(chunkPresetFor(3000)).toBe("long");
+    expect(chunkPresetFor(2200)).toBe("custom");
+  });
+
+  it("renders a passing badge when every segment is verified", () => {
+    const html = renderToStaticMarkup(<TtsQualityBadge quality={artifact({})} />);
+    expect(html).toContain("status pass");
+    expect(html).toContain("TTS Quality: Passed");
+  });
+
+  it("renders needs review and unverified badge states", () => {
+    const review = renderToStaticMarkup(<TtsQualityBadge quality={artifact({ status: "needs_review", segments: [segment({ status: "needs_review", score: 0.81 }), segment({ index: 1, status: "needs_review" })] })} />);
+    expect(review).toContain("status warn");
+    expect(review).toContain("TTS Quality: Needs review (2 segments)");
+    const unverified = renderToStaticMarkup(<TtsQualityBadge quality={artifact({ status: "unverified", segments: [segment({ status: "unverified", score: undefined })] })} />);
+    expect(unverified).toContain("TTS Quality: Unverified");
+  });
+
+  it("never presents a manually accepted chapter as passed", () => {
+    const html = renderToStaticMarkup(<TtsQualityBadge quality={artifact({ status: "partial", segments: [segment({ status: "manually_accepted", acceptedAt: "2026-09-19T01:00:00.000Z" })] })} />);
+    expect(html).toContain("TTS Quality: Manually accepted (1)");
+    expect(html).not.toContain("Passed");
+    expect(html).not.toContain("status pass");
+  });
+
+  it("renders a problem segment row with retry count and review affordances", () => {
+    const attempts = [
+      { attempt: 1, settings: { deliveryIntensity: "restrained" as const }, status: "retry" as const, score: 0.7, issues: [] },
+      { attempt: 2, settings: { deliveryIntensity: "none" as const }, status: "retry" as const, score: 0.78, issues: [] },
+      { attempt: 3, settings: { deliveryIntensity: "none" as const }, status: "needs_review" as const, score: 0.81, issues: [] },
+    ];
+    const html = renderToStaticMarkup(<TtsSegmentRow slug="demo-story" chapter={1} busy={false} onRegenerate={() => undefined} onAccept={() => undefined} segment={segment({ index: 2, status: "needs_review", score: 0.81, attempts, transcription: "The bell rang before dawn.", issues: [{ type: "missing_speech", severity: 0.4 }] })} />);
+    expect(html).toContain("Segment 3");
+    expect(html).toContain("81%");
+    expect(html).toContain("Retried 2×");
+    expect(html).toContain("Needs review");
+    expect(html).toContain("Regenerate segment");
+    expect(html).toContain("Accept anyway");
+    expect(html).toContain("Narration missing from the audio");
+    expect(html).toContain("/api/stories/demo-story/chapters/1/audio-segments/3.mp3");
+  });
+
+  it("labels an accepted segment as accepted, not passed", () => {
+    const html = renderToStaticMarkup(<TtsSegmentRow slug="demo-story" chapter={1} busy={false} onRegenerate={() => undefined} onAccept={() => undefined} segment={segment({ status: "manually_accepted", score: 0.81, acceptedAt: "2026-09-19T01:00:00.000Z", acceptedReason: "Sounds right" })} />);
+    expect(html).toContain("Accepted by reviewer");
+    expect(html).toContain("Manual acceptance is not an objective pass");
+    expect(html).not.toContain("Passed");
+    expect(html).not.toContain("Accept anyway");
   });
 });

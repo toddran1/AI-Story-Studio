@@ -37,12 +37,15 @@ export const fishTtsStageConfigSchema = z.object({
   secondaryReferenceId: z.string().min(1).optional(),
   deliveryIntensity: z.enum(["none", "restrained", "expressive"]).default("restrained"),
   qualityGuard: z.boolean().default(true),
+  /** Post-generation verification retries per failed segment (verification-only;
+   * never part of the synthesis fingerprint). */
+  maxQualityRetries: z.number().int().min(0).max(5).default(2),
   speed: z.number().min(0.5).max(2).default(1),
   format: z.literal("mp3").default("mp3"),
   sampleRate: z.union([z.literal(32000), z.literal(44100)]).default(44100),
   bitrate: z.union([z.literal(64), z.literal(128), z.literal(192)]).default(128),
   normalize: z.boolean().default(true),
-  maxCharsPerRequest: z.number().int().min(500).max(20_000).default(4000),
+  maxCharsPerRequest: z.number().int().min(500).max(20_000).default(1750),
 });
 
 // Provider-specific discriminated variants belong here. Adding a provider does
@@ -51,3 +54,11 @@ export const ttsStageConfigSchema = z.discriminatedUnion("provider", [fishTtsSta
 
 export type StageModelConfig = z.infer<typeof stageModelConfigSchema>;
 export type TTSStageConfig = z.infer<typeof ttsStageConfigSchema>;
+
+/** Settings that change what is synthesized. Verification-only fields
+ * (qualityGuard, maxQualityRetries) are excluded so they never affect the
+ * synthesis fingerprint or tts-stage staleness. */
+export function ttsSynthesisSettings(config: TTSStageConfig) {
+  const { qualityGuard: _qualityGuard, maxQualityRetries: _maxQualityRetries, ...synthesis } = config;
+  return synthesis;
+}

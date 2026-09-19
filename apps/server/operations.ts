@@ -113,6 +113,12 @@ import { SummaryVisualService, summaryVisualInputSchema, summaryProduceInputSche
 import { generateLocalizedNameSuggestions, localizationSuggestionRequestSchema } from "../../src/story-bible/localization.js";
 import { inspectStagesForCurrent, markCurrentInputSchema, markStagesCurrent } from "../../src/studio/stage-acceptance.js";
 import { executeStagePlan, planStageExecution, stageExecutionInputSchema, stageExecutionModeSchema } from "../../src/studio/stage-execution.js";
+import { WhisperCppSpeechTranscriber } from "../../src/alignment/transcription.js";
+import { QualityGuardTTSProvider, SpeechTranscriber } from "../../src/tts/quality-guard.js";
+import { acceptStoredChapterTtsSegment, loadChapterTtsQuality, regenerateStoredChapterTtsSegment, verifyStoredChapterTts } from "../../src/tts/chapter-quality.js";
+
+const chapterParamSchema = z.number().int().positive();
+const segmentParamSchema = z.number().int().min(1).max(99_999);
 
 const slugSchema = z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/);
 const batchInputSchema = z.object({ from: z.number().int().positive().optional(), to: z.number().int().positive().optional(), force: z.enum(["translation", "narration", "qa", "story-bible", "continuity", "tts", "audio", "all"]).optional(), stage: z.enum(["ingestion", "translation", "narration", "qa", "storyBible", "continuity", "tts", "audioMastering", "alignment", "subtitles", "scenePlanning", "artwork", "video"]).optional(), mode: stageExecutionModeSchema.default("selected"), continueOnError: z.boolean().default(false) }).strict().refine((value) => !(value.stage && value.force), { message: "Choose either a manual stage or the legacy force stage, not both" });
@@ -141,7 +147,7 @@ const artworkJobSchema = z.object({ from: z.number().int().positive(), to: z.num
 const productionInputSchema = z.object({ from: z.number().int().positive(), to: z.number().int().positive(), profile: z.string().optional(), outputs: z.array(productionOutputSchema).min(1).optional(), artwork: z.boolean().optional(), repairQa: z.boolean().optional(), alignment: z.boolean().optional(), refresh: z.boolean().default(false), dryRun: z.boolean().default(false), force: productionForceSchema.optional(), audiobookFormat: z.enum(["mp3", "m4b"]).optional(), maxProviderBudgetUsd: z.number().positive().max(1_000_000).optional() }).strict().refine((value) => value.to >= value.from, { message: "Range end must be at or after range start" });
 
 type InspectionRecord = { inspection: SourceInspection; temporaryDirectory?: string; createdAt: number; bytes: number };
-export type OperationsDependencies = { pipeline?: ChapterProcessor; preview?: PreviewRunner; registry?: SourceProviderRegistry; llm?: LLMRouter; audio?: AudioMasteringProcessor; audiobook?: AudiobookProcessor; video?: VideoProcessor; videoExport?: VideoExportProcessor; scenePlanner?: LLMProvider; image?: ImageProviderSource; tts?: TTSProvider | TTSProviderRouter; censor?: CensorAudioService; alignment?: AlignmentEngine; queue?: ProductionQueueService; usage?: PostgresUsageRepository };
+export type OperationsDependencies = { pipeline?: ChapterProcessor; preview?: PreviewRunner; registry?: SourceProviderRegistry; llm?: LLMRouter; audio?: AudioMasteringProcessor; audiobook?: AudiobookProcessor; video?: VideoProcessor; videoExport?: VideoExportProcessor; scenePlanner?: LLMProvider; image?: ImageProviderSource; tts?: TTSProvider | TTSProviderRouter; censor?: CensorAudioService; alignment?: AlignmentEngine; speechTranscriber?: SpeechTranscriber; queue?: ProductionQueueService; usage?: PostgresUsageRepository };
 
 async function attemptRollback(
   phase: string,
@@ -164,7 +170,7 @@ export class StudioOperations {
   private readonly video: VideoProcessor; private readonly videoExport: VideoExportProcessor;
   private readonly llm: LLMRouter;
   private readonly scenePlanner?: LLMProvider; private readonly image: ImageProviderSource; private readonly tts: TTSProviderRouter; private readonly censor: CensorAudioService; private readonly runtime: ReturnType<typeof createPipelineRuntime>;
-  private readonly alignConfig; private readonly aligner?: AlignmentEngine;
+  private readonly alignConfig; private readonly aligner?: AlignmentEngine; private readonly transcriber?: SpeechTranscriber;
   private readonly summaryImages: ReturnType<typeof createPipelineRuntime>["images"] | ImageProvider;
   private readonly inspectionTimer: NodeJS.Timeout; private inspectionBytes = 0;
   readonly queue?: ProductionQueueService; readonly usage?: PostgresUsageRepository;
@@ -174,7 +180,7 @@ export class StudioOperations {
     this.audio = dependencies.audio ?? runtime.audio ?? new FfmpegMasteringProcessor(); this.audiobook = dependencies.audiobook ?? new FfmpegAudiobookProcessor();
     this.video = dependencies.video ?? new FfmpegVideoProcessor(); this.videoExport = dependencies.videoExport ?? new FfmpegVideoExportProcessor();
     this.scenePlanner = dependencies.scenePlanner; this.image = dependencies.image ?? runtime.images; this.summaryImages = dependencies.image && typeof dependencies.image !== "function" ? dependencies.image : runtime.images; this.tts = dependencies.tts instanceof TTSProviderRouter ? dependencies.tts : dependencies.tts ? new TTSProviderRouter(dependencies.tts) : runtime.tts;
-    this.queue = dependencies.queue; this.alignConfig = alignmentConfig(env, root); this.aligner = dependencies.alignment ?? createAlignmentEngine(this.alignConfig);
+    this.queue = dependencies.queue; this.transcriber = dependencies.speechTranscriber; this.alignConfig = alignmentConfig(env, root); this.aligner = dependencies.alignment ?? createAlignmentEngine(this.alignConfig);
     this.inspectionTimer = setInterval(() => this.expireInspections(), 60_000); this.inspectionTimer.unref();
   }
   async previewMarkStagesCurrent(slug: string, raw: unknown) {
@@ -1026,6 +1032,50 @@ export class StudioOperations {
       }
       return { status: "completed", mastered, reused, total: selected.length, warnings: [...new Set(warnings)] };
     }));
+  }
+
+  private speechTranscriber() {
+    if (this.transcriber) return this.transcriber;
+    if (this.alignConfig.engine === "disabled") throw new ConfigurationError("TTS quality verification requires whisper.cpp (ALIGNMENT_ENGINE is disabled)");
+    return new WhisperCppSpeechTranscriber(this.alignConfig.executable, this.alignConfig.model, this.alignConfig.timeoutMs, undefined, this.alignConfig.device);
+  }
+
+  async getChapterTtsQuality(slug: string, chapter: number) {
+    slugSchema.parse(slug); chapterParamSchema.parse(chapter);
+    return { quality: (await loadChapterTtsQuality(this.root, slug, chapter)) ?? null };
+  }
+
+  startVerifyChapterTts(slug: string, raw: unknown) {
+    slugSchema.parse(slug); const input = z.object({ chapter: z.number().int().positive() }).strict().parse(raw);
+    return this.jobs.create("ttsQualityVerify", slug, async () => withStoryLock(this.root, slug, "TTS quality re-verification", async () => {
+      const story = await loadStory(storyPaths(this.root, slug, input.chapter).storyConfig);
+      const quality = await verifyStoredChapterTts({ root: this.root, story, chapter: input.chapter, transcriber: this.speechTranscriber() });
+      await recordActivity(this.root, slug, "tts.quality.verified", `Re-verified TTS quality for Chapter ${input.chapter}`);
+      return { quality };
+    }));
+  }
+
+  startRegenerateChapterTtsSegment(slug: string, chapter: number, segment: number) {
+    slugSchema.parse(slug); chapterParamSchema.parse(chapter); segmentParamSchema.parse(segment);
+    return this.jobs.create("ttsSegmentRegenerate", slug, async () => withStoryLock(this.root, slug, "TTS segment regeneration", async () => {
+      const story = await loadStory(storyPaths(this.root, slug, chapter).storyConfig);
+      const config = story.pipeline.tts;
+      const base = pronunciationProvider(this.tts.forName(config.provider), await loadPronunciationEntities(this.root, slug));
+      const provider = new QualityGuardTTSProvider(base, this.speechTranscriber(), { maxRetries: config.maxQualityRetries, language: story.outputLanguage });
+      const quality = await withUsageScope({ story: slug, chapter, stage: "tts" }, () => regenerateStoredChapterTtsSegment({ root: this.root, story, chapter, segment: segment - 1, provider, maxRetries: config.maxQualityRetries }));
+      await recordActivity(this.root, slug, "tts.quality.segment_regenerated", `Regenerated TTS segment ${segment} for Chapter ${chapter}`);
+      return { quality };
+    }));
+  }
+
+  async acceptChapterTtsSegment(slug: string, chapter: number, segment: number, raw: unknown) {
+    slugSchema.parse(slug); chapterParamSchema.parse(chapter); segmentParamSchema.parse(segment);
+    const input = z.object({ reason: z.string().max(500).optional() }).strict().parse(raw);
+    return withStoryLock(this.root, slug, "TTS segment acceptance", async () => {
+      const quality = await acceptStoredChapterTtsSegment({ root: this.root, slug, chapter, segment: segment - 1, reason: input.reason });
+      await recordActivity(this.root, slug, "tts.quality.segment_accepted", `Manually accepted TTS segment ${segment} for Chapter ${chapter}`);
+      return { quality };
+    });
   }
 
   startAudiobook(slug: string, raw: unknown) {

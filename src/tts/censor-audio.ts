@@ -6,6 +6,7 @@ import { atomicWrite } from "../storage/atomic-write.js";
 import { FfmpegTools } from "../audio/ffmpeg.js";
 import { TTSProvider } from "./provider.js";
 import { TTSRequest, TTSResult } from "./types.js";
+import { summarizeQuality } from "./quality-guard.js";
 
 export const CENSOR_AUDIO_VERSION = "censor-tone-v2";
 export const CENSOR_BLEEP_MARKER = "[CENSOR_BLEEP]" as const;
@@ -80,6 +81,7 @@ export class FfmpegCensorAudioService implements CensorAudioService {
     await this.tools.validateAvailability();
     const directory = await mkdtemp(join(tmpdir(), "ai-story-censor-"));
     const files: string[] = []; const segments: Uint8Array[] = []; const requestIds: string[] = []; let providerRequests = 0;
+    const qualitySegments: import("./quality-guard.js").TtsSegmentQuality[] = [];
     try {
       for (const [index, segment] of plan.entries()) {
         if (segment.kind === "speech") {
@@ -88,6 +90,10 @@ export class FfmpegCensorAudioService implements CensorAudioService {
           const result = await provider.synthesize({ ...request, text: speechForSynthesis(plan, index), bleepStrongProfanity: false });
           requestIds.push(...(result.requestIds ?? []));
           providerRequests += result.providerRequests ?? result.segments.length;
+          // Tone segments have no expected text, so a flattened 1:1 segmentTexts
+          // mapping is impossible; the per-speech-chunk quality reports still
+          // aggregate honestly (reindexed across calls).
+          for (const q of result.quality?.segments ?? []) qualitySegments.push({ ...q, index: qualitySegments.length });
           for (const audio of result.segments.length ? result.segments : [result.audio]) {
             const path = join(directory, `${String(files.length + 1).padStart(4, "0")}.mp3`);
             await atomicWrite(path, audio); files.push(path); segments.push(audio);
@@ -104,7 +110,10 @@ export class FfmpegCensorAudioService implements CensorAudioService {
       await this.tools.ffmpeg(buildCensorConcatArgs(manifest, output, request));
       const audio = await readFile(output);
       if (!audio.length) throw new AudioError("Censor audio assembly produced an empty MP3");
+      const summary = qualitySegments.length ? summarizeQuality(qualitySegments) : undefined;
+      const quality = summary ? { version: 1 as const, status: summary.status, retried: summary.retried, segments: qualitySegments } : undefined;
       return { audio, segments, requestIds: requestIds.length ? requestIds : undefined, providerRequests, assembled: true,
+        ...(quality ? { quality } : {}),
         censor: { segments: censored.length, durationSeconds: censored.reduce((sum, segment) => sum + segment.durationSeconds, 0) } };
     } finally { await rm(directory, { recursive: true, force: true }); }
   }

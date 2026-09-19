@@ -184,6 +184,22 @@ export function createApiHandler(operations: StudioOperations) {
         const audioFile = (await exists(paths.audio)) ? paths.audio : paths.audioRaw;
         return sendFile(request, response, audioFile, "audio/mpeg");
       }
+      const ttsQualityMatch = /^\/api\/stories\/([a-z0-9-]+)\/chapters\/(\d+)\/tts-quality$/.exec(url.pathname);
+      if (ttsQualityMatch && request.method === "GET") return send(response, 200, await operations.getChapterTtsQuality(ttsQualityMatch[1]!, chapterParam(ttsQualityMatch[2]!)));
+      const ttsQualityVerifyMatch = /^\/api\/stories\/([a-z0-9-]+)\/chapters\/(\d+)\/tts-quality\/verify$/.exec(url.pathname);
+      if (ttsQualityVerifyMatch && request.method === "POST") return send(response, 202, operations.startVerifyChapterTts(ttsQualityVerifyMatch[1]!, { chapter: chapterParam(ttsQualityVerifyMatch[2]!) }));
+      const segmentActionMatch = /^\/api\/stories\/([a-z0-9-]+)\/chapters\/(\d+)\/audio-segments\/(\d{1,4})\/(regenerate|accept)$/.exec(url.pathname);
+      if (segmentActionMatch && request.method === "POST") {
+        const [_, slug, chapter, segment, action] = segmentActionMatch;
+        if (action === "regenerate") return send(response, 202, operations.startRegenerateChapterTtsSegment(slug!, chapterParam(chapter!), Number(segment)));
+        return send(response, 200, await operations.acceptChapterTtsSegment(slug!, chapterParam(chapter!), Number(segment), await jsonBody(request)));
+      }
+      const segmentAudioMatch = /^\/api\/stories\/([a-z0-9-]+)\/chapters\/(\d+)\/audio-segments\/(\d{1,4})\.mp3$/.exec(url.pathname);
+      if (segmentAudioMatch && request.method === "GET") {
+        const file = join(storyPaths(operations.root, segmentAudioMatch[1]!, chapterParam(segmentAudioMatch[2]!)).segments, `${segmentAudioMatch[3]!.padStart(4, "0")}.mp3`);
+        if (!(await exists(file))) return send(response, 404, { error: "Chapter audio segment was not found" });
+        return sendFile(request, response, file, "audio/mpeg");
+      }
       const subtitleFileMatch = /^\/api\/stories\/([a-z0-9-]+)\/chapters\/(\d+)\/subtitles\.(srt|vtt)$/.exec(url.pathname);
       if (subtitleFileMatch && request.method === "GET") { const chapterNumber = chapterParam(subtitleFileMatch[2]!); const chapter = await getChapter(operations.root, subtitleFileMatch[1]!, chapterNumber); if (!chapter.subtitles) return send(response, 404, { error: "Chapter subtitles were not found" }); const paths = storyPaths(operations.root, subtitleFileMatch[1]!, chapterNumber); return sendFile(request, response, subtitleFileMatch[3] === "srt" ? paths.subtitlesSrt : paths.subtitlesVtt, subtitleFileMatch[3] === "srt" ? "application/x-subrip" : "text/vtt; charset=utf-8"); }
       const subtitleEditMatch = /^\/api\/stories\/([a-z0-9-]+)\/chapters\/(\d+)\/subtitles$/.exec(url.pathname);
@@ -399,7 +415,6 @@ export function createApiHandler(operations: StudioOperations) {
       if (bibleEntryMatch && request.method === "PUT") return send(response, 200, await operations.updateBibleEntry(bibleEntryMatch[1]!, bibleEntryMatch[2]!, await jsonBody(request)));
       if (bibleEntryMatch && request.method === "DELETE") return send(response, 200, await operations.deleteBibleEntry(bibleEntryMatch[1]!, bibleEntryMatch[2]!));
       const settingsMatch = /^\/api\/stories\/([a-z0-9-]+)\/settings$/.exec(url.pathname);
-      if (settingsMatch && request.method === "PUT") return send(response, 200, { story: await updateStorySettings(operations.root, settingsMatch[1]!, await jsonBody(request)) });
       if (settingsMatch && request.method === "PUT") {
         await updateStorySettings(operations.root, settingsMatch[1]!, await jsonBody(request));
         const overview = await getStoryOverview(operations.root, settingsMatch[1]!);

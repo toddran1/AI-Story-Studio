@@ -22,7 +22,7 @@ const envSchema = z.object({
   FISH_AUDIO_SAMPLE_RATE: z.coerce.number().pipe(z.union([z.literal(32000), z.literal(44100)])).default(44100),
   FISH_AUDIO_MP3_BITRATE: z.coerce.number().pipe(z.union([z.literal(64), z.literal(128), z.literal(192)])).default(128),
   FISH_AUDIO_NORMALIZE: z.stringbool().default(true),
-  FISH_AUDIO_MAX_CHARS: z.coerce.number().int().min(500).max(20_000).default(4000),
+  FISH_AUDIO_MAX_CHARS: z.coerce.number().int().min(500).max(20_000).default(1750),
   PROVIDER_TIMEOUT_MS: z.coerce.number().int().min(1000).max(900_000).default(120_000),
   MEDIA_PROCESS_TIMEOUT_MS: z.coerce.number().int().min(1000).max(86_400_000).default(1_800_000),
   ALIGNMENT_ENGINE: z.enum(["whisper-cpp", "disabled"]).default("whisper-cpp"),

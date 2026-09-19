@@ -1,6 +1,7 @@
 import { mkdir, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { Chapter, StageName, StageState, chapterSchema } from "../domain/chapter.js";
+import { ttsSynthesisSettings } from "../domain/provider.js";
 import { Story } from "../domain/story.js";
 import { StoryBibleUpdate, storyBibleUpdateSchema, storyBibleSchema } from "../domain/story-bible.js";
 import { activeQaIssues, QaResult, qaResultSchema } from "../domain/qa.js";
@@ -41,6 +42,8 @@ import { withUsageScope } from "../cost/context.js";
 import { loadNarrationNamingEntities } from "../story-bible/narration-names.js";
 import { loadEligibleSummaryContext } from "../summaries/service.js";
 import { CENSOR_AUDIO_VERSION, CensorAudioService, FfmpegCensorAudioService, censorToneConfig } from "../tts/censor-audio.js";
+import { QualityGuardTTSProvider, SpeechTranscriber, summarizeQuality } from "../tts/quality-guard.js";
+import { persistChapterTtsQuality, removeChapterTtsQuality } from "../tts/chapter-quality.js";
 import { normalizeSpeechForProvider } from "../tts/speech-normalization.js";
 import { manualAcceptanceFingerprint } from "../studio/stage-acceptance.js";
 import { StageExecutionNode, dependentProcessingStages } from "../studio/stage-execution.js";
@@ -61,7 +64,7 @@ const pending = (): StageState => ({ status: "pending" });
 
 export class ChapterPipeline {
   private readonly tts: TTSProviderRouter;
-  constructor(private readonly llms: LLMRouter, tts: TTSProviderRouter | TTSProvider, private readonly audio: AudioMasteringProcessor = new FfmpegMasteringProcessor(), private readonly censor: CensorAudioService = new FfmpegCensorAudioService()) { this.tts = tts instanceof TTSProviderRouter ? tts : new TTSProviderRouter(tts); }
+  constructor(private readonly llms: LLMRouter, tts: TTSProviderRouter | TTSProvider, private readonly audio: AudioMasteringProcessor = new FfmpegMasteringProcessor(), private readonly censor: CensorAudioService = new FfmpegCensorAudioService(), private readonly qualityVerification?: { transcriber?: SpeechTranscriber }) { this.tts = tts instanceof TTSProviderRouter ? tts : new TTSProviderRouter(tts); }
 
   async run(options: PipelineOptions): Promise<Chapter> {
     const paths = storyPaths(options.root, options.story.slug, options.chapter);
@@ -287,12 +290,21 @@ export class ChapterPipeline {
     // generated with a different voice.
     const pronunciationData = await withUsageScope({ story: options.story.slug, chapter: options.chapter, stage: "pronunciation" }, () => enrichStoryPronunciations(options.root, options.story.slug, bible, this.llms.forStage(bibleConfig), bibleConfig, options.story.sourceLanguage, undefined, false, false,
       (progress) => { if (progress.total > 0) options.onStageEvent?.({ stage: "tts", status: "started", state: chapter.stages.tts, detail: `Enriching pronunciations ${progress.processed}/${progress.total}` }); }));
-    const ttsProvider = pronunciationProvider(this.tts.forName(ttsConfig.provider), pronunciationData.entities);
+    const baseTtsProvider = pronunciationProvider(this.tts.forName(ttsConfig.provider), pronunciationData.entities);
+    // Verification wraps the pronunciation layer so the guard sees the final
+    // spoken text and per-segment audio; retry calls flow back through the same
+    // tracked provider and are usage-recorded with attempt numbers.
+    const ttsProvider = this.qualityVerification?.transcriber && ttsConfig.qualityGuard
+      ? new QualityGuardTTSProvider(baseTtsProvider, this.qualityVerification.transcriber, { maxRetries: ttsConfig.maxQualityRetries, language: options.story.outputLanguage })
+      : baseTtsProvider;
     const speech = normalizeSpeechForProvider(ttsScript, options.story.outputLanguage, options.story.narrationSettings, ttsProvider, ttsConfig.model);
     const pronunciationFp = pronunciationFingerprint(resolvePronunciations(speech.normalized.text, pronunciationData.entities));
     const referenceId = ttsProvider.resolveReferenceId?.(ttsConfig.referenceId) ?? ttsConfig.referenceId;
     const bleepStrongProfanity = options.story.narrationSettings.bleepStrongProfanity === true;
-    const ttsFp = fingerprint({ narration: fingerprint(ttsScript), speech: speech.fingerprint, config: { ...ttsConfig, referenceId }, deliveryProfile, inputNormalizationVersion: ttsProvider.inputNormalizationVersion,
+    // Verification-policy settings change whether verification runs, not what is
+    // synthesized, so they stay out of the synthesis fingerprint: toggling the
+    // guard never invalidates existing audio. maxCharsPerRequest stays in.
+    const ttsFp = fingerprint({ narration: fingerprint(ttsScript), speech: speech.fingerprint, config: { ...ttsSynthesisSettings(ttsConfig), referenceId }, deliveryProfile, inputNormalizationVersion: ttsProvider.inputNormalizationVersion,
       ...(pronunciationFp ? { pronunciation: pronunciationFp } : {}),
       ...(bleepStrongProfanity ? { bleepStrongProfanity: true, censor: { version: this.censor.version || CENSOR_AUDIO_VERSION, config: censorToneConfig } } : {}) });
     if (!(await fileFingerprint(paths.audioRaw)) && chapter.stages.tts.status === "complete" && await fileFingerprint(paths.audio)) await atomicWrite(paths.audioRaw, await readFile(paths.audio));
@@ -312,6 +324,11 @@ export class ChapterPipeline {
         characters: [...speech.normalized.text].length, bytes: result.audio.byteLength,
         censoredSegments: result.censor?.segments, censorDurationSeconds: result.censor?.durationSeconds,
       };
+      if (result.quality) {
+        const summary = summarizeQuality(result.quality.segments);
+        chapter.stages.tts.usage.quality = { status: summary.status, segments: result.quality.segments.length, needsReview: summary.needsReview, retried: summary.retried, manuallyAccepted: summary.manuallyAccepted };
+        await persistChapterTtsQuality({ root: options.root, story: options.story, chapter: options.chapter, report: result.quality, maxRetries: ttsConfig.maxQualityRetries, transcriber: this.qualityVerification?.transcriber?.name ?? "unavailable" });
+      } else await removeChapterTtsQuality(options.root, options.story.slug, options.chapter);
     });
     if (options.stopAfter === "tts") { await persist(); return chapter; }
 

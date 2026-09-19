@@ -144,4 +144,14 @@ describe("Fish TTS", () => {
     const json = new FishAudioProvider("test-key", vi.fn(async () => new Response("{}", { status: 200, headers: { "content-type": "application/json" } })) as typeof fetch);
     await expect(json.synthesize(request)).rejects.toThrow(/unexpected content type/);
   });
+
+  it("exposes the exact posted chunk texts as segmentTexts aligned with segments", async () => {
+    const posted: string[] = [];
+    const fetcher = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => { posted.push(JSON.parse(String(init?.body)).text); return new Response(new Uint8Array([1, 2, 3]), { status: 200, headers: { "content-type": "audio/mpeg" } }); });
+    const provider = new FishAudioProvider("test-key", fetcher as typeof fetch);
+    const result = await provider.synthesize({ text: "Sentence one. ".repeat(120), model: "s2-pro", speed: 1, format: "mp3", sampleRate: 44100, bitrate: 128, normalize: true, maxCharsPerRequest: 500 });
+    expect(result.segments.length).toBeGreaterThan(1);
+    expect(result.segmentTexts).toEqual(posted);
+    expect(result.segmentTexts).toHaveLength(result.segments.length);
+  });
 });

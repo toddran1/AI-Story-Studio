@@ -77,7 +77,7 @@ export class FishAudioProvider implements TTSProvider {
     const length = segments.reduce((sum, segment) => sum + segment.length, 0);
     const audio = new Uint8Array(length); let offset = 0;
     for (const segment of segments) { audio.set(segment, offset); offset += segment.length; }
-    return { audio, segments, requestIds, providerRequests: segments.length };
+    return { audio, segments, requestIds, providerRequests: segments.length, segmentTexts: chunks };
   }
 }
 

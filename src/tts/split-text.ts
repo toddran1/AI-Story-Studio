@@ -12,7 +12,13 @@ export function splitForTTS(text: string, maxChars: number): string[] {
     for (const sentence of paragraph.match(/[^.!?。！？]+[.!?。！？]+|[^.!?。！？]+$/g) ?? [paragraph]) {
       const trimmed = sentence.trim();
       if (trimmed.length <= maxChars) push(trimmed);
-      else for (let start = 0; start < trimmed.length; start += maxChars) push(trimmed.slice(start, start + maxChars));
+      else for (let start = 0; start < trimmed.length;) {
+        let end = Math.min(trimmed.length, start + maxChars);
+        // Hard slices back off to the last whitespace so provider control tags
+        // (e.g. [laugh], <|speaker:0|>) and words are never cut in half.
+        if (end < trimmed.length) { const boundary = trimmed.lastIndexOf(" ", end); if (boundary > start) end = boundary; }
+        push(trimmed.slice(start, end).trim()); start = end;
+      }
     }
   }
   if (current) chunks.push(current);

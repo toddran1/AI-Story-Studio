@@ -1,6 +1,6 @@
 import { Component, ErrorInfo, FormEvent, ReactNode, useDeferredValue, useEffect, useRef, useState } from "react";
 import type { StageName } from "../../../src/domain/chapter.js";
-import { api, AudioDashboard, ChapterDetail, ChapterQaDetail, ChapterRow, CostAnalytics, Counts, del, ErrorDiagnostic, formatDiagnostic, Job, Model, OutputItem, post, put, ProductionManifest, ProductionPlan, QaException, QaExceptionMatchKind, QaFinding, QaRecheckSummary, QaResult, Scene, ScenesDashboard, StoryCard, StoryConfig, StoryDashboard, VideoDashboard } from "./api.js";
+import { api, AudioDashboard, ChapterDetail, ChapterQaDetail, ChapterRow, CostAnalytics, Counts, del, ErrorDiagnostic, formatDiagnostic, Job, Model, OutputItem, post, put, ProductionManifest, ProductionPlan, QaException, QaExceptionMatchKind, QaFinding, QaRecheckSummary, QaResult, Scene, ScenesDashboard, StoryCard, StoryConfig, StoryDashboard, TtsQualityArtifact, TtsQualityIssueType, TtsSegmentQuality, VideoDashboard, acceptChapterTtsSegment, chapterTtsSegmentAudioUrl, getChapterTtsQuality, regenerateChapterTtsSegment, verifyChapterTtsQuality } from "./api.js";
 import { ArtifactStatusNotice } from "./ArtifactStatusNotice.js";
 import { pretty } from "./format.js";
 import { GlobalSettingsPage, LibraryPage, ManageStoryPage, NewStoryPage } from "./Milestone12.js";
@@ -774,6 +774,7 @@ export function ChapterPage({
       {tab === "audio" && <>
         {data.audioStale && <ArtifactStatusNotice status="stale" reason="This master was rendered from older inputs or settings. You can still listen to it, but it will not be treated as current until it is regenerated or marked current." />}
         <AudioDeck src={data.audioUrl} title={`Chapter ${chapter} master`} />
+        <TtsQualityPanel slug={slug} chapter={chapter} onJob={onJob} onChanged={() => void load()} />
       </>}
       {tab === "subtitles" && <SubtitleWorkspace data={data} cues={cues} working={working} onCue={updateCue} onAlign={(estimated) => void runSubtitleJob("alignment", estimated)} onGenerate={(estimated) => void runSubtitleJob("subtitles", estimated)} onSave={() => void saveCues()} onReset={() => void resetCues()} />}
       {(tab === "scenes" || tab === "artwork") && <>
@@ -788,6 +789,142 @@ export function ChapterPage({
       </> : <Empty title="No chapter video yet" text="Render this chapter from the Video workspace." />)}
     </section>
   );
+}
+
+export function chunkPresetFor(value: number): "conservative" | "balanced" | "long" | "custom" {
+  if (value === 1000) return "conservative";
+  if (value === 1750) return "balanced";
+  if (value === 3000) return "long";
+  return "custom";
+}
+
+export const TTS_ISSUE_LABELS: Record<TtsQualityIssueType, string> = {
+  unexpected_speech: "Speech not present in the narration",
+  missing_speech: "Narration missing from the audio",
+  repetition: "Repeated phrase",
+  truncated: "Audio cut off early",
+  suspected_gibberish: "Suspected gibberish",
+  abnormal_duration: "Abnormal pacing",
+  unexpected_silence: "Unexpected silence",
+  invalid_audio: "Unreadable audio",
+  transcription_failed: "Segment could not be transcribed",
+};
+
+export function ttsIssueLabel(type: TtsQualityIssueType): string {
+  return TTS_ISSUE_LABELS[type] ?? pretty(type);
+}
+
+export function ttsQualityBadgeView(quality: TtsQualityArtifact): { status: "pass" | "warn" | "fail" | "pending"; label: string } {
+  const segments = quality.segments;
+  const needsReview = segments.filter((segment) => segment.status === "needs_review").length;
+  const accepted = segments.filter((segment) => segment.status === "manually_accepted").length;
+  if (quality.status === "verified") return { status: "pass", label: "TTS Quality: Passed" };
+  if (quality.status === "needs_review") return { status: "warn", label: `TTS Quality: Needs review (${needsReview} segment${needsReview === 1 ? "" : "s"})` };
+  if (quality.status === "unverified") return { status: "pending", label: "TTS Quality: Unverified" };
+  if (accepted) return { status: "pending", label: `TTS Quality: Manually accepted (${accepted})` };
+  return { status: "pending", label: "TTS Quality: Partially verified" };
+}
+
+export function TtsQualityBadge({ quality }: { quality: TtsQualityArtifact }) {
+  const view = ttsQualityBadgeView(quality);
+  return <Status status={view.status} label={view.label} />;
+}
+
+const TTS_SEGMENT_ICONS: Record<TtsSegmentQuality["status"], string> = { verified: "✓", needs_review: "⚠", unverified: "–", manually_accepted: "✓" };
+const TTS_SEGMENT_LABELS: Record<TtsSegmentQuality["status"], string> = { verified: "Verified", needs_review: "Needs review", unverified: "Unverified", manually_accepted: "Accepted by reviewer" };
+
+export function TtsSegmentRow({ slug, chapter, segment, busy, onRegenerate, onAccept }: { slug: string; chapter: number; segment: TtsSegmentQuality; busy: boolean; onRegenerate: () => void; onAccept: () => void }) {
+  const number = segment.index + 1;
+  const retries = Math.max(0, segment.attempts.length - 1);
+  const summary = <><span className={`tts-segment-icon ${segment.status}`} aria-hidden="true">{TTS_SEGMENT_ICONS[segment.status]}</span><span className="tts-segment-title">Segment {number}{segment.score !== undefined && <> · {Math.round(segment.score * 100)}%</>}{retries > 0 && <> · Retried {retries}×</>} — {TTS_SEGMENT_LABELS[segment.status]}{segment.status === "manually_accepted" && segment.acceptedAt && <> · {new Date(segment.acceptedAt).toLocaleString()}</>}</span></>;
+  const actions = <div className="tts-segment-actions">
+    <audio controls preload="none" src={chapterTtsSegmentAudioUrl(slug, chapter, number)} aria-label={`Play segment ${number}`} />
+    {segment.status !== "verified" && segment.status !== "manually_accepted" && <>
+      <button type="button" className="button" disabled={busy} onClick={onRegenerate}>{busy ? "Working…" : "Regenerate segment"}</button>
+      <button type="button" className="button" disabled={busy} onClick={onAccept}>Accept anyway</button>
+    </>}
+  </div>;
+  if (segment.status === "verified") return <div className="tts-segment-row">{summary}</div>;
+  return <details className="tts-segment-row">
+    <summary>{summary}</summary>
+    <div className="tts-segment-detail">
+      <div><span className="eyebrow">Expected narration</span><p>{segment.expectedText}</p></div>
+      <div><span className="eyebrow">Transcription</span><p>{segment.transcription ?? "Not transcribed"}</p></div>
+      {segment.issues.length > 0 && <div><span className="eyebrow">Issues</span><ul className="tts-issue-list">{segment.issues.map((issue, index) => <li key={`${issue.type}-${index}`}>{ttsIssueLabel(issue.type)}{issue.detail ? ` — ${issue.detail}` : ""}</li>)}</ul></div>}
+      {segment.attempts.length > 0 && <div><span className="eyebrow">Attempts</span><ul className="tts-attempt-list">{segment.attempts.map((attempt) => <li key={attempt.attempt}>Attempt {attempt.attempt} · {attempt.settings.deliveryIntensity} delivery{attempt.score !== undefined && <> · {Math.round(attempt.score * 100)}%</>} · {pretty(attempt.status)}</li>)}</ul></div>}
+      {segment.status === "manually_accepted" && <p className="field-note">Accepted by a reviewer{segment.acceptedReason ? `: ${segment.acceptedReason}` : ""}. Manual acceptance is not an objective pass.</p>}
+      {actions}
+    </div>
+  </details>;
+}
+
+export function TtsQualityPanel({ slug, chapter, onJob, onChanged, initialQuality }: { slug: string; chapter: number; onJob: (job: Job) => void; onChanged?: () => void; initialQuality?: TtsQualityArtifact | null }) {
+  const [quality, setQuality] = useState<TtsQualityArtifact | null | undefined>(initialQuality);
+  const [error, setError] = useState("");
+  const [working, setWorking] = useState("");
+  const watcher = useRef<(() => void) | undefined>(undefined);
+  const load = async () => { const value = await getChapterTtsQuality(slug, chapter); setQuality(value.quality); };
+  useEffect(() => {
+    if (initialQuality !== undefined) { setQuality(initialQuality); return; }
+    let cancelled = false;
+    setQuality(undefined);
+    setError("");
+    getChapterTtsQuality(slug, chapter).then((value) => { if (!cancelled) setQuality(value.quality); }).catch((value) => { if (!cancelled) setError(message(value)); });
+    return () => { cancelled = true; watcher.current?.(); };
+  }, [slug, chapter]);
+  const runJob = async (kind: "verify" | "regenerate", start: () => Promise<Job>) => {
+    if (working) return;
+    try {
+      setError("");
+      setWorking(kind);
+      const job = await start();
+      onJob(job);
+      watcher.current?.();
+      watcher.current = watchJob(job.id, async (next) => {
+        onJob(next);
+        if (isTerminalJob(next)) {
+          setWorking("");
+          if (next.status === "failed") setError(next.error ?? "TTS quality job failed");
+          await load().catch((value) => setError(message(value)));
+          onChanged?.();
+        }
+      }, (value) => { setWorking(""); setError(message(value)); });
+    } catch (value) {
+      setWorking("");
+      setError(message(value));
+    }
+  };
+  const accept = async (segment: TtsSegmentQuality) => {
+    if (working) return;
+    if (!confirm(`Accept segment ${segment.index + 1} as-is? This records a manual acceptance — it is not an objective pass.`)) return;
+    const reason = prompt("Optional note for the review record", "") ?? undefined;
+    try {
+      setError("");
+      setWorking("accept");
+      const result = await acceptChapterTtsSegment(slug, chapter, segment.index + 1, reason?.trim() || undefined);
+      setQuality(result.quality);
+      onChanged?.();
+    } catch (value) {
+      setError(message(value));
+    } finally {
+      setWorking("");
+    }
+  };
+  if (quality === undefined) return error ? <ErrorBox text={error} /> : null;
+  if (quality === null) return <p className="tts-quality-empty">TTS quality has not been verified for this chapter yet. Verification runs automatically during TTS when the quality guard is enabled.</p>;
+  const busy = Boolean(working);
+  return <section className="tts-quality-panel" aria-label="TTS quality">
+    <div className="tts-quality-summary">
+      <TtsQualityBadge quality={quality} />
+      <span className="tts-quality-meta">{quality.provider} · {quality.model} · {quality.segments.length} segment{quality.segments.length === 1 ? "" : "s"}</span>
+      <button type="button" className="button" disabled={busy} title="Re-checks the existing audio against the expected narration without regenerating anything." onClick={() => void runJob("verify", () => verifyChapterTtsQuality(slug, chapter))}>{working === "verify" ? "Verifying…" : "Re-verify"}</button>
+    </div>
+    {error && <ErrorBox text={error} />}
+    <details className="tts-segment-list">
+      <summary>Segments ({quality.segments.length})</summary>
+      {quality.segments.map((segment) => <TtsSegmentRow key={segment.index} slug={slug} chapter={chapter} segment={segment} busy={busy} onRegenerate={() => void runJob("regenerate", () => regenerateChapterTtsSegment(slug, chapter, segment.index + 1))} onAccept={() => void accept(segment)} />)}
+    </details>
+  </section>;
 }
 
 function SubtitleWorkspace({ data, cues, working, onCue, onAlign, onGenerate, onSave, onReset }: { data: any; cues: any[]; working: string; onCue: (index: number, patch: Record<string, unknown>) => void; onAlign: (estimated: boolean) => void; onGenerate: (estimated: boolean) => void; onSave: () => void; onReset: () => void }) {
@@ -2341,6 +2478,8 @@ function SettingsPage({ slug, onJob }: { slug: string; onJob: (job: Job) => void
           voiceMode: story.pipeline.tts.voiceMode,
           deliveryIntensity: story.pipeline.tts.deliveryIntensity,
           qualityGuard: story.pipeline.tts.qualityGuard,
+          maxCharsPerRequest: story.pipeline.tts.maxCharsPerRequest,
+          maxQualityRetries: story.pipeline.tts.maxQualityRetries,
           speed: story.pipeline.tts.speed,
         },
         audio: story.audio,
@@ -2389,6 +2528,8 @@ function SettingsPage({ slug, onJob }: { slug: string; onJob: (job: Job) => void
           voiceMode: story.pipeline.tts.voiceMode,
           deliveryIntensity: story.pipeline.tts.deliveryIntensity,
           qualityGuard: story.pipeline.tts.qualityGuard,
+          maxCharsPerRequest: story.pipeline.tts.maxCharsPerRequest,
+          maxQualityRetries: story.pipeline.tts.maxQualityRetries,
           speed: story.pipeline.tts.speed,
         },
         audio: story.audio,
@@ -2558,8 +2699,14 @@ function SettingsPage({ slug, onJob }: { slug: string; onJob: (job: Job) => void
         <div className="voice-casting" role="group" aria-label="Voice casting"><span>VOICE CASTING</span>{([{"id":"same-voice-dialogue","label":"Same voice · dialogue delivery","detail":"Keeps one voice identity and gives quoted speech a restrained performance shift.","recommended":true},{"id":"narrator-only","label":"Narrator only","detail":"One unchanged voice treatment for everything.","recommended":false},{"id":"narrator-dialogue","label":"Narrator + dialogue voice","detail":"Uses one separate secondary voice for every quoted line.","recommended":false}] as const).map((option) => <button key={option.id} type="button" aria-pressed={story.pipeline.tts.voiceMode === option.id} className={`${story.pipeline.tts.voiceMode === option.id ? "active" : ""} ${option.recommended ? "recommended" : ""}`.trim()} onClick={() => setStory({ ...story, pipeline: { ...story.pipeline, tts: { ...story.pipeline.tts, voiceMode: option.id } } })}><b>{option.label}</b><small>{option.detail}</small></button>)}</div>
         {story.pipeline.tts.voiceMode === "narrator-dialogue" && <Field label="Dialogue voice / reference ID"><input value={story.pipeline.tts.secondaryReferenceId ?? ""} placeholder="Fish model ID or fish.audio model URL" onChange={(event) => setStory({ ...story, pipeline: { ...story.pipeline, tts: { ...story.pipeline.tts, secondaryReferenceId: event.target.value || undefined } } })} /><small className="field-note">Quoted speech uses this voice. Until one is set, dialogue safely uses the narrator voice.</small></Field>}
         <Field label="Delivery intensity"><select value={story.pipeline.tts.deliveryIntensity} onChange={(event) => setStory({ ...story, pipeline: { ...story.pipeline, tts: { ...story.pipeline.tts, deliveryIntensity: event.target.value as "none" | "restrained" | "expressive" } } })}><option value="none">None · no emotion cues</option><option value="restrained">Restrained · consistent</option><option value="expressive">Expressive · more variation</option></select></Field>
-        <label className={`narration-policy ${story.pipeline.tts.qualityGuard ? "active" : ""}`}><div><span>FISH AUDIO</span><b>Quality guard</b><small>Ask Fish to apply its request-level quality protection during synthesis.</small></div><input type="checkbox" checked={story.pipeline.tts.qualityGuard} onChange={(event) => setStory({ ...story, pipeline: { ...story.pipeline, tts: { ...story.pipeline.tts, qualityGuard: event.target.checked } } })} /><i aria-hidden="true" /></label>
-        <Field label={`Speed · ${story.pipeline.tts.speed.toFixed(2)}×`}><input type="range" min="0.5" max="2" step="0.05" value={story.pipeline.tts.speed} onChange={(event) => setStory({ ...story, pipeline: { ...story.pipeline, tts: { ...story.pipeline.tts, speed: Number(event.target.value) } } })} /></Field>
+        <div className="voice-casting" role="group" aria-label="TTS chunk size"><span>TTS CHUNK SIZE</span>{([{"id":"conservative","label":"Conservative · ~1,000 chars","detail":"More, smaller requests. Smallest blast radius when a request fails.","recommended":false},{"id":"balanced","label":"Balanced · ~1,750 chars","detail":"Recommended default for most voices.","recommended":true},{"id":"long","label":"Long · ~3,000 chars","detail":"Fewer requests; only for very stable voices.","recommended":false},{"id":"custom","label":"Custom","detail":"Choose an exact size between 500 and 20,000 characters.","recommended":false}] as const).map((option) => <button key={option.id} type="button" aria-pressed={chunkPresetFor(story.pipeline.tts.maxCharsPerRequest) === option.id} className={`${chunkPresetFor(story.pipeline.tts.maxCharsPerRequest) === option.id ? "active" : ""} ${option.recommended ? "recommended" : ""}`.trim()} onClick={() => setStory({ ...story, pipeline: { ...story.pipeline, tts: { ...story.pipeline.tts, maxCharsPerRequest: option.id === "conservative" ? 1000 : option.id === "balanced" ? 1750 : option.id === "long" ? 3000 : story.pipeline.tts.maxCharsPerRequest } } })}><b>{option.label}</b><small>{option.detail}</small></button>)}</div>
+        {chunkPresetFor(story.pipeline.tts.maxCharsPerRequest) === "custom" && <Field label="Custom chunk size · characters"><input type="number" min="500" max="20000" step="50" value={story.pipeline.tts.maxCharsPerRequest} onChange={(event) => setStory({ ...story, pipeline: { ...story.pipeline, tts: { ...story.pipeline.tts, maxCharsPerRequest: Math.max(500, Math.min(20000, Number(event.target.value) || 500)) } } })} /></Field>}
+        <label className={`narration-policy ${story.pipeline.tts.qualityGuard ? "active" : ""}`}><div><span>QUALITY</span><b>Quality guard</b><small>Verify generated speech against the expected narration — each segment is transcribed locally and failed segments are retried automatically. Fish's request-level quality protection is included.</small></div><input type="checkbox" checked={story.pipeline.tts.qualityGuard} onChange={(event) => setStory({ ...story, pipeline: { ...story.pipeline, tts: { ...story.pipeline.tts, qualityGuard: event.target.checked } } })} /><i aria-hidden="true" /></label>
+        <Field label="Max quality retries"><input type="number" min="0" max="5" step="1" value={story.pipeline.tts.maxQualityRetries} onChange={(event) => setStory({ ...story, pipeline: { ...story.pipeline, tts: { ...story.pipeline.tts, maxQualityRetries: Math.max(0, Math.min(5, Math.round(Number(event.target.value) || 0))) } } })} /><small className="field-note">Regenerate only the failed segment, up to this many extra attempts. Verification-only — changing it does not regenerate existing audio.</small></Field>
+        <div className="diagnostic-delivery"><div><span>TROUBLESHOOTING</span><small>Flattens delivery and disables vocalization rendering to isolate unstable voices. Updates this form — save to apply.</small></div><button type="button" className="button" onClick={() => setStory({ ...story, pipeline: { ...story.pipeline, tts: { ...story.pipeline.tts, deliveryIntensity: "none" } }, narrationSettings: { ...story.narrationSettings, speechVocalizations: { ...story.narrationSettings.speechVocalizations, mode: "disabled" } } })}>Use diagnostic delivery (flat, no vocalizations)</button></div>
+        <details className="settings-advanced"><summary>Advanced voice settings</summary>
+          <Field label={`Speed · ${story.pipeline.tts.speed.toFixed(2)}×`}><input type="range" min="0.5" max="2" step="0.05" value={story.pipeline.tts.speed} onChange={(event) => setStory({ ...story, pipeline: { ...story.pipeline, tts: { ...story.pipeline.tts, speed: Number(event.target.value) } } })} /></Field>
+        </details>
       </div>
       <div className="settings-group"><h3>Audio master</h3>
         <div className="field-row"><Field label="Loudness · LUFS"><input type="number" min="-24" max="-12" step="0.5" value={story.audio.loudnessTarget} onChange={(event) => audio("loudnessTarget", Number(event.target.value))} /></Field><Field label="True peak · dBTP"><input type="number" min="-6" max="-0.1" step="0.1" value={story.audio.truePeak} onChange={(event) => audio("truePeak", Number(event.target.value))} /></Field></div>
@@ -2707,7 +2854,7 @@ export function JobConsole({ job, onUpdate, onClose, navigate, initialQaComparis
     }
   };
   const isSceneJob = job.type === "scenes" || stage === "scenePlanning" || stage === "scenes";
-  const label = ({ batch: "Processing chapters", preview: "Rendering comparison", metadataTranslation: "Translating reader metadata", qaRepair: "Repairing selected QA findings", qaRecheck: "Rechecking chapter QA", stageExecution: "Processing stage", summary: "Building story recap", audio: "Mastering chapter audio", audiobook: "Building audiobook", alignment: "Aligning narration to audio", subtitles: "Timing subtitles", video: "Rendering chapter video", videoExport: "Building combined video", scenes: "Planning chapter scenes", artwork: "Generating scene artwork", production: "Producing finished story" } as Record<string, string>)[job.type] ?? "Working";
+  const label = ({ batch: "Processing chapters", preview: "Rendering comparison", metadataTranslation: "Translating reader metadata", qaRepair: "Repairing selected QA findings", qaRecheck: "Rechecking chapter QA", stageExecution: "Processing stage", summary: "Building story recap", audio: "Mastering chapter audio", audiobook: "Building audiobook", alignment: "Aligning narration to audio", subtitles: "Timing subtitles", video: "Rendering chapter video", videoExport: "Building combined video", scenes: "Planning chapter scenes", artwork: "Generating scene artwork", production: "Producing finished story", ttsQualityVerify: "Verifying TTS quality", ttsSegmentRegenerate: "Regenerating TTS segment" } as Record<string, string>)[job.type] ?? "Working";
   const modelBadge = [diagnostic?.provider, diagnostic?.model].filter(Boolean).join(" · ");
   const terminal = isTerminalJob(job);
   const title = terminal ? (job.status === "completed" ? `${label} — completed` : `${label} — ${job.status}`) : label;

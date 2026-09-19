@@ -15,6 +15,9 @@ import { UsageSink } from "../cost/types.js";
 import { TrackedImageProvider, TrackedLLMProvider, TrackedTTSProvider } from "../cost/context.js";
 import { TTSProviderRouter } from "../tts/router.js";
 import { FfmpegCensorAudioService } from "../tts/censor-audio.js";
+import { WhisperCppSpeechTranscriber } from "../alignment/transcription.js";
+import { alignmentConfig } from "../alignment/config.js";
+import { resolveStudioRoot } from "../config/env.js";
 
 export function createPipeline(env: Environment): ChapterPipeline {
   return createPipelineRuntime(env).pipeline;
@@ -37,5 +40,7 @@ export function createPipelineRuntime(env: Environment, usage?: UsageSink) {
     ["openai", trackImage(new OpenAIImageProvider(env.OPENAI_API_KEY, env.PROVIDER_TIMEOUT_MS))],
     ["gemini", trackImage(new GeminiImageProvider(env.GEMINI_API_KEY, env.PROVIDER_TIMEOUT_MS))],
   ]));
-  return { router, images, tts, audio, censor, pipeline: new ChapterPipeline(router, tts, audio, censor) };
+  const align = alignmentConfig(env, resolveStudioRoot(env));
+  const transcriber = align.engine === "disabled" ? undefined : new WhisperCppSpeechTranscriber(align.executable, align.model, align.timeoutMs, undefined, align.device);
+  return { router, images, tts, audio, censor, pipeline: new ChapterPipeline(router, tts, audio, censor, { transcriber }) };
 }

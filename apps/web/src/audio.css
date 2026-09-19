@@ -54,3 +54,31 @@
   .audio-page .section-heading { display: grid; }
   .audio-master-heading { align-items: flex-start; }
 }
+
+.tts-quality-panel { margin-top: 18px; border: 1px solid var(--line); background: #101015; border-radius: 9px; padding: 14px 16px; }
+.tts-quality-summary { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.tts-quality-summary .button { margin-left: auto; }
+.tts-quality-meta { font: 9px var(--mono); color: var(--muted); }
+.tts-quality-empty { margin-top: 14px; font-size: 10px; color: var(--muted); }
+.tts-segment-list { margin-top: 10px; }
+.tts-segment-list > summary { cursor: pointer; font: 9px var(--mono); text-transform: uppercase; letter-spacing: .08em; color: var(--muted); }
+.tts-segment-row { border-top: 1px solid var(--line); padding: 8px 2px; }
+.tts-segment-row > summary { cursor: pointer; list-style: none; }
+.tts-segment-row > summary::-webkit-details-marker { display: none; }
+.tts-segment-icon { display: inline-block; width: 16px; font: 11px var(--mono); }
+.tts-segment-icon.verified { color: var(--pass); }
+.tts-segment-icon.needs_review { color: var(--warn); }
+.tts-segment-icon.manually_accepted { color: var(--violet-soft); }
+.tts-segment-icon.unverified { color: var(--muted); }
+.tts-segment-title { font-size: 10px; overflow-wrap: anywhere; }
+.tts-segment-detail { display: grid; gap: 10px; padding: 10px 0 4px 16px; }
+.tts-segment-detail p { margin: 4px 0 0; font-size: 10px; line-height: 1.5; color: var(--ink); overflow-wrap: anywhere; white-space: pre-wrap; }
+.tts-issue-list,.tts-attempt-list { margin: 4px 0 0; padding-left: 18px; font-size: 10px; color: var(--muted); display: grid; gap: 3px; }
+.tts-segment-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.tts-segment-actions audio { width: min(280px, 100%); height: 30px; }
+.diagnostic-delivery { display: flex; align-items: center; justify-content: space-between; gap: 12px; border: 1px dashed var(--line-strong); border-radius: 8px; padding: 12px 14px; margin-top: 12px; }
+.diagnostic-delivery span { display: block; font: 8px var(--mono); letter-spacing: .12em; color: var(--muted); }
+.diagnostic-delivery small { display: block; font-size: 9px; color: var(--muted); margin-top: 4px; max-width: 460px; }
+.settings-advanced { margin-top: 12px; border-top: 1px solid var(--line); padding-top: 10px; }
+.settings-advanced > summary { cursor: pointer; font: 9px var(--mono); text-transform: uppercase; letter-spacing: .1em; color: var(--muted); }
+.settings-advanced[open] > summary { margin-bottom: 10px; }

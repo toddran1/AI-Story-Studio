@@ -15,7 +15,7 @@ import { storyPaths } from "../storage/paths.js";
 import { exists, readJsonIfExists } from "../storage/story-files.js";
 import { withStoryLock } from "../storage/story-lock.js";
 import { alignmentConfig, createAlignmentEngine } from "../alignment/config.js";
-import { ttsProviderNameSchema } from "../domain/provider.js";
+import { ttsProviderNameSchema, ttsSynthesisSettings } from "../domain/provider.js";
 
 const MAX_BACKUP_ARCHIVE_BYTES = 4 * 1024 * 1024 * 1024;
 const MAX_BACKUP_ENTRY_BYTES = 4 * 1024 * 1024 * 1024;
@@ -107,7 +107,9 @@ export async function invalidateStoryForConfigChange(root: string, slug: string,
   if (changed(before.pipeline.qa, after.pipeline.qa)) add("qa");
   if (changed(before.pipeline.storyBible, after.pipeline.storyBible)) add("storyBible", "continuity");
   if (before.pipeline.tts.deliveryIntensity !== after.pipeline.tts.deliveryIntensity) add("narration", "qa", "storyBible", "continuity");
-  if (changed(before.pipeline.tts, after.pipeline.tts)) add("tts", "audioMastering", "alignment", "subtitles", "scenePlanning", "artwork", "video");
+  // Verification-only TTS settings change whether post-generation verification
+  // runs, not what is synthesized, so they must not stale existing audio.
+  if (changed(ttsSynthesisSettings(before.pipeline.tts), ttsSynthesisSettings(after.pipeline.tts))) add("tts", "audioMastering", "alignment", "subtitles", "scenePlanning", "artwork", "video");
   if (changed(before.audio, after.audio)) add("audioMastering", "alignment", "subtitles", "scenePlanning", "artwork", "video");
   if (changed(before.subtitles, after.subtitles)) add("subtitles", "video");
   if (changed(before.video, after.video)) add("video");

@@ -14,6 +14,14 @@ const usageSchema = z.object({
   bytes: z.number().optional(),
   censoredSegments: z.number().int().nonnegative().optional(),
   censorDurationSeconds: z.number().nonnegative().optional(),
+  /** Post-generation TTS verification summary (additive; full detail lives in tts-quality.json). */
+  quality: z.object({
+    status: z.enum(["verified", "needs_review", "unverified", "partial"]),
+    segments: z.number().int().nonnegative(),
+    needsReview: z.number().int().nonnegative(),
+    retried: z.number().int().nonnegative(),
+    manuallyAccepted: z.number().int().nonnegative().default(0),
+  }).optional(),
 }).optional();
 
 export const stageStateSchema = z.object({

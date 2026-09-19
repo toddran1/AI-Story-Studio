@@ -358,7 +358,7 @@ export type ScenesDashboard = {
 export type AudioDashboard = { settings: AudioSettings; chapters: Array<{ chapter: number; title?: string; status: string; durationSeconds?: number; audioAvailable: boolean; audioStale: boolean }>; counts: { total: number; mastered: number; current: number; stale: number }; totalDurationSeconds: number; exports: Array<{ fingerprint: string; from: number; to: number; format: "mp3" | "m4b"; createdAt: string; durationSeconds: number; downloadUrl: string }> };
 export type VideoDashboard = { settings: VideoSettings; subtitleSettings: SubtitleSettings; background: { coverAvailable: boolean; coverName?: string; effectiveMode: string }; counts: { total: number; mastered: number; subtitles: number; videos: number }; chapters: Array<{ chapter: number; title?: string; durationSeconds?: number; subtitleStatus: string; videoStatus: string; videoAvailable: boolean; videoStale?: boolean }>; exports: Array<{ fingerprint: string; from: number; to: number; createdAt: string; durationSeconds: number; downloadUrl: string }> };
 export type Model = { provider: "openai" | "gemini" | "kimi"; model: string };
-export type FishTtsConfig = { provider: "fish"; model: string; referenceId?: string; secondaryReferenceId?: string; voiceMode: "narrator-only" | "same-voice-dialogue" | "narrator-dialogue"; deliveryIntensity: "none" | "restrained" | "expressive"; qualityGuard: boolean; speed: number; format: "mp3"; sampleRate: number; bitrate: number; normalize: boolean; maxCharsPerRequest: number };
+export type FishTtsConfig = { provider: "fish"; model: string; referenceId?: string; secondaryReferenceId?: string; voiceMode: "narrator-only" | "same-voice-dialogue" | "narrator-dialogue"; deliveryIntensity: "none" | "restrained" | "expressive"; qualityGuard: boolean; maxQualityRetries: number; speed: number; format: "mp3"; sampleRate: number; bitrate: number; normalize: boolean; maxCharsPerRequest: number };
 export type StoryCard = { slug: string; title: string; author?: string; description: string; tags: string[]; sourceType: string; sourceUrl?: string; sourceLanguage: string; outputLanguage: string; importedChapters: number; processedChapters: number; latestProcessedChapter?: number; qa: Counts; progress: number; coverUrl?: string; updatedAt: string; recentActivity?: { type: string; message: string; at: string }; projectBytes: number; hasAudiobook: boolean; hasVideo: boolean };
 export type Counts = { pass: number; warn: number; fail: number };
 export type ChapterRow = { chapter: number; originalTitle?: string; translation: string; narration: string; qa?: "pass" | "warn" | "fail"; qaScore?: number; qaStale?: boolean; qaNeedsVerification?: number; tts: string; audioMastering: string; alignment: string; subtitles: string; durationSeconds?: number; audioAvailable: boolean; audioStale?: boolean; videoAvailable?: boolean; videoStale?: boolean };
@@ -394,6 +394,14 @@ export type ChapterDetail = {
   qa?: QaResult; qaStale?: boolean;
   [key: string]: any;
 };
+export type TtsDeliveryIntensity = "none" | "restrained" | "expressive";
+export type TtsQualityIssueType = "unexpected_speech" | "missing_speech" | "repetition" | "truncated" | "suspected_gibberish" | "abnormal_duration" | "unexpected_silence" | "invalid_audio" | "transcription_failed";
+export type TtsQualityIssue = { type: TtsQualityIssueType; severity: number; detail?: string };
+export type TtsQualityAttempt = { attempt: number; settings: { deliveryIntensity: TtsDeliveryIntensity }; status: "pass" | "retry" | "needs_review" | "unverified"; score?: number; issues: TtsQualityIssue[]; requestId?: string };
+export type TtsSegmentStatus = "verified" | "needs_review" | "unverified" | "manually_accepted";
+export type TtsSegmentQuality = { index: number; expectedText: string; transcription?: string; score?: number; status: TtsSegmentStatus; issues: TtsQualityIssue[]; attempts: TtsQualityAttempt[]; finalAttempt: number; acceptedAt?: string; acceptedReason?: string };
+export type TtsQualitySummaryStatus = "verified" | "needs_review" | "unverified" | "partial";
+export type TtsQualityArtifact = { version: 1; chapter: number; createdAt: string; updatedAt: string; provider: string; model: string; referenceId?: string; voiceMode?: string; deliveryIntensity?: TtsDeliveryIntensity; status: TtsQualitySummaryStatus; verificationPolicy: { transcriber: string; maxRetries: number; thresholds: Record<string, number>; fingerprint: string }; segments: TtsSegmentQuality[] };
 export type Job = { id: string; type: string; story: string; status: "queued" | "running" | "completed" | "failed" | "paused"; progress?: any; result?: any; error?: string; diagnostic?: ErrorDiagnostic };
 export type StorySummary = import("../../../src/summaries/types.js").StorySummary;
 export type ProductionPlan = { story: string; from: number; to: number; chapters: number[]; requiredChapters: number[]; chapterRequirements: Record<string,string[]>; outputs: string[]; artwork: boolean; stages: string[]; counts: Record<string, { required: number; reusable: number }>; estimates: { llmOperations: number; ttsOperations: number; imageOperations: number; imagesPendingPlanning: number }; finalOutputs: string[]; costEstimate?: {classification:string;estimatedUsd?:number;lowUsd?:number;highUsd?:number;confidence:string;assumptions:string[];unknownStages:string[];breakdown:Array<{stage:string;required:number;estimatedUsd?:number;basis:string}>} };
@@ -457,6 +465,26 @@ export async function duplicateArtDirectionPreset(slug: string, id: string): Pro
 
 export async function setDefaultArtDirectionPreset(slug: string, id: string): Promise<StoryArtDirection> {
   return post<StoryArtDirection>(`/stories/${encodeURIComponent(slug)}/art-direction/presets/${encodeURIComponent(id)}/default`, {});
+}
+
+export async function getChapterTtsQuality(slug: string, chapter: number): Promise<{ quality: TtsQualityArtifact | null }> {
+  return api<{ quality: TtsQualityArtifact | null }>(`/stories/${encodeURIComponent(slug)}/chapters/${chapter}/tts-quality`);
+}
+
+export async function verifyChapterTtsQuality(slug: string, chapter: number): Promise<Job> {
+  return post<Job>(`/stories/${encodeURIComponent(slug)}/chapters/${chapter}/tts-quality/verify`, {});
+}
+
+export async function regenerateChapterTtsSegment(slug: string, chapter: number, segment: number): Promise<Job> {
+  return post<Job>(`/stories/${encodeURIComponent(slug)}/chapters/${chapter}/audio-segments/${segment}/regenerate`, {});
+}
+
+export async function acceptChapterTtsSegment(slug: string, chapter: number, segment: number, reason?: string): Promise<{ quality: TtsQualityArtifact }> {
+  return post<{ quality: TtsQualityArtifact }>(`/stories/${encodeURIComponent(slug)}/chapters/${chapter}/audio-segments/${segment}/accept`, { reason });
+}
+
+export function chapterTtsSegmentAudioUrl(slug: string, chapter: number, segment: number): string {
+  return `/api/stories/${encodeURIComponent(slug)}/chapters/${chapter}/audio-segments/${segment}.mp3`;
 }
 
 export async function reviewArtworkVersion(slug: string, chapter: number, sceneId: string, versionId: string, review: string): Promise<SceneArtwork> {
