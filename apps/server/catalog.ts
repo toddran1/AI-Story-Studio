@@ -272,7 +272,6 @@ export const settingsUpdateSchema = z.object({
   scenePlanner: z.object({ provider: z.enum(["openai", "gemini", "kimi"]), model: z.string().trim().min(1) }).optional(),
   pipelineOverrides: z.record(z.string(), z.boolean()).optional(),
   tts: z.object({ provider: ttsProviderNameSchema.optional(), model: z.string().trim().min(1).optional(), referenceId: z.string().trim().optional(), secondaryReferenceId: z.string().trim().optional(),
-    voiceMode: z.enum(["narrator-only", "same-voice-dialogue", "narrator-dialogue"]).optional(), deliveryIntensity: z.enum(["none", "restrained", "expressive"]).optional(), qualityGuard: z.boolean().optional(), speed: z.number().min(0.5).max(2),
     voiceMode: z.enum(["narrator-only", "same-voice-dialogue", "narrator-dialogue"]).optional(), deliveryIntensity: z.enum(["none", "restrained", "expressive"]).optional(), qualityGuard: z.boolean().optional(), providerQualityGuard: z.boolean().optional(), speed: z.number().min(0.5).max(2),
     maxCharsPerRequest: z.number().int().min(500).max(20_000).optional(), maxQualityRetries: z.number().int().min(0).max(5).optional(), normalize: z.boolean().optional() }),
   audio: z.object({ loudnessTarget: z.number().min(-24).max(-12), truePeak: z.number().min(-6).max(-0.1), segmentGapSeconds: z.number().min(0).max(5),

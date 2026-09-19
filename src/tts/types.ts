@@ -5,8 +5,6 @@ export type TTSRequest = {
   deliveryIntensity?: "none" | "restrained" | "expressive";
   /** Post-generation quality guard: when true or omitted, speech is transcribed
    * and verified against expected text by AI Story Studio's QualityGuardTTSProvider.
-   * Also passed to providers supporting upstream quality features (e.g. Fish features: ["quality-guard"]).
-   * Set false to disable both. */
    * Set false to disable post-generation verification. */
   qualityGuard?: boolean;
   /** Enables provider-native quality assistance when supported (e.g. Fish features: ["quality-guard"]). */

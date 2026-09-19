@@ -55,7 +55,6 @@ export class PreviewRunner {
         const provider = this.tts.forName(preset.tts.provider);
         const sample = normalizeSpeechForProvider(audioSample(narrationScript), options.story.outputLanguage, options.story.narrationSettings, provider, preset.tts.model).normalized.text;
         const result = await this.censor.synthesize(provider, { text: sample, model: preset.tts.model, referenceId: preset.tts.referenceId, secondaryReferenceId: preset.tts.secondaryReferenceId,
-          voiceMode: preset.tts.voiceMode, deliveryIntensity: preset.tts.deliveryIntensity, qualityGuard: preset.tts.qualityGuard,
           voiceMode: preset.tts.voiceMode, deliveryIntensity: preset.tts.deliveryIntensity, qualityGuard: preset.tts.qualityGuard, providerQualityGuard: preset.tts.providerQualityGuard,
           bleepStrongProfanity: options.story.narrationSettings.bleepStrongProfanity,
           speed: preset.tts.speed, format: preset.tts.format, sampleRate: preset.tts.sampleRate, bitrate: preset.tts.bitrate,

@@ -309,7 +309,6 @@ export class ChapterPipeline {
       ...(bleepStrongProfanity ? { bleepStrongProfanity: true, censor: { version: this.censor.version || CENSOR_AUDIO_VERSION, config: censorToneConfig } } : {}) });
     await runStage("tts", ttsFp, paths.audioRaw, { provider: ttsConfig.provider, model: ttsConfig.model }, async () => {
       const result = await this.censor.synthesize(ttsProvider, { text: speech.normalized.text, model: ttsConfig.model, referenceId, secondaryReferenceId: ttsConfig.secondaryReferenceId,
-        voiceMode: ttsConfig.voiceMode, deliveryIntensity: ttsConfig.deliveryIntensity, qualityGuard: ttsConfig.qualityGuard, bleepStrongProfanity,
         voiceMode: ttsConfig.voiceMode, deliveryIntensity: ttsConfig.deliveryIntensity, qualityGuard: ttsConfig.qualityGuard, providerQualityGuard: ttsConfig.providerQualityGuard, bleepStrongProfanity,
         speed: ttsConfig.speed, format: ttsConfig.format, sampleRate: ttsConfig.sampleRate, bitrate: ttsConfig.bitrate,
         normalize: ttsConfig.normalize, maxCharsPerRequest: ttsConfig.maxCharsPerRequest });

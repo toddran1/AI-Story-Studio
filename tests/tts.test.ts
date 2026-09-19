@@ -95,11 +95,9 @@ describe("Fish TTS", () => {
     expect(body.text).toBe("She said, \"Hello.\"");
   });
 
-  it("supports expressive sampling and disabling quality guard", async () => {
   it("supports expressive sampling and disabling provider quality guard", async () => {
     const fetcher = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => new Response(new Uint8Array([1]), { headers: { "content-type": "audio/mpeg" } }));
     const provider = new FishAudioProvider("test-key", fetcher as typeof fetch);
-    await provider.synthesize({ text: "Hello", model: "s2.1-pro", deliveryIntensity: "expressive", qualityGuard: false, speed: 1, format: "mp3", sampleRate: 44100, bitrate: 128, normalize: true, maxCharsPerRequest: 500 });
     await provider.synthesize({ text: "Hello", model: "s2.1-pro", deliveryIntensity: "expressive", providerQualityGuard: false, speed: 1, format: "mp3", sampleRate: 44100, bitrate: 128, normalize: true, maxCharsPerRequest: 500 });
     const body = JSON.parse(String((fetcher.mock.calls[0]?.[1] as RequestInit).body));
     expect(body).toMatchObject({ temperature: .7, top_p: .7 });

@@ -63,9 +63,6 @@ export class FishAudioProvider implements TTSProvider {
           body: JSON.stringify({ text, reference_id: multiSpeaker ? [referenceId!, secondaryReferenceId!] : referenceId, format: request.format, sample_rate: request.sampleRate,
             mp3_bitrate: request.bitrate, normalize: request.normalize, prosody: { speed: request.speed, volume: 0, normalize_loudness: true },
             // Upstream Fish Audio API feature "quality-guard" enables Fish's server-side
-            // output quality checking. This is separate from AI Story Studio's post-generation
-            // speech transcriber verification guard.
-            ...(request.qualityGuard === false ? {} : { features: ["quality-guard"] }),
             // output quality checking when providerQualityGuard is enabled. This is separate
             // from AI Story Studio's post-generation speech transcriber verification guard (qualityGuard).
             ...(request.providerQualityGuard === false ? {} : { features: ["quality-guard"] }),
