@@ -2101,16 +2101,43 @@ function ProductionPage({ slug, activeJob, onJob, navigate }: { slug: string; ac
   </section>;
 }
 
-export function JobConsole({ job, onUpdate, onClose, navigate, initialQaComparison }: {
+export function JobConsole({ job, onUpdate, onClose, navigate, initialQaComparison, initialMinimized }: {
   job: Job;
   onUpdate: (job: Job) => void;
   onClose: () => void;
   navigate?: (path: string) => void;
   initialQaComparison?: { status: "current" | "historical" | "unknown_legacy"; nowCurrent: boolean };
+  initialMinimized?: boolean;
 }) {
+  const [minimized, setMinimized] = useState(() => initialMinimized ?? isJobConsoleMinimized(job.id));
   const [actionError, setActionError] = useState("");
   const [retrying, setRetrying] = useState(false);
   const [copied, setCopied] = useState(false);
+
+  useEffect(() => {
+    if (initialMinimized !== undefined) {
+      setMinimized(initialMinimized);
+    } else {
+      setMinimized(isJobConsoleMinimized(job.id));
+    }
+  }, [job.id, initialMinimized]);
+
+  useEffect(() => {
+    if (job.status === "failed" && minimized) {
+      setMinimized(false);
+      setJobConsoleMinimized(job.id, false);
+    }
+  }, [job.id, job.status, minimized]);
+
+  const toggleMinimize = (event?: React.MouseEvent) => {
+    event?.stopPropagation();
+    setMinimized((prev) => {
+      const next = !prev;
+      setJobConsoleMinimized(job.id, next);
+      return next;
+    });
+  };
+
   useEffect(() => {
     if (isTerminalJob(job)) return;
     return watchJob(job.id, onUpdate, (value) => setActionError(message(value)));
@@ -2187,48 +2214,93 @@ export function JobConsole({ job, onUpdate, onClose, navigate, initialQaComparis
     const timer = window.setTimeout(() => onCloseRef.current(), 10000);
     return () => window.clearTimeout(timer);
   }, [job.id, job.status]);
-  return <aside className={`job-console ${job.status}`} role={job.status === "failed" ? "alert" : "status"}>
-    <div className="job-head">
-      <div>{!terminal && <span className="live-dot" />}<b>{title}</b></div>
-      <span className="mono">{job.status}</span>
-    </div>
-    <div className="job-progress"><i /><i /><i /><i /><i /></div>
-    {diagnostic ? <div className="incident">
-      <h3>{isSceneJob ? "Scene planning failed" : diagnostic.summary}</h3>
-      <div className="incident-meta">
-        {chapter && <span>Chapter {chapter}</span>}
-        {stage && <span>{pretty(stage)}</span>}
-        <span>{pretty(diagnostic.category)}</span>
-        {modelBadge && <span>{modelBadge}</span>}
+  return <aside className={`job-console ${job.status}${minimized ? " minimized" : ""}`} role={job.status === "failed" ? "alert" : "status"}>
+    {minimized ? (
+      <div
+        className="job-minimized-strip"
+        onClick={toggleMinimize}
+      >
+        <div className="job-minimized-info">
+          {!terminal && <span className="live-dot" />}
+          <b className="job-minimized-title">{label}</b>
+          {chapter != null ? (
+            <span className="job-minimized-detail">
+              Chapter {chapter}{stage ? ` · ${pretty(stage)}` : ""}
+            </span>
+          ) : (
+            <span className="mono job-minimized-status">{job.status}</span>
+          )}
+        </div>
+        <button
+          type="button"
+          className="job-console-toggle"
+          aria-label="Expand job console"
+          title="Expand job console"
+          onClick={toggleMinimize}
+        >
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+            <polyline points="18 15 12 9 6 15" />
+          </svg>
+        </button>
       </div>
-      {isSceneJob && diagnostic.summary && <p className="incident-reason">{diagnostic.summary}</p>}
-      {qaRelated && qaComparison?.nowCurrent && <p className="incident-historical">Chapter QA is current and passing now — this failure is historical.</p>}
-      {qaRelated && !qaComparison?.nowCurrent && qaComparison?.status === "historical" && (
-        <p className="incident-historical">Previous production attempt failed quality review. The chapter or its QA dependencies have changed since this failure. Recheck QA before retrying production.</p>
-      )}
-      {qaRelated && !qaComparison?.nowCurrent && qaComparison?.status === "unknown_legacy" && (
-        <p className="incident-historical">Previous QA failure. This production attempt predates QA freshness tracking, so its relationship to the chapter's current QA state cannot be verified. Recheck QA to verify current quality before retrying.</p>
-      )}
-      {qaRelated && qaComparison?.status === "reset_not_run" && (
-        <p className="incident-historical">This production attempt previously failed quality review. Current QA data has been reset and has not yet been rechecked.</p>
-      )}
-      {diagnostic.issues?.length ? (qaComparison?.nowCurrent || qaComparison?.status === "historical" || qaComparison?.status === "unknown_legacy" || qaComparison?.status === "reset_not_run"
-        ? <details><summary>Issues reported by this attempt</summary><ul>{diagnostic.issues.slice(0, 3).map((issue, index) => <li key={`${issue.category}-${index}`}><b>{pretty(issue.category)}</b>{issue.message}</li>)}</ul></details>
-        : <ul>{diagnostic.issues.slice(0, 3).map((issue, index) => <li key={`${issue.category}-${index}`}><b>{pretty(issue.category)}</b>{issue.message}</li>)}</ul>) : null}
-      <div className="incident-next"><small>Recommended next step</small><p>{diagnostic.recommendedAction}</p></div>
-      <details><summary>Technical details</summary><p>{diagnostic.technicalDetails ?? "No additional provider details were supplied."}</p><small>{new Date(diagnostic.timestamp).toLocaleString()} · {diagnostic.id} · Job {job.id.slice(0, 8)}</small></details>
-    </div> : <p>{actionError || job.error || (chapter ? `Chapter ${chapter} · ${pretty(stage ?? "working")}${detail ? ` — ${detail}` : ""}` : pretty(job.status))}</p>}
-    <div className="job-actions">
-      {diagnostic && <button type="button" onClick={() => void copyDiagnostic()}>{copied ? "Copied" : "Copy details"}</button>}
-      {job.status === "failed" && <button type="button" className="button-retry" disabled={retrying} onClick={() => void retry()}>{retrying ? "Retrying…" : "Retry"}</button>}
-      {job.story && (
-        <button type="button" onClick={() => navigate?.(`/stories/${job.story}/settings`) ?? (location.href = `/stories/${job.story}/settings`)}>Open model settings</button>
-      )}
-      {diagnostic?.chapter && <a href={`/stories/${job.story}/chapters/${diagnostic.chapter}`}>Open chapter</a>}
-      {job.status === "running" && ["batch", "audio", "audiobook", "subtitles", "video", "scenes", "artwork", "production"].includes(job.type) && <button type="button" onClick={() => void pause()}>Pause after chapter</button>}
-      <button type="button" onClick={onClose}>{terminal ? "Close" : "Dismiss"}</button>
-    </div>
-    {actionError && diagnostic && <p className="incident-action-error">{actionError}</p>}
+    ) : (
+      <>
+        <div className="job-head">
+          <div>{!terminal && <span className="live-dot" />}<b>{title}</b></div>
+          <div className="job-head-controls">
+            <span className="mono">{job.status}</span>
+            <button
+              type="button"
+              className="job-console-toggle"
+              aria-label="Minimize job console"
+              title="Minimize job console"
+              onClick={toggleMinimize}
+            >
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <polyline points="6 9 12 15 18 9" />
+              </svg>
+            </button>
+          </div>
+        </div>
+        <div className="job-progress"><i /><i /><i /><i /><i /></div>
+        {diagnostic ? <div className="incident">
+          <h3>{isSceneJob ? "Scene planning failed" : diagnostic.summary}</h3>
+          <div className="incident-meta">
+            {chapter && <span>Chapter {chapter}</span>}
+            {stage && <span>{pretty(stage)}</span>}
+            <span>{pretty(diagnostic.category)}</span>
+            {modelBadge && <span>{modelBadge}</span>}
+          </div>
+          {isSceneJob && diagnostic.summary && <p className="incident-reason">{diagnostic.summary}</p>}
+          {qaRelated && qaComparison?.nowCurrent && <p className="incident-historical">Chapter QA is current and passing now — this failure is historical.</p>}
+          {qaRelated && !qaComparison?.nowCurrent && qaComparison?.status === "historical" && (
+            <p className="incident-historical">Previous production attempt failed quality review. The chapter or its QA dependencies have changed since this failure. Recheck QA before retrying production.</p>
+          )}
+          {qaRelated && !qaComparison?.nowCurrent && qaComparison?.status === "unknown_legacy" && (
+            <p className="incident-historical">Previous QA failure. This production attempt predates QA freshness tracking, so its relationship to the chapter's current QA state cannot be verified. Recheck QA to verify current quality before retrying.</p>
+          )}
+          {qaRelated && qaComparison?.status === "reset_not_run" && (
+            <p className="incident-historical">This production attempt previously failed quality review. Current QA data has been reset and has not yet been rechecked.</p>
+          )}
+          {diagnostic.issues?.length ? (qaComparison?.nowCurrent || qaComparison?.status === "historical" || qaComparison?.status === "unknown_legacy" || qaComparison?.status === "reset_not_run"
+            ? <details><summary>Issues reported by this attempt</summary><ul>{diagnostic.issues.slice(0, 3).map((issue, index) => <li key={`${issue.category}-${index}`}><b>{pretty(issue.category)}</b>{issue.message}</li>)}</ul></details>
+            : <ul>{diagnostic.issues.slice(0, 3).map((issue, index) => <li key={`${issue.category}-${index}`}><b>{pretty(issue.category)}</b>{issue.message}</li>)}</ul>) : null}
+          <div className="incident-next"><small>Recommended next step</small><p>{diagnostic.recommendedAction}</p></div>
+          <details><summary>Technical details</summary><p>{diagnostic.technicalDetails ?? "No additional provider details were supplied."}</p><small>{new Date(diagnostic.timestamp).toLocaleString()} · {diagnostic.id} · Job {job.id.slice(0, 8)}</small></details>
+        </div> : <p>{actionError || job.error || (chapter ? `Chapter ${chapter} · ${pretty(stage ?? "working")}${detail ? ` — ${detail}` : ""}` : pretty(job.status))}</p>}
+        <div className="job-actions">
+          {diagnostic && <button type="button" onClick={() => void copyDiagnostic()}>{copied ? "Copied" : "Copy details"}</button>}
+          {job.status === "failed" && <button type="button" className="button-retry" disabled={retrying} onClick={() => void retry()}>{retrying ? "Retrying…" : "Retry"}</button>}
+          {job.story && (
+            <button type="button" onClick={() => navigate?.(`/stories/${job.story}/settings`) ?? (location.href = `/stories/${job.story}/settings`)}>Open model settings</button>
+          )}
+          {diagnostic?.chapter && <a href={`/stories/${job.story}/chapters/${diagnostic.chapter}`}>Open chapter</a>}
+          {job.status === "running" && ["batch", "audio", "audiobook", "subtitles", "video", "scenes", "artwork", "production"].includes(job.type) && <button type="button" onClick={() => void pause()}>Pause after chapter</button>}
+          <button type="button" onClick={onClose}>{terminal ? "Close" : "Dismiss"}</button>
+        </div>
+        {actionError && diagnostic && <p className="incident-action-error">{actionError}</p>}
+      </>
+    )}
   </aside>;
 }
 
@@ -2389,6 +2461,32 @@ export function clearJobDismissal(jobId: string) {
   } catch {
     // ignore
   }
+}
+export function setJobConsoleMinimized(jobId: string, minimized: boolean) {
+  try {
+    if (typeof sessionStorage !== "undefined") {
+      if (minimized) {
+        sessionStorage.setItem(`minimized_job_${jobId}`, "true");
+      } else {
+        sessionStorage.removeItem(`minimized_job_${jobId}`);
+      }
+    }
+  } catch {
+    // sessionStorage unavailable or restricted
+  }
+}
+export function isJobConsoleMinimized(jobId: string): boolean {
+  try {
+    if (typeof sessionStorage !== "undefined") {
+      return sessionStorage.getItem(`minimized_job_${jobId}`) === "true";
+    }
+  } catch {
+    return false;
+  }
+  return false;
+}
+export function clearJobMinimized(jobId: string) {
+  setJobConsoleMinimized(jobId, false);
 }
 export function shouldRefreshAfterJob(previous: Job | undefined, next: Job) {
   // These read-only jobs own their result in the current workspace. Remounting

@@ -1,6 +1,6 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
-import { App, CanonicalEntitySheet, chapterPageSize, clearJobDismissal, dismissJob, EntityStatusField, ErrorBoundary, isJobDismissed, isTerminalJob, JobConsole, paginateRows, QaDetail, QaFindingCard, QaResolvedFindings, ScenesPage, shouldRefreshAfterJob } from "../apps/web/src/App.js";
+import { App, CanonicalEntitySheet, chapterPageSize, clearJobDismissal, clearJobMinimized, dismissJob, EntityStatusField, ErrorBoundary, isJobConsoleMinimized, isJobDismissed, isTerminalJob, JobConsole, paginateRows, QaDetail, QaFindingCard, QaResolvedFindings, ScenesPage, setJobConsoleMinimized, shouldRefreshAfterJob } from "../apps/web/src/App.js";
 import type { Job, QaFinding } from "../apps/web/src/api.js";
 import { pretty } from "../apps/web/src/format.js";
 import { ChapterImportPage, savedStorySourceUrl } from "../apps/web/src/ChapterImportPage.js";
@@ -671,4 +671,218 @@ describe("web UI", () => {
       expect(sorted[0]!.id).toBe("newer-job");
     });
   });
+
+  describe("JobConsole minimize and expand toggle", () => {
+    const storageMap = new Map<string, string>();
+    const fakeSessionStorage = {
+      getItem: (key: string) => storageMap.get(key) ?? null,
+      setItem: (key: string, value: string) => { storageMap.set(key, String(value)); },
+      removeItem: (key: string) => { storageMap.delete(key); },
+      clear: () => { storageMap.clear(); },
+    };
+
+    const runningJob: Job = {
+      id: "job-minimize-123",
+      type: "production",
+      story: "demo-story",
+      status: "running",
+      createdAt: "2026-09-18T10:00:00.000Z",
+      updatedAt: "2026-09-18T10:01:00.000Z",
+      progress: { chapter: 449, stage: "tts" },
+    };
+
+    const failedJob: Job = {
+      id: "job-failed-minimize-456",
+      type: "production",
+      story: "demo-story",
+      status: "failed",
+      createdAt: "2026-09-18T10:00:00.000Z",
+      updatedAt: "2026-09-18T10:02:00.000Z",
+      diagnostic: {
+        id: "diag-1",
+        stage: "tts",
+        category: "content_tts",
+        summary: "Fish Audio synthesis error",
+        recommendedAction: "Check provider credits and retry",
+        timestamp: "2026-09-18T10:02:00.000Z",
+      },
+    };
+
+    it("starts expanded by default with accessible minimize control and full progress", () => {
+      const html = renderToStaticMarkup(
+        <JobConsole
+          job={runningJob}
+          onUpdate={() => undefined}
+          onClose={() => undefined}
+        />
+      );
+
+      expect(html).toContain("job-console running");
+      expect(html).not.toContain("job-console running minimized");
+      expect(html).toContain("aria-label=\"Minimize job console\"");
+      expect(html).toContain("Producing finished story");
+      expect(html).toContain("Chapter 449");
+      expect(html).toContain("job-progress");
+      expect(html).toContain("Dismiss");
+      expect(html).toContain("Pause after chapter");
+    });
+
+    it("renders compact strip when minimized with live dot, title, chapter/stage, and expand control", () => {
+      const html = renderToStaticMarkup(
+        <JobConsole
+          job={runningJob}
+          initialMinimized={true}
+          onUpdate={() => undefined}
+          onClose={() => undefined}
+        />
+      );
+
+      expect(html).toContain("job-console running minimized");
+      expect(html).toContain("job-minimized-strip");
+      expect(html).toContain("live-dot");
+      expect(html).toContain("Producing finished story");
+      expect(html).toContain("Chapter 449 · TTS");
+      expect(html).toContain("aria-label=\"Expand job console\"");
+      // Minimized bar should not show full expanded panels
+      expect(html).not.toContain("job-progress");
+      expect(html).not.toContain("Dismiss");
+      expect(html).not.toContain("Pause after chapter");
+    });
+
+    it("minimized compact strip updates dynamically with live job progress", () => {
+      const updatedJob: Job = {
+        ...runningJob,
+        progress: { chapter: 450, stage: "audio" },
+      };
+
+      const html = renderToStaticMarkup(
+        <JobConsole
+          job={updatedJob}
+          initialMinimized={true}
+          onUpdate={() => undefined}
+          onClose={() => undefined}
+        />
+      );
+
+      expect(html).toContain("job-console running minimized");
+      expect(html).toContain("Chapter 450 · Audio");
+    });
+
+    it("minimizing is pure presentation: does not alter job status, call pause, or dismiss the job", () => {
+      const originalSession = globalThis.sessionStorage;
+      try {
+        globalThis.sessionStorage = fakeSessionStorage as any;
+        fakeSessionStorage.clear();
+
+        // Minimizing records presentation preference only
+        setJobConsoleMinimized(runningJob.id, true);
+        expect(isJobConsoleMinimized(runningJob.id)).toBe(true);
+
+        // Job status is unchanged, and job is NOT dismissed
+        expect(runningJob.status).toBe("running");
+        expect(isJobDismissed(runningJob.id)).toBe(false);
+
+        // Expanding clears minimized preference
+        setJobConsoleMinimized(runningJob.id, false);
+        expect(isJobConsoleMinimized(runningJob.id)).toBe(false);
+      } finally {
+        globalThis.sessionStorage = originalSession;
+      }
+    });
+
+    it("sessionStorage preserves minimized state across page refresh for the same job", () => {
+      const originalSession = globalThis.sessionStorage;
+      try {
+        globalThis.sessionStorage = fakeSessionStorage as any;
+        fakeSessionStorage.clear();
+
+        // Simulate user minimizing active job before refresh
+        setJobConsoleMinimized(runningJob.id, true);
+        expect(isJobConsoleMinimized(runningJob.id)).toBe(true);
+
+        // Simulate app page refresh where same active job is restored
+        const html = renderToStaticMarkup(
+          <JobConsole
+            job={runningJob}
+            onUpdate={() => undefined}
+            onClose={() => undefined}
+          />
+        );
+
+        expect(html).toContain("job-console running minimized");
+        expect(html).toContain("aria-label=\"Expand job console\"");
+      } finally {
+        globalThis.sessionStorage = originalSession;
+      }
+    });
+
+    it("newly started job ID starts expanded even if previous job was minimized", () => {
+      const originalSession = globalThis.sessionStorage;
+      try {
+        globalThis.sessionStorage = fakeSessionStorage as any;
+        fakeSessionStorage.clear();
+
+        setJobConsoleMinimized("old-job-id", true);
+        expect(isJobConsoleMinimized("old-job-id")).toBe(true);
+
+        // New job ID has no saved minimize state
+        const newJob: Job = { ...runningJob, id: "new-job-456" };
+        expect(isJobConsoleMinimized(newJob.id)).toBe(false);
+
+        const html = renderToStaticMarkup(
+          <JobConsole
+            job={newJob}
+            onUpdate={() => undefined}
+            onClose={() => undefined}
+          />
+        );
+
+        expect(html).not.toContain("job-console running minimized");
+        expect(html).toContain("aria-label=\"Minimize job console\"");
+      } finally {
+        globalThis.sessionStorage = originalSession;
+      }
+    });
+
+    it("job failure automatically presents failure diagnostic and recovery actions", () => {
+      const html = renderToStaticMarkup(
+        <JobConsole
+          job={failedJob}
+          onUpdate={() => undefined}
+          onClose={() => undefined}
+        />
+      );
+
+      // Even if previously running, failure displays diagnostic, alert role, and retry action
+      expect(html).toContain("job-console failed");
+      expect(html).toContain("role=\"alert\"");
+      expect(html).toContain("Fish Audio synthesis error");
+      expect(html).toContain("Retry");
+      expect(html).toContain("Copy details");
+    });
+
+    it("toggle controls use valid accessible aria-labels and type=button", () => {
+      const expandedHtml = renderToStaticMarkup(
+        <JobConsole
+          job={runningJob}
+          onUpdate={() => undefined}
+          onClose={() => undefined}
+        />
+      );
+      expect(expandedHtml).toContain("type=\"button\"");
+      expect(expandedHtml).toContain("aria-label=\"Minimize job console\"");
+
+      const minimizedHtml = renderToStaticMarkup(
+        <JobConsole
+          job={runningJob}
+          initialMinimized={true}
+          onUpdate={() => undefined}
+          onClose={() => undefined}
+        />
+      );
+      expect(minimizedHtml).toContain("type=\"button\"");
+      expect(minimizedHtml).toContain("aria-label=\"Expand job console\"");
+    });
+  });
 });
+
