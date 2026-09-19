@@ -2189,13 +2189,13 @@ function guessExceptionValue(messageText: string) {
   return (match?.[1] ?? match?.[2] ?? match?.[3] ?? "").trim();
 }
 
-export function QaDetail({ slug, chapter, onJob, onEditManually, onChanged }: { slug: string; chapter: number; onJob: (job: Job) => void; onEditManually: () => void; onChanged: () => void }) {
-  const [data, setData] = useState<ChapterQaDetail>(); const [error, setError] = useState(""); const [note, setNote] = useState(""); const [busy, setBusy] = useState("");
+export function QaDetail({ slug, chapter, onJob, onEditManually, onChanged, initialData }: { slug: string; chapter: number; onJob: (job: Job) => void; onEditManually: () => void; onChanged: () => void; initialData?: ChapterQaDetail }) {
+  const [data, setData] = useState<ChapterQaDetail | undefined>(initialData); const [error, setError] = useState(""); const [note, setNote] = useState(""); const [busy, setBusy] = useState("");
   const [dismissTarget, setDismissTarget] = useState<QaFinding>(); const [resetOpen, setResetOpen] = useState(false);
   const [expanded, setExpanded] = useState<string[]>([]); const [recheckSummary, setRecheckSummary] = useState<QaRecheckSummary>();
   const watcher = useRef<(() => void) | undefined>(undefined);
   const load = async () => { const next = await api<ChapterQaDetail>(`/stories/${slug}/chapters/${chapter}/qa`); setData(next); };
-  useEffect(() => { setData(undefined); setError(""); setRecheckSummary(undefined); void load().catch((value) => setError(message(value))); return () => watcher.current?.(); }, [slug, chapter]);
+  useEffect(() => { if (!initialData) { setData(undefined); setError(""); setRecheckSummary(undefined); void load().catch((value) => setError(message(value))); } return () => watcher.current?.(); }, [slug, chapter]);
   const toggleExpanded = (key: string) => setExpanded((current) => current.includes(key) ? current.filter((item) => item !== key) : [...current, key]);
   const runJob = (kind: string, job: Job, onComplete?: (job: Job) => void) => { setError(""); setNote(""); setBusy(kind); onJob(job); watcher.current?.(); watcher.current = watchJob(job.id, async (next) => { onJob(next); if (next.status === "completed") { setBusy(""); onComplete?.(next); await load(); onChanged(); } else if (next.status === "failed") { setBusy(""); setError(next.error ?? "QA job failed"); } }, (value) => { setBusy(""); setError(message(value)); }); };
   const recheck = async (mode: "changed" | "full") => { try { const job = await post<Job>(`/stories/${slug}/chapters/${chapter}/qa/recheck`, { mode }); runJob("recheck", job, (done) => { const summary = done.result?.summary as QaRecheckSummary | undefined; if (summary) setRecheckSummary(summary); }); } catch (value) { setError(message(value)); } };
@@ -2203,7 +2203,6 @@ export function QaDetail({ slug, chapter, onJob, onEditManually, onChanged }: { 
   const fixWithAi = async (finding: QaFinding) => { if (!confirm(`Send this finding and the chapter text to the configured AI model for repair, then recheck QA? This may incur provider charges.`)) return; try { const job = await post<Job>(`/stories/${slug}/chapters/${chapter}/qa/findings/${finding.id}/fix-ai`, {}); runJob(`fix:${finding.id}`, job, (done) => { const repaired: string[] = done.result?.repaired ?? []; setNote(done.result?.fixed ? `Finding repaired in ${repaired.join(" and ") || "chapter text"} and verified by recheck.` : "Repair was applied, but the recheck still reports the problem — it was reopened."); }); } catch (value) { setError(message(value)); } };
   const resolveManual = async (finding: QaFinding) => { try { setError(""); setNote(""); setBusy(`resolve:${finding.id}`); await post(`/stories/${slug}/chapters/${chapter}/qa/findings/${finding.id}/resolve-manual`, {}); setBusy(""); setNote("Finding marked as fixed manually. A future recheck will verify it."); await load(); onChanged(); } catch (value) { setBusy(""); setError(message(value)); } };
   const reopen = async (finding: QaFinding) => { try { setError(""); setNote(""); setBusy(`reopen:${finding.id}`); await post(`/stories/${slug}/chapters/${chapter}/qa/findings/${finding.id}/reopen`, {}); setBusy(""); await load(); onChanged(); } catch (value) { setBusy(""); setError(message(value)); } };
-  if (error && !data) return <div className="qa-detail"><ErrorBox text={error} /></div>; if (!data) return <Loading />;
   if (error && !data) {
     const isNoQa = /does not have a QA result|no QA result|QA has not been run/i.test(error);
     if (isNoQa) {
@@ -2238,7 +2237,6 @@ export function QaDetail({ slug, chapter, onJob, onEditManually, onChanged }: { 
       : <>{critical > 0 && <Status status="fail" label={`${critical} critical`} />}{warnings > 0 && <Status status="warn" label={`${warnings} warning${warnings === 1 ? "" : "s"}`} />}{!openFindingsList.length && <Status status="pass" label="Chapter is clear" />}</>}</div></div>
       <div className="qa-attention-actions">
         {data.counts.safeFixesAvailable > 0 && !stale && <button className="button primary" disabled={Boolean(busy)} onClick={() => void safeFixes()}>{busy === "safeFixes" ? "Fixing…" : `Fix ${data.counts.safeFixesAvailable} safe issue${data.counts.safeFixesAvailable === 1 ? "" : "s"}`}</button>}
-        <div className="qa-recheck-split"><button className={`button${stale ? " primary" : ""}`} disabled={Boolean(busy)} onClick={() => void recheck("changed")}>{busy === "recheck" ? "Rechecking…" : "Recheck QA"}</button><details className="qa-recheck-menu"><summary aria-label="Recheck options">▾</summary><div><button disabled={Boolean(busy)} onClick={() => void recheck("changed")}>Recheck changed content</button><button disabled={Boolean(busy)} onClick={() => void recheck("full")}>Full chapter recheck</button></div></details></div>
         <div className="qa-recheck-split"><button className={`button${stale ? " primary" : ""}`} disabled={Boolean(busy)} onClick={() => void recheck("changed")}>{busy === "recheck" ? "Rechecking…" : "Recheck QA"}</button><details className="qa-recheck-menu"><summary aria-label="Recheck options">▾</summary><div><button disabled={Boolean(busy)} onClick={() => void recheck("changed")}>Recheck changed content</button><button disabled={Boolean(busy)} onClick={() => void recheck("full")}>Full chapter recheck</button><button disabled={Boolean(busy)} onClick={() => setResetOpen(true)}>Reset QA data…</button></div></details></div>
       </div>
     </div>

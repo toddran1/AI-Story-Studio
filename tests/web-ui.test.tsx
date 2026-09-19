@@ -1,6 +1,6 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import { App, CanonicalEntitySheet, chapterPageSize, EntityStatusField, ErrorBoundary, JobConsole, paginateRows, QaFindingCard, QaResolvedFindings, ScenesPage, shouldRefreshAfterJob } from "../apps/web/src/App.js";
+import { App, CanonicalEntitySheet, chapterPageSize, EntityStatusField, ErrorBoundary, JobConsole, paginateRows, QaDetail, QaFindingCard, QaResolvedFindings, ScenesPage, shouldRefreshAfterJob } from "../apps/web/src/App.js";
 import type { QaFinding } from "../apps/web/src/api.js";
 import { pretty } from "../apps/web/src/format.js";
 import { ChapterImportPage, savedStorySourceUrl } from "../apps/web/src/ChapterImportPage.js";
@@ -46,6 +46,83 @@ describe("web UI", () => {
   it("shows QA severity and both human resolution actions", () => {
     const html = renderToStaticMarkup(<QaFindingCard finding={qaFinding({})} busy="" expanded={[]} onToggle={() => undefined} onFixAi={() => undefined} onEdit={() => undefined} onResolve={() => undefined} onDismiss={() => undefined} />);
     expect(html).toContain("Warning"); expect(html).toContain("Dialogue"); expect(html).toContain("Fix with AI"); expect(html).toContain("Edit manually"); expect(html).toContain("Mark resolved"); expect(html).toContain("Dismiss");
+  });
+  it("renders exactly one Recheck QA split-button control on the Quality tab with all actions preserved", () => {
+    const mockDetail = {
+      chapter: 1,
+      state: {
+        version: 1 as const,
+        chapter: 1,
+        evaluatedAt: "2026-09-18T12:00:00.000Z",
+        score: 0.8,
+        status: "warn" as const,
+        findings: [qaFinding({})],
+        checks: {
+          completeness: "pass" as const,
+          names: "pass" as const,
+          numbers: "pass" as const,
+          terminology: "warn" as const,
+          dialogue: "pass" as const,
+          storyConsistency: "pass" as const,
+          narrationFidelity: "pass" as const,
+        },
+      },
+      counts: {
+        pass: 6,
+        warn: 1,
+        fail: 0,
+        open: 1,
+        resolved: 0,
+        safeFixesAvailable: 0,
+        needsVerification: 0,
+      },
+      stats: {
+        open: 1,
+        resolved: 0,
+        unverified: 0,
+        needsVerification: 0,
+      },
+      freshness: "current" as const,
+      qaStale: false,
+      currentFingerprint: "fp",
+    };
+
+    const html = renderToStaticMarkup(
+      <QaDetail
+        slug="demo-story"
+        chapter={1}
+        onJob={() => undefined}
+        onEditManually={() => undefined}
+        onChanged={() => undefined}
+        initialData={mockDetail}
+      />
+    );
+
+    // Must have EXACTLY ONE recheck split control
+    const splitMatches = html.match(/class="qa-recheck-split"/g);
+    expect(splitMatches).toHaveLength(1);
+
+    // Primary action button exists
+    expect(html).toContain("Recheck QA");
+
+    // Dropdown menu actions preserved
+    expect(html).toContain("Recheck changed content");
+    expect(html).toContain("Full chapter recheck");
+    expect(html).toContain("Reset QA data…");
+
+    // Stale state renders primary button styling with exactly one control
+    const staleHtml = renderToStaticMarkup(
+      <QaDetail
+        slug="demo-story"
+        chapter={1}
+        onJob={() => undefined}
+        onEditManually={() => undefined}
+        onChanged={() => undefined}
+        initialData={{ ...mockDetail, qaStale: true }}
+      />
+    );
+    expect(staleHtml.match(/class="qa-recheck-split"/g)).toHaveLength(1);
+    expect(staleHtml).toContain("button primary");
   });
   it("keeps dismissed QA findings visible without a selectable checkbox", () => {
     const html = renderToStaticMarkup(<QaResolvedFindings defaultOpen busy="" expanded={[`resolved:qaf_0123456789abcdef01234567`]} onToggle={() => undefined} onReopen={() => undefined} findings={[qaFinding({ status: "dismissed", resolution: { action: "dismiss", reason: "Intentional softening", resolvedAt: "2026-09-16T14:00:00.000Z" } })]} />);
