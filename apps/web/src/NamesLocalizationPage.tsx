@@ -2,6 +2,7 @@ import { useDeferredValue, useEffect, useRef, useState } from "react";
 import { api, Job, post, put } from "./api.js";
 import { pretty } from "./format.js";
 import { defaultLocale, LanguageSelect } from "./languages.js";
+import { Pagination } from "./Pagination.js";
 import "./names-localization.css";
 
 type Entity = {
@@ -44,8 +45,10 @@ export function NamesLocalizationPage({ slug, onJob, navigate }: { slug: string;
     <div className="localization-workspace">
       <aside className="localization-index">
         <div className="localization-search"><input className="search" value={query} placeholder="Search any name" onChange={(event) => { setQuery(event.target.value); setPage(1); }} /><select value={type} onChange={(event) => { setType(event.target.value); setPage(1); }}><option value="all">All entity types</option>{["character","location","organization","ability","item","concept"].map((value) => <option key={value} value={value}>{pretty(value)}</option>)}</select></div>
+        {view && <Pagination variant="compact" position="top" page={view.page} pages={view.pages} onPrevious={() => setPage(view.page - 1)} onNext={() => setPage(view.page + 1)} />}
         <div className="localization-list">{view?.items?.map((item: Entity) => <button key={item.id} className={selected === item.id ? "active" : ""} onClick={() => choose(item.id)}><span className="entity-glyph">{item.type.slice(0, 1).toUpperCase()}</span><span><b>{item.localizedNaming?.fullName ?? item.localizedNaming?.shortName ?? item.canonicalName}</b><small>{item.canonicalName}{item.originalName ? ` · ${item.originalName}` : ""}</small></span>{item.localizedNaming && <i>{item.localizedNaming.locale}</i>}</button>)}</div>
         {view && <div className="localization-pagination"><button disabled={view.page <= 1} onClick={() => setPage(view.page - 1)}>←</button><span>{view.page} / {view.pages}</span><button disabled={view.page >= view.pages} onClick={() => setPage(view.page + 1)}>→</button></div>}
+        {view && <Pagination variant="compact" position="bottom" page={view.page} pages={view.pages} onPrevious={() => setPage(view.page - 1)} onNext={() => setPage(view.page + 1)} />}
       </aside>
       <main className="localization-sheet">
         {!entity || !draft ? <div className="localization-empty"><span>文 / A</span><h3>Select an entity to localize</h3><p>Original identity stays fixed. You are choosing how it should read in {story?.outputLanguage ?? "the output locale"}.</p></div> : <>

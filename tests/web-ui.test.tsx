@@ -1,6 +1,7 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 import { App, ArtworkEstimateSummary, artworkModelOptionsFor, CanonicalEntitySheet, chapterPageSize, ChapterPage, chunkPresetFor, clearJobDismissal, clearJobMinimized, dismissJob, EntityStatusField, ErrorBoundary, EXECUTABLE_CHAPTER_STAGES, getStageActionDetails, isJobConsoleMinimized, isJobDismissed, isTerminalJob, JobConsole, paginateRows, QaDetail, QaFindingCard, QaResolvedFindings, ScenesPage, setJobConsoleMinimized, shouldRefreshAfterJob, TtsQualityBadge, TtsSegmentRow } from "../apps/web/src/App.js";
+import { App, ArtworkEstimateSummary, artworkModelOptionsFor, CanonicalEntitySheet, chapterPageSize, ChapterPage, chunkPresetFor, clearJobDismissal, clearJobMinimized, dismissJob, EntityStatusField, ErrorBoundary, EXECUTABLE_CHAPTER_STAGES, getStageActionDetails, isJobConsoleMinimized, isJobDismissed, isTerminalJob, JobConsole, paginateRows, Pagination, QaDetail, QaFindingCard, QaResolvedFindings, ScenesPage, setJobConsoleMinimized, shouldRefreshAfterJob, TtsQualityBadge, TtsSegmentRow } from "../apps/web/src/App.js";
 import type { ChapterDetail, Job, QaFinding, TtsQualityArtifact, TtsSegmentQuality } from "../apps/web/src/api.js";
 import { pretty } from "../apps/web/src/format.js";
 import { ChapterImportPage, savedStorySourceUrl } from "../apps/web/src/ChapterImportPage.js";
@@ -1359,5 +1360,89 @@ describe("TTS quality guard UI", () => {
     expect(html).toContain("Manual acceptance is not an objective pass");
     expect(html).not.toContain("Passed");
     expect(html).not.toContain("Accept anyway");
+  });
+
+  describe("Pagination component", () => {
+    it("renders standard top and bottom pagination with navigation role and accurate labels", () => {
+      const topHtml = renderToStaticMarkup(
+        <Pagination position="top" page={2} pages={5} total={120} itemLabel="chapters" onPrevious={() => undefined} onNext={() => undefined} />
+      );
+      expect(topHtml).toContain('class="pagination top"');
+      expect(topHtml).toContain('role="navigation"');
+      expect(topHtml).toContain('aria-label="top pagination"');
+      expect(topHtml).toContain("Page 2 / 5 · 120 chapters");
+      expect(topHtml).not.toContain('disabled=""');
+
+      const bottomHtml = renderToStaticMarkup(
+        <Pagination position="bottom" page={2} pages={5} total={120} itemLabel="chapters" onPrevious={() => undefined} onNext={() => undefined} />
+      );
+      expect(bottomHtml).toContain('class="pagination"');
+      expect(bottomHtml).not.toContain("pagination top");
+      expect(bottomHtml).toContain('aria-label="bottom pagination"');
+      expect(bottomHtml).toContain("Page 2 / 5 · 120 chapters");
+    });
+
+    it("disables Previous button on first page and Next button on last page", () => {
+      // First page
+      const firstHtml = renderToStaticMarkup(
+        <Pagination page={1} pages={4} total={80} itemLabel="entities" onPrevious={() => undefined} onNext={() => undefined} />
+      );
+      expect(firstHtml).toContain('<button type="button" disabled=""');
+      expect(firstHtml).toContain("Previous</button>");
+      // Next button should be enabled
+      expect(firstHtml).toContain('<button type="button" aria-label="Next page">Next</button>');
+
+      // Last page
+      const lastHtml = renderToStaticMarkup(
+        <Pagination page={4} pages={4} total={80} itemLabel="entities" onPrevious={() => undefined} onNext={() => undefined} />
+      );
+      expect(lastHtml).toContain('<button type="button" aria-label="Previous page">Previous</button>');
+      expect(lastHtml).toContain('<button type="button" disabled="" aria-label="Next page">Next</button>');
+    });
+
+    it("disables both Previous and Next buttons on a single-page view", () => {
+      const singleHtml = renderToStaticMarkup(
+        <Pagination page={1} pages={1} total={12} itemLabel="chapters" onPrevious={() => undefined} onNext={() => undefined} />
+      );
+      // Both buttons disabled
+      const disabledCount = (singleHtml.match(/disabled=""/g) ?? []).length;
+      expect(disabledCount).toBe(2);
+      expect(singleHtml).toContain("Page 1 / 1 · 12 chapters");
+    });
+
+    it("renders compact variant with correct classes and boundary states", () => {
+      const topCompact = renderToStaticMarkup(
+        <Pagination variant="compact" position="top" page={1} pages={3} onPrevious={() => undefined} onNext={() => undefined} />
+      );
+      expect(topCompact).toContain('class="localization-pagination top"');
+      expect(topCompact).toContain("1 / 3");
+      expect(topCompact).toContain('<button type="button" disabled=""');
+
+      const bottomCompact = renderToStaticMarkup(
+        <Pagination variant="compact" position="bottom" page={3} pages={3} onPrevious={() => undefined} onNext={() => undefined} />
+      );
+      expect(bottomCompact).toContain('class="localization-pagination"');
+      expect(bottomCompact).not.toContain("localization-pagination top");
+      expect(bottomCompact).toContain("3 / 3");
+      // Next button disabled on last page
+      expect(bottomCompact).toContain('<button type="button" disabled=""');
+    });
+
+    it("renders mini variant with correct classes and boundary states", () => {
+      const topMini = renderToStaticMarkup(
+        <Pagination variant="mini" position="top" page={1} pages={4} onPrevious={() => undefined} onNext={() => undefined} />
+      );
+      expect(topMini).toContain('class="queue-mini-pages top"');
+      expect(topMini).toContain("<span>1/4</span>");
+      expect(topMini).toContain('<button type="button" disabled=""');
+
+      const bottomMini = renderToStaticMarkup(
+        <Pagination variant="mini" position="bottom" page={2} pages={4} onPrevious={() => undefined} onNext={() => undefined} />
+      );
+      expect(bottomMini).toContain('class="queue-mini-pages"');
+      expect(bottomMini).not.toContain("queue-mini-pages top");
+      expect(bottomMini).toContain("<span>2/4</span>");
+      expect(bottomMini).not.toContain('disabled=""');
+    });
   });
 });
