@@ -1463,14 +1463,31 @@ describe("TTS quality guard UI", () => {
       expect(paginationBaseMatches?.length).toBe(1);
 
       // App.tsx has no hand-written <div className="pagination">
+      // App.tsx: 4 collections (chapters, canonical entities, minor refs, audio masters)
+      // Exactly 1 top Pagination and 1 bottom Pagination per collection (8 total)
       const appTsx = fs.readFileSync(path.resolve(process.cwd(), "apps/web/src/App.tsx"), "utf8");
       expect(appTsx).not.toContain('className="pagination"');
       expect(appTsx).not.toContain('className="localization-pagination"');
       expect(appTsx).not.toContain('className="queue-mini-pages"');
+      expect(appTsx.match(/<Pagination\b/g)?.length).toBe(8);
+      expect(appTsx.match(/<Pagination[^>]*position="top"/g)?.length).toBe(4);
+      expect(appTsx.match(/<Pagination[^>]*position="bottom"/g)?.length).toBe(4);
 
       // NamesLocalizationPage.tsx has no hand-written <div className="localization-pagination">
+      // NamesLocalizationPage.tsx: exactly 1 top Pagination and 1 bottom Pagination
       const namesPageTsx = fs.readFileSync(path.resolve(process.cwd(), "apps/web/src/NamesLocalizationPage.tsx"), "utf8");
       expect(namesPageTsx).not.toContain('className="localization-pagination"');
+      expect(namesPageTsx.match(/<Pagination\b/g)?.length).toBe(2);
+      expect(namesPageTsx.match(/<Pagination[^>]*position="top"/g)?.length).toBe(1);
+      expect(namesPageTsx.match(/<Pagination[^>]*position="bottom"/g)?.length).toBe(1);
+
+      // QueueStudio.tsx: 3 collections (jobs ledger, work items list, review items list)
+      const queueTsx = fs.readFileSync(path.resolve(process.cwd(), "apps/web/src/QueueStudio.tsx"), "utf8");
+      expect(queueTsx).not.toContain('className="pagination"');
+      expect(queueTsx).not.toContain('className="queue-mini-pages"');
+      expect(queueTsx.match(/<Pagination\b/g)?.length).toBe(6);
+      expect(queueTsx.match(/<Pagination[^>]*position="top"/g)?.length).toBe(3);
+      expect(queueTsx.match(/<Pagination[^>]*position="bottom"/g)?.length).toBe(3);
     });
   });
 });
