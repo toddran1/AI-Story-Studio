@@ -27,6 +27,7 @@ import { SummaryService, summaryPath } from "./service.js";
 import { summarySchema, type StorySummary } from "./types.js";
 import { planVisualScenes } from "../scenes/planner.js";
 import { normalizeProductionSceneTiming } from "../scenes/timing.js";
+import { normalizeVisualContinuityChange } from "../visual-canon/continuity.js";
 import { scenePacingSchema, estimateScenePacing } from "../scenes/pacing.js";
 import { resolveVisualEntities } from "../scenes/identity.js";
 import { bindNarrationSpans } from "../scenes/narration-spans.js";
@@ -149,7 +150,7 @@ export class SummaryMediaService {
         durationSeconds: estimate.durationSeconds, timingMethod: "estimated", planningFingerprint: inputFingerprint,
         planner: { provider: config.provider, model: config.model, promptVersion: "summary-scenes-v1" },
         manualRevision: 0, manuallyEdited: false, createdAt: summary.scenePlan?.createdAt ?? now, updatedAt: now,
-        scenes: bindNarrationSpans(normalizeProductionSceneTiming(planned.value.scenes.map((s) => ({ ...s, location: s.location ?? undefined })), estimate.durationSeconds), summary.narration.text).map((scene) => ({ ...scene,
+        scenes: bindNarrationSpans(normalizeProductionSceneTiming(planned.value.scenes.map((s) => ({ ...s, location: s.location ?? undefined, visualChanges: normalizeVisualContinuityChange(s.visualChanges) })), estimate.durationSeconds), summary.narration.text).map((scene) => ({ ...scene,
           visualType: "image", entityIds: resolveVisualEntities(scene.characters, input.context.canonicalEntities).map((entity) => entity.id) })) };
       // Retain image provenance atomically with the new plan. A restart between
       // planning and artwork must never discard protected/approved image metadata.

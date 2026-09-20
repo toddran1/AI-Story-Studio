@@ -32,7 +32,9 @@ describe("scene planning", () => {
   it("retries a transient scene-planner failure", async () => { const { root, story } = await fixture(); const provider = new SceneLLM(); const generate = provider.generateStructured.bind(provider); let attempts = 0; provider.generateStructured = async (request: any) => { if (++attempts === 1) throw Object.assign(new Error("temporarily unavailable"), { status: 503, headers: { "retry-after": "0" } }); return generate(request); }; await expect(planStoredScenes({ root, story, chapter: 1, provider })).resolves.toMatchObject({ reused: false }); expect(attempts).toBe(2); });
   it("keeps manual edits as the image-generation source of truth", async () => { const { root, story } = await fixture(); const result = await planStoredScenes({ root, story, chapter: 1, provider: new SceneLLM() }); const scenes = structuredClone(result.manifest.scenes); scenes[0]!.visualPrompt = "A manually art-directed brass observatory"; const updated = await updateStoredSceneManifest({ root, story, chapter: 1, scenes }); expect(updated.manuallyEdited).toBe(true); expect(updated.manualRevision).toBe(1); expect(updated.scenes[0]!.visualPrompt).toContain("manually art-directed"); expect(updated.scenes[0]!.artwork.status).toBe("pending"); });
   it("documents per-scene fields, the importance rubric, and subtitle timing usage", () => {
-    expect(SCENE_PLANNER_PROMPT_VERSION).toBe("scene-planner-v2");
+    // Bumped to v3: the planner schema gained visualChanges and the
+    // instructions gained the PREVIOUS VISUAL CONTINUITY contract.
+    expect(SCENE_PLANNER_PROMPT_VERSION).toBe("scene-planner-v3");
     expect(scenePlannerInstructions).toMatch(/summary.*characters.*location/s);
     expect(scenePlannerInstructions).toMatch(/major for a pivotal set-piece.*standard for a normal story beat.*transition for connective/s);
     expect(scenePlannerInstructions).toMatch(/OPTIONAL SUBTITLE TIMING is provided, use it/i);

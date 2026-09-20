@@ -26,6 +26,7 @@ export type ResolvedSceneVisualPrompt = {
   entityVisualFingerprints: Record<string, string>;
   sceneDirectionFingerprint: string;
   resolvedPromptFingerprint: string;
+  visualContinuityFingerprint?: string;
   resolvedEntities: ResolvedEntityCanon[];
 };
 
@@ -35,8 +36,9 @@ export function resolveVisualCanonPrompt(options: {
   bible: StoryBible;
   artDirection: ArtDirectionPreset;
   visualProfiles: Record<string, VisualEntityProfile>;
+  visualContinuity?: string;
 }): ResolvedSceneVisualPrompt {
-  const { scene, story, bible, artDirection, visualProfiles } = options;
+  const { scene, story, bible, artDirection, visualProfiles, visualContinuity } = options;
 
   // 1. Resolve canonical entities in the scene
   const matchedEntities = new Map<string, CanonicalEntity>();
@@ -197,6 +199,13 @@ export function resolveVisualCanonPrompt(options: {
     promptParts.push(`ENTITY VISUAL CANON:\n${entityCanonLines.join("\n")}`);
   }
 
+  // Layer 2.5: Current Visual Continuity — temporary state, clearly delimited
+  // from the permanent canon above. Manual Scene Studio overrides still win
+  // (they are applied in a later layer).
+  if (visualContinuity) {
+    promptParts.push(`CURRENT VISUAL CONTINUITY (temporary state — the canonical identity above still applies):\n${visualContinuity}`);
+  }
+
   // Layer 3: Scene Content
   promptParts.push(`SCENE BEAT: ${scene.visualPrompt}`);
   if (scene.summary) {
@@ -282,6 +291,7 @@ export function resolveVisualCanonPrompt(options: {
     overrides: scene.overrides,
   });
   const resolvedPromptFingerprint = fingerprint({ prompt, negativePrompt });
+  const visualContinuityFingerprint = visualContinuity ? fingerprint(visualContinuity) : undefined;
 
   return {
     prompt,
@@ -290,6 +300,7 @@ export function resolveVisualCanonPrompt(options: {
     entityVisualFingerprints,
     sceneDirectionFingerprint,
     resolvedPromptFingerprint,
+    ...(visualContinuityFingerprint ? { visualContinuityFingerprint } : {}),
     resolvedEntities,
   };
 }

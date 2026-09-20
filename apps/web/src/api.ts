@@ -313,6 +313,54 @@ export type SceneArtwork = {
   approvedVersionId?: string;
 };
 
+export type VisualCharacterState = {
+  entityId?: string;
+  name: string;
+  appearanceDelta?: string;
+  wardrobe?: string;
+  equipment?: string;
+  carriedItems?: string[];
+  injuries?: string;
+  condition?: string;
+  transformation?: string;
+  visibleEmotionalState?: string;
+  location?: string;
+};
+export type VisualEnvironmentState = { locationId?: string; description?: string; timeOfDay?: string; lighting?: string; weather?: string; condition?: string; damage?: string };
+export type VisualObjectState = { name: string; condition?: string; possessedBy?: string };
+export type VisualContinuityState = { characters: VisualCharacterState[]; environment?: VisualEnvironmentState; objects: VisualObjectState[]; spatial?: string };
+export type VisualContinuityChange = {
+  characters?: Array<{ name: string; entityId?: string; op: "enter" | "exit" | "update"; set?: Partial<Omit<VisualCharacterState, "name" | "entityId">>; clear?: string[] }>;
+  environment?: { set?: Partial<VisualEnvironmentState>; clear?: string[] };
+  objects?: Array<{ name: string; op: "add" | "remove" | "update"; set?: Partial<Omit<VisualObjectState, "name">> }>;
+  note?: string;
+};
+export type VisualContinuityReferenceDecision = {
+  kind: "previous-scene" | "previous-chapter" | "none";
+  used: boolean;
+  reason?: string;
+  sourceChapter?: number;
+  sourceSceneId?: string;
+  versionId?: string;
+  versionNumber?: number;
+  imageFingerprint?: string;
+};
+export type SceneContinuity = {
+  startState: VisualContinuityState;
+  changes?: VisualContinuityChange;
+  endState: VisualContinuityState;
+  referenceDecision?: VisualContinuityReferenceDecision;
+  manualOverride?: { note?: string; usePreviousReference?: "prefer" | "avoid"; revision: number; stale: boolean };
+};
+export type PreviousVisualHandoff = { chapter: number; sceneId: string; stateFingerprint: string; hasApprovedArtwork: boolean; usedAsReference: boolean; origin: string };
+export type VisualContinuityOverrideEntryInput = {
+  sceneId: string;
+  note?: string;
+  setState?: { characters?: Array<Partial<VisualCharacterState> & { name: string }>; environment?: Partial<VisualEnvironmentState>; objects?: Array<Partial<VisualObjectState> & { name: string }>; spatial?: string };
+  usePreviousReference?: "prefer" | "avoid";
+  sceneContentFingerprint?: string;
+};
+
 export type Scene = {
   id: string;
   summary: string;
@@ -329,6 +377,8 @@ export type Scene = {
   resolvedCharacters?: ResolvedSceneCharacter[];
   direction?: SceneDirection;
   overrides?: SceneOverrides;
+  visualChanges?: VisualContinuityChange;
+  continuity?: SceneContinuity;
 };
 
 export type ResolvedSceneCharacter = {
@@ -352,6 +402,7 @@ export type ScenesDashboard = {
   counts: { chapters: number; planned: number; artworkReady: number };
   manifest?: SceneManifest;
   manifestStale?: boolean;
+  previousHandoff?: PreviousVisualHandoff;
   visualProfiles?: VisualEntityProfile[];
   artDirection?: StoryArtDirection;
 };
@@ -485,6 +536,17 @@ export async function acceptChapterTtsSegment(slug: string, chapter: number, seg
 
 export function chapterTtsSegmentAudioUrl(slug: string, chapter: number, segment: number): string {
   return `/api/stories/${encodeURIComponent(slug)}/chapters/${chapter}/audio-segments/${segment}.mp3`;
+}
+
+export type VisualContinuityOverrideEntry = VisualContinuityOverrideEntryInput & { revision: number; updatedAt: string };
+export type VisualContinuityOverlay = { version: 1; entries: VisualContinuityOverrideEntry[] };
+
+export async function updateSceneContinuity(slug: string, chapter: number, sceneId: string, input: Omit<VisualContinuityOverrideEntryInput, "sceneId">): Promise<{ overlay: VisualContinuityOverlay }> {
+  return put<{ overlay: VisualContinuityOverlay }>(`/stories/${encodeURIComponent(slug)}/chapters/${chapter}/scenes/${encodeURIComponent(sceneId)}/continuity`, input);
+}
+
+export async function resetSceneContinuity(slug: string, chapter: number, sceneId: string): Promise<{ overlay: VisualContinuityOverlay }> {
+  return del<{ overlay: VisualContinuityOverlay }>(`/stories/${encodeURIComponent(slug)}/chapters/${chapter}/scenes/${encodeURIComponent(sceneId)}/continuity`);
 }
 
 export async function reviewArtworkVersion(slug: string, chapter: number, sceneId: string, versionId: string, review: string): Promise<SceneArtwork> {

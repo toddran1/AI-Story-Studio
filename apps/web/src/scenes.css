@@ -140,6 +140,18 @@
 .scene-direction-panel[open] summary { margin-bottom: 10px; color: var(--violet-soft); }
 .scene-direction-content { display: grid; gap: 10px; }
 
+/* Visual Continuity (Milestone 22) */
+.handoff-badge { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 6px; font-size: 9px; }
+.handoff-badge b { font-weight: 500; overflow-wrap: anywhere; }
+.scene-continuity-panel summary .manual-badge { margin-left: 6px; }
+.continuity-state h5 { margin: 0 0 4px; font-size: 9px; text-transform: uppercase; letter-spacing: .06em; color: var(--violet-soft); }
+.continuity-state ul { margin: 0; padding-left: 16px; display: grid; gap: 2px; }
+.continuity-state li { font-size: 9px; color: var(--muted); overflow-wrap: anywhere; }
+.continuity-reference { margin: 0; font-size: 9px; color: var(--muted); overflow-wrap: anywhere; }
+.continuity-empty { color: var(--muted); font-size: 9px; }
+.continuity-override-editor { display: grid; gap: 8px; border-top: 1px solid var(--line); padding-top: 10px; }
+.continuity-override-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+
 .version-tabs-bar { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 6px 0; padding: 6px 8px; background: #0c0c10; border-radius: 5px; border: 1px solid var(--line); }
 .version-tabs { display: flex; gap: 4px; }
 .version-tab { border: 1px solid transparent; background: transparent; color: var(--muted); padding: 3px 8px; border-radius: 3px; font-size: 9px; cursor: pointer; font-family: var(--mono); }

@@ -15,6 +15,7 @@ import { retryConfigSchema } from "../batch/types.js";
 import { loadVisualProfiles } from "../visual-canon/profiles.js";
 import { loadStoryArtDirection, resolveActiveArtDirection } from "../visual-canon/art-direction.js";
 import { resolveVisualCanonPrompt, ResolvedSceneVisualPrompt } from "../visual-canon/resolver.js";
+import { renderSceneContinuity, resolveChapterVisualContinuity, VisualContinuityReferenceDecision } from "../visual-canon/continuity.js";
 import { emptyStoryBible, storyBibleSchema, StoryBible } from "../domain/story-bible.js";
 import { assertImageModelCompatible, MAX_REFERENCE_IMAGES, MAX_REFERENCE_IMAGE_BYTES, MAX_REFERENCE_TOTAL_BYTES, providerSupportsReferenceImages } from "./providers.js";
 import { findVisualReferenceFile, mimeForVisualReferenceExtension } from "../visual-canon/assets.js";
@@ -57,6 +58,18 @@ export async function generateStoredArtwork(options: {
   const artDirectionConfig = await loadStoryArtDirection(options.root, options.story.slug);
   const visualProfiles = await loadVisualProfiles(options.root, options.story.slug);
 
+  // Recompute-on-read visual continuity: manifest deltas + previous handoff +
+  // manual overlay. Textual continuity joins the prompt; approved prior artwork
+  // may join the reference images. Never blocks generation.
+  const continuity = await resolveChapterVisualContinuity({
+    root: options.root,
+    slug: options.story.slug,
+    chapter: options.chapter,
+    manifest,
+    contentFingerprints: Object.fromEntries(manifest.scenes.map((scene) => [scene.id, sceneContentFingerprint(scene)])),
+  });
+  const continuityByScene = new Map(continuity.resolved.perScene.map((entry) => [entry.sceneId, entry]));
+
   // Migrate any legacy scenes without versions array
   for (const scene of manifest.scenes) {
     if (scene.artwork.status === "complete" && (!scene.artwork.versions || scene.artwork.versions.length === 0)) {
@@ -96,23 +109,28 @@ export async function generateStoredArtwork(options: {
     prompt: string;
     resolved: ResolvedSceneVisualPrompt;
     refs: Awaited<ReturnType<typeof loadCharacterVisualReferences>>;
+    continuityReference?: VisualContinuityReferenceDecision;
     inputFingerprint: string;
   }> = [];
 
   for (const scene of selected) {
     const refs = await loadCharacterVisualReferences(options.root, options.story.slug, scene.characters);
     const activePreset = resolveActiveArtDirection(artDirectionConfig, scene.overrides?.artDirectionPresetId);
+    const sceneContinuity = continuityByScene.get(scene.id);
+    const continuityText = sceneContinuity ? renderSceneContinuity(sceneContinuity) : undefined;
+    const continuityReference = sceneContinuity?.referenceDecision?.used ? sceneContinuity.referenceDecision : undefined;
     const resolved = resolveVisualCanonPrompt({
       scene,
       story: options.story,
       bible,
       artDirection: activePreset,
       visualProfiles,
+      visualContinuity: continuityText,
     });
 
     const inputFingerprint = artworkFingerprint(
       scene,
-      refs.map((ref) => ref.fingerprint),
+      [...refs.map((ref) => ref.fingerprint), ...(continuityReference?.imageFingerprint ? [continuityReference.imageFingerprint] : [])],
       options.story,
       options.provider.version,
       {
@@ -120,6 +138,7 @@ export async function generateStoredArtwork(options: {
         entityVisualFingerprints: resolved.entityVisualFingerprints,
         sceneDirectionFingerprint: resolved.sceneDirectionFingerprint,
         resolvedPromptFingerprint: resolved.resolvedPromptFingerprint,
+        visualContinuityFingerprint: resolved.visualContinuityFingerprint,
       }
     );
 
@@ -135,7 +154,7 @@ export async function generateStoredArtwork(options: {
       scene.artwork.review === "needs-regeneration";
 
     if (needs) {
-      candidates.push({ scene, prompt: resolved.prompt, resolved, refs, inputFingerprint });
+      candidates.push({ scene, prompt: resolved.prompt, resolved, refs, continuityReference: sceneContinuity?.referenceDecision, inputFingerprint });
     }
   }
 
@@ -206,7 +225,7 @@ export async function generateStoredArtwork(options: {
     });
 
     try {
-      const references = await loadSceneReferenceImages(options.root, options.story, item.resolved);
+      const references = await loadSceneReferenceImages(options.root, options.story, item.resolved, item.continuityReference, options.chapter);
       const result = await generateSceneImage(options.provider, options.story, item.prompt, {
         negativePrompt: item.resolved.negativePrompt || undefined,
         referenceImages: references.images,
@@ -257,6 +276,7 @@ export async function generateStoredArtwork(options: {
           referencesUsed: references.mode,
           referenceImageCount: references.images.length,
           availableReferenceCount: references.available,
+          continuityReference: references.continuityReference,
         },
         review: "unreviewed",
       };
@@ -496,6 +516,7 @@ export function artworkFingerprint(
     entityVisualFingerprints?: Record<string, string>;
     sceneDirectionFingerprint?: string;
     resolvedPromptFingerprint?: string;
+    visualContinuityFingerprint?: string;
   }
 ) {
   const artDirectionFingerprint =
@@ -519,6 +540,7 @@ export function artworkFingerprint(
     ...(extra?.entityVisualFingerprints && Object.keys(extra.entityVisualFingerprints).length > 0
       ? { entityVisualFingerprints: extra.entityVisualFingerprints }
       : {}),
+    ...(extra?.visualContinuityFingerprint ? { visualContinuityFingerprint: extra.visualContinuityFingerprint } : {}),
   });
 }
 
@@ -567,22 +589,31 @@ export async function generateSceneImage(
   return result;
 }
 
-type SceneReferencePayload = { images: ImageReferenceImage[]; available: number; mode: "images" | "text-only" | "none" };
+type ContinuityReferenceProvenance = { kind: "previous-scene" | "previous-chapter" | "none"; used: boolean; reason?: string };
+type SceneReferencePayload = { images: ImageReferenceImage[]; available: number; mode: "images" | "text-only" | "none"; continuityReference: ContinuityReferenceProvenance };
 
-/** Collect Visual Canon reference images for a scene. Bytes are resolved only
- * through the controlled asset directory (never persisted paths). When the
- * effective provider/model cannot consume image input, the textual canon stays
- * in the prompt and provenance records the text-only fallback. */
-async function loadSceneReferenceImages(root: string, story: Story, resolved: ResolvedSceneVisualPrompt): Promise<SceneReferencePayload> {
+/** Collect Visual Canon reference images for a scene, then the resolved visual
+ * continuity reference (previous scene / previous chapter approved artwork)
+ * after canonical refs within the same budget. Bytes are resolved only through
+ * controlled scene/version paths. When the effective provider/model cannot
+ * consume image input, the textual canon stays in the prompt and provenance
+ * records the text-only fallback. A missing or unreadable continuity image is
+ * skipped — generation never fails on it. */
+async function loadSceneReferenceImages(root: string, story: Story, resolved: ResolvedSceneVisualPrompt, continuityDecision?: VisualContinuityReferenceDecision, chapter?: number): Promise<SceneReferencePayload> {
   const wanted: VisualReferenceImage[] = [];
   for (const entity of resolved.resolvedEntities) {
     const refs = entity.references ?? [];
     wanted.push(...refs.filter((ref) => ref.approved), ...refs.filter((ref) => !ref.approved));
   }
-  const available = wanted.length;
-  if (!available) return { images: [], available: 0, mode: "none" };
-  if (!providerSupportsReferenceImages(story.artwork.provider, story.artwork.model)) {
-    return { images: [], available, mode: "text-only" };
+  const continuityReference: ContinuityReferenceProvenance = continuityDecision
+    ? { kind: continuityDecision.kind, used: false, reason: continuityDecision.reason }
+    : { kind: "none", used: false };
+  const supportsImages = providerSupportsReferenceImages(story.artwork.provider, story.artwork.model);
+  const available = wanted.length + (continuityDecision?.used ? 1 : 0);
+  if (!available) return { images: [], available: 0, mode: "none", continuityReference };
+  if (!supportsImages) {
+    if (continuityDecision?.used) continuityReference.reason = continuityReference.reason ? `${continuityReference.reason}; provider cannot consume reference images, textual continuity retained` : "provider cannot consume reference images, textual continuity retained";
+    return { images: [], available, mode: "text-only", continuityReference };
   }
   const images: ImageReferenceImage[] = [];
   let totalBytes = 0;
@@ -596,7 +627,21 @@ async function loadSceneReferenceImages(root: string, story: Story, resolved: Re
     totalBytes += data.length;
     images.push({ data, mimeType: mimeForVisualReferenceExtension(file.ext), role: ref.role });
   }
-  return { images, available, mode: images.length ? "images" : "text-only" };
+  if (continuityDecision?.used && continuityDecision.sourceSceneId && continuityDecision.versionNumber && chapter !== undefined && images.length < MAX_REFERENCE_IMAGES) {
+    const sourceChapter = continuityDecision.kind === "previous-chapter" ? continuityDecision.sourceChapter : chapter;
+    try {
+      if (sourceChapter === undefined) throw new Error("missing source chapter");
+      const path = sceneVersionImagePath(root, story.slug, sourceChapter, continuityDecision.sourceSceneId, continuityDecision.versionNumber);
+      const data = await readFile(path);
+      if (!data.length || data.length > MAX_REFERENCE_IMAGE_BYTES || totalBytes + data.length > MAX_REFERENCE_TOTAL_BYTES) throw new Error("continuity reference exceeds reference image budget");
+      validatePng(data);
+      images.push({ data, mimeType: "image/png", role: continuityDecision.kind });
+      continuityReference.used = true;
+    } catch {
+      continuityReference.reason = continuityReference.reason ? `${continuityReference.reason}; continuity image unavailable, textual continuity retained` : "continuity image unavailable, textual continuity retained";
+    }
+  }
+  return { images, available, mode: images.length ? "images" : "text-only", continuityReference };
 }
 
 function validatePng(data: Buffer) {

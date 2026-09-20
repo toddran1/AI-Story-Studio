@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { visualContinuityChangeInputSchema, visualContinuityChangeSchema } from "../visual-canon/continuity.js";
 
 export const sceneSettingsSchema = z.object({
   targetDurationSeconds: z.number().min(10).max(30).default(20),
@@ -157,6 +158,7 @@ export const sceneSchema = z.object({
   disabled: z.boolean().optional(),
   direction: sceneDirectionSchema.optional(),
   overrides: sceneOverridesSchema.optional(),
+  visualChanges: visualContinuityChangeSchema.optional(),
 }).refine((value) => value.endSeconds > value.startSeconds, { message: "Scene end must be after its start" });
 
 export const productionSceneManifestSchema = z.object({
@@ -180,6 +182,7 @@ export const plannedSceneSchema = z.object({
   summary: z.string().trim().min(1).max(1000), startSeconds: z.number().min(0), endSeconds: z.number().positive(),
   characters: z.array(z.string().trim().min(1)).max(20).default([]), location: z.string().trim().max(300).nullish(),
   visualPrompt: z.string().trim().min(1).max(8000), importance: sceneImportanceSchema.default("standard"),
+  visualChanges: visualContinuityChangeInputSchema.nullish(),
 });
 export const plannedScenesSchema = z.object({ scenes: z.array(plannedSceneSchema).min(1).max(100) });
 export const summaryPlannedScenesSchema = z.object({ scenes: z.array(plannedSceneSchema.extend({

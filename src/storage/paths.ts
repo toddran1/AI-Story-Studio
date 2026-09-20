@@ -18,6 +18,7 @@ export function storyPaths(root: string, slug: string, chapter: number) {
     alignment: join(chapterDir, "alignment.json"), subtitlesDocument: join(chapterDir, "subtitles.json"), subtitlesManual: join(chapterDir, "subtitles.manual.json"),
     subtitlesSrt: join(chapterDir, "subtitles.srt"), subtitlesVtt: join(chapterDir, "subtitles.vtt"), video: join(chapterDir, "video.mp4"),
     scenesManifest: join(chapterDir, "scenes.json"), scenesDirectory: join(chapterDir, "scenes"),
+    visualContinuity: join(chapterDir, "visual-continuity.json"), visualContinuityManual: join(chapterDir, "visual-continuity-manual.json"),
   };
 }
 

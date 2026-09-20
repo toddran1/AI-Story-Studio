@@ -1,7 +1,7 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
-import { App, ArtworkEstimateSummary, artworkModelOptionsFor, CanonicalEntitySheet, chapterPageSize, ChapterPage, chunkPresetFor, clearJobDismissal, clearJobMinimized, dismissJob, EntityStatusField, ErrorBoundary, EXECUTABLE_CHAPTER_STAGES, getStageActionDetails, isJobConsoleMinimized, isJobDismissed, isTerminalJob, JobConsole, paginateRows, Pagination, QaDetail, QaFindingCard, QaResolvedFindings, ScenesPage, setJobConsoleMinimized, shouldRefreshAfterJob, TtsQualityBadge, TtsSegmentRow } from "../apps/web/src/App.js";
-import type { ChapterDetail, Job, QaFinding, TtsQualityArtifact, TtsSegmentQuality } from "../apps/web/src/api.js";
+import { App, ArtworkEstimateSummary, artworkModelOptionsFor, CanonicalEntitySheet, chapterPageSize, ChapterPage, chunkPresetFor, clearJobDismissal, clearJobMinimized, continuityReferenceTriState, describeContinuityReference, dismissJob, EntityStatusField, ErrorBoundary, EXECUTABLE_CHAPTER_STAGES, getStageActionDetails, humanizeContinuityChanges, isJobConsoleMinimized, isJobDismissed, isTerminalJob, JobConsole, paginateRows, Pagination, PreviousHandoffBadge, QaDetail, QaFindingCard, QaResolvedFindings, SceneContinuityPanel, ScenesPage, setJobConsoleMinimized, shouldRefreshAfterJob, TtsQualityBadge, TtsSegmentRow } from "../apps/web/src/App.js";
+import type { ChapterDetail, Job, QaFinding, Scene, TtsQualityArtifact, TtsSegmentQuality, VisualContinuityChange } from "../apps/web/src/api.js";
 import { pretty } from "../apps/web/src/format.js";
 import { ChapterImportPage, savedStorySourceUrl } from "../apps/web/src/ChapterImportPage.js";
 import { SummariesPage } from "../apps/web/src/SummariesPage.js";
@@ -406,6 +406,173 @@ describe("web UI", () => {
     expect(htmlEmpty).toContain("No scene plan yet");
     expect(htmlEmpty).toContain("Plan this chapter");
   });
+
+  describe("Visual Continuity (Milestone 22)", () => {
+    const continuityScene = (overrides: Partial<Scene>): Scene => ({
+      id: "scene-001",
+      summary: "Hero arrives",
+      startSeconds: 0,
+      endSeconds: 30,
+      characters: ["Malakai"],
+      visualPrompt: "A gate",
+      importance: "standard",
+      artwork: { status: "pending", review: "unreviewed", versions: [] },
+      ...overrides,
+    });
+
+    it("humanizes continuity deltas into readable change lines", () => {
+      const change: VisualContinuityChange = {
+        characters: [
+          { name: "Malakai", op: "enter" },
+          { name: "Su Xue", op: "exit" },
+          { name: "Garrick", op: "update", set: { wardrobe: "torn coat", carriedItems: ["staff", "lantern"] }, clear: ["injuries"] },
+        ],
+        environment: { set: { timeOfDay: "afternoon" }, clear: ["weather"] },
+        objects: [
+          { name: "Stone key", op: "add" },
+          { name: "Old torch", op: "remove" },
+          { name: "Banner", op: "update", set: { condition: "burning" } },
+        ],
+        note: "The bell keeps ringing.",
+      };
+      expect(humanizeContinuityChanges(change)).toEqual([
+        "Malakai enters",
+        "Su Xue exits",
+        "Garrick: wardrobe → torn coat; carrying → staff, lantern; injuries cleared",
+        "environment: time of day → afternoon",
+        "environment: weather cleared",
+        "Stone key appears",
+        "Old torch removed",
+        "Banner: condition → burning",
+        "The bell keeps ringing.",
+      ]);
+      expect(humanizeContinuityChanges(undefined)).toEqual([]);
+      expect(humanizeContinuityChanges({})).toEqual([]);
+    });
+
+    it("describes reference decisions for used, unused, and text-only cases", () => {
+      expect(
+        describeContinuityReference({ kind: "previous-chapter", used: true, sourceChapter: 408, sourceSceneId: "scene-012", versionNumber: 2 }),
+      ).toBe("Using Chapter 408 · Scene 012 approved artwork (v2) as reference");
+      expect(
+        describeContinuityReference({ kind: "previous-scene", used: false, sourceSceneId: "scene-003", reason: "setting changed" }),
+      ).toBe("Scene 003 artwork not used — setting changed");
+      expect(describeContinuityReference({ kind: "none", used: false })).toBe("Text-only continuity");
+      expect(describeContinuityReference(undefined)).toBe("Text-only continuity");
+    });
+
+    it("maps the override tri-state to the API enum", () => {
+      expect(continuityReferenceTriState(undefined)).toBe("inherit");
+      expect(continuityReferenceTriState("prefer")).toBe("prefer");
+      expect(continuityReferenceTriState("avoid")).toBe("avoid");
+    });
+
+    it("renders the previous-chapter handoff badge only when a handoff exists", () => {
+      expect(renderToStaticMarkup(<PreviousHandoffBadge handoff={undefined} />)).toBe("");
+      const used = renderToStaticMarkup(
+        <PreviousHandoffBadge handoff={{ chapter: 408, sceneId: "scene-012", stateFingerprint: "fp", hasApprovedArtwork: true, usedAsReference: true, origin: "automatic" }} />,
+      );
+      expect(used).toContain("Previous chapter handoff");
+      expect(used).toContain("Chapter 408 · Scene 012");
+      expect(used).toContain("Using approved artwork as reference");
+      expect(used).not.toContain("Manual");
+      const textOnly = renderToStaticMarkup(
+        <PreviousHandoffBadge handoff={{ chapter: 407, sceneId: "scene-004", stateFingerprint: "fp", hasApprovedArtwork: false, usedAsReference: false, origin: "manual" }} />,
+      );
+      expect(textOnly).toContain("Text-only continuity");
+      expect(textOnly).toContain("Manual");
+    });
+
+    it("renders the continuity panel quietly when empty and with a manual badge when overridden", () => {
+      const empty = renderToStaticMarkup(
+        <SceneContinuityPanel scene={continuityScene({})} busy={false} onSave={() => undefined} onReset={() => undefined} />,
+      );
+      expect(empty).toContain("Visual Continuity");
+      expect(empty).toContain("No continuity state recorded for this scene.");
+      expect(empty).not.toContain("Manual override");
+      expect(empty).toContain("Save continuity override");
+      expect(empty).not.toContain("Reset override");
+
+      const overridden = renderToStaticMarkup(
+        <SceneContinuityPanel
+          scene={continuityScene({
+            continuity: {
+              startState: {
+                characters: [{ name: "Malakai", wardrobe: "torn coat", carriedItems: ["staff"] }],
+                environment: { timeOfDay: "dusk", damage: "collapsed archway" },
+                objects: [{ name: "Stone key", possessedBy: "Malakai" }],
+              },
+              changes: { characters: [{ name: "Su Xue", op: "enter" }] },
+              endState: { characters: [{ name: "Malakai" }, { name: "Su Xue" }], objects: [] },
+              referenceDecision: { kind: "previous-chapter", used: true, sourceChapter: 408, sourceSceneId: "scene-012", versionNumber: 2 },
+              manualOverride: { note: "Malakai still has the staff.", revision: 3, stale: true },
+            },
+          })}
+          busy={false}
+          onSave={() => undefined}
+          onReset={() => undefined}
+        />,
+      );
+      expect(overridden).toContain("Manual override");
+      expect(overridden).toContain("stale");
+      expect(overridden).toContain("revision 3");
+      expect(overridden).toContain("Entering state");
+      expect(overridden).toContain("Malakai — wardrobe: torn coat");
+      expect(overridden).toContain("environment — time of day: dusk");
+      expect(overridden).toContain("Stone key — with Malakai");
+      expect(overridden).toContain("Changes in this scene");
+      expect(overridden).toContain("Su Xue enters");
+      expect(overridden).toContain("Ending state");
+      expect(overridden).toContain("Using Chapter 408 · Scene 012 approved artwork (v2) as reference");
+      expect(overridden).toContain('value="Malakai still has the staff."');
+      expect(overridden).toContain("Reset override");
+      expect(overridden).toContain("Inherit (automatic)");
+      expect(overridden).toContain("Prefer previous artwork");
+      expect(overridden).toContain("Avoid previous artwork");
+    });
+
+    it("surfaces the handoff badge and continuity section inside ScenesPage", () => {
+      const html = renderToStaticMarkup(
+        <ScenesPage
+          slug="demo-story"
+          onJob={() => undefined}
+          navigate={() => undefined}
+          initialData={{
+            settings: { enabled: true },
+            artwork: { enabled: true },
+            planner: { provider: "mock", model: "mock" },
+            selectedChapter: 409,
+            chapters: [{ chapter: 409, title: "Chapter 409", durationSeconds: 60, sceneStatus: "complete", artworkStatus: "pending" }],
+            counts: { chapters: 1, planned: 1, artworkReady: 0 },
+            previousHandoff: { chapter: 408, sceneId: "scene-012", stateFingerprint: "fp", hasApprovedArtwork: true, usedAsReference: true, origin: "automatic" },
+            manifest: {
+              version: 1,
+              chapter: 409,
+              durationSeconds: 60,
+              planningFingerprint: "fp",
+              manualRevision: 0,
+              manuallyEdited: false,
+              updatedAt: new Date().toISOString(),
+              scenes: [
+                continuityScene({
+                  continuity: {
+                    startState: { characters: [{ name: "Malakai", condition: "limping" }], objects: [] },
+                    endState: { characters: [{ name: "Malakai" }], objects: [] },
+                  },
+                }),
+              ],
+            },
+          } as any}
+        />,
+      );
+      expect(html).toContain("Previous chapter handoff");
+      expect(html).toContain("Chapter 408 · Scene 012");
+      expect(html).toContain("Using approved artwork as reference");
+      expect(html).toContain("Visual Continuity");
+      expect(html).toContain("Malakai — condition: limping");
+    });
+  });
+
   describe("JobConsole QA failure diagnostics (current, historical, legacy)", () => {
     const baseJob = {
       id: "job-failed-qa-1",

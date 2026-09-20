@@ -356,6 +356,9 @@ export function createApiHandler(operations: StudioOperations) {
       if (productionPlanMatch && request.method === "POST") return send(response, 200, await operations.productionPlan(productionPlanMatch[1]!, await jsonBody(request)));
       const scenesEditMatch = /^\/api\/stories\/([a-z0-9-]+)\/chapters\/(\d+)\/scenes$/.exec(url.pathname);
       if (scenesEditMatch && request.method === "PUT") { const input = z.object({ scenes: z.array(z.unknown()) }).strict().parse(await jsonBody(request)); return send(response, 200, { manifest: await operations.updateScenes(scenesEditMatch[1]!, chapterParam(scenesEditMatch[2]!), input.scenes) }); }
+      const sceneContinuityMatch = /^\/api\/stories\/([a-z0-9-]+)\/chapters\/(\d+)\/scenes\/(scene-\d{3})\/continuity$/.exec(url.pathname);
+      if (sceneContinuityMatch && request.method === "PUT") return send(response, 200, { overlay: await operations.updateSceneContinuity(sceneContinuityMatch[1]!, chapterParam(sceneContinuityMatch[2]!), sceneContinuityMatch[3]!, await jsonBody(request)) });
+      if (sceneContinuityMatch && request.method === "DELETE") return send(response, 200, { overlay: await operations.deleteSceneContinuity(sceneContinuityMatch[1]!, chapterParam(sceneContinuityMatch[2]!), sceneContinuityMatch[3]!) });
       const artworkReviewMatch = /^\/api\/stories\/([a-z0-9-]+)\/chapters\/(\d+)\/scenes\/(scene-\d{3})\/review$/.exec(url.pathname);
       if (artworkReviewMatch && request.method === "POST") { const input = z.object({ review: z.enum(["unreviewed", "approved", "rejected", "needs-regeneration"]) }).strict().parse(await jsonBody(request)); return send(response, 200, { manifest: await operations.reviewArtwork(artworkReviewMatch[1]!, chapterParam(artworkReviewMatch[2]!), artworkReviewMatch[3]!, input.review) }); }
       const artworkVersionReviewMatch = /^\/api\/stories\/([a-z0-9-]+)\/chapters\/(\d+)\/scenes\/(scene-\d{3})\/versions\/(v\d+)\/review$/.exec(url.pathname);

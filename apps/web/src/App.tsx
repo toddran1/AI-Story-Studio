@@ -17,7 +17,8 @@ import { VocalizationList } from "./VocalizationList.js";
 import { getEntityStatusOptions, isStandardEntityStatus, statusKey } from "../../../src/story-bible/entity-status.js";
 import { VisualProfileModal } from "./VisualProfileModal.js";
 import { ArtDirectionModal } from "./ArtDirectionModal.js";
-import { reviewArtworkVersion, ShotType, CameraAngle, CompositionTendency, ARTWORK_PROVIDERS } from "./api.js";
+import { reviewArtworkVersion, updateSceneContinuity, resetSceneContinuity, ShotType, CameraAngle, CompositionTendency, ARTWORK_PROVIDERS } from "./api.js";
+import type { PreviousVisualHandoff, SceneContinuity, VisualCharacterState, VisualContinuityChange, VisualContinuityOverrideEntryInput, VisualContinuityReferenceDecision, VisualContinuityState, VisualEnvironmentState, VisualObjectState } from "./api.js";
 import { Pagination } from "./Pagination.js";
 export { Pagination, type PaginationProps, type PaginationVariant } from "./Pagination.js";
 import "./entity-sheet-actions.css";
@@ -1607,6 +1608,271 @@ export function artworkModelOptionsFor(provider: string, currentModel: string): 
   return entry.models.includes(currentModel) ? entry.models : [...entry.models, currentModel];
 }
 
+const CONTINUITY_CHARACTER_LABELS: Record<string, string> = {
+  appearanceDelta: "appearance",
+  wardrobe: "wardrobe",
+  equipment: "equipment",
+  carriedItems: "carrying",
+  injuries: "injuries",
+  condition: "condition",
+  transformation: "transformation",
+  visibleEmotionalState: "emotional state",
+  location: "location",
+};
+const CONTINUITY_ENVIRONMENT_LABELS: Record<string, string> = {
+  locationId: "location",
+  description: "description",
+  timeOfDay: "time of day",
+  lighting: "lighting",
+  weather: "weather",
+  condition: "condition",
+  damage: "damage",
+};
+
+function continuityFieldValue(value: unknown): string | undefined {
+  if (value === undefined || value === null || value === "") return undefined;
+  return Array.isArray(value) ? value.join(", ") : String(value);
+}
+
+export function humanizeContinuityChanges(change?: VisualContinuityChange): string[] {
+  if (!change) return [];
+  const lines: string[] = [];
+  for (const character of change.characters ?? []) {
+    if (character.op === "enter") {
+      lines.push(`${character.name} enters`);
+    } else if (character.op === "exit") {
+      lines.push(`${character.name} exits`);
+    } else {
+      const parts = [
+        ...Object.entries(character.set ?? {}).map(([key, value]) => {
+          const text = continuityFieldValue(value);
+          return text ? `${CONTINUITY_CHARACTER_LABELS[key] ?? key} → ${text}` : undefined;
+        }),
+        ...(character.clear ?? []).map((key) => `${CONTINUITY_CHARACTER_LABELS[key] ?? key} cleared`),
+      ].filter((part): part is string => Boolean(part));
+      lines.push(parts.length ? `${character.name}: ${parts.join("; ")}` : `${character.name} updated`);
+    }
+  }
+  if (change.environment) {
+    for (const [key, value] of Object.entries(change.environment.set ?? {})) {
+      const text = continuityFieldValue(value);
+      if (text) lines.push(`environment: ${CONTINUITY_ENVIRONMENT_LABELS[key] ?? key} → ${text}`);
+    }
+    for (const key of change.environment.clear ?? []) {
+      lines.push(`environment: ${CONTINUITY_ENVIRONMENT_LABELS[key] ?? key} cleared`);
+    }
+  }
+  for (const object of change.objects ?? []) {
+    if (object.op === "add") {
+      lines.push(`${object.name} appears`);
+    } else if (object.op === "remove") {
+      lines.push(`${object.name} removed`);
+    } else {
+      const parts = Object.entries(object.set ?? {})
+        .map(([key, value]) => {
+          const text = continuityFieldValue(value);
+          return text ? `${key} → ${text}` : undefined;
+        })
+        .filter((part): part is string => Boolean(part));
+      lines.push(parts.length ? `${object.name}: ${parts.join("; ")}` : `${object.name} updated`);
+    }
+  }
+  if (change.note) lines.push(change.note);
+  return lines;
+}
+
+export function describeContinuityReference(decision?: VisualContinuityReferenceDecision): string {
+  if (!decision || decision.kind === "none") {
+    return decision?.reason ? `Text-only continuity — ${decision.reason}` : "Text-only continuity";
+  }
+  const source = decision.sourceSceneId
+    ? `${decision.sourceChapter !== undefined ? `Chapter ${decision.sourceChapter} · ` : ""}Scene ${decision.sourceSceneId.replace(/^scene-/, "")}`
+    : decision.kind === "previous-chapter"
+      ? "Previous chapter"
+      : "Previous scene";
+  const version = decision.versionNumber !== undefined ? ` (v${decision.versionNumber})` : "";
+  if (decision.used) return `Using ${source} approved artwork${version} as reference`;
+  return `${source} artwork not used${decision.reason ? ` — ${decision.reason}` : ""}`;
+}
+
+export function describePreviousHandoff(handoff: PreviousVisualHandoff): string {
+  return `Chapter ${handoff.chapter} · Scene ${handoff.sceneId.replace(/^scene-/, "")}`;
+}
+
+export function continuityReferenceTriState(value?: "prefer" | "avoid"): "inherit" | "prefer" | "avoid" {
+  return value ?? "inherit";
+}
+
+export function describeCharacterContinuityState(character: VisualCharacterState): string {
+  const parts: string[] = [];
+  for (const [key, label] of Object.entries(CONTINUITY_CHARACTER_LABELS)) {
+    const text = continuityFieldValue(character[key as keyof VisualCharacterState]);
+    if (text) parts.push(`${label}: ${text}`);
+  }
+  return parts.length ? `${character.name} — ${parts.join("; ")}` : character.name;
+}
+
+export function describeEnvironmentContinuityState(environment?: VisualEnvironmentState): string[] {
+  if (!environment) return [];
+  const lines: string[] = [];
+  for (const [key, label] of Object.entries(CONTINUITY_ENVIRONMENT_LABELS)) {
+    const text = continuityFieldValue(environment[key as keyof VisualEnvironmentState]);
+    if (text) lines.push(`environment — ${label}: ${text}`);
+  }
+  return lines;
+}
+
+export function describeObjectContinuityState(object: VisualObjectState): string {
+  const parts = [object.condition ? `condition: ${object.condition}` : undefined, object.possessedBy ? `with ${object.possessedBy}` : undefined].filter((part): part is string => Boolean(part));
+  return parts.length ? `${object.name} — ${parts.join("; ")}` : object.name;
+}
+
+export function hasContinuityState(state?: VisualContinuityState): boolean {
+  return Boolean(
+    state &&
+      (state.characters.length > 0 ||
+        state.objects.length > 0 ||
+        Boolean(state.spatial) ||
+        describeEnvironmentContinuityState(state.environment).length > 0),
+  );
+}
+
+export function hasContinuityContent(continuity?: SceneContinuity, changes?: VisualContinuityChange): boolean {
+  return Boolean(
+    continuity?.referenceDecision ||
+      continuity?.manualOverride ||
+      hasContinuityState(continuity?.startState) ||
+      hasContinuityState(continuity?.endState) ||
+      humanizeContinuityChanges(changes ?? continuity?.changes).length > 0,
+  );
+}
+
+export function PreviousHandoffBadge({ handoff }: { handoff?: PreviousVisualHandoff }) {
+  if (!handoff) return null;
+  return (
+    <div className="handoff-badge">
+      <span className="eyebrow">Previous chapter handoff</span>
+      <b>{describePreviousHandoff(handoff)}</b>
+      <span className="routing-badge inherited">
+        {handoff.usedAsReference ? "Using approved artwork as reference" : "Text-only continuity"}
+      </span>
+      {handoff.origin === "manual" && <span className="manual-badge">Manual</span>}
+    </div>
+  );
+}
+
+export function SceneContinuityStateView({ title, state }: { title: string; state?: VisualContinuityState }) {
+  if (!hasContinuityState(state)) return null;
+  const lines = [
+    ...(state?.characters ?? []).map(describeCharacterContinuityState),
+    ...describeEnvironmentContinuityState(state?.environment),
+    ...(state?.objects ?? []).map(describeObjectContinuityState),
+    ...(state?.spatial ? [`spatial: ${state.spatial}`] : []),
+  ];
+  return (
+    <div className="continuity-state">
+      <h5>{title}</h5>
+      <ul>
+        {lines.map((line, index) => (
+          <li key={index}>{line}</li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+export function SceneContinuityPanel({
+  scene,
+  busy,
+  onSave,
+  onReset,
+}: {
+  scene: Scene;
+  busy: boolean;
+  onSave: (input: Omit<VisualContinuityOverrideEntryInput, "sceneId">) => void;
+  onReset: () => void;
+}) {
+  const continuity = scene.continuity;
+  const override = continuity?.manualOverride;
+  const [note, setNote] = useState(override?.note ?? "");
+  const [reference, setReference] = useState<"inherit" | "prefer" | "avoid">(continuityReferenceTriState(override?.usePreviousReference));
+  const changeLines = humanizeContinuityChanges(scene.visualChanges ?? continuity?.changes);
+  const empty = !hasContinuityContent(continuity, scene.visualChanges);
+
+  const save = () => {
+    const trimmed = note.trim();
+    onSave({
+      ...(trimmed ? { note: trimmed } : {}),
+      ...(reference === "inherit" ? {} : { usePreviousReference: reference }),
+    });
+  };
+
+  return (
+    <details className="scene-direction-panel scene-continuity-panel">
+      <summary>
+        🧭 Visual Continuity
+        {override && (
+          <span className="manual-badge">Manual override{override.stale ? " · stale" : ""}</span>
+        )}
+      </summary>
+      <div className="scene-direction-content">
+        {empty ? (
+          <small className="continuity-empty">No continuity state recorded for this scene.</small>
+        ) : (
+          <>
+            <SceneContinuityStateView title="Entering state" state={continuity?.startState} />
+            {changeLines.length > 0 && (
+              <div className="continuity-state">
+                <h5>Changes in this scene</h5>
+                <ul>
+                  {changeLines.map((line, index) => (
+                    <li key={index}>{line}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
+            <SceneContinuityStateView title="Ending state" state={continuity?.endState} />
+            {continuity?.referenceDecision && (
+              <p className="continuity-reference">Previous reference: {describeContinuityReference(continuity.referenceDecision)}</p>
+            )}
+          </>
+        )}
+
+        <div className="continuity-override-editor">
+          <div className="form-row">
+            <label>Continuity note (manual correction)</label>
+            <input
+              type="text"
+              value={note}
+              onChange={(event) => setNote(event.target.value)}
+              placeholder="e.g. Malakai still has the staff. Coat is no longer torn."
+            />
+          </div>
+          <div className="form-row">
+            <label>Use previous scene reference</label>
+            <select value={reference} onChange={(event) => setReference(event.target.value as "inherit" | "prefer" | "avoid")}>
+              <option value="inherit">Inherit (automatic)</option>
+              <option value="prefer">Prefer previous artwork</option>
+              <option value="avoid">Avoid previous artwork</option>
+            </select>
+          </div>
+          <div className="continuity-override-actions">
+            {override && <span className="badge">revision {override.revision}{override.stale ? " · stale" : ""}</span>}
+            <button type="button" className="button small" disabled={busy} onClick={save}>
+              {busy ? "Saving…" : "Save continuity override"}
+            </button>
+            {override && (
+              <button type="button" className="button small" disabled={busy} onClick={onReset}>
+                Reset override
+              </button>
+            )}
+          </div>
+        </div>
+      </div>
+    </details>
+  );
+}
+
 export function ScenesPage({ slug, onJob, navigate, initialData }: { slug: string; onJob: (job: Job) => void; navigate?: (path: string) => void; initialData?: ScenesDashboard }) {
   const [data, setData] = useState<ScenesDashboard | undefined>(initialData);
   const [draft, setDraft] = useState<Scene[]>(() => (initialData?.manifest?.scenes ? structuredClone(initialData.manifest.scenes) : []));
@@ -1620,6 +1886,7 @@ export function ScenesPage({ slug, onJob, navigate, initialData }: { slug: strin
   const [selectedVersionByScene, setSelectedVersionByScene] = useState<Record<string, string>>({});
   const [activeVisualProfile, setActiveVisualProfile] = useState<{ id: string; name?: string } | null>(null);
   const [showArtDirectionModal, setShowArtDirectionModal] = useState(false);
+  const [continuityBusy, setContinuityBusy] = useState(false);
   const watcher = useRef<(() => void) | undefined>(undefined);
 
   const load = async (chapter?: number) => {
@@ -1735,6 +2002,47 @@ export function ScenesPage({ slug, onJob, navigate, initialData }: { slug: strin
 
   const editOverrides = (id: string, patch: Partial<NonNullable<Scene["overrides"]>>) =>
     setDraft((current) => current.map((scene) => (scene.id === id ? { ...scene, overrides: { ...scene.overrides, ...patch } } : scene)));
+
+  // Refresh continuity from the server without clobbering unsaved scene draft
+  // edits: only continuity-related fields are merged back into the draft.
+  const refreshContinuity = async () => {
+    const next = await api<ScenesDashboard>(`/stories/${slug}/scenes${data?.selectedChapter ? `?chapter=${data.selectedChapter}` : ""}`);
+    setData(next);
+    setDraft((current) =>
+      current.map((scene) => {
+        const fresh = next.manifest?.scenes.find((item) => item.id === scene.id);
+        return fresh ? { ...scene, continuity: fresh.continuity, visualChanges: fresh.visualChanges } : scene;
+      }),
+    );
+  };
+
+  const saveSceneContinuity = async (scene: Scene, input: Omit<VisualContinuityOverrideEntryInput, "sceneId">) => {
+    if (!data?.selectedChapter) return;
+    try {
+      setContinuityBusy(true);
+      setError("");
+      await updateSceneContinuity(slug, data.selectedChapter, scene.id, input);
+      await refreshContinuity();
+    } catch (value) {
+      setError(message(value));
+    } finally {
+      setContinuityBusy(false);
+    }
+  };
+
+  const resetSceneContinuityOverride = async (scene: Scene) => {
+    if (!data?.selectedChapter) return;
+    try {
+      setContinuityBusy(true);
+      setError("");
+      await resetSceneContinuity(slug, data.selectedChapter, scene.id);
+      await refreshContinuity();
+    } catch (value) {
+      setError(message(value));
+    } finally {
+      setContinuityBusy(false);
+    }
+  };
 
   if (error && !data) return <LoadFailure error={error} />;
   if (!data) return <Loading />;
@@ -1934,6 +2242,7 @@ export function ScenesPage({ slug, onJob, navigate, initialData }: { slug: strin
               <p>
                 {data.manifest.manuallyEdited ? `Manual revision ${data.manifest.manualRevision}` : "Planner draft"} · {formatDuration(data.manifest.durationSeconds)}
               </p>
+              <PreviousHandoffBadge handoff={data.previousHandoff} />
             </div>
             <button className="button primary" disabled={saving} onClick={save}>
               {saving ? "Saving…" : "Save scene edits"}
@@ -2317,6 +2626,14 @@ export function ScenesPage({ slug, onJob, navigate, initialData }: { slug: strin
                         </div>
                       </div>
                     </details>
+
+                    <SceneContinuityPanel
+                      key={`${scene.id}:${scene.continuity?.manualOverride?.revision ?? 0}`}
+                      scene={scene}
+                      busy={continuityBusy}
+                      onSave={(input) => void saveSceneContinuity(scene, input)}
+                      onReset={() => void resetSceneContinuityOverride(scene)}
+                    />
 
                     <Field label="Artwork prompt">
                       <textarea

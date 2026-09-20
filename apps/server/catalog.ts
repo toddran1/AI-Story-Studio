@@ -20,6 +20,8 @@ import { exportManifestSchema } from "../../src/audio/audiobook.js";
 import { FfmpegTools } from "../../src/audio/ffmpeg.js";
 import { videoExportManifestSchema } from "../../src/video/video-export.js";
 import { SceneManifest, artworkSettingsSchema, sceneManifestSchema, sceneSettingsSchema } from "../../src/scenes/types.js";
+import { sceneContentFingerprint } from "../../src/scenes/manifest.js";
+import { resolveChapterVisualContinuity, ResolvedSceneContinuity } from "../../src/visual-canon/continuity.js";
 import { resolveSceneVisualEntity } from "../../src/scenes/identity.js";
 import { loadLatestProduction } from "../../src/production/manifest.js";
 import { ProductionManifest } from "../../src/production/types.js";
@@ -471,6 +473,13 @@ export async function getScenesDashboard(root: string, slug: string, selectedCha
         scenes: Array<
           SceneManifest["scenes"][number] & {
             imageUrl?: string;
+            continuity?: {
+              startState: ResolvedSceneContinuity["startState"];
+              changes?: ResolvedSceneContinuity["changes"];
+              endState: ResolvedSceneContinuity["endState"];
+              referenceDecision?: ResolvedSceneContinuity["referenceDecision"];
+              manualOverride?: ResolvedSceneContinuity["manualOverride"];
+            };
             artwork: SceneManifest["scenes"][number]["artwork"] & {
               versions: Array<
                 SceneManifest["scenes"][number]["artwork"]["versions"][number] & { imageUrl?: string }
@@ -481,11 +490,25 @@ export async function getScenesDashboard(root: string, slug: string, selectedCha
       })
     | undefined;
 
+  let previousHandoff:
+    | { chapter: number; sceneId: string; stateFingerprint: string; hasApprovedArtwork: boolean; usedAsReference: boolean; origin: string }
+    | undefined;
+
   if (chapterNumber !== undefined) {
     const raw = await readJsonIfExists<SceneManifest>(storyPaths(root, slug, chapterNumber).scenesManifest);
     const parsed = raw ? sceneManifestSchema.safeParse(raw) : undefined;
     if (parsed?.success) {
       const bible = await getStoryBible(root, slug).catch(() => undefined);
+      // Recompute-on-read visual continuity for the loaded chapter (bounded:
+      // manifest deltas + previous handoff + manual overlay).
+      const continuity = await resolveChapterVisualContinuity({
+        root,
+        slug,
+        chapter: chapterNumber,
+        manifest: parsed.data,
+        contentFingerprints: Object.fromEntries(parsed.data.scenes.map((scene) => [scene.id, sceneContentFingerprint(scene)])),
+      });
+      const continuityByScene = new Map(continuity.resolved.perScene.map((entry) => [entry.sceneId, entry]));
       const scenes = await mapLimit(parsed.data.scenes, 8, async (scene) => {
         const hasMain =
           scene.artwork.status === "complete" &&
@@ -504,11 +527,21 @@ export async function getScenesDashboard(root: string, slug: string, selectedCha
         const resolvedCharacters = (scene.characters ?? []).map((charName) =>
           resolveSceneVisualEntity(charName, bible?.canonicalEntities ?? [], visualProfiles)
         );
+        const continuityEntry = continuityByScene.get(scene.id);
         return {
           ...scene,
           resolvedCharacters,
           imageUrl: hasMain
             ? `/api/stories/${slug}/chapters/${chapterNumber}/scenes/${scene.id}.png`
+            : undefined,
+          continuity: continuityEntry
+            ? {
+                startState: continuityEntry.startState,
+                changes: continuityEntry.changes,
+                endState: continuityEntry.endState,
+                referenceDecision: continuityEntry.referenceDecision,
+                manualOverride: continuityEntry.manualOverride,
+              }
             : undefined,
           artwork: {
             ...scene.artwork,
@@ -516,6 +549,17 @@ export async function getScenesDashboard(root: string, slug: string, selectedCha
           },
         };
       });
+      if (continuity.previous) {
+        const firstDecision = continuity.resolved.perScene[0]?.referenceDecision;
+        previousHandoff = {
+          chapter: continuity.previous.chapter,
+          sceneId: continuity.previous.sceneId,
+          stateFingerprint: continuity.previous.stateFingerprint,
+          hasApprovedArtwork: Boolean(continuity.previous.referenceArtwork),
+          usedAsReference: firstDecision?.kind === "previous-chapter" && firstDecision.used,
+          origin: continuity.previous.origin,
+        };
+      }
       manifest = { ...parsed.data, scenes };
     }
   }
@@ -548,6 +592,7 @@ export async function getScenesDashboard(root: string, slug: string, selectedCha
       artworkReady: chapters.filter((item) => item.artwork === "complete").length,
     },
     manifest,
+    previousHandoff,
     artDirection,
     visualProfiles: Object.values(visualProfiles),
   };

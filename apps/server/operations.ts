@@ -44,6 +44,8 @@ import { renderStoredChapterVideo } from "../../src/video/chapter-video.js";
 import { assembleVideoExport, FfmpegVideoExportProcessor, VideoExportProcessor } from "../../src/video/video-export.js";
 import { LLMProvider } from "../../src/llm/provider.js";
 import { planStoredScenes, updateStoredSceneManifest } from "../../src/scenes/manifest.js";
+import { SceneManifest, sceneManifestSchema } from "../../src/scenes/types.js";
+import { persistChapterVisualContinuity, removeVisualContinuityOverride, upsertVisualContinuityOverride, visualContinuityOverrideEntrySchema } from "../../src/visual-canon/continuity.js";
 import { generateStoredArtwork, reviewStoredArtwork, reviewStoredArtworkVersion } from "../../src/artwork/generator.js";
 import { ImageProvider } from "../../src/artwork/provider.js";
 import { ImageProviderSource, resolveImageProvider } from "../../src/artwork/providers.js";
@@ -1145,6 +1147,40 @@ export class StudioOperations {
   }
 
   async updateScenes(slug: string, chapter: number, scenes: unknown) { slugSchema.parse(slug); return withStoryLock(this.root, slug, "manual scene edit", async () => { const story = await loadStory(storyPaths(this.root, slug, chapter).storyConfig); return updateStoredSceneManifest({ root: this.root, story, chapter, scenes }); }); }
+  async updateSceneContinuity(slug: string, chapter: number, sceneId: string, raw: unknown) {
+    slugSchema.parse(slug);
+    const input = visualContinuityOverrideEntrySchema.omit({ revision: true, updatedAt: true }).parse({ ...(typeof raw === "object" && raw !== null ? raw : {}), sceneId });
+    return withStoryLock(this.root, slug, "manual visual continuity override", async () => {
+      const overlay = await upsertVisualContinuityOverride({ root: this.root, slug, chapter, entry: visualContinuityOverrideEntrySchema.parse({ ...input, revision: 1, updatedAt: new Date().toISOString() }) });
+      await this.afterContinuityOverride(slug, chapter);
+      return overlay;
+    });
+  }
+  async deleteSceneContinuity(slug: string, chapter: number, sceneId: string) {
+    slugSchema.parse(slug);
+    return withStoryLock(this.root, slug, "manual visual continuity override reset", async () => {
+      const overlay = await removeVisualContinuityOverride({ root: this.root, slug, chapter, sceneId });
+      await this.afterContinuityOverride(slug, chapter);
+      return overlay;
+    });
+  }
+  private async afterContinuityOverride(slug: string, chapter: number) {
+    const paths = storyPaths(this.root, slug, chapter);
+    // Targeted invalidation: the overlay fingerprint feeds the scene-planning
+    // input fingerprint, so mark this chapter's scene plan stale (not missing).
+    const rawChapter = await readJsonIfExists<Chapter>(paths.chapterMeta);
+    if (rawChapter) {
+      const metadata = chapterSchema.parse(rawChapter);
+      if (metadata.stages.scenePlanning.status === "complete") {
+        metadata.stages.scenePlanning = { ...metadata.stages.scenePlanning, staleReason: "Manual visual continuity override changed" };
+        metadata.updatedAt = new Date().toISOString();
+        await atomicWriteJson(paths.chapterMeta, metadata);
+      }
+    }
+    const rawManifest = await readJsonIfExists<SceneManifest>(paths.scenesManifest);
+    const manifest = rawManifest ? sceneManifestSchema.safeParse(rawManifest) : undefined;
+    if (manifest?.success) await persistChapterVisualContinuity({ root: this.root, slug, chapter, manifest: manifest.data, origin: "manual" });
+  }
   async reviewArtwork(slug: string, chapter: number, sceneId: string, review: unknown) { slugSchema.parse(slug); return withStoryLock(this.root, slug, "artwork review", async () => { const story = await loadStory(storyPaths(this.root, slug, chapter).storyConfig); return reviewStoredArtwork({ root: this.root, story, chapter, sceneId, review }); }); }
   async reviewArtworkVersion(slug: string, chapter: number, sceneId: string, versionId: string, review?: unknown) {
     slugSchema.parse(slug);
