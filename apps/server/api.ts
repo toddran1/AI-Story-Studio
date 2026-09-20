@@ -9,7 +9,7 @@ import { z } from "zod";
 import { getAudioDashboard, getCanonicalEntitiesPage, getCanonicalEntityDetail, getChapter, getChapterPage, getContinuityReview, getMinorReferencesPage, getOutputsLibrary, getQaDashboard, getScenesDashboard, getStoryBibleView, getStoryDashboard, getStoryOverview, getVideoDashboard, listStories, updateStorySettings, chapterFilterSchema } from "./catalog.js";
 import { JobConflictError } from "./job-manager.js";
 import { StudioOperations } from "./operations.js";
-import { exportPaths, previewPaths, sceneImagePath, sceneVersionImagePath, storyPaths, videoExportPaths, visualProfileRefPath, voicePreviewPaths } from "../../src/storage/paths.js";
+import { exportPaths, mediaDownloadName, padChapterNumber, previewPaths, rangeMediaDownloadName, sanitizeFilenamePart, sceneImagePath, sceneVersionImagePath, storyPaths, videoExportPaths, visualProfileRefPath, voicePreviewPaths } from "../../src/storage/paths.js";
 import { SceneManifest, sceneManifestSchema } from "../../src/scenes/types.js";
 import { readJsonIfExists } from "../../src/storage/story-files.js";
 import { BatchValidationError, ConfigurationError, ProviderError, SceneError, StorageError } from "../../src/pipeline/errors.js";
@@ -127,12 +127,12 @@ export function createApiHandler(operations: StudioOperations) {
       if (summarySceneRegenerateMatch && request.method === "POST") { z.object({}).strict().parse(await jsonBody(request)); return send(response, 202, await operations.regenerateSummaryScene(summarySceneRegenerateMatch[1]!, summarySceneRegenerateMatch[2]!, summarySceneRegenerateMatch[3]!)); }
       const summaryImageMatch = /^\/api\/stories\/([a-z0-9-]+)\/summaries\/(sum_[a-f0-9-]{36})\/artwork\/(scene-\d{3})$/.exec(url.pathname);
       if (summaryImageMatch && request.method === "PUT") { const input = z.object({ review: z.enum(["unreviewed", "approved", "rejected", "needs-regeneration"]) }).strict().parse(await jsonBody(request)); return send(response, 200, { summary: await operations.reviewSummaryArtwork(summaryImageMatch[1]!, summaryImageMatch[2]!, summaryImageMatch[3]!, input.review) }); }
-      if (summaryImageMatch && request.method === "GET") { const artifact = await operations.summaryVisuals().export(summaryImageMatch[1]!, summaryImageMatch[2]!, "artwork", summaryImageMatch[3]!); if (url.searchParams.get("download") === "1") response.setHeader("content-disposition", `attachment; filename="${artifact.name}"`); return sendFile(request, response, artifact.path, artifact.contentType); }
+      if (summaryImageMatch && request.method === "GET") { const artifact = await operations.summaryVisuals().export(summaryImageMatch[1]!, summaryImageMatch[2]!, "artwork", summaryImageMatch[3]!); const downloadName = url.searchParams.get("download") === "1" ? artifact.name : undefined; return sendFile(request, response, artifact.path, artifact.contentType, { downloadName }); }
       const summaryExportMatch = /^\/api\/stories\/([a-z0-9-]+)\/summaries\/(sum_[a-f0-9-]{36})\/export\/(summary|narration|audio|video)$/.exec(url.pathname);
       if (summaryExportMatch && request.method === "GET") {
         const artifact = summaryExportMatch[3] === "video" ? await operations.summaryVisuals().export(summaryExportMatch[1]!, summaryExportMatch[2]!, "video") : await operations.summaryMedia().export(summaryExportMatch[1]!, summaryExportMatch[2]!, summaryExportMatch[3]!);
-        if (url.searchParams.get("download") === "1") response.setHeader("content-disposition", `attachment; filename="${artifact.name}"`);
-        return sendFile(request, response, artifact.path, artifact.contentType);
+        const downloadName = url.searchParams.get("download") === "1" ? artifact.name : undefined;
+        return sendFile(request, response, artifact.path, artifact.contentType, { downloadName });
       }
       const dashboardMatch = /^\/api\/stories\/([a-z0-9-]+)\/dashboard$/.exec(url.pathname);
       if (dashboardMatch && request.method === "GET") return send(response, 200, await getStoryDashboard(operations.root, dashboardMatch[1]!));
@@ -182,7 +182,8 @@ export function createApiHandler(operations: StudioOperations) {
         if (!chapter.audioAvailable) return send(response, 404, { error: "Chapter audio was not found" });
         const paths = storyPaths(operations.root, audioMatch[1]!, chapterNumber);
         const audioFile = (await exists(paths.audio)) ? paths.audio : paths.audioRaw;
-        return sendFile(request, response, audioFile, "audio/mpeg");
+        const downloadName = url.searchParams.get("download") === "1" ? mediaDownloadName(audioMatch[1]!, chapterNumber, "mp3") : undefined;
+        return sendFile(request, response, audioFile, "audio/mpeg", { downloadName });
       }
       const ttsQualityMatch = /^\/api\/stories\/([a-z0-9-]+)\/chapters\/(\d+)\/tts-quality$/.exec(url.pathname);
       if (ttsQualityMatch && request.method === "GET") return send(response, 200, await operations.getChapterTtsQuality(ttsQualityMatch[1]!, chapterParam(ttsQualityMatch[2]!)));
@@ -196,18 +197,33 @@ export function createApiHandler(operations: StudioOperations) {
       }
       const segmentAudioMatch = /^\/api\/stories\/([a-z0-9-]+)\/chapters\/(\d+)\/audio-segments\/(\d{1,4})\.mp3$/.exec(url.pathname);
       if (segmentAudioMatch && request.method === "GET") {
-        const file = join(storyPaths(operations.root, segmentAudioMatch[1]!, chapterParam(segmentAudioMatch[2]!)).segments, `${segmentAudioMatch[3]!.padStart(4, "0")}.mp3`);
+        const chapterNumber = chapterParam(segmentAudioMatch[2]!);
+        const segmentNumber = Number(segmentAudioMatch[3]!);
+        const file = join(storyPaths(operations.root, segmentAudioMatch[1]!, chapterNumber).segments, `${segmentAudioMatch[3]!.padStart(4, "0")}.mp3`);
         if (!(await exists(file))) return send(response, 404, { error: "Chapter audio segment was not found" });
-        return sendFile(request, response, file, "audio/mpeg");
+        const downloadName = url.searchParams.get("download") === "1" ? `${sanitizeFilenamePart(segmentAudioMatch[1]!)}-${padChapterNumber(chapterNumber, 4)}-seg-${padChapterNumber(segmentNumber, 4)}.mp3` : undefined;
+        return sendFile(request, response, file, "audio/mpeg", { downloadName });
       }
       const subtitleFileMatch = /^\/api\/stories\/([a-z0-9-]+)\/chapters\/(\d+)\/subtitles\.(srt|vtt)$/.exec(url.pathname);
-      if (subtitleFileMatch && request.method === "GET") { const chapterNumber = chapterParam(subtitleFileMatch[2]!); const chapter = await getChapter(operations.root, subtitleFileMatch[1]!, chapterNumber); if (!chapter.subtitles) return send(response, 404, { error: "Chapter subtitles were not found" }); const paths = storyPaths(operations.root, subtitleFileMatch[1]!, chapterNumber); return sendFile(request, response, subtitleFileMatch[3] === "srt" ? paths.subtitlesSrt : paths.subtitlesVtt, subtitleFileMatch[3] === "srt" ? "application/x-subrip" : "text/vtt; charset=utf-8"); }
+      if (subtitleFileMatch && request.method === "GET") {
+        const chapterNumber = chapterParam(subtitleFileMatch[2]!); const chapter = await getChapter(operations.root, subtitleFileMatch[1]!, chapterNumber);
+        if (!chapter.subtitles) return send(response, 404, { error: "Chapter subtitles were not found" });
+        const paths = storyPaths(operations.root, subtitleFileMatch[1]!, chapterNumber);
+        const ext = subtitleFileMatch[3] as "srt" | "vtt";
+        const downloadName = url.searchParams.get("download") === "1" ? mediaDownloadName(subtitleFileMatch[1]!, chapterNumber, ext) : undefined;
+        return sendFile(request, response, ext === "srt" ? paths.subtitlesSrt : paths.subtitlesVtt, ext === "srt" ? "application/x-subrip" : "text/vtt; charset=utf-8", { downloadName });
+      }
       const subtitleEditMatch = /^\/api\/stories\/([a-z0-9-]+)\/chapters\/(\d+)\/subtitles$/.exec(url.pathname);
       if (subtitleEditMatch && request.method === "PUT") return send(response, 200, await operations.editSubtitles(subtitleEditMatch[1]!, chapterParam(subtitleEditMatch[2]!), await jsonBody(request)));
       const subtitleResetMatch = /^\/api\/stories\/([a-z0-9-]+)\/chapters\/(\d+)\/subtitles\/reset$/.exec(url.pathname);
       if (subtitleResetMatch && request.method === "POST") return send(response, 200, await operations.resetSubtitles(subtitleResetMatch[1]!, chapterParam(subtitleResetMatch[2]!)));
       const chapterVideoMatch = /^\/api\/stories\/([a-z0-9-]+)\/chapters\/(\d+)\/video$/.exec(url.pathname);
-      if (chapterVideoMatch && request.method === "GET") { const chapterNumber = chapterParam(chapterVideoMatch[2]!); const chapter = await getChapter(operations.root, chapterVideoMatch[1]!, chapterNumber); if (!chapter.videoUrl) return send(response, 404, { error: "Chapter video was not found" }); return sendFile(request, response, storyPaths(operations.root, chapterVideoMatch[1]!, chapterNumber).video, "video/mp4"); }
+      if (chapterVideoMatch && request.method === "GET") {
+        const chapterNumber = chapterParam(chapterVideoMatch[2]!); const chapter = await getChapter(operations.root, chapterVideoMatch[1]!, chapterNumber);
+        if (!chapter.videoUrl) return send(response, 404, { error: "Chapter video was not found" });
+        const downloadName = url.searchParams.get("download") === "1" ? mediaDownloadName(chapterVideoMatch[1]!, chapterNumber, "mp4") : undefined;
+        return sendFile(request, response, storyPaths(operations.root, chapterVideoMatch[1]!, chapterNumber).video, "video/mp4", { downloadName });
+      }
       const sceneImageMatch = /^\/api\/stories\/([a-z0-9-]+)\/chapters\/(\d+)\/scenes\/(scene-\d{3})\.png$/.exec(url.pathname);
       if (sceneImageMatch && request.method === "GET") { const chapterNumber = chapterParam(sceneImageMatch[2]!); const raw = await readJsonIfExists<SceneManifest>(storyPaths(operations.root, sceneImageMatch[1]!, chapterNumber).scenesManifest); const manifest = raw ? sceneManifestSchema.safeParse(raw) : undefined; const scene = manifest?.success ? manifest.data.scenes.find((item) => item.id === sceneImageMatch[3]) : undefined; if (!scene || scene.artwork.status !== "complete") return send(response, 404, { error: "Scene artwork was not found" }); return sendFile(request, response, sceneImagePath(operations.root, sceneImageMatch[1]!, chapterNumber, sceneImageMatch[3]!), "image/png"); }
       const sceneVersionImageMatch = /^\/api\/stories\/([a-z0-9-]+)\/chapters\/(\d+)\/scenes\/(scene-\d{3})\/versions\/(v\d+)\.png$/.exec(url.pathname);
@@ -360,10 +376,16 @@ export function createApiHandler(operations: StudioOperations) {
       if (exportMatch && request.method === "GET") {
         const from = chapterParam(exportMatch[2]!); const to = chapterParam(exportMatch[3]!); const format = exportMatch[4] as "mp3" | "m4b";
         if (to < from) throw new HttpError("Invalid export range", 400);
-        return sendFile(request, response, exportPaths(operations.root, exportMatch[1]!, from, to, format).output, format === "m4b" ? "audio/mp4" : "audio/mpeg");
+        const downloadName = rangeMediaDownloadName(exportMatch[1]!, from, to, format);
+        return sendFile(request, response, exportPaths(operations.root, exportMatch[1]!, from, to, format).output, format === "m4b" ? "audio/mp4" : "audio/mpeg", { downloadName });
       }
       const videoExportMatch = /^\/api\/stories\/([a-z0-9-]+)\/video-exports\/(\d+)-(\d+)\.mp4$/.exec(url.pathname);
-      if (videoExportMatch && request.method === "GET") { const from = chapterParam(videoExportMatch[2]!); const to = chapterParam(videoExportMatch[3]!); if (to < from) throw new HttpError("Invalid video export range", 400); return sendFile(request, response, videoExportPaths(operations.root, videoExportMatch[1]!, from, to).output, "video/mp4"); }
+      if (videoExportMatch && request.method === "GET") {
+        const from = chapterParam(videoExportMatch[2]!); const to = chapterParam(videoExportMatch[3]!);
+        if (to < from) throw new HttpError("Invalid video export range", 400);
+        const downloadName = rangeMediaDownloadName(videoExportMatch[1]!, from, to, "mp4");
+        return sendFile(request, response, videoExportPaths(operations.root, videoExportMatch[1]!, from, to).output, "video/mp4", { downloadName });
+      }
       const bibleMatch = /^\/api\/stories\/([a-z0-9-]+)\/story-bible$/.exec(url.pathname);
       if (bibleMatch && request.method === "GET") return send(response, 200, await getStoryBibleView(operations.root, bibleMatch[1]!));
       if (bibleMatch && request.method === "POST") return send(response, 201, await operations.addBibleEntry(bibleMatch[1]!, await jsonBody(request)));
@@ -468,7 +490,12 @@ export function createApiHandler(operations: StudioOperations) {
       const voicePreviewJobMatch = /^\/api\/stories\/([a-z0-9-]+)\/jobs\/voice-preview$/.exec(url.pathname);
       if (voicePreviewJobMatch && request.method === "POST") return send(response, 202, operations.startVoicePreview(voicePreviewJobMatch[1]!, await jsonBody(request)));
       const voicePreviewMatch = /^\/api\/stories\/([a-z0-9-]+)\/voice-previews\/([a-f0-9-]{36})\.mp3$/.exec(url.pathname);
-      if (voicePreviewMatch && request.method === "GET") { const paths = voicePreviewPaths(operations.root, voicePreviewMatch[1]!, voicePreviewMatch[2]!); if (!(await readJsonIfExists(paths.manifest))) return send(response, 404, { error: "Voice preview was not found" }); return sendFile(request, response, paths.audio, "audio/mpeg"); }
+      if (voicePreviewMatch && request.method === "GET") {
+        const paths = voicePreviewPaths(operations.root, voicePreviewMatch[1]!, voicePreviewMatch[2]!);
+        if (!(await readJsonIfExists(paths.manifest))) return send(response, 404, { error: "Voice preview was not found" });
+        const downloadName = url.searchParams.get("download") === "1" ? `${sanitizeFilenamePart(voicePreviewMatch[1]!)}-voice-preview-${voicePreviewMatch[2]!.slice(0, 8)}.mp3` : undefined;
+        return sendFile(request, response, paths.audio, "audio/mpeg", { downloadName });
+      }
       const previewResult = /^\/api\/stories\/([a-z0-9-]+)\/previews\/([A-Za-z0-9T_-]+)$/.exec(url.pathname);
       if (previewResult && request.method === "GET") return send(response, 200, await operations.getPreview(previewResult[1]!, previewResult[2]!));
       const previewAudio = /^\/api\/stories\/([a-z0-9-]+)\/previews\/([A-Za-z0-9T_-]+)\/audio-([ab])$/.exec(url.pathname);
@@ -507,11 +534,15 @@ export function validateLocalRequest(request: Pick<IncomingMessage, "method" | "
 }
 
 function send(response: ServerResponse, status: number, value: unknown): true { const output = JSON.stringify(value); response.writeHead(status, { "content-type": "application/json; charset=utf-8", "content-length": Buffer.byteLength(output), "cache-control": "no-store", "x-content-type-options": "nosniff" }); response.end(output); return true; }
-async function sendFile(request: IncomingMessage, response: ServerResponse, path: string, contentType: string): Promise<true> {
+async function sendFile(request: IncomingMessage, response: ServerResponse, path: string, contentType: string, options?: { downloadName?: string }): Promise<true> {
   let info; try { info = await stat(path); } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return send(response, 404, { error: "File not found" }); throw error; }
   const range = parseRange(request.headers.range, info.size); const status = range ? 206 : 200; const start = range?.start ?? 0; const end = range?.end ?? info.size - 1;
-  response.writeHead(status, { "content-type": contentType, "content-length": Math.max(0, end - start + 1), "cache-control": "no-store", "accept-ranges": "bytes",
-    "x-content-type-options": "nosniff", ...(range ? { "content-range": `bytes ${start}-${end}/${info.size}` } : {}) });
+  const headers: Record<string, string | number> = {
+    "content-type": contentType, "content-length": Math.max(0, end - start + 1), "cache-control": "no-store", "accept-ranges": "bytes",
+    "x-content-type-options": "nosniff", ...(range ? { "content-range": `bytes ${start}-${end}/${info.size}` } : {}),
+  };
+  if (options?.downloadName) headers["content-disposition"] = `attachment; filename="${options.downloadName}"`;
+  response.writeHead(status, headers);
   const stream = createReadStream(path, { start, end }); stream.on("error", (error) => response.destroy(error)); stream.pipe(response); return true;
 }
 async function body(request: IncomingMessage, limit = MAX_BODY_BYTES): Promise<Buffer> { const parts: Buffer[] = []; let size = 0; for await (const chunk of request) { const part = Buffer.from(chunk); size += part.length; if (size > limit) throw new HttpError(`Request body exceeds ${Math.floor(limit / 1_000_000)} MB`, 413); parts.push(part); } return Buffer.concat(parts); }
