@@ -1443,5 +1443,34 @@ describe("TTS quality guard UI", () => {
       expect(bottomMini).toContain("<span>2/4</span>");
       expect(bottomMini).not.toContain('disabled=""');
     });
+
+    it("verifies stylesheets and web source files have no duplicate copies or legacy hand-written pagination divs", async () => {
+      const fs = await import("node:fs");
+      const path = await import("node:path");
+
+      const namesCss = fs.readFileSync(path.resolve(process.cwd(), "apps/web/src/names-localization.css"), "utf8");
+      const queueCss = fs.readFileSync(path.resolve(process.cwd(), "apps/web/src/queue-extras.css"), "utf8");
+      const stylesCss = fs.readFileSync(path.resolve(process.cwd(), "apps/web/src/styles.css"), "utf8");
+
+      // No duplicated entire stylesheets (which occurred as multi-line copies)
+      const namesLines = namesCss.trim().split("\n");
+      expect(namesLines.length).toBe(1);
+      const queueLines = queueCss.trim().split("\n");
+      expect(queueLines.length).toBe(1);
+
+      // styles.css has exactly one .pagination base declaration
+      const paginationBaseMatches = stylesCss.match(/\.pagination\{display:flex/g);
+      expect(paginationBaseMatches?.length).toBe(1);
+
+      // App.tsx has no hand-written <div className="pagination">
+      const appTsx = fs.readFileSync(path.resolve(process.cwd(), "apps/web/src/App.tsx"), "utf8");
+      expect(appTsx).not.toContain('className="pagination"');
+      expect(appTsx).not.toContain('className="localization-pagination"');
+      expect(appTsx).not.toContain('className="queue-mini-pages"');
+
+      // NamesLocalizationPage.tsx has no hand-written <div className="localization-pagination">
+      const namesPageTsx = fs.readFileSync(path.resolve(process.cwd(), "apps/web/src/NamesLocalizationPage.tsx"), "utf8");
+      expect(namesPageTsx).not.toContain('className="localization-pagination"');
+    });
   });
 });
