@@ -106,11 +106,42 @@ describe("central aspect-ratio composition guidance", () => {
 
   it("resolves aspect ratio with legacy size fallback support", () => {
     expect(resolveArtworkAspectRatio({ artwork: { aspectRatio: "9:16", size: "1536x1024" } as any })).toBe("9:16");
+  it("resolves aspect ratio with modern aspectRatio as authoritative over legacy size", () => {
+    // Explicit 16:9 wins over legacy portrait/square size
+    expect(resolveArtworkAspectRatio({ artwork: { aspectRatio: "16:9", size: "1024x1536" } as any })).toBe("16:9");
+    expect(resolveArtworkAspectRatio({ artwork: { aspectRatio: "16:9", size: "1024x1024" } as any })).toBe("16:9");
+    expect(resolveArtworkAspectRatio({ artwork: { aspectRatio: "16:9", size: "1536x1024" } as any })).toBe("16:9");
+
+    // Explicit 1:1 wins over legacy landscape size
     expect(resolveArtworkAspectRatio({ artwork: { aspectRatio: "1:1", size: "1536x1024" } as any })).toBe("1:1");
     // When aspectRatio is default 16:9, legacy size 1024x1536 resolves to 9:16
     expect(resolveArtworkAspectRatio({ artwork: { aspectRatio: "16:9", size: "1024x1536" } as any })).toBe("9:16");
     expect(resolveArtworkAspectRatio({ artwork: { aspectRatio: "16:9", size: "1024x1024" } as any })).toBe("1:1");
     expect(resolveArtworkAspectRatio({ artwork: { aspectRatio: "16:9", size: "1536x1024" } as any })).toBe("16:9");
+
+    // Explicit 9:16 wins over legacy square size
+    expect(resolveArtworkAspectRatio({ artwork: { aspectRatio: "9:16", size: "1024x1024" } as any })).toBe("9:16");
+  });
+
+  it("falls back to Art Direction aspect ratio when modern artwork.aspectRatio is absent", () => {
+    expect(resolveArtworkAspectRatio({ artwork: { size: "1536x1024" } as any }, { aspectRatio: "9:16" })).toBe("9:16");
+    expect(resolveArtworkAspectRatio({ artwork: { size: "1024x1536" } as any }, { aspectRatio: "1:1" })).toBe("1:1");
+  });
+
+  it("infers aspect ratio from legacy size when modern aspectRatio is absent", () => {
+    // Legacy portrait fallback
+    expect(resolveArtworkAspectRatio({ artwork: { size: "1024x1536" } as any })).toBe("9:16");
+
+    // Legacy square fallback
+    expect(resolveArtworkAspectRatio({ artwork: { size: "1024x1024" } as any })).toBe("1:1");
+
+    // Legacy landscape fallback
+    expect(resolveArtworkAspectRatio({ artwork: { size: "1536x1024" } as any })).toBe("16:9");
+  });
+
+  it("defaults to 16:9 when neither modern aspectRatio nor legacy size is available", () => {
+    expect(resolveArtworkAspectRatio({ artwork: {} as any })).toBe("16:9");
+    expect(resolveArtworkAspectRatio({})).toBe("16:9");
   });
 });
 
@@ -151,6 +182,22 @@ describe("Visual Canon prompt integration with aspect ratio", () => {
     const resolved = resolveVisualCanonPrompt({ scene, story, bible, artDirection, visualProfiles: {} });
     expect(resolved.prompt).toContain("COMPOSITION: 1:1 square frame.");
     expect(resolved.prompt).toContain("square canvas");
+  });
+
+  it("proves conflicting legacy size does not override modern 16:9 aspectRatio in resolved prompt", () => {
+    const story: Story = {
+      ...testStory(),
+      artwork: {
+        ...testStory().artwork,
+        aspectRatio: "16:9",
+        size: "1024x1536",
+      },
+    };
+    const resolved = resolveVisualCanonPrompt({ scene, story, bible, artDirection, visualProfiles: {} });
+    expect(resolved.prompt).toContain("COMPOSITION: 16:9 landscape cinematic frame.");
+    expect(resolved.prompt).toContain("landscape-safe composition");
+    expect(resolved.prompt).not.toContain("COMPOSITION: 9:16 portrait frame.");
+    expect(resolved.prompt).not.toContain("portrait-safe composition");
   });
 });
 

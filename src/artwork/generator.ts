@@ -11,6 +11,7 @@ import { loadCharacterVisualReferences } from "../scenes/visual-references.js";
 import { artworkReviewSchema, ArtworkVersion, Scene, SceneManifest, sceneManifestSchema } from "../scenes/types.js";
 import { ImageAspectRatio, ImageProvider, ImageReferenceImage } from "./provider.js";
 import { artworkCompositionGuidance } from "./composition.js";
+import { artworkCompositionGuidance, resolveArtworkAspectRatio } from "./composition.js";
 import { withRetry } from "../batch/retry.js";
 import { retryConfigSchema } from "../batch/types.js";
 import { loadVisualProfiles } from "../visual-canon/profiles.js";
@@ -606,6 +607,9 @@ export function artworkPrompt(
 ) {
   const resolvedRatio: ImageAspectRatio =
     aspectRatio ?? (size === "1024x1536" ? "9:16" : size === "1024x1024" ? "1:1" : "16:9");
+  const resolvedRatio = resolveArtworkAspectRatio({
+    artwork: { aspectRatio, size },
+  });
   return [
     `STORY-WIDE ART DIRECTION: ${style}`,
     `SCENE: ${scene.visualPrompt}`,

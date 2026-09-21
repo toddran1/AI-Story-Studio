@@ -29,19 +29,51 @@ export function artworkCompositionGuidance(aspectRatio: ImageAspectRatio = "16:9
 
 /** Resolve the effective aspect ratio for composition guidance, honoring configured artwork
  * aspectRatio with fallback to legacy size dimensions if aspectRatio was left at default. */
+const VALID_ASPECT_RATIOS = new Set<string>(["16:9", "1:1", "9:16"]);
+
+/** Resolve the effective aspect ratio for composition guidance.
+ * Precedence:
+ * 1. Modern story.artwork.aspectRatio (authoritative whenever present and valid: 16:9, 1:1, 9:16)
+ * 2. Art Direction aspect ratio fallback
+ * 3. Legacy artwork.size inference (e.g. 1024x1536 -> 9:16, 1024x1024 -> 1:1, 1536x1024 -> 16:9)
+ * 4. Default 16:9
+ */
 export function resolveArtworkAspectRatio(
   story: Pick<Story, "artwork">,
+  story: { artwork?: { aspectRatio?: string; size?: string } } | Pick<Story, "artwork">,
   artDirection?: { aspectRatio?: string }
 ): ImageAspectRatio {
   if (story.artwork?.aspectRatio && story.artwork.aspectRatio !== "16:9") {
     return story.artwork.aspectRatio;
+  // 1. Modern story.artwork.aspectRatio is authoritative whenever present and valid
+  if (story.artwork?.aspectRatio && VALID_ASPECT_RATIOS.has(story.artwork.aspectRatio)) {
+    return story.artwork.aspectRatio as ImageAspectRatio;
   }
   if (artDirection?.aspectRatio && artDirection.aspectRatio !== "16:9") {
+
+  // 2. Art Direction aspect ratio fallback
+  if (artDirection?.aspectRatio && VALID_ASPECT_RATIOS.has(artDirection.aspectRatio)) {
     return artDirection.aspectRatio as ImageAspectRatio;
   }
   // Check legacy size if aspectRatio was left at default "16:9"
   if (story.artwork?.size === "1024x1536") return "9:16";
   if (story.artwork?.size === "1024x1024") return "1:1";
   return story.artwork?.aspectRatio ?? (artDirection?.aspectRatio as ImageAspectRatio) ?? "16:9";
+
+  // 3. Legacy artwork.size inference
+  if (story.artwork?.size) {
+    if (story.artwork.size === "1024x1536") return "9:16";
+    if (story.artwork.size === "1024x1024") return "1:1";
+    if (story.artwork.size === "1536x1024") return "16:9";
+    const [width = 0, height = 0] = story.artwork.size.split("x").map(Number);
+    if (width > 0 && height > 0) {
+      if (width === height) return "1:1";
+      if (width < height) return "9:16";
+      return "16:9";
+    }
+  }
+
+  // 4. Default
+  return "16:9";
 }
 
