@@ -5,6 +5,7 @@ import { VisualEntityProfile, VisualReferenceImage } from "../domain/visual-prof
 import { Scene, SceneDirection, SceneOverrides, sceneDirectionSchema, sceneOverridesSchema } from "../scenes/types.js";
 import { resolveVisualEntities } from "../scenes/identity.js";
 import { fingerprint } from "../utils/hash.js";
+import { artworkCompositionGuidance, resolveArtworkAspectRatio } from "../artwork/composition.js";
 
 export type ResolvedEntityCanon = {
   entityId: string;
@@ -250,11 +251,10 @@ export function resolveVisualCanonPrompt(options: {
     promptParts.push(`SCENE OVERRIDES: ${overrideLines.join(" | ")}`);
   }
 
-  // Layer 6: Guard instructions & framing
-  const [width = 0, height = 0] = (story.artwork.size || "").split("x").map(Number);
-  const isPortrait = artDirection.aspectRatio === "9:16" || (width > 0 && height > 0 && width < height);
-  const orientation = isPortrait ? "portrait" : "landscape";
-  promptParts.push(`Create one polished still illustration. ${orientation}-safe composition. No text, captions, speech bubbles, logos, or watermarks.`);
+  // Layer 6: Aspect-ratio-aware composition guidance & guard instructions
+  const aspectRatio = resolveArtworkAspectRatio(story, artDirection);
+  promptParts.push(artworkCompositionGuidance(aspectRatio));
+  promptParts.push("Create one polished still illustration. No text, captions, speech bubbles, logos, or watermarks.");
 
   const prompt = promptParts.filter(Boolean).join("\n\n");
 

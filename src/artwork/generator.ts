@@ -9,7 +9,8 @@ import { fingerprint } from "../utils/hash.js";
 import { sceneContentFingerprint } from "../scenes/manifest.js";
 import { loadCharacterVisualReferences } from "../scenes/visual-references.js";
 import { artworkReviewSchema, ArtworkVersion, Scene, SceneManifest, sceneManifestSchema } from "../scenes/types.js";
-import { ImageProvider, ImageReferenceImage } from "./provider.js";
+import { ImageAspectRatio, ImageProvider, ImageReferenceImage } from "./provider.js";
+import { artworkCompositionGuidance } from "./composition.js";
 import { withRetry } from "../batch/retry.js";
 import { retryConfigSchema } from "../batch/types.js";
 import { loadVisualProfiles } from "../visual-canon/profiles.js";
@@ -600,10 +601,11 @@ export function artworkPrompt(
   scene: Scene,
   refs: Array<{ name: string; description: string }>,
   style: string,
-  size: string
+  size: string,
+  aspectRatio?: ImageAspectRatio
 ) {
-  const [width = 0, height = 0] = size.split("x").map(Number);
-  const orientation = width >= height ? "landscape" : "portrait";
+  const resolvedRatio: ImageAspectRatio =
+    aspectRatio ?? (size === "1024x1536" ? "9:16" : size === "1024x1024" ? "1:1" : "16:9");
   return [
     `STORY-WIDE ART DIRECTION: ${style}`,
     `SCENE: ${scene.visualPrompt}`,
@@ -611,7 +613,8 @@ export function artworkPrompt(
     scene.location ? `LOCATION: ${scene.location}` : "",
     scene.characters.length ? `CHARACTERS: ${scene.characters.join(", ")}` : "",
     ...refs.map((ref) => `CANONICAL VISUAL REFERENCE — ${ref.name}: ${ref.description}`),
-    `Create one polished still illustration. ${orientation}-safe composition. No text, captions, speech bubbles, logos, or watermarks.`,
+    artworkCompositionGuidance(resolvedRatio),
+    `Create one polished still illustration. No text, captions, speech bubbles, logos, or watermarks.`,
   ]
     .filter(Boolean)
     .join("\n");
