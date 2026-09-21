@@ -9,7 +9,7 @@ import { z } from "zod";
 import { BatchRunner, ChapterProcessor, ProgressEvent } from "../../src/batch/batch-runner.js";
 import { createBatchState } from "../../src/batch/batch-state.js";
 import { retryConfigSchema } from "../../src/batch/types.js";
-import { selectChapterRange } from "../../src/batch/range.js";
+import { selectChapterNumbers, selectChapterRange } from "../../src/batch/range.js";
 import { Environment } from "../../src/config/env.js";
 import { defaultStory, loadStory } from "../../src/config/load-config.js";
 import { Story, storySchema } from "../../src/domain/story.js";
@@ -114,7 +114,8 @@ import { SummaryMediaService, summaryMediaInputSchema, summaryNarrationEditSchem
 import { SummaryVisualService, summaryVisualInputSchema, summaryProduceInputSchema } from "../../src/summaries/visuals.js";
 import { generateLocalizedNameSuggestions, localizationSuggestionRequestSchema } from "../../src/story-bible/localization.js";
 import { inspectStagesForCurrent, markCurrentInputSchema, markStagesCurrent } from "../../src/studio/stage-acceptance.js";
-import { executeStagePlan, planStageExecution, stageExecutionInputSchema, stageExecutionModeSchema } from "../../src/studio/stage-execution.js";
+import { executeStagePlan, planStageExecution, planStageExecutionBatch, stageExecutionInputSchema, stageExecutionModeSchema } from "../../src/studio/stage-execution.js";
+import { batchStageSchema } from "../../src/studio/stage-selection.js";
 import { WhisperCppSpeechTranscriber } from "../../src/alignment/transcription.js";
 import { QualityGuardTTSProvider, SpeechTranscriber } from "../../src/tts/quality-guard.js";
 import { acceptStoredChapterTtsSegment, loadChapterTtsQuality, regenerateStoredChapterTtsSegment, verifyStoredChapterTts } from "../../src/tts/chapter-quality.js";
@@ -123,7 +124,7 @@ const chapterParamSchema = z.number().int().positive();
 const segmentParamSchema = z.number().int().min(1).max(99_999);
 
 const slugSchema = z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/);
-const batchInputSchema = z.object({ from: z.number().int().positive().optional(), to: z.number().int().positive().optional(), force: z.enum(["translation", "narration", "qa", "story-bible", "continuity", "tts", "audio", "all"]).optional(), stage: z.enum(["ingestion", "translation", "narration", "qa", "storyBible", "continuity", "tts", "audioMastering", "alignment", "subtitles", "scenePlanning", "artwork", "video"]).optional(), mode: stageExecutionModeSchema.default("selected"), continueOnError: z.boolean().default(false) }).strict().refine((value) => !(value.stage && value.force), { message: "Choose either a manual stage or the legacy force stage, not both" });
+const batchInputSchema = z.object({ from: z.number().int().positive().optional(), to: z.number().int().positive().optional(), force: z.enum(["translation", "narration", "qa", "story-bible", "continuity", "tts", "audio", "all"]).optional(), stage: batchStageSchema.optional(), mode: stageExecutionModeSchema.default("selected"), continueOnError: z.boolean().default(false) }).strict().refine((value) => !(value.stage && value.force), { message: "Choose either a manual stage or the legacy force stage, not both" });
 const qaRepairInputSchema = z.object({ issueIndexes: z.array(z.number().int().nonnegative()).min(1).max(100) }).strict();
 const qaDismissInputSchema = z.object({ issueIndexes: z.array(z.number().int().nonnegative()).min(1).max(100), disposition: z.enum(["dismissed", "manually_fixed"]).default("dismissed") }).strict();
 const qaFindingIdSchema = z.string().regex(/^qaf_[a-f0-9]{24}$/);
@@ -196,25 +197,35 @@ export class StudioOperations {
   }
   async planStageExecution(slug: string, raw: unknown) {
     slugSchema.parse(slug); const input = stageExecutionInputSchema.parse(raw);
-    return { chapters: await Promise.all(input.chapters.map(async (chapter) => ({ chapter, ...await planStageExecution({ root: this.root, story: slug, chapter, selectedStage: input.stage, mode: input.mode }) }))) };
+    const imported = await loadImportedChapters(this.root, slug); const selected = selectChapterNumbers(imported.chapters, input.chapters);
+    return planStageExecutionBatch({ root: this.root, story: slug, chapters: selected.map((chapter) => chapter.chapter), selectedStages: input.stages, mode: input.mode, force: input.force });
   }
   startStageExecution(slug: string, raw: unknown) {
     slugSchema.parse(slug); const input = stageExecutionInputSchema.parse(raw);
     if (input.dryRun) return this.planStageExecution(slug, input);
     return this.jobs.create("stageExecution", slug, async (control) => withStoryLock(this.root, slug, "manual stage processing", async () => {
       const story = await loadStory(storyPaths(this.root, slug, 1).storyConfig); const imported = await loadImportedChapters(this.root, slug);
-      const sources = new Map(imported.chapters.map((item) => [item.chapter, item])); const results = [];
-      for (const chapter of input.chapters) {
-        const source = sources.get(chapter); if (!source) throw new ConfigurationError(`Chapter ${chapter} is not imported for story '${slug}'`);
-        const plan = await planStageExecution({ root: this.root, story: slug, chapter, selectedStage: input.stage, mode: input.mode });
+      const selected = selectChapterNumbers(imported.chapters, input.chapters); const batchPlan = await planStageExecutionBatch({ root: this.root, story: slug, chapters: selected.map((chapter) => chapter.chapter), selectedStages: input.stages, mode: input.mode, force: input.force });
+      if (input.expectedPlanFingerprint && input.expectedPlanFingerprint !== batchPlan.fingerprint) throw new ConfigurationError("The execution plan changed after preview. Preview the current plan before running it.");
+      if (batchPlan.summary.blockedOperations) throw new ConfigurationError(`${batchPlan.summary.blockedOperations} stage operation${batchPlan.summary.blockedOperations === 1 ? " is" : "s are"} blocked by unavailable prerequisites. Select prerequisite mode and preview again.`);
+      const sources = new Map(selected.map((item) => [item.chapter, item])); const results: Array<{ chapter: number; status: "completed" | "reused" | "blocked" | "failed"; plan: (typeof batchPlan.chapters)[number]; error?: string }> = [];
+      for (const plan of batchPlan.chapters) {
+        const chapter = plan.chapter; const source = sources.get(chapter)!;
         control.update({ type: "stage-execution.chapter.planned", chapter, plan });
-        await executeStagePlan({ root: this.root, story, chapter, inputPath: source.path, source: source.source, plan,
-          runtime: { pipeline: this.pipeline, alignment: { config: this.alignConfig, engine: this.aligner }, scenePlanner: this.scenePlanner ?? this.runtime.router.forStage(story.pipeline.scenePlanner), image: this.image, video: this.video },
-          onStageEvent: (event) => control.update({ type: "stage", chapter, event }) });
-        results.push({ chapter, plan });
+        if (plan.blockedStages.length) { results.push({ chapter, status: "blocked", plan }); continue; }
+        if (!plan.runStages.length) { results.push({ chapter, status: "reused", plan }); continue; }
+        try {
+          await executeStagePlan({ root: this.root, story, chapter, inputPath: source.path, source: source.source, plan,
+            runtime: { pipeline: this.pipeline, alignment: { config: this.alignConfig, engine: this.aligner }, scenePlanner: this.scenePlanner ?? this.runtime.router.forStage(story.pipeline.scenePlanner), image: this.image, video: this.video },
+            onStageEvent: (event) => control.update({ type: "stage", chapter, event }) });
+          results.push({ chapter, status: "completed", plan });
+        } catch (error) {
+          if (!input.continueOnError) throw error;
+          results.push({ chapter, status: "failed", plan, error: error instanceof Error ? error.message : String(error) });
+        }
       }
-      invalidateCatalogCache(this.root, slug); return { results };
-    }));
+      invalidateCatalogCache(this.root, slug); return { fingerprint: batchPlan.fingerprint, results, summary: { ...batchPlan.summary, completedOperations: results.filter((item) => item.status === "completed").reduce((count, item) => count + item.plan.runStages.length, 0), completedChapters: results.filter((item) => item.status === "completed").length, reusedChapters: results.filter((item) => item.status === "reused").length, blockedChapters: results.filter((item) => item.status === "blocked").length, failedChapters: results.filter((item) => item.status === "failed").length } };
+    }), { chapters: input.chapters, stages: input.stages, mode: input.mode, force: input.force });
   }
 
   novelProviders() { return this.registry.listNovelProviders(); }
@@ -395,7 +406,7 @@ export class StudioOperations {
       const selected = selectChapterRange(imported.chapters, input.from, input.to); const state = createBatchState({ root: this.root, story: slug, inputDirectory: imported.directory, chapters: selected, allowGaps: true, continueOnError: input.continueOnError, delayMs: 0, force: input.force, stopAfter: batchStopAfter(input.force), stage: input.stage, mode: input.mode });
       const shutdown = new ShutdownController(); control.setPause(() => shutdown.request());
       const processor: ChapterProcessor = input.stage ? { run: async (request) => {
-        const plan = await planStageExecution({ root: this.root, story: slug, chapter: request.chapter, selectedStage: input.stage!, mode: input.mode });
+        const plan = await planStageExecution({ root: this.root, story: slug, chapter: request.chapter, selectedStages: [input.stage!], mode: input.mode, force: true });
         await executeStagePlan({ root: this.root, story, chapter: request.chapter, inputPath: request.inputPath, source: request.source, plan,
           runtime: { pipeline: this.pipeline, alignment: { config: this.alignConfig, engine: this.aligner }, scenePlanner: this.scenePlanner ?? this.runtime.router.forStage(story.pipeline.scenePlanner), image: this.image, video: this.video }, onStageEvent: request.onStageEvent });
       } } : this.pipeline;

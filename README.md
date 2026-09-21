@@ -34,6 +34,19 @@ The chapter workspace supports side-by-side source, translation, and narration r
 
 The Outputs library exposes only known chapter and export artifacts through validated localhost API routes; arbitrary filesystem paths are never accepted from the browser. Production can be paused after the current chapter and resumed from its durable manifest after a page reload or server restart.
 
+### Explicit chapter-stage batches
+
+The story dashboard accepts exact chapter sets such as `5,10,13,40-50` and one or more stages. **Selected only** runs exactly those stages and blocks work whose prerequisites are unavailable. **Add prerequisites** adds only missing prerequisites; current and stale-but-usable artifacts are reused. A server-generated execution preview is required before the browser can run the batch, and its fingerprint prevents execution if the plan changes after review. **Mark stages current** remains a separate artifact-acceptance action and never runs providers.
+
+The CLI uses the same chapter parser, dependency graph, artifact inspection, and planner:
+
+```sh
+npm run story:stages -- run undead-disaster --chapters "5,10,13,40-50" --stages narration,qa --mode selected --dry-run
+npm run story:stages -- run undead-disaster --chapters "5,10,13,40-50" --stages tts,audioMastering --mode prerequisites
+```
+
+Use `--force` to regenerate selected stages that already have usable artifacts. Dry runs never write artifacts or call providers.
+
 Milestone 1 is a CLI-first, provider-agnostic vertical slice:
 
 `Chinese TXT → translation → narration polish → Story Bible → Fish Audio → MP3`

@@ -8,8 +8,14 @@ import { SummariesPage } from "../apps/web/src/SummariesPage.js";
 import { NamesLocalizationPage } from "../apps/web/src/NamesLocalizationPage.js";
 import { defaultLocale, LanguageSelect } from "../apps/web/src/languages.js";
 import { PronunciationFields, PronunciationPanel } from "../apps/web/src/PronunciationPanel.js";
+import { applyStagePreset, BatchProcessingPanel, toggleStageSelection } from "../apps/web/src/BatchProcessingPanel.js";
 
 describe("web UI", () => {
+  it("renders the explicit batch planner and deterministic stage presets", () => {
+    const html = renderToStaticMarkup(<BatchProcessingPanel slug="demo-story" selectedChapters={[5, 10, 13, 40, 41]} onSelectionChange={() => undefined} onSelectVisible={() => undefined} onSelectMatching={() => undefined} onSelectAll={() => undefined} onJob={() => undefined} watchJob={() => () => undefined} />);
+    expect(html).toContain("Plan a precise batch"); expect(html).toContain('value="5, 10, 13, 40-41"'); expect(html).toContain("Selected stages only"); expect(html).toContain("Selected stages + prerequisites"); expect(html).toContain("Preview execution"); expect(html).toContain("Regenerate selected stages");
+    expect(applyStagePreset("audio")).toEqual(["tts", "audioMastering", "alignment", "subtitles"]); expect(toggleStageSelection(["narration"], "qa")).toEqual(["narration", "qa"]); expect(toggleStageSelection(["narration", "qa"], "narration")).toEqual(["qa"]);
+  });
   it("exposes pronunciation mode, language dropdown, protected settings and a management desk", () => {
     const html = renderToStaticMarkup(<PronunciationFields value={{ mode: "custom", customPronunciation: "Jyang Yweh", sourceLanguage: "zh-CN", locked: true }} onChange={() => undefined} />);
     expect(html).toContain("Original-language pronunciation"); expect(html).toContain("Custom spoken form"); expect(html).toContain("Lock pronunciation"); expect(html).toContain("Chinese · Simplified"); expect(html).toContain("Advanced pronunciation");
@@ -2102,4 +2108,3 @@ describe("Milestone 23 — image output quality UI", () => {
     });
   });
 });
-
