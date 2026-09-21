@@ -180,16 +180,29 @@ describe("local Real-ESRGAN upscaler adapter", () => {
   function runner(captured: { calls?: Array<{ command: string; args: string[] }>, failHelp?: boolean }) {
     return async (command: string, args: string[]): Promise<CommandResult> => {
       (captured.calls ??= []).push({ command, args });
-      if (args[0] === "--help" && captured.failHelp) throw new Error("spawn ENOENT");
+      if (args[0] === "-h" && captured.failHelp) throw new Error("spawn ENOENT");
       if (args.includes("-o")) await atomicWrite(args[args.indexOf("-o") + 1]!, pngWithDims(5504, 3072));
       return { stdout: "", stderr: "" };
     };
   }
-  it("probes --help and reports an actionable error when the binary is missing", async () => {
+  it("probes -h and reports an actionable error when the binary is missing", async () => {
     const captured: any = { failHelp: true };
     const upscaler = new LocalRealEsrganUpscaler("realesrgan-ncnn-vulkan", "realesrgan-x4plus", 1000, runner(captured));
     await expect(upscaler.validateConfiguration()).rejects.toBeInstanceOf(ConfigurationError);
     await expect(upscaler.validateConfiguration()).rejects.toThrow(/Install Real-ESRGAN/);
+  });
+  it("treats a usage banner with a non-zero exit as an available binary", async () => {
+    const bannerRunner = async (): Promise<CommandResult> => { throw new Error("realesrgan-ncnn-vulkan exited with 255: Usage: realesrgan-ncnn-vulkan -i infile -o outfile [options]..."); };
+    const upscaler = new LocalRealEsrganUpscaler("realesrgan-ncnn-vulkan", "realesrgan-x4plus", 1000, bannerRunner);
+    await expect(upscaler.validateConfiguration()).resolves.toBeUndefined();
+  });
+  it("fails when the upscaler produces no output", async () => {
+    const silentRunner = async (_command: string, args: string[]): Promise<CommandResult> => {
+      if (args[0] === "-h") return { stdout: "", stderr: "" };
+      return { stdout: "", stderr: "" }; // exit 0 but never writes the -o file
+    };
+    const upscaler = new LocalRealEsrganUpscaler("realesrgan-ncnn-vulkan", "realesrgan-x4plus", 1000, silentRunner);
+    await expect(upscaler.upscale({ ...request, outputPath: join(await mkdtemp(join(tmpdir(), "upscale-")), "out.png") })).rejects.toThrow(/produced no output/);
   });
   it("picks the smallest factor reaching the target and normalizes to exact dimensions", async () => {
     const captured: any = {};

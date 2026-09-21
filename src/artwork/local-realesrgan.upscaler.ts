@@ -1,4 +1,4 @@
-import { mkdir, rename, rm } from "node:fs/promises";
+import { access, mkdir, rename, rm } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { runCommand, CommandRunner } from "../audio/ffmpeg.js";
@@ -36,14 +36,18 @@ export class LocalRealEsrganUpscaler implements ImageUpscaler {
     readonly model = "realesrgan-x4plus",
     private readonly timeoutMs = 1_800_000,
     private readonly runner: CommandRunner = runCommand,
-    private readonly resizer: DeterministicResizer = ffmpegResizer()
+    private readonly resizer: DeterministicResizer = ffmpegResizer(),
+    private readonly modelPath?: string
   ) {}
 
   validateConfiguration() { return this.validation ??= this.checkConfiguration(); }
 
   private async checkConfiguration() {
-    try { await this.runner(this.executable, ["--help"], Math.min(this.timeoutMs, 60_000)); }
+    // realesrgan-ncnn-vulkan prints its usage banner and exits non-zero for -h,
+    // so presence is proven by the banner, not the exit code.
+    try { await this.runner(this.executable, ["-h"], Math.min(this.timeoutMs, 60_000)); }
     catch (error) {
+      if (error instanceof Error && error.message.includes("Usage: realesrgan")) return;
       throw new ConfigurationError(
         `Upscaler executable '${this.executable}' is unavailable. Install Real-ESRGAN (e.g. 'brew install realesrgan-ncnn-vulkan' or the Upscayl ncnn binaries) or set UPSCALER_EXECUTABLE.`,
         { cause: error }
@@ -56,9 +60,11 @@ export class LocalRealEsrganUpscaler implements ImageUpscaler {
     const factor = request.sourceWidth * 2 >= request.targetWidth && request.sourceHeight * 2 >= request.targetHeight ? 2 : 4;
     const directory = dirname(request.outputPath);
     await mkdir(directory, { recursive: true });
-    const staged = join(directory, `.upscale-${randomUUID()}.png`);
+    // Not a dotfile: realesrgan-ncnn-vulkan silently skips hidden output paths.
+    const staged = join(directory, `upscale-${randomUUID()}.staging.png`);
     try {
-      await this.runner(this.executable, ["-i", request.sourcePath, "-o", staged, "-n", request.model ?? this.model, "-s", String(factor), "-f", "png"], this.timeoutMs);
+      await this.runner(this.executable, ["-i", request.sourcePath, "-o", staged, "-n", request.model ?? this.model, ...(this.modelPath ? ["-m", this.modelPath] : []), "-s", String(factor), "-f", "png"], this.timeoutMs);
+      await access(staged).catch(() => { throw new Error(`Upscaler produced no output at ${staged}`); });
       return await this.finish(request, staged, factor);
     } catch (error) {
       await rm(staged, { force: true });
@@ -85,6 +91,6 @@ export class LocalRealEsrganUpscaler implements ImageUpscaler {
   }
 }
 
-export function createLocalUpscaler(env: Pick<Environment, "UPSCALER_EXECUTABLE" | "UPSCALER_MODEL" | "UPSCALER_TIMEOUT_MS">): LocalRealEsrganUpscaler {
-  return new LocalRealEsrganUpscaler(env.UPSCALER_EXECUTABLE, env.UPSCALER_MODEL, env.UPSCALER_TIMEOUT_MS);
+export function createLocalUpscaler(env: Pick<Environment, "UPSCALER_EXECUTABLE" | "UPSCALER_MODEL" | "UPSCALER_MODEL_PATH" | "UPSCALER_TIMEOUT_MS">): LocalRealEsrganUpscaler {
+  return new LocalRealEsrganUpscaler(env.UPSCALER_EXECUTABLE, env.UPSCALER_MODEL, env.UPSCALER_TIMEOUT_MS, undefined, undefined, env.UPSCALER_MODEL_PATH);
 }

@@ -35,6 +35,7 @@ const envSchema = z.object({
   ALIGNMENT_TIMEOUT_MS: z.coerce.number().int().min(10_000).max(86_400_000).default(1_800_000),
   UPSCALER_EXECUTABLE: z.string().trim().min(1).default("realesrgan-ncnn-vulkan"),
   UPSCALER_MODEL: z.string().trim().min(1).default("realesrgan-x4plus"),
+  UPSCALER_MODEL_PATH: z.string().trim().min(1).optional(),
   UPSCALER_TIMEOUT_MS: z.coerce.number().int().min(1000).max(86_400_000).default(1_800_000),
   WEB_REQUEST_TIMEOUT_MS: z.coerce.number().int().min(1000).max(120_000).default(30_000),
   WEB_REQUEST_DELAY_MS: z.coerce.number().int().min(0).max(60_000).default(500),
