@@ -55,7 +55,6 @@ describe("artwork generation", () => {
   it("derives composition orientation from the configured artwork size", async () => {
     const { root, story } = await fixture(); await planStoredScenes({ root, story, chapter: 1, provider: new SceneLLM() });
     const landscapeImages = new FakeImages(); await generateStoredArtwork({ root, story, chapter: 1, provider: landscapeImages, sceneId: "scene-001" }); expect(landscapeImages.calls[0].prompt).toContain("landscape-safe composition");
-    const portraitStory = { ...story, artwork: { ...story.artwork, size: "1024x1536" as const } }; const portraitImages = new FakeImages(); await generateStoredArtwork({ root, story: portraitStory, chapter: 1, provider: portraitImages, sceneId: "scene-002" }); expect(portraitImages.calls[0].prompt).toContain("portrait-safe composition");
     const portraitStory = { ...story, artwork: { ...story.artwork, aspectRatio: "9:16" as const, size: "1024x1536" as const } }; const portraitImages = new FakeImages(); await generateStoredArtwork({ root, story: portraitStory, chapter: 1, provider: portraitImages, sceneId: "scene-002" }); expect(portraitImages.calls[0].prompt).toContain("portrait-safe composition");
     expect(landscapeImages.calls[0].prompt).not.toContain("16:9-safe");
   });

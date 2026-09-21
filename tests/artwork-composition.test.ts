@@ -76,7 +76,6 @@ describe("central aspect-ratio composition guidance", () => {
     expect(guidance).toContain("composition-safe area");
     expect(guidance).toContain("extreme left or right edges");
     expect(guidance).toContain("landscape-safe composition");
-    // Must NOT contain resolution numbers or false promises of exact pixel targets
     expect(guidance).not.toContain("2560x1440");
     expect(guidance).not.toContain("1920x1080");
     expect(guidance).not.toContain("1440p");
@@ -104,8 +103,6 @@ describe("central aspect-ratio composition guidance", () => {
     expect(guidance).toContain("16:9 landscape cinematic frame");
   });
 
-  it("resolves aspect ratio with legacy size fallback support", () => {
-    expect(resolveArtworkAspectRatio({ artwork: { aspectRatio: "9:16", size: "1536x1024" } as any })).toBe("9:16");
   it("resolves aspect ratio with modern aspectRatio as authoritative over legacy size", () => {
     // Explicit 16:9 wins over legacy portrait/square size
     expect(resolveArtworkAspectRatio({ artwork: { aspectRatio: "16:9", size: "1024x1536" } as any })).toBe("16:9");
@@ -114,10 +111,6 @@ describe("central aspect-ratio composition guidance", () => {
 
     // Explicit 1:1 wins over legacy landscape size
     expect(resolveArtworkAspectRatio({ artwork: { aspectRatio: "1:1", size: "1536x1024" } as any })).toBe("1:1");
-    // When aspectRatio is default 16:9, legacy size 1024x1536 resolves to 9:16
-    expect(resolveArtworkAspectRatio({ artwork: { aspectRatio: "16:9", size: "1024x1536" } as any })).toBe("9:16");
-    expect(resolveArtworkAspectRatio({ artwork: { aspectRatio: "16:9", size: "1024x1024" } as any })).toBe("1:1");
-    expect(resolveArtworkAspectRatio({ artwork: { aspectRatio: "16:9", size: "1536x1024" } as any })).toBe("16:9");
 
     // Explicit 9:16 wins over legacy square size
     expect(resolveArtworkAspectRatio({ artwork: { aspectRatio: "9:16", size: "1024x1024" } as any })).toBe("9:16");
