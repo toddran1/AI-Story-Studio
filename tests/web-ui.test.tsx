@@ -8,13 +8,83 @@ import { SummariesPage } from "../apps/web/src/SummariesPage.js";
 import { NamesLocalizationPage } from "../apps/web/src/NamesLocalizationPage.js";
 import { defaultLocale, LanguageSelect } from "../apps/web/src/languages.js";
 import { PronunciationFields, PronunciationPanel } from "../apps/web/src/PronunciationPanel.js";
-import { applyStagePreset, BatchProcessingPanel, toggleStageSelection } from "../apps/web/src/BatchProcessingPanel.js";
+import { applyStagePreset, BatchProcessingPanel, ExecutionPreview, toggleStageSelection } from "../apps/web/src/BatchProcessingPanel.js";
+import { formatChapterSelection, parseChapterSelection } from "../src/batch/range.js";
+import type { StageExecutionBatchPlan } from "../src/studio/stage-execution.js";
 
 describe("web UI", () => {
-  it("renders the explicit batch planner and deterministic stage presets", () => {
+  it("renders Chapter Dispatch with grouped stage checkboxes, quick-select presets, and radio-card execution modes", () => {
     const html = renderToStaticMarkup(<BatchProcessingPanel slug="demo-story" selectedChapters={[5, 10, 13, 40, 41]} onSelectionChange={() => undefined} onSelectVisible={() => undefined} onSelectMatching={() => undefined} onSelectAll={() => undefined} onJob={() => undefined} watchJob={() => () => undefined} />);
-    expect(html).toContain("Plan a precise batch"); expect(html).toContain('value="5, 10, 13, 40-41"'); expect(html).toContain("Selected stages only"); expect(html).toContain("Selected stages + prerequisites"); expect(html).toContain("Preview execution"); expect(html).toContain("Regenerate selected stages");
-    expect(applyStagePreset("audio")).toEqual(["tts", "audioMastering", "alignment", "subtitles"]); expect(toggleStageSelection(["narration"], "qa")).toEqual(["narration", "qa"]); expect(toggleStageSelection(["narration", "qa"], "narration")).toEqual(["qa"]);
+    expect(html).toContain("Chapter Dispatch"); expect(html).toContain('value="5, 10, 13, 40-41"'); expect(html).toContain("5 chapters selected");
+    // Every dispatchable stage is a real checkbox inside a Text/Audio/Visual group.
+    expect(html.match(/type="checkbox"/g)).toHaveLength(14); // 12 stages + regenerate + continue
+    expect(html).toContain("<legend>Text</legend>"); expect(html).toContain("<legend>Audio</legend>"); expect(html).toContain("<legend>Visual</legend>");
+    for (const label of ["Translation", "Narration", "QA", "Story Bible", "Continuity", "TTS", "Audio Mastering", "Alignment", "Subtitles", "Scene Planning", "Artwork", "Video"]) expect(html).toContain(label);
+    // The old chip/tag implementation is gone.
+    expect(html).not.toContain("aria-pressed");
+    // Default Narration + QA preset checks exactly those two stage boxes (plus the default radio).
+    expect(html.match(/checked=""/g)).toHaveLength(3);
+    // Quick-select presets, including Clear, only set checkbox state.
+    for (const label of ["Core text", "Narration + QA", "Audio", "Visuals", "Clear"]) expect(html).toContain(`>${label}</button>`);
+    // Exactly two single-choice execution mode radio cards.
+    expect(html.match(/type="radio"/g)).toHaveLength(2); expect(html.match(/name="batch-mode"/g)).toHaveLength(2);
+    expect(html).toContain("Selected stages only"); expect(html).toContain("Run only the stages selected above. Existing prerequisites may be reused, including valid stale artifacts. Missing prerequisites will block the affected work.");
+    expect(html).toContain("Selected stages + prerequisites"); expect(html).toContain("Run the selected stages and automatically generate any missing prerequisites. Existing usable prerequisites are reused.");
+    // Independent execution checkboxes with explanations.
+    expect(html).toContain("Regenerate selected stages"); expect(html).toContain("Regenerate selected stages even when a usable artifact already exists.");
+    expect(html).toContain("Continue past failures"); expect(html).toContain("Continue processing other chapters when one chapter fails.");
+    // Preview stays required before running.
+    expect(html).toContain("Preview required before running"); expect(html).toContain("Preview execution"); expect(html).toContain("Run batch");
+    expect(html).toContain("Visible page"); expect(html).toContain("Matching filter"); expect(html).toContain("All chapters");
+    expect(html).not.toContain("Add prerequisites");
+  });
+  it("keeps stage selection helpers independent, ordered, and preset-driven", () => {
+    expect(applyStagePreset("coreText")).toEqual(["translation", "narration", "qa", "storyBible", "continuity"]);
+    expect(applyStagePreset("narrationQa")).toEqual(["narration", "qa"]);
+    expect(applyStagePreset("audio")).toEqual(["tts", "audioMastering", "alignment", "subtitles"]);
+    expect(applyStagePreset("visuals")).toEqual(["scenePlanning", "artwork", "video"]);
+    // Multiple independent checks accumulate in canonical pipeline order; unchecking removes only that stage.
+    let stages = applyStagePreset("narrationQa");
+    stages = toggleStageSelection(stages, "tts"); expect(stages).toEqual(["narration", "qa", "tts"]);
+    stages = toggleStageSelection(stages, "translation"); expect(stages).toEqual(["translation", "narration", "qa", "tts"]);
+    stages = toggleStageSelection(stages, "narration"); expect(stages).toEqual(["translation", "qa", "tts"]);
+    expect(toggleStageSelection([], "video")).toEqual(["video"]);
+  });
+  it("parses chapter expressions with ranges, dedupe, sorting, and clear errors", () => {
+    expect(parseChapterSelection("5, 10, 13, 40-50")).toEqual([5, 10, 13, ...Array.from({ length: 11 }, (_, index) => 40 + index)]);
+    expect(parseChapterSelection("10, 5, 5, 13")).toEqual([5, 10, 13]);
+    expect(formatChapterSelection([5, 10, 13, 40, 41])).toBe("5, 10, 13, 40-41");
+    expect(() => parseChapterSelection("abc")).toThrow();
+  });
+  it("renders the execution preview ledger and references “Selected stages + prerequisites” when blocked", () => {
+    const plan = (blocked: number, addedPrerequisites: StageExecutionBatchPlan["summary"]["addedPrerequisites"]): StageExecutionBatchPlan => ({
+      fingerprint: "abcdef1234567890",
+      chapters: [{
+        chapter: 5, selectedStages: ["narration", "qa"], mode: "selected", force: false, prerequisitesComplete: blocked === 0,
+        runStages: ["narration"], reusedStages: [{ stage: "translation", state: "current" }], missingStages: [], blockedStages: blocked ? ["qa"] : [],
+        entries: [
+          { stage: "narration", action: "selected-run", reason: "Selected stage", availability: "missing", requiredBy: [] },
+          { stage: "translation", action: "reuse", reason: "Current artifact", availability: "available", freshness: "current", requiredBy: ["narration"] },
+          ...(blocked ? [{ stage: "qa" as const, action: "blocked" as const, reason: "Narration is missing", availability: "missing" as const, requiredBy: [] }] : []),
+        ],
+        artifacts: [], reason: "",
+      }],
+      summary: {
+        chapterCount: 1, selectedStages: ["narration", "qa"], mode: "selected", force: false,
+        operationCount: 1, reusedCount: 1, blockedOperations: blocked, blockedChapters: blocked ? 1 : 0,
+        plannedByStage: { narration: 1 }, reusedByStage: { translation: 1 }, blockedByStage: blocked ? { qa: blocked } : {},
+        addedPrerequisites, providerOperations: { llm: 1, tts: 0, images: 0 },
+      },
+    });
+    const blockedHtml = renderToStaticMarkup(<ExecutionPreview preview={plan(1, [])} />);
+    expect(blockedHtml).toContain("1 planned · 1 reused · 1 blocked");
+    expect(blockedHtml).toContain("This plan cannot run because required inputs are missing. Choose “Selected stages + prerequisites” to include the missing prerequisite stages automatically.");
+    expect(blockedHtml).not.toContain("Add prerequisites");
+    expect(blockedHtml).toContain("Ch. 0005"); expect(blockedHtml).toContain("<span>Run</span>"); expect(blockedHtml).toContain("<span>Reuse</span>"); expect(blockedHtml).toContain("<span>Blocked</span>");
+    expect(blockedHtml).toContain("LLM <b>1</b>"); expect(blockedHtml).toContain("TTS <b>0</b>"); expect(blockedHtml).toContain("Images <b>0</b>");
+    const unblockedHtml = renderToStaticMarkup(<ExecutionPreview preview={plan(0, ["translation"])} />);
+    expect(unblockedHtml).toContain("Added prerequisites: Translation");
+    expect(unblockedHtml).not.toContain("This plan cannot run");
   });
   it("exposes pronunciation mode, language dropdown, protected settings and a management desk", () => {
     const html = renderToStaticMarkup(<PronunciationFields value={{ mode: "custom", customPronunciation: "Jyang Yweh", sourceLanguage: "zh-CN", locked: true }} onChange={() => undefined} />);
