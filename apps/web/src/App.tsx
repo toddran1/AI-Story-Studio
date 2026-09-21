@@ -3579,15 +3579,12 @@ function guessExceptionValue(messageText: string) {
   return (match?.[1] ?? match?.[2] ?? match?.[3] ?? "").trim();
 }
 
-export function QaDetail({ slug, chapter, onJob, onEditManually, onChanged, initialData }: { slug: string; chapter: number; onJob: (job: Job) => void; onEditManually: () => void; onChanged: () => void; initialData?: ChapterQaDetail }) {
-  const [data, setData] = useState<ChapterQaDetail | undefined>(initialData); const [error, setError] = useState(""); const [note, setNote] = useState(""); const [busy, setBusy] = useState("");
 export function QaDetail({ slug, chapter, onJob, onEditManually, onChanged, initialData, initialError }: { slug: string; chapter: number; onJob: (job: Job) => void; onEditManually: () => void; onChanged: () => void; initialData?: ChapterQaDetail; initialError?: string }) {
   const [data, setData] = useState<ChapterQaDetail | undefined>(initialData); const [error, setError] = useState(initialError ?? ""); const [note, setNote] = useState(""); const [busy, setBusy] = useState("");
   const [dismissTarget, setDismissTarget] = useState<QaFinding>(); const [resetOpen, setResetOpen] = useState(false);
   const [expanded, setExpanded] = useState<string[]>([]); const [recheckSummary, setRecheckSummary] = useState<QaRecheckSummary>();
   const watcher = useRef<(() => void) | undefined>(undefined);
   const load = async () => { const next = await api<ChapterQaDetail>(`/stories/${slug}/chapters/${chapter}/qa`); setData(next); };
-  useEffect(() => { if (!initialData) { setData(undefined); setError(""); setRecheckSummary(undefined); void load().catch((value) => setError(message(value))); } return () => watcher.current?.(); }, [slug, chapter]);
   useEffect(() => { if (!initialData && !initialError) { setData(undefined); setError(""); setRecheckSummary(undefined); void load().catch((value) => setError(message(value))); } return () => watcher.current?.(); }, [slug, chapter]);
   const toggleExpanded = (key: string) => setExpanded((current) => current.includes(key) ? current.filter((item) => item !== key) : [...current, key]);
   const runJob = (kind: string, job: Job, onComplete?: (job: Job) => void) => { setError(""); setNote(""); setBusy(kind); onJob(job); watcher.current?.(); watcher.current = watchJob(job.id, async (next) => { onJob(next); if (next.status === "completed") { setBusy(""); onComplete?.(next); await load(); onChanged(); } else if (next.status === "failed") { setBusy(""); setError(next.error ?? "QA job failed"); } }, (value) => { setBusy(""); setError(message(value)); }); };
@@ -3626,10 +3623,6 @@ export function QaDetail({ slug, chapter, onJob, onEditManually, onChanged, init
   const unverified = (finding: QaFinding) => stale && finding.verifiedAgainstFingerprint !== data.currentFingerprint;
   const summaryParts = recheckSummary ? [recheckSummary.verified ? `✓ ${recheckSummary.verified} fix${recheckSummary.verified === 1 ? "" : "es"} verified` : "", recheckSummary.respected ? `✓ ${recheckSummary.respected} dismissal${recheckSummary.respected === 1 ? "" : "s"} respected` : "", recheckSummary.reopened ? `⚠ ${recheckSummary.reopened} returned` : "", recheckSummary.newFindings ? `${recheckSummary.newFindings} new issue${recheckSummary.newFindings === 1 ? "" : "s"}` : ""].filter(Boolean) : [];
   return <div className="qa-detail stateful">
-    {stale && <ArtifactStatusNotice status="stale" reason="The chapter or its QA dependencies changed since this review. Previous findings are awaiting verification — recheck QA to make this result current." />}
-    <div className="qa-attention-head"><div><h3>{stale ? "QA needs recheck" : openFindingsList.length ? `${openFindingsList.length} issue${openFindingsList.length === 1 ? "" : "s"} need${openFindingsList.length === 1 ? "s" : ""} attention` : "No open issues"}</h3><div className="qa-attention-counts">{stale
-      ? <Status status="warn" label={needsVerification ? `${needsVerification} previous finding${needsVerification === 1 ? "" : "s"} need${needsVerification === 1 ? "s" : ""} verification` : "Previous result is out of date"} />
-      : <>{critical > 0 && <Status status="fail" label={`${critical} critical`} />}{warnings > 0 && <Status status="warn" label={`${warnings} warning${warnings === 1 ? "" : "s"}`} />}{!openFindingsList.length && <Status status="pass" label="Chapter is clear" />}</>}</div></div>
     <div className="qa-attention-head">
       <div>
         <h3>{stale ? "QA needs recheck" : openFindingsList.length ? `${openFindingsList.length} issue${openFindingsList.length === 1 ? "" : "s"} need${openFindingsList.length === 1 ? "s" : ""} attention` : "No open issues"}</h3>
