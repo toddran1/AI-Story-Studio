@@ -9,10 +9,19 @@ export function bindNarrationSpans(scenes: Scene[], narration: string) {
   const supplied = scenes.every((scene) => scene.narrationStartWord !== undefined && scene.narrationEndWord !== undefined);
   let cursor = 0;
   return scenes.map((scene, index) => {
-    const start = supplied ? scene.narrationStartWord! : cursor;
-    const end = supplied ? scene.narrationEndWord! : index === scenes.length - 1 ? words.length :
-      Math.max(start + 1, Math.min(words.length - (scenes.length - index - 1), Math.round(scene.endSeconds / scenes.at(-1)!.endSeconds * words.length)));
-    if (start !== cursor || end <= start || end > words.length || (index === scenes.length - 1 && end !== words.length))
+    const remaining = scenes.length - index - 1;
+    // Supplied LLM spans are normalized to a contiguous cover: starts continue
+    // where the previous scene ended (absorbing gaps/overlaps), ends are
+    // preserved as the beat boundaries but clamped to leave one word per
+    // remaining scene.
+    const start = cursor;
+    const end = supplied
+      ? index === scenes.length - 1
+        ? words.length
+        : Math.max(start + 1, Math.min(scene.narrationEndWord!, words.length - remaining))
+      : index === scenes.length - 1 ? words.length :
+        Math.max(start + 1, Math.min(words.length - remaining, Math.round(scene.endSeconds / scenes.at(-1)!.endSeconds * words.length)));
+    if (start !== cursor || end <= start || end > words.length)
       throw new Error("Scene narration spans must cover all narration words in order without gaps");
     cursor = end;
     return { ...scene, narrationStartWord: start, narrationEndWord: end, narrationText: words.slice(start, end).join(" ") };
