@@ -22,10 +22,10 @@ describe("web UI", () => {
     for (const label of ["Translation", "Narration", "QA", "Story Bible", "Continuity", "TTS", "Audio Mastering", "Alignment", "Subtitles", "Scene Planning", "Artwork", "Video"]) expect(html).toContain(label);
     // The old chip/tag implementation is gone.
     expect(html).not.toContain("aria-pressed");
-    // Default Narration + QA preset checks exactly those two stage boxes (plus the default radio).
-    expect(html.match(/checked=""/g)).toHaveLength(3);
+    // Dispatch starts deliberately blank: only the selected execution-mode radio is checked.
+    expect(html).toContain("0 stages selected"); expect(html.match(/checked=""/g)).toHaveLength(1);
     // Quick-select presets, including Clear, only set checkbox state.
-    for (const label of ["Core text", "Narration + QA", "Audio", "Visuals", "Clear"]) expect(html).toContain(`>${label}</button>`);
+    for (const label of ["Context", "Narration + QA", "Audio", "Visuals", "Clear"]) expect(html).toContain(`>${label}</button>`);
     // Exactly two single-choice execution mode radio cards.
     expect(html.match(/type="radio"/g)).toHaveLength(2); expect(html.match(/name="batch-mode"/g)).toHaveLength(2);
     expect(html).toContain("Selected stages only"); expect(html).toContain("Run only the stages selected above. Existing prerequisites may be reused, including valid stale artifacts. Missing prerequisites will block the affected work.");

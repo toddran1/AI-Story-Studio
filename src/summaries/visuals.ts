@@ -37,7 +37,7 @@ import { generateSubtitleTiming } from "../subtitles/timing.js";
 import { generateAlignedSubtitleTiming } from "../subtitles/aligned-timing.js";
 import { toSrt } from "../subtitles/srt.js";
 import { SummaryMediaService, summaryMediaPaths, summaryScenesInputSchema } from "./media.js";
-import { summarySchema, summaryScenePlanAvailable, type StorySummary } from "./types.js";
+import { summarySchema, summaryAudioAvailable, summaryNarrationTextAvailable, summaryScenePlanAvailable, type StorySummary } from "./types.js";
 import { summaryPath } from "./service.js";
 import { validateSceneCoverage } from "../scenes/timing.js";
 import { withUsageScope } from "../cost/context.js";
@@ -212,43 +212,6 @@ export class SummaryVisualService {
     const paths = this.paths(slug, id);
     const upscaler = needsProductionDerivative(story) ? resolveUpscaler(upscalerOverride ?? this.upscaler) : undefined;
 
-    // Migrate any legacy scenes without versions array
-    for (const scene of selected) {
-      if (scene.artwork.status === "complete" && (!scene.artwork.versions || scene.artwork.versions.length === 0)) {
-        const actual = await validPngFingerprint(paths.image(scene.id));
-        if (actual && actual === scene.artwork.imageFingerprint) {
-          const v1Path = paths.sceneVersionImage(scene.id, 1);
-          if (!(await exists(v1Path))) {
-            await atomicWrite(v1Path, await readFile(paths.image(scene.id)));
-          }
-          const dims = (await exists(v1Path)) ? imageDimensions(await readFile(v1Path)) : undefined;
-          const v1: ArtworkVersion = {
-            id: "v1",
-            versionNumber: 1,
-            sceneId: scene.id,
-            imagePath: `${scene.id}-v1.png`,
-            imageFingerprint: scene.artwork.imageFingerprint,
-            createdAt: scene.artwork.generatedAt ?? new Date().toISOString(),
-            provider: scene.artwork.provider ?? story.artwork.provider,
-            model: scene.artwork.model ?? story.artwork.model,
-            prompt: scene.artwork.prompt ?? scene.visualPrompt,
-            promptFingerprint: scene.artwork.fingerprint ?? "",
-            resolvedVisualProfileReferences: [],
-            artDirectionFingerprint: "",
-            settings: {
-              quality: story.artwork.quality,
-              size: story.artwork.size,
-              aspectRatio: story.artwork.aspectRatio,
-              outputFormat: story.artwork.outputFormat,
-            },
-            original: dims ? { width: dims.width, height: dims.height, fingerprint: scene.artwork.imageFingerprint, provider: scene.artwork.provider ?? story.artwork.provider, model: scene.artwork.model ?? story.artwork.model } : undefined,
-            review: scene.artwork.review ?? "unreviewed",
-          };
-          scene.artwork.versions = [v1];
-        }
-      }
-    }
-
     let imagesToGenerate = 0;
     let reusable = 0;
     let derivativesToBuild = 0;
@@ -310,6 +273,28 @@ export class SummaryVisualService {
         reusable,
         derivativesToBuild,
       };
+    }
+
+    // Migrate legacy assets only for real production. A dry run is strictly read-only.
+    for (const scene of selected) {
+      if (scene.artwork.status === "complete" && (!scene.artwork.versions || scene.artwork.versions.length === 0)) {
+        const actual = await validPngFingerprint(paths.image(scene.id));
+        if (actual && actual === scene.artwork.imageFingerprint) {
+          const v1Path = paths.sceneVersionImage(scene.id, 1);
+          if (!(await exists(v1Path))) await atomicWrite(v1Path, await readFile(paths.image(scene.id)));
+          const dims = (await exists(v1Path)) ? imageDimensions(await readFile(v1Path)) : undefined;
+          const v1: ArtworkVersion = {
+            id: "v1", versionNumber: 1, sceneId: scene.id, imagePath: `${scene.id}-v1.png`, imageFingerprint: scene.artwork.imageFingerprint,
+            createdAt: scene.artwork.generatedAt ?? new Date().toISOString(), provider: scene.artwork.provider ?? story.artwork.provider,
+            model: scene.artwork.model ?? story.artwork.model, prompt: scene.artwork.prompt ?? scene.visualPrompt,
+            promptFingerprint: scene.artwork.fingerprint ?? "", resolvedVisualProfileReferences: [], artDirectionFingerprint: "",
+            settings: { quality: story.artwork.quality, size: story.artwork.size, aspectRatio: story.artwork.aspectRatio, outputFormat: story.artwork.outputFormat },
+            original: dims ? { width: dims.width, height: dims.height, fingerprint: scene.artwork.imageFingerprint, provider: scene.artwork.provider ?? story.artwork.provider, model: scene.artwork.model ?? story.artwork.model } : undefined,
+            review: scene.artwork.review ?? "unreviewed",
+          };
+          scene.artwork.versions = [v1];
+        }
+      }
     }
 
     summary.artwork = { ...summary.artwork, status: "generating", inputFingerprint: "per-scene", manuallyEdited: false, reviewRequired: false };
@@ -626,15 +611,41 @@ export class SummaryVisualService {
     }
   }
   async produce(slug: string, id: string, raw: unknown = {}, progress?: SummaryVisualProgress, paused?: () => boolean) {
-    const options = summaryProduceInputSchema.parse(raw); progress?.({ type: "summary.narration.preparing" });
-    if (paused?.()) return this.get(slug, id); await withUsageScope({ story: slug, stage: "narration" }, () => this.media.narration(slug, id));
-    if (paused?.()) return this.get(slug, id); progress?.({ type: "summary.audio.preparing" }); await withUsageScope({ story: slug, stage: "tts" }, () => this.media.audio(slug, id));
+    const options = summaryProduceInputSchema.parse(raw);
+    if (options.dryRun) return this.planProduce(slug, id, options);
+    progress?.({ type: "summary.narration.preparing" });
+    if (paused?.()) return this.get(slug, id); await withUsageScope({ story: slug, stage: "narration" }, () => this.media.narration(slug, id, { force: options.force }));
+    if (paused?.()) return this.get(slug, id); progress?.({ type: "summary.audio.preparing" }); await withUsageScope({ story: slug, stage: "tts" }, () => this.media.audio(slug, id, { force: options.force }));
     if (paused?.()) return this.get(slug, id); const { missingOnly, dryRun, ...pacing } = options;
     const recorded = (await this.media.get(slug, id)).scenePacing;
     const sceneOptions = options.pacing === "automatic" && options.sceneCount === undefined && options.secondsPerScene === undefined && recorded ? { ...recorded, force: options.force } : pacing;
     await withUsageScope({ story: slug, stage: "scenePlanning" }, () => this.scenes(slug, id, sceneOptions, progress));
-    if (paused?.()) return this.get(slug, id); await this.artwork(slug, id, { missingOnly, dryRun }, progress, paused);
-    if (paused?.()) return this.get(slug, id); return this.video(slug, id, {}, progress);
+    if (paused?.()) return this.get(slug, id); await this.artwork(slug, id, { force: options.force, missingOnly, dryRun }, progress, paused);
+    if (paused?.()) return this.get(slug, id); return this.video(slug, id, { force: options.force }, progress);
+  }
+  private async planProduce(slug: string, id: string, options: z.infer<typeof summaryProduceInputSchema>) {
+    // This path deliberately reads metadata and existing files only. It must never call a
+    // provider, master audio, render video, alter freshness, or write an artifact.
+    const summary = await this.get(slug, id);
+    const narration = summary.narration?.status === "current"
+      ? { action: "reuse", status: summary.narration.status }
+      : { action: "generate", status: summary.narration?.status ?? "missing" };
+    const audio = summary.audio?.status === "current"
+      ? { action: "reuse", status: summary.audio.status }
+      : { action: "generate", status: summary.audio?.status ?? "missing" };
+    const scenes = summary.scenes?.status === "current" && summaryScenePlanAvailable(summary)
+      ? { action: "reuse", status: summary.scenes.status }
+      : { action: "generate", status: summary.scenes?.status ?? "missing" };
+    const artwork = summaryScenePlanAvailable(summary)
+      ? await this.artwork(slug, id, { missingOnly: options.missingOnly, dryRun: true })
+      : { blocked: true, reason: "A scene plan will be generated before artwork can be planned" };
+    const canRenderVideo = summaryAudioAvailable(summary) && summaryNarrationTextAvailable(summary) && summaryScenePlanAvailable(summary);
+    const video = summary.video?.status === "current" && canRenderVideo
+      ? { action: "reuse", status: summary.video.status }
+      : canRenderVideo
+        ? { action: "render", status: summary.video?.status ?? "missing" }
+        : { action: "blocked", status: summary.video?.status ?? "missing", reason: "Audio and scene plan are required" };
+    return { dryRun: true, id, narration, audio, scenes, artwork, video };
   }
   async export(slug: string, id: string, type: "video" | "artwork", sceneId?: string) {
     const summary = await this.get(slug, id); const paths = this.paths(slug, id);

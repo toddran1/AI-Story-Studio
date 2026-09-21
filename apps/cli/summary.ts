@@ -40,8 +40,16 @@ export function parseSummaryArgs(values: string[]): SummaryCommand {
   if (action === "scenes" || action === "artwork" || action === "video" || action === "produce") {
     if (!positionalId) usage(`${action} requires a summary ID`);
     const input: Record<string, unknown> = {};
+    const allowed = action === "scenes"
+      ? new Set(["--force", "--pacing", "--scene-count", "--seconds-per-scene"])
+      : action === "artwork"
+        ? new Set(["--force", "--missing-only", "--dry-run", "--scene"])
+        : action === "video"
+          ? new Set(["--force"])
+          : new Set(["--force", "--missing-only", "--dry-run", "--pacing", "--scene-count", "--seconds-per-scene"]);
     for (let index = 0; index < rest.length; index++) {
       const key = rest[index];
+      if (!allowed.has(key!)) usage(`Unknown ${action} option: ${key}`);
       if (key === "--force") { input.force = true; continue; }
       if (key === "--missing-only") { input.missingOnly = true; continue; }
       if (key === "--dry-run") { input.dryRun = true; continue; }

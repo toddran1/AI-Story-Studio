@@ -79,6 +79,7 @@ describe("manual stage execution planner", () => {
   });
   it("normalizes legacy single-stage requests without weakening strict input validation", () => {
     expect(stageExecutionInputSchema.parse({ chapters: [3, 1, 3], stage: "qa", mode: "through" })).toMatchObject({ chapters: [1, 3], stages: ["qa"], mode: "prerequisites" }); expect(stageExecutionInputSchema.parse({ chapters: [1], selectedStage: "qa" })).toMatchObject({ stages: ["qa"] });
+    expect(stageExecutionInputSchema.parse({ chapters: [1], stages: ["qa"] }).force).toBe(false);
     expect(() => stageExecutionInputSchema.parse({ chapters: [1], stages: ["qa"], surprise: true })).toThrow();
   });
 });

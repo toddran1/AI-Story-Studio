@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -50,6 +50,14 @@ describe("summary visual production", () => {
   });
   afterEach(async () => { await rm(root, { recursive: true, force: true }); });
   const produce = () => visuals.produce("demo-story", id, { pacing: "custom", sceneCount: 2 });
+  it("plans produce dry-runs without generating, rendering, or changing summary metadata", async () => {
+    const before = await readFile(summaryPath(root, "demo-story", id), "utf8");
+    const llmCalls = llm.calls.length, ttsCalls = tts.calls, imageCalls = images.generate.mock.calls.length, renderCalls = render.mock.calls.length;
+    const result = await visuals.produce("demo-story", id, { dryRun: true, sceneCount: 2 });
+    expect(result).toMatchObject({ dryRun: true, narration: { action: "generate" }, audio: { action: "generate" }, scenes: { action: "generate" }, artwork: { blocked: true }, video: { action: "blocked" } });
+    expect(llm.calls.length).toBe(llmCalls); expect(tts.calls).toBe(ttsCalls); expect(images.generate.mock.calls.length).toBe(imageCalls); expect(render.mock.calls.length).toBe(renderCalls);
+    expect(await readFile(summaryPath(root, "demo-story", id), "utf8")).toBe(before);
+  });
   it("renders a real MP4 through the shared FFmpeg renderer without paid providers", async (context) => {
     try { await runCommand(process.env.FFMPEG_PATH || "ffmpeg", ["-version"]); } catch { context.skip(); return; }
     const story = testStory(); story.video = { ...story.video, width: 640, height: 360, fps: 24, subtitleMode: "none" }; await atomicWriteJson(storyPaths(root, "demo-story", 1).storyConfig, story);
@@ -140,6 +148,12 @@ describe("summary visual production", () => {
     const props = { summary, base: `/stories/demo-story/summaries/${id}`, disabled: false, onChange: () => {}, onGenerate: () => {}, onError: () => {} };
     expect(renderToStaticMarkup(<SummaryScenePanel {...props} />)).toContain("Regenerate scene"); expect(renderToStaticMarkup(<SummaryArtworkPanel {...props} />)).toContain("Approve / retain"); expect(renderToStaticMarkup(<SummaryVideoPanel {...props} />)).toContain("Download MP4");
     expect(renderToStaticMarkup(<SummaryLayers {...props} slug="demo-story" busy={false}>Canonical</SummaryLayers>)).toContain("Artwork");
+  });
+  it("rejects summary CLI flags that do not apply to their command", () => {
+    expect(() => parseSummaryArgs(["scenes", "demo-story", id, "--dry-run"])).toThrow(/Unknown scenes option/);
+    expect(() => parseSummaryArgs(["artwork", "demo-story", id, "--pacing", "fast"])).toThrow(/Unknown artwork option/);
+    expect(() => parseSummaryArgs(["video", "demo-story", id, "--missing-only"])).toThrow(/Unknown video option/);
+    expect(parseSummaryArgs(["produce", "demo-story", id, "--force", "--missing-only", "--dry-run", "--scene-count", "2"])).toMatchObject({ action: "produce", input: { force: true, missingOnly: true, dryRun: true, sceneCount: 2 } });
   });
   const markStale = async (...stages: Array<"narration" | "tts" | "audio" | "scenes">) => {
     const stored = await summaries.get("demo-story", id);

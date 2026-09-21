@@ -406,6 +406,9 @@ export class StudioOperations {
       const selected = selectChapterRange(imported.chapters, input.from, input.to); const state = createBatchState({ root: this.root, story: slug, inputDirectory: imported.directory, chapters: selected, allowGaps: true, continueOnError: input.continueOnError, delayMs: 0, force: input.force, stopAfter: batchStopAfter(input.force), stage: input.stage, mode: input.mode });
       const shutdown = new ShutdownController(); control.setPause(() => shutdown.request());
       const processor: ChapterProcessor = input.stage ? { run: async (request) => {
+        // Legacy /batch callers selected one stage as an explicit rerun action. Preserve that
+        // long-standing force behavior here; the new /stages/plan + /stages/run dispatcher
+        // passes its own `force` flag unchanged and never inherits this legacy default.
         const plan = await planStageExecution({ root: this.root, story: slug, chapter: request.chapter, selectedStages: [input.stage!], mode: input.mode, force: true });
         await executeStagePlan({ root: this.root, story, chapter: request.chapter, inputPath: request.inputPath, source: request.source, plan,
           runtime: { pipeline: this.pipeline, alignment: { config: this.alignConfig, engine: this.aligner }, scenePlanner: this.scenePlanner ?? this.runtime.router.forStage(story.pipeline.scenePlanner), image: this.image, video: this.video }, onStageEvent: request.onStageEvent });
@@ -430,7 +433,7 @@ export class StudioOperations {
     slugSchema.parse(slug); const input = stage === "produce" ? summaryProduceInputSchema.parse(raw) : stage === "scenes" ? summaryScenesInputSchema.parse(raw) : ["artwork", "video"].includes(stage) ? summaryVisualInputSchema.parse(raw) : summaryMediaInputSchema.parse(raw);
     return this.jobs.createDurable(this.summaryJobsDirectory(), slug, async (control) => withStoryLock(this.root, slug, `summary ${stage}`, async () => {
       const shutdown = new ShutdownController(); control.setPause(() => shutdown.request()); const progress = (event: unknown) => control.update(event);
-      const result = await withUsageScope({ story: slug, stage: stage === "audio" ? "tts" : stage === "scenes" ? "scenePlanning" : stage === "artwork" ? "artwork" : stage === "video" ? "video" : "narration" }, () => stage === "narration" ? this.summaryMedia().narration(slug, id, input) : stage === "audio" ? this.summaryMedia().audio(slug, id, input, progress) : stage === "produce" ? this.summaryVisuals().produce(slug, id, input, progress, () => shutdown.isRequested) : stage === "artwork" ? this.summaryVisuals().artwork(slug, id, input, progress, () => shutdown.isRequested) : this.summaryVisuals()[stage](slug, id, input, progress));
+      const result: unknown = await withUsageScope<unknown>({ story: slug, stage: stage === "audio" ? "tts" : stage === "scenes" ? "scenePlanning" : stage === "artwork" ? "artwork" : stage === "video" ? "video" : "narration" }, () => stage === "narration" ? this.summaryMedia().narration(slug, id, input) : stage === "audio" ? this.summaryMedia().audio(slug, id, input, progress) : stage === "produce" ? this.summaryVisuals().produce(slug, id, input, progress, () => shutdown.isRequested) : stage === "artwork" ? this.summaryVisuals().artwork(slug, id, input, progress, () => shutdown.isRequested) : this.summaryVisuals()[stage](slug, id, input, progress));
       return shutdown.isRequested ? { status: "paused", summary: result } : result;
     }));
   }

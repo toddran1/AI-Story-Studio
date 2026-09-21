@@ -22,7 +22,7 @@ const stageGroups: Array<{ label: string; stages: BatchStage[] }> = [
   { label: "Audio", stages: ["tts", "audioMastering", "alignment", "subtitles"] },
   { label: "Visual", stages: ["scenePlanning", "artwork", "video"] },
 ];
-const presetLabels: Record<keyof typeof STAGE_SELECTION_PRESETS, string> = { coreText: "Core text", narrationQa: "Narration + QA", audio: "Audio", visuals: "Visuals" };
+const presetLabels: Record<keyof typeof STAGE_SELECTION_PRESETS, string> = { coreText: "Context", narrationQa: "Narration + QA", audio: "Audio", visuals: "Visuals" };
 
 export function toggleStageSelection(current: readonly BatchStage[], stage: BatchStage): BatchStage[] {
   return current.includes(stage) ? current.filter((item) => item !== stage) : BATCH_STAGES.filter((item) => item === stage || current.includes(item));
@@ -32,7 +32,8 @@ export function applyStagePreset(key: keyof typeof STAGE_SELECTION_PRESETS): Bat
 export function BatchProcessingPanel(props: Props) {
   const [expression, setExpression] = useState(() => formatChapterSelection(props.selectedChapters));
   const [editingExpression, setEditingExpression] = useState(false);
-  const [stages, setStages] = useState<BatchStage[]>(applyStagePreset("narrationQa"));
+  // Dispatch is deliberately opt-in: no stage is selected until the operator chooses it.
+  const [stages, setStages] = useState<BatchStage[]>([]);
   const [mode, setMode] = useState<StageExecutionMode>("selected");
   const [force, setForce] = useState(false);
   const [continueOnError, setContinueOnError] = useState(false);
@@ -91,7 +92,7 @@ export function BatchProcessingPanel(props: Props) {
         <div className="selection-shortcuts"><button type="button" onClick={() => chooseChapters(props.onSelectVisible)}>Visible page</button><button type="button" onClick={() => chooseChapters(props.onSelectMatching)}>Matching filter</button><button type="button" onClick={() => chooseChapters(props.onSelectAll)}>All chapters</button><button type="button" onClick={() => chooseChapters(() => props.onSelectionChange([]))}>Clear</button></div>
       </section>
       <section className="batch-step-block" aria-label="Stages">
-        <div className="batch-step"><span>02</span><div><b>Stages</b><small>Select one or more outputs</small></div></div>
+        <div className="batch-step"><span>02</span><div><b>Stages</b><small>Select one or more outputs</small></div><span className="batch-step-result">{stages.length} stage{stages.length === 1 ? "" : "s"} selected</span></div>
         <div className="stage-presets" aria-label="Quick select">
           {(Object.keys(STAGE_SELECTION_PRESETS) as Array<keyof typeof STAGE_SELECTION_PRESETS>).map((key) => <button type="button" key={key} onClick={() => setStages(applyStagePreset(key))}>{presetLabels[key]}</button>)}
           <button type="button" onClick={() => setStages([])}>Clear</button>
