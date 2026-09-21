@@ -122,6 +122,8 @@ export function createApiHandler(operations: StudioOperations) {
       if (summaryRegenerateMatch && request.method === "POST") return send(response, 202, operations.regenerateSummary(summaryRegenerateMatch[1]!, summaryRegenerateMatch[2]!, await jsonBody(request)));
       const summaryMediaMatch = /^\/api\/stories\/([a-z0-9-]+)\/summaries\/(sum_[a-f0-9-]{36})\/(narration|audio|scenes|artwork|video|produce)$/.exec(url.pathname);
       if (summaryMediaMatch && request.method === "POST") return send(response, 202, await operations.startSummaryMedia(summaryMediaMatch[1]!, summaryMediaMatch[2]!, summaryMediaMatch[3]! as Parameters<StudioOperations["startSummaryMedia"]>[2], await jsonBody(request)));
+      const summaryReupscaleMatch = /^\/api\/stories\/([a-z0-9-]+)\/summaries\/(sum_[a-f0-9-]{36})\/reupscale$/.exec(url.pathname);
+      if (summaryReupscaleMatch && request.method === "POST") return send(response, 200, await operations.reupscaleSummaryArtwork(summaryReupscaleMatch[1]!, summaryReupscaleMatch[2]!, await jsonBody(request)));
       if (summaryMediaMatch && summaryMediaMatch[3] === "narration" && request.method === "PUT") return send(response, 200, { summary: await operations.editSummaryNarration(summaryMediaMatch[1]!, summaryMediaMatch[2]!, await jsonBody(request)) });
       if (summaryMediaMatch && summaryMediaMatch[3] === "scenes" && request.method === "PUT") return send(response, 200, { summary: await operations.editSummaryScenes(summaryMediaMatch[1]!, summaryMediaMatch[2]!, await jsonBody(request)) });
       const summarySceneRegenerateMatch = /^\/api\/stories\/([a-z0-9-]+)\/summaries\/(sum_[a-f0-9-]{36})\/scenes\/(scene-\d{3})\/regenerate$/.exec(url.pathname);

@@ -1,21 +1,35 @@
 import { randomUUID } from "node:crypto";
-import { rename, rm } from "node:fs/promises";
+import { readFile, rename, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { z } from "zod";
 import { loadStory } from "../config/load-config.js";
 import { storyPaths } from "../storage/paths.js";
 import { atomicWrite, atomicWriteJson } from "../storage/atomic-write.js";
+import { exists } from "../storage/story-files.js";
 import { fileFingerprint } from "../utils/file-fingerprint.js";
 import { fingerprint } from "../utils/hash.js";
 import { loadNarrationNamingEntities } from "../story-bible/narration-names.js";
 import { resolveVisualEntities } from "../scenes/identity.js";
 import { productionSceneFingerprint } from "../scenes/manifest.js";
-import { sceneSchema, artworkReviewSchema, type Scene } from "../scenes/types.js";
+import { sceneSchema, artworkReviewSchema, type Scene, type ArtworkVersion } from "../scenes/types.js";
 import { bindNarrationSpans, timeNarrationScenes } from "../scenes/narration-spans.js";
 import { loadCharacterVisualReferences } from "../scenes/visual-references.js";
-import { artworkPrompt, generateSceneImage, validPngFingerprint } from "../artwork/generator.js";
+import {
+  artworkPrompt,
+  generateSceneImage,
+  validPngFingerprint,
+  backingArtworkVersion,
+  resolveBestProductionAssetForPaths,
+  ensureArtworkVersionProductionAssetForPaths,
+  syncCanonicalSceneImageForPaths,
+  needsProductionDerivative,
+  resolveUpscaler,
+} from "../artwork/generator.js";
+import { imageDimensions } from "../artwork/resolution.js";
+import { resolveVideoSettings } from "../video/config.js";
 import type { ImageProvider } from "../artwork/provider.js";
 import type { ImageProviderRouter } from "../artwork/router.js";
+import type { ImageUpscaler } from "../artwork/upscaler.js";
 import type { VideoProcessor } from "../video/renderer.js";
 import type { AlignmentConfig, AlignmentEngine } from "../alignment/types.js";
 import { reconcileAndValidateAlignment } from "../alignment/quality.js";
@@ -30,22 +44,66 @@ import { withUsageScope } from "../cost/context.js";
 
 export class SummaryArtifactNotFoundError extends Error {}
 
-export const summaryVisualInputSchema = z.object({ force: z.boolean().default(false), missingOnly: z.boolean().default(false),
-  scenes: z.array(z.string().regex(/^scene-\d{3}$/)).min(1).max(100).optional() }).strict();
-export const summaryProduceInputSchema = summaryScenesInputSchema.safeExtend({ missingOnly: z.boolean().default(false) });
+export const summaryVisualInputSchema = z.object({
+  force: z.boolean().default(false),
+  missingOnly: z.boolean().default(false),
+  dryRun: z.boolean().default(false),
+  scenes: z.array(z.string().regex(/^scene-\d{3}$/)).min(1).max(100).optional(),
+}).strict();
+export const summaryReupscaleInputSchema = z.object({
+  sceneId: z.string().regex(/^scene-\d{3}$/).optional(),
+  versionNumber: z.number().int().positive().optional(),
+}).strict();
+export const summaryProduceInputSchema = summaryScenesInputSchema.safeExtend({
+  missingOnly: z.boolean().default(false),
+  dryRun: z.boolean().default(false),
+});
 export const summarySceneEditSchema = z.union([
   z.object({ scenes: z.array(sceneSchema).min(1).max(100) }).strict(),
   z.object({ acceptCurrent: z.literal(true) }).strict(),
 ]);
-export type SummaryVisualProgress = (event: { type: string; scene?: string; index?: number; total?: number }) => void;
+export type SummaryVisualProgress = (event: {
+  type: string;
+  scene?: string;
+  index?: number;
+  total?: number;
+  imagesToGenerate?: number;
+  reusable?: number;
+  derivativesToBuild?: number;
+}) => void;
 
 /** Source adapter only. Image generation, prompts, alignment quality, captions,
  * TTS/mastering and video rendering all use the chapter production engines. */
 export class SummaryVisualService {
-  constructor(private readonly root: string, private readonly media: SummaryMediaService,
-    private readonly images: ImageProviderRouter | ImageProvider, private readonly renderer: VideoProcessor,
-    private readonly alignmentConfig: AlignmentConfig, private readonly aligner?: AlignmentEngine) {}
-  paths(slug: string, id: string) { const paths = summaryMediaPaths(this.root, slug, id); return { ...paths, video: join(paths.directory, "video.mp4"), subtitles: join(paths.directory, "subtitles.srt"), image: (scene: string) => { if (!/^scene-\d{3}$/.test(scene)) throw new Error("Invalid scene ID"); return join(paths.directory, "artwork", `${scene}.png`); } }; }
+  constructor(
+    private readonly root: string,
+    private readonly media: SummaryMediaService,
+    private readonly images: ImageProviderRouter | ImageProvider,
+    private readonly renderer: VideoProcessor,
+    private readonly alignmentConfig: AlignmentConfig,
+    private readonly aligner?: AlignmentEngine,
+    private readonly upscaler?: ImageUpscaler
+  ) {}
+  paths(slug: string, id: string) {
+    const paths = summaryMediaPaths(this.root, slug, id);
+    return {
+      ...paths,
+      video: join(paths.directory, "video.mp4"),
+      subtitles: join(paths.directory, "subtitles.srt"),
+      image: (scene: string) => {
+        if (!/^scene-\d{3}$/.test(scene)) throw new Error("Invalid scene ID");
+        return join(paths.directory, "artwork", `${scene}.png`);
+      },
+      sceneVersionImage: (scene: string, versionNumber: number) => {
+        if (!/^scene-\d{3}$/.test(scene)) throw new Error("Invalid scene ID");
+        return join(paths.directory, "artwork", `${scene}-v${versionNumber}.png`);
+      },
+      sceneVersionProductionImage: (scene: string, versionNumber: number) => {
+        if (!/^scene-\d{3}$/.test(scene)) throw new Error("Invalid scene ID");
+        return join(paths.directory, "artwork", `${scene}-v${versionNumber}-production.png`);
+      },
+    };
+  }
   private save(slug: string, summary: StorySummary) { summary.updatedAt = new Date().toISOString(); return atomicWriteJson(summaryPath(this.root, slug, summary.id), summarySchema.parse(summary)).then(() => summary); }
   private async context(slug: string) { const story = await loadStory(storyPaths(this.root, slug, 1).storyConfig); const entities = await loadNarrationNamingEntities(this.root, slug); const provider = "forName" in this.images ? this.images.forName(story.artwork.provider) : this.images; if (provider.name !== story.artwork.provider) throw new Error("Configured artwork provider does not match the available provider"); return { story, entities, provider }; }
   private async imageInput(slug: string, scene: Scene) {
@@ -56,7 +114,19 @@ export class SummaryVisualService {
     const canonical = entities.map((entity) => ({ name: entity.canonicalName, description: [entity.description, entity.notes].filter(Boolean).join(". ") }));
     const visualScene = { ...scene, characters: entities.length ? entities.map((entity) => entity.canonicalName) : scene.characters };
     const prompt = artworkPrompt(visualScene, [...canonical, ...refs], context.story.artwork.stylePrompt, context.story.artwork.size, context.story.artwork.aspectRatio);
-    return { ...context, prompt, entityIds: entities.map((entity) => entity.id), inputFingerprint: fingerprint({ version: "source-artwork-v1", prompt, refs: refs.map((ref) => ref.fingerprint), settings: context.story.artwork, providerVersion: context.provider.version }) };
+    const { provider: pName, model, quality, aspectRatio, size, stylePrompt, outputFormat } = context.story.artwork;
+    return {
+      ...context,
+      prompt,
+      entityIds: entities.map((entity) => entity.id),
+      inputFingerprint: fingerprint({
+        version: "source-artwork-v1",
+        prompt,
+        refs: refs.map((ref) => ref.fingerprint),
+        settings: { provider: pName, model, quality, aspectRatio, size, stylePrompt, outputFormat },
+        providerVersion: context.provider.version,
+      }),
+    };
   }
   private videoFingerprint(summary: StorySummary, settings: unknown) { return fingerprint({ version: "summary-video-v1", audio: summary.audio?.outputFingerprint, scenes: summary.scenePlan?.scenes.filter((scene) => !scene.disabled).map((scene) => ({ id: scene.id, start: scene.startSeconds, end: scene.endSeconds, image: scene.artwork.imageFingerprint, review: scene.artwork.review })), settings, alignment: summary.alignment?.inputFingerprint, renderer: this.renderer.version }); }
   async get(slug: string, id: string) {
@@ -69,7 +139,8 @@ export class SummaryVisualService {
     if (summary.artwork?.status === "current" && !intact) summary.artwork.status = "stale";
     if (summary.artwork?.status === "stale" && intact) summary.artwork.status = "current";
     const { story } = await this.context(slug);
-    if (summary.video?.status === "current" && (summary.audio?.status !== "current" || summary.scenes?.status !== "current" || !intact || summary.video.inputFingerprint !== this.videoFingerprint(summary, { ...story.video, introDurationSeconds: 0 }) || summary.video.outputFingerprint !== await fileFingerprint(paths.video))) summary.video.status = "stale";
+    const settings = { ...resolveVideoSettings(story.video), introDurationSeconds: 0 };
+    if (summary.video?.status === "current" && (summary.audio?.status !== "current" || summary.scenes?.status !== "current" || !intact || summary.video.inputFingerprint !== this.videoFingerprint(summary, settings) || summary.video.outputFingerprint !== await fileFingerprint(paths.video))) summary.video.status = "stale";
     return summary;
   }
   async align(slug: string, id: string, progress?: SummaryVisualProgress) {
@@ -126,28 +197,343 @@ export class SummaryVisualService {
     summary.scenes = { ...summary.scenes!, status: "current", manuallyEdited: true, reviewRequired: false, outputFingerprint: productionSceneFingerprint(summary.scenePlan), sourceFingerprint: fingerprint(summary.narration.text), configurationFingerprint: fingerprint({ config: story.pipeline.scenePlanner, settings: story.scenes }) };
     if (summary.video) summary.video.status = "stale"; return this.save(slug, summary);
   }
-  async artwork(slug: string, id: string, raw: unknown = {}, progress?: SummaryVisualProgress, paused?: () => boolean) {
-    const options = summaryVisualInputSchema.parse(raw); let summary = await this.get(slug, id);
+  async artwork(slug: string, id: string, raw: unknown = {}, progress?: SummaryVisualProgress, paused?: () => boolean, upscalerOverride?: ImageUpscaler) {
+    const options = summaryVisualInputSchema.parse(raw);
+    let summary = await this.get(slug, id);
     if (!summary.scenePlan || summary.scenes?.status !== "current") throw new Error("Generate or review current scenes before artwork production");
     const selected = summary.scenePlan.scenes.filter((scene) => !scene.disabled && (!options.scenes || options.scenes.includes(scene.id)));
     if (options.scenes?.some((sceneId) => !selected.some((scene) => scene.id === sceneId))) throw new Error("Selected scene was not found or is disabled");
-    summary.artwork = { ...summary.artwork, status: "generating", inputFingerprint: "per-scene", manuallyEdited: false, reviewRequired: false }; await this.save(slug, summary);
-    try {
-      for (let index = 0; index < selected.length; index++) {
-        if (paused?.()) { summary.artwork.status = "stale"; return this.save(slug, summary); }
-        const scene = selected[index]!; const input = await this.imageInput(slug, scene); const actual = await validPngFingerprint(this.paths(slug, id).image(scene.id));
-        const current = scene.artwork.status === "complete" && Boolean(actual) && actual === scene.artwork.imageFingerprint && scene.artwork.fingerprint === input.inputFingerprint && !["rejected", "needs-regeneration"].includes(scene.artwork.review);
-        if ((!options.force && current) || (options.missingOnly && actual && scene.artwork.status === "complete")) continue;
-        if (!options.force && (scene.artwork.review === "approved" || scene.artwork.manuallyEdited)) continue;
-        progress?.({ type: "summary.artwork.started", scene: scene.id, index: index + 1, total: selected.length });
-        await input.provider.validateConfiguration(); scene.artwork = { ...scene.artwork, status: "running", error: undefined }; await this.save(slug, summary);
-        try { const result = await withUsageScope({ story: slug, stage: "artwork" }, () => generateSceneImage(input.provider, input.story, input.prompt)); await atomicWrite(this.paths(slug, id).image(scene.id), result.data);
-          scene.artwork = { status: "complete", review: "unreviewed", fingerprint: input.inputFingerprint, imageFingerprint: fingerprint(result.data.toString("base64")), provider: input.provider.name, model: input.story.artwork.model, generatedAt: new Date().toISOString(), prompt: input.prompt, sourceType: "summary", sourceId: id, entityIds: input.entityIds, versions: [] }; }
-        catch (error) { scene.artwork = { ...scene.artwork, status: "failed", error: error instanceof Error ? error.message : String(error) }; throw error; }
-        if (summary.video) summary.video.status = "stale"; await this.save(slug, summary); progress?.({ type: "summary.artwork.completed", scene: scene.id, index: index + 1, total: selected.length });
+
+    const { story } = await this.context(slug);
+    const paths = this.paths(slug, id);
+    const upscaler = needsProductionDerivative(story) ? resolveUpscaler(upscalerOverride ?? this.upscaler) : undefined;
+
+    // Migrate any legacy scenes without versions array
+    for (const scene of selected) {
+      if (scene.artwork.status === "complete" && (!scene.artwork.versions || scene.artwork.versions.length === 0)) {
+        const actual = await validPngFingerprint(paths.image(scene.id));
+        if (actual && actual === scene.artwork.imageFingerprint) {
+          const v1Path = paths.sceneVersionImage(scene.id, 1);
+          if (!(await exists(v1Path))) {
+            await atomicWrite(v1Path, await readFile(paths.image(scene.id)));
+          }
+          const dims = (await exists(v1Path)) ? imageDimensions(await readFile(v1Path)) : undefined;
+          const v1: ArtworkVersion = {
+            id: "v1",
+            versionNumber: 1,
+            sceneId: scene.id,
+            imagePath: `${scene.id}-v1.png`,
+            imageFingerprint: scene.artwork.imageFingerprint,
+            createdAt: scene.artwork.generatedAt ?? new Date().toISOString(),
+            provider: scene.artwork.provider ?? story.artwork.provider,
+            model: scene.artwork.model ?? story.artwork.model,
+            prompt: scene.artwork.prompt ?? scene.visualPrompt,
+            promptFingerprint: scene.artwork.fingerprint ?? "",
+            resolvedVisualProfileReferences: [],
+            artDirectionFingerprint: "",
+            settings: {
+              quality: story.artwork.quality,
+              size: story.artwork.size,
+              aspectRatio: story.artwork.aspectRatio,
+              outputFormat: story.artwork.outputFormat,
+            },
+            original: dims ? { width: dims.width, height: dims.height, fingerprint: scene.artwork.imageFingerprint, provider: scene.artwork.provider ?? story.artwork.provider, model: scene.artwork.model ?? story.artwork.model } : undefined,
+            review: scene.artwork.review ?? "unreviewed",
+          };
+          scene.artwork.versions = [v1];
+        }
       }
-      summary.artwork.status = "current"; await this.save(slug, summary); summary = await this.get(slug, id); return this.save(slug, summary);
-    } catch (error) { summary.artwork!.status = "failed"; summary.artwork!.error = error instanceof Error ? error.message : String(error); await this.save(slug, summary); throw error; }
+    }
+
+    let imagesToGenerate = 0;
+    let reusable = 0;
+    let derivativesToBuild = 0;
+
+    type PlanItem = {
+      scene: Scene;
+      input: Awaited<ReturnType<SummaryVisualService["imageInput"]>>;
+      needsGeneration: boolean;
+      backingVersion?: ArtworkVersion;
+    };
+    const planItems: PlanItem[] = [];
+
+    for (const scene of selected) {
+      const input = await this.imageInput(slug, scene);
+      const backing = backingArtworkVersion(scene);
+      let intactOriginal = false;
+      if (backing) {
+        const originalPath = paths.sceneVersionImage(scene.id, backing.versionNumber);
+        const actualOrig = await validPngFingerprint(originalPath);
+        if (actualOrig && actualOrig === backing.imageFingerprint) {
+          intactOriginal = true;
+        }
+      }
+      if (!intactOriginal) {
+        const standardActual = await validPngFingerprint(paths.image(scene.id));
+        if (standardActual && standardActual === scene.artwork.imageFingerprint) {
+          intactOriginal = true;
+        }
+      }
+
+      const isCurrent = scene.artwork.status === "complete" && intactOriginal && scene.artwork.fingerprint === input.inputFingerprint && !["rejected", "needs-regeneration"].includes(scene.artwork.review);
+      const isProtected = scene.artwork.review === "approved" || scene.artwork.manuallyEdited;
+      const skipGeneration = (!options.force && isCurrent) || (options.missingOnly && intactOriginal && scene.artwork.status === "complete") || (!options.force && isProtected);
+
+      if (skipGeneration) {
+        reusable++;
+        if (needsProductionDerivative(story) && backing) {
+          const prodPath = paths.sceneVersionProductionImage(scene.id, backing.versionNumber);
+          const actualProd = await validPngFingerprint(prodPath);
+          if (!actualProd || actualProd !== backing.upscale?.outputFingerprint) {
+            derivativesToBuild++;
+          }
+        }
+        planItems.push({ scene, input, needsGeneration: false, backingVersion: backing });
+      } else {
+        imagesToGenerate++;
+        if (needsProductionDerivative(story)) {
+          derivativesToBuild++;
+        }
+        planItems.push({ scene, input, needsGeneration: true });
+      }
+    }
+
+    if (options.dryRun) {
+      return {
+        summary,
+        dryRun: true,
+        imagesToGenerate,
+        reusable,
+        derivativesToBuild,
+      };
+    }
+
+    summary.artwork = { ...summary.artwork, status: "generating", inputFingerprint: "per-scene", manuallyEdited: false, reviewRequired: false };
+    await this.save(slug, summary);
+
+    try {
+      for (let index = 0; index < planItems.length; index++) {
+        if (paused?.()) { summary.artwork.status = "stale"; return this.save(slug, summary); }
+        const item = planItems[index]!;
+        const scene = item.scene;
+        const input = item.input;
+
+        if (!item.needsGeneration) {
+          if (item.backingVersion && needsProductionDerivative(story)) {
+            const originalPath = paths.sceneVersionImage(scene.id, item.backingVersion.versionNumber);
+            const productionPath = paths.sceneVersionProductionImage(scene.id, item.backingVersion.versionNumber);
+            const warnings: string[] = [];
+            const didChange = await ensureArtworkVersionProductionAssetForPaths({
+              story,
+              sceneId: scene.id,
+              version: item.backingVersion,
+              originalPath,
+              productionPath,
+              upscaler,
+              warnings,
+            });
+            if (didChange) {
+              await syncCanonicalSceneImageForPaths({
+                story,
+                scene,
+                originalPath,
+                productionPath,
+                standardImagePath: paths.image(scene.id),
+              });
+              if (summary.video) summary.video.status = "stale";
+              await this.save(slug, summary);
+            }
+          }
+          continue;
+        }
+
+        progress?.({ type: "summary.artwork.started", scene: scene.id, index: index + 1, total: planItems.length });
+        await input.provider.validateConfiguration();
+        scene.artwork = { ...scene.artwork, status: "running", error: undefined };
+        await this.save(slug, summary);
+
+        try {
+          const result = await withUsageScope({ story: slug, stage: "artwork" }, () => generateSceneImage(input.provider, input.story, input.prompt));
+          const versionNumber = (scene.artwork.versions?.length ?? 0) + 1;
+          const versionId = `v${versionNumber}`;
+          const originalPath = paths.sceneVersionImage(scene.id, versionNumber);
+          const productionPath = paths.sceneVersionProductionImage(scene.id, versionNumber);
+          const standardPath = paths.image(scene.id);
+
+          await atomicWrite(originalPath, result.data);
+          const dims = imageDimensions(result.data);
+          const newVersion: ArtworkVersion = {
+            id: versionId,
+            versionNumber,
+            sceneId: scene.id,
+            imagePath: `${scene.id}-v${versionNumber}.png`,
+            imageFingerprint: fingerprint(result.data.toString("base64")),
+            createdAt: new Date().toISOString(),
+            provider: input.provider.name,
+            model: input.story.artwork.model,
+            prompt: input.prompt,
+            promptFingerprint: input.inputFingerprint,
+            resolvedVisualProfileReferences: [],
+            artDirectionFingerprint: "",
+            settings: {
+              quality: input.story.artwork.quality,
+              size: input.story.artwork.size,
+              aspectRatio: input.story.artwork.aspectRatio,
+              outputFormat: input.story.artwork.outputFormat,
+            },
+            original: dims ? { width: dims.width, height: dims.height, fingerprint: fingerprint(result.data.toString("base64")), provider: input.provider.name, model: input.story.artwork.model } : undefined,
+            review: "unreviewed",
+          };
+
+          const warnings: string[] = [];
+          await ensureArtworkVersionProductionAssetForPaths({
+            story: input.story,
+            sceneId: scene.id,
+            version: newVersion,
+            originalPath,
+            productionPath,
+            upscaler,
+            warnings,
+          });
+
+          scene.artwork.versions = [...(scene.artwork.versions ?? []), newVersion];
+          scene.artwork = {
+            ...scene.artwork,
+            status: "complete",
+            review: "unreviewed",
+            fingerprint: input.inputFingerprint,
+            imageFingerprint: newVersion.imageFingerprint,
+            provider: input.provider.name,
+            model: input.story.artwork.model,
+            generatedAt: new Date().toISOString(),
+            prompt: input.prompt,
+            sourceType: "summary",
+            sourceId: id,
+            entityIds: input.entityIds,
+            versions: scene.artwork.versions,
+          };
+
+          await syncCanonicalSceneImageForPaths({
+            story: input.story,
+            scene,
+            originalPath,
+            productionPath,
+            standardImagePath: standardPath,
+          });
+        } catch (error) {
+          scene.artwork = { ...scene.artwork, status: "failed", error: error instanceof Error ? error.message : String(error) };
+          throw error;
+        }
+
+        if (summary.video) summary.video.status = "stale";
+        await this.save(slug, summary);
+        progress?.({ type: "summary.artwork.completed", scene: scene.id, index: index + 1, total: planItems.length });
+      }
+
+      summary.artwork.status = "current";
+      await this.save(slug, summary);
+      summary = await this.get(slug, id);
+      return this.save(slug, summary);
+    } catch (error) {
+      summary.artwork!.status = "failed";
+      summary.artwork!.error = error instanceof Error ? error.message : String(error);
+      await this.save(slug, summary);
+      throw error;
+    }
+  }
+  async reupscale(slug: string, id: string, raw: unknown = {}, upscalerOverride?: ImageUpscaler) {
+    const options = summaryReupscaleInputSchema.parse(raw);
+    const summary = await this.get(slug, id);
+    if (!summary.scenePlan) throw new Error("Summary has no scene plan");
+    const { story } = await this.context(slug);
+    const paths = this.paths(slug, id);
+    const scenes = options.sceneId
+      ? summary.scenePlan.scenes.filter((scene) => scene.id === options.sceneId)
+      : summary.scenePlan.scenes;
+    if (options.sceneId && !scenes.length) throw new Error(`Scene '${options.sceneId}' was not found`);
+
+    // Migrate any legacy scenes without versions array
+    for (const scene of scenes) {
+      if (scene.artwork.status === "complete" && (!scene.artwork.versions || scene.artwork.versions.length === 0)) {
+        const actual = await validPngFingerprint(paths.image(scene.id));
+        if (actual && actual === scene.artwork.imageFingerprint) {
+          const v1Path = paths.sceneVersionImage(scene.id, 1);
+          if (!(await exists(v1Path))) {
+            await atomicWrite(v1Path, await readFile(paths.image(scene.id)));
+          }
+          const dims = (await exists(v1Path)) ? imageDimensions(await readFile(v1Path)) : undefined;
+          const v1: ArtworkVersion = {
+            id: "v1",
+            versionNumber: 1,
+            sceneId: scene.id,
+            imagePath: `${scene.id}-v1.png`,
+            imageFingerprint: scene.artwork.imageFingerprint,
+            createdAt: scene.artwork.generatedAt ?? new Date().toISOString(),
+            provider: scene.artwork.provider ?? story.artwork.provider,
+            model: scene.artwork.model ?? story.artwork.model,
+            prompt: scene.artwork.prompt ?? scene.visualPrompt,
+            promptFingerprint: scene.artwork.fingerprint ?? "",
+            resolvedVisualProfileReferences: [],
+            artDirectionFingerprint: "",
+            settings: {
+              quality: story.artwork.quality,
+              size: story.artwork.size,
+              aspectRatio: story.artwork.aspectRatio,
+              outputFormat: story.artwork.outputFormat,
+            },
+            original: dims ? { width: dims.width, height: dims.height, fingerprint: scene.artwork.imageFingerprint, provider: scene.artwork.provider ?? story.artwork.provider, model: scene.artwork.model ?? story.artwork.model } : undefined,
+            review: scene.artwork.review ?? "unreviewed",
+          };
+          scene.artwork.versions = [v1];
+        }
+      }
+    }
+
+    const warnings: string[] = [];
+    const upscaler = needsProductionDerivative(story) ? resolveUpscaler(upscalerOverride ?? this.upscaler) : undefined;
+    const rederived: Array<{ sceneId: string; versionId: string; status: string }> = [];
+    let changed = false;
+
+    for (const scene of scenes) {
+      for (const version of scene.artwork.versions ?? []) {
+        if (options.versionNumber !== undefined && version.versionNumber !== options.versionNumber) continue;
+        const originalPath = paths.sceneVersionImage(scene.id, version.versionNumber);
+        const actual = await validPngFingerprint(originalPath);
+        if (!actual || actual !== version.imageFingerprint) {
+          warnings.push(`Scene ${scene.id} ${version.id}: original image is missing or corrupt, skipping re-upscale.`);
+          continue;
+        }
+        const productionPath = paths.sceneVersionProductionImage(scene.id, version.versionNumber);
+        const didChange = await ensureArtworkVersionProductionAssetForPaths({
+          story,
+          sceneId: scene.id,
+          version,
+          originalPath,
+          productionPath,
+          upscaler,
+          warnings,
+        });
+        if (didChange) {
+          changed = true;
+          rederived.push({ sceneId: scene.id, versionId: version.id, status: version.upscale?.status ?? "unknown" });
+        }
+      }
+      const backing = backingArtworkVersion(scene);
+      if (backing) {
+        const originalPath = paths.sceneVersionImage(scene.id, backing.versionNumber);
+        const productionPath = paths.sceneVersionProductionImage(scene.id, backing.versionNumber);
+        const standardImagePath = paths.image(scene.id);
+        if (await syncCanonicalSceneImageForPaths({ story, scene, originalPath, productionPath, standardImagePath })) {
+          changed = true;
+        }
+      }
+    }
+
+    if (changed) {
+      if (summary.video) summary.video.status = "stale";
+      await this.save(slug, summary);
+    }
+    return { id, rederived, warnings };
   }
   async reviewArtwork(slug: string, id: string, sceneId: string, raw: unknown) {
     const review = artworkReviewSchema.parse(raw); const summary = await this.get(slug, id); const scene = summary.scenePlan?.scenes.find((item) => item.id === sceneId); if (!scene) throw new Error("Scene was not found");
@@ -157,29 +543,92 @@ export class SummaryVisualService {
   async video(slug: string, id: string, raw: unknown = {}, progress?: SummaryVisualProgress) {
     const { force } = summaryVisualInputSchema.parse(raw); const summary = await this.get(slug, id); const { story } = await this.context(slug);
     if (!summary.scenePlan || summary.scenes?.status !== "current" || summary.audio?.status !== "current" || !summary.audio.durationSeconds) throw new Error("Current audio and scenes are required for summary video");
-    const scenes = summary.scenePlan.scenes.filter((scene) => !scene.disabled); for (const scene of scenes) { const input = await this.imageInput(slug, scene); const actual = await validPngFingerprint(this.paths(slug, id).image(scene.id)); if (!actual || actual !== scene.artwork.imageFingerprint || scene.artwork.status !== "complete" || scene.artwork.fingerprint !== input.inputFingerprint || ["rejected", "needs-regeneration"].includes(scene.artwork.review)) throw new Error(`${scene.id} needs current artwork; review protected artwork or regenerate it explicitly`); }
-    const settings = { ...story.video, introDurationSeconds: 0 }; const inputFingerprint = this.videoFingerprint(summary, settings);
+    const scenes = summary.scenePlan.scenes.filter((scene) => !scene.disabled);
+    const paths = this.paths(slug, id);
+    for (const scene of scenes) {
+      const input = await this.imageInput(slug, scene);
+      const actual = await validPngFingerprint(paths.image(scene.id));
+      if (!actual || actual !== scene.artwork.imageFingerprint || scene.artwork.status !== "complete" || scene.artwork.fingerprint !== input.inputFingerprint || ["rejected", "needs-regeneration"].includes(scene.artwork.review)) {
+        throw new Error(`${scene.id} needs current artwork; review protected artwork or regenerate it explicitly`);
+      }
+    }
+    const settings = { ...resolveVideoSettings(story.video), introDurationSeconds: 0 };
+    const inputFingerprint = this.videoFingerprint(summary, settings);
     if (!force && summary.video?.status === "current" && summary.video.inputFingerprint === inputFingerprint) return summary;
-    const paths = this.paths(slug, id); let subtitles: string | undefined;
-    if (settings.subtitleMode !== "none") { const document = summary.alignment?.mode === "aligned" ? generateAlignedSubtitleTiming(summary.alignment.words, summary.audio.durationSeconds, story.subtitles) : generateSubtitleTiming(summary.narration!.text!, summary.audio.durationSeconds, story.subtitles); await atomicWrite(paths.subtitles, toSrt(document)); subtitles = paths.subtitles; }
-    summary.video = { ...summary.video, status: "generating", inputFingerprint, manuallyEdited: false, reviewRequired: false }; await this.save(slug, summary); progress?.({ type: "summary.video.started" });
+    let subtitles: string | undefined;
+    if (settings.subtitleMode !== "none") {
+      const document = summary.alignment?.mode === "aligned"
+        ? generateAlignedSubtitleTiming(summary.alignment.words, summary.audio.durationSeconds, story.subtitles)
+        : generateSubtitleTiming(summary.narration!.text!, summary.audio.durationSeconds, story.subtitles);
+      await atomicWrite(paths.subtitles, toSrt(document));
+      subtitles = paths.subtitles;
+    }
+    summary.video = { ...summary.video, status: "generating", inputFingerprint, manuallyEdited: false, reviewRequired: false };
+    await this.save(slug, summary);
+    progress?.({ type: "summary.video.started" });
+
+    const sceneArtwork = await Promise.all(scenes.map(async (scene) => {
+      const backing = backingArtworkVersion(scene);
+      let path = paths.image(scene.id);
+      if (backing) {
+        const originalPath = paths.sceneVersionImage(scene.id, backing.versionNumber);
+        const productionPath = paths.sceneVersionProductionImage(scene.id, backing.versionNumber);
+        const asset = await resolveBestProductionAssetForPaths({ story, version: backing, originalPath, productionPath });
+        if (await validPngFingerprint(asset.path)) {
+          path = asset.path;
+        }
+      }
+      return { path, durationSeconds: scene.endSeconds - scene.startSeconds };
+    }));
+
     const staging = join(paths.directory, `video-${randomUUID()}.mp4`);
-    try { const probe = await this.renderer.render({ audio: paths.audio, subtitles, storyTitle: story.title, chapterLabel: "Summary", chapterTitle: summary.title, audioDurationSeconds: summary.audio.durationSeconds,
-        sceneArtwork: scenes.map((scene) => ({ path: paths.image(scene.id), durationSeconds: scene.endSeconds - scene.startSeconds })) }, staging, settings);
-      if (Math.abs(probe.durationSeconds - summary.audio.durationSeconds) > Math.max(.25, 2 / settings.fps)) throw new Error("Rendered summary video duration does not match mastered audio");
-      await rename(staging, paths.video); summary.video = { status: "current", inputFingerprint, outputFingerprint: await fileFingerprint(paths.video), durationSeconds: probe.durationSeconds, width: probe.width, height: probe.height, sceneCount: scenes.length, sourceFingerprint: summary.audio.outputFingerprint, generatedAt: new Date().toISOString(), manuallyEdited: false, reviewRequired: false }; progress?.({ type: "summary.video.completed" }); return this.save(slug, summary);
-    } catch (error) { summary.video!.status = "failed"; summary.video!.error = error instanceof Error ? error.message : String(error); await this.save(slug, summary); throw error; }
-    finally { await rm(staging, { force: true }).catch(() => undefined); }
+    try {
+      const probe = await this.renderer.render({
+        audio: paths.audio,
+        subtitles,
+        storyTitle: story.title,
+        chapterLabel: "Summary",
+        chapterTitle: summary.title,
+        audioDurationSeconds: summary.audio.durationSeconds,
+        sceneArtwork,
+      }, staging, settings);
+      if (Math.abs(probe.durationSeconds - summary.audio.durationSeconds) > Math.max(.25, 2 / settings.fps)) {
+        throw new Error("Rendered summary video duration does not match mastered audio");
+      }
+      await rename(staging, paths.video);
+      summary.video = {
+        status: "current",
+        inputFingerprint,
+        outputFingerprint: await fileFingerprint(paths.video),
+        durationSeconds: probe.durationSeconds,
+        width: probe.width,
+        height: probe.height,
+        sceneCount: scenes.length,
+        sourceFingerprint: summary.audio.outputFingerprint,
+        generatedAt: new Date().toISOString(),
+        manuallyEdited: false,
+        reviewRequired: false,
+      };
+      progress?.({ type: "summary.video.completed" });
+      return this.save(slug, summary);
+    } catch (error) {
+      summary.video!.status = "failed";
+      summary.video!.error = error instanceof Error ? error.message : String(error);
+      await this.save(slug, summary);
+      throw error;
+    } finally {
+      await rm(staging, { force: true }).catch(() => undefined);
+    }
   }
   async produce(slug: string, id: string, raw: unknown = {}, progress?: SummaryVisualProgress, paused?: () => boolean) {
     const options = summaryProduceInputSchema.parse(raw); progress?.({ type: "summary.narration.preparing" });
     if (paused?.()) return this.get(slug, id); await withUsageScope({ story: slug, stage: "narration" }, () => this.media.narration(slug, id));
     if (paused?.()) return this.get(slug, id); progress?.({ type: "summary.audio.preparing" }); await withUsageScope({ story: slug, stage: "tts" }, () => this.media.audio(slug, id));
-    if (paused?.()) return this.get(slug, id); const { missingOnly, ...pacing } = options;
+    if (paused?.()) return this.get(slug, id); const { missingOnly, dryRun, ...pacing } = options;
     const recorded = (await this.media.get(slug, id)).scenePacing;
     const sceneOptions = options.pacing === "automatic" && options.sceneCount === undefined && options.secondsPerScene === undefined && recorded ? { ...recorded, force: options.force } : pacing;
     await withUsageScope({ story: slug, stage: "scenePlanning" }, () => this.scenes(slug, id, sceneOptions, progress));
-    if (paused?.()) return this.get(slug, id); await this.artwork(slug, id, { missingOnly }, progress, paused);
+    if (paused?.()) return this.get(slug, id); await this.artwork(slug, id, { missingOnly, dryRun }, progress, paused);
     if (paused?.()) return this.get(slug, id); return this.video(slug, id, {}, progress);
   }
   async export(slug: string, id: string, type: "video" | "artwork", sceneId?: string) {

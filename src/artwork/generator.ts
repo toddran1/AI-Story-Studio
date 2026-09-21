@@ -31,11 +31,11 @@ import { loadEnvironment } from "../config/env.js";
  * resolution is requested and upscaling is enabled. Generation fingerprints
  * never include these settings — originals stay reusable across resolution
  * changes. */
-function needsProductionDerivative(story: Story): boolean {
+export function needsProductionDerivative(story: Story): boolean {
   return story.artwork.outputResolution !== "native" && story.artwork.upscaling !== "off";
 }
 
-function resolveUpscaler(provided?: ImageUpscaler): ImageUpscaler {
+export function resolveUpscaler(provided?: ImageUpscaler): ImageUpscaler {
   return provided ?? createLocalUpscaler(loadEnvironment());
 }
 
@@ -759,14 +759,13 @@ export function backingArtworkVersion(scene: Scene): ArtworkVersion | undefined 
 /** The asset consumers should render: the production derivative when it is
  * current (upscale fingerprint matches today's settings and the derivative
  * file is intact), otherwise the immutable ORIGINAL provider image. */
-export async function bestProductionAsset(
-  root: string,
-  story: Story,
-  chapter: number,
-  sceneId: string,
-  version: ArtworkVersion
-): Promise<{ path: string; fingerprint: string; width?: number; height?: number; upscaled: boolean; engine?: string }> {
-  const originalPath = sceneVersionImagePath(root, story.slug, chapter, sceneId, version.versionNumber);
+export async function resolveBestProductionAssetForPaths(options: {
+  story: Story;
+  version: ArtworkVersion;
+  originalPath: string;
+  productionPath: string;
+}): Promise<{ path: string; fingerprint: string; width?: number; height?: number; upscaled: boolean; engine?: string }> {
+  const { story, version, originalPath, productionPath } = options;
   const original = {
     path: originalPath,
     fingerprint: version.imageFingerprint,
@@ -785,7 +784,6 @@ export async function bestProductionAsset(
     target: resolveTargetDimensions(story.artwork.outputResolution, story.artwork.aspectRatio),
   });
   if (upscale.fingerprint !== expected) return original;
-  const productionPath = sceneVersionProductionImagePath(root, story.slug, chapter, sceneId, version.versionNumber);
   const actual = await validPngFingerprint(productionPath);
   if (!actual || actual !== upscale.outputFingerprint) return original;
   return {
@@ -798,14 +796,35 @@ export async function bestProductionAsset(
   };
 }
 
-/** Keep the canonical ${sceneId}.png in sync with the backing version's best
- * production asset. Returns true when the canonical image (or its recorded
- * fingerprint) changed. */
-async function syncCanonicalSceneImage(root: string, story: Story, chapter: number, scene: Scene): Promise<boolean> {
+/** The asset consumers should render: the production derivative when it is
+ * current (upscale fingerprint matches today's settings and the derivative
+ * file is intact), otherwise the immutable ORIGINAL provider image. */
+export async function bestProductionAsset(
+  root: string,
+  story: Story,
+  chapter: number,
+  sceneId: string,
+  version: ArtworkVersion
+): Promise<{ path: string; fingerprint: string; width?: number; height?: number; upscaled: boolean; engine?: string }> {
+  return resolveBestProductionAssetForPaths({
+    story,
+    version,
+    originalPath: sceneVersionImagePath(root, story.slug, chapter, sceneId, version.versionNumber),
+    productionPath: sceneVersionProductionImagePath(root, story.slug, chapter, sceneId, version.versionNumber),
+  });
+}
+
+export async function syncCanonicalSceneImageForPaths(options: {
+  story: Story;
+  scene: Scene;
+  originalPath: string;
+  productionPath: string;
+  standardImagePath: string;
+}): Promise<boolean> {
+  const { story, scene, originalPath, productionPath, standardImagePath } = options;
   const version = backingArtworkVersion(scene);
   if (!version || scene.artwork.status !== "complete") return false;
-  const asset = await bestProductionAsset(root, story, chapter, scene.id, version);
-  const standardImagePath = sceneImagePath(root, story.slug, chapter, scene.id);
+  const asset = await resolveBestProductionAssetForPaths({ story, version, originalPath, productionPath });
   const current = await validPngFingerprint(standardImagePath);
   if (current === asset.fingerprint && scene.artwork.imageFingerprint === asset.fingerprint) return false;
   await atomicWrite(standardImagePath, await readFile(asset.path));
@@ -813,21 +832,32 @@ async function syncCanonicalSceneImage(root: string, story: Story, chapter: numb
   return true;
 }
 
-/** Derive (or record the skip of) the production derivative for ONE artwork
- * version, always consuming the preserved ORIGINAL provider image — never a
- * derivative. Generation is never failed by upscaler problems. */
-async function ensureVersionProductionAsset(options: {
-  root: string;
+/** Keep the canonical ${sceneId}.png in sync with the backing version's best
+ * production asset. Returns true when the canonical image (or its recorded
+ * fingerprint) changed. */
+async function syncCanonicalSceneImage(root: string, story: Story, chapter: number, scene: Scene): Promise<boolean> {
+  const version = backingArtworkVersion(scene);
+  if (!version) return false;
+  return syncCanonicalSceneImageForPaths({
+    story,
+    scene,
+    originalPath: sceneVersionImagePath(root, story.slug, chapter, scene.id, version.versionNumber),
+    productionPath: sceneVersionProductionImagePath(root, story.slug, chapter, scene.id, version.versionNumber),
+    standardImagePath: sceneImagePath(root, story.slug, chapter, scene.id),
+  });
+}
+
+export async function ensureArtworkVersionProductionAssetForPaths(options: {
   story: Story;
-  chapter: number;
   sceneId: string;
   version: ArtworkVersion;
+  originalPath: string;
+  productionPath: string;
   upscaler?: ImageUpscaler;
   warnings: string[];
 }): Promise<boolean> {
-  const { story, version } = options;
+  const { story, version, originalPath, productionPath } = options;
   const settings = story.artwork;
-  const originalPath = sceneVersionImagePath(options.root, story.slug, options.chapter, options.sceneId, version.versionNumber);
   let sourceDimensions = version.original ? { width: version.original.width, height: version.original.height } : undefined;
   if (!sourceDimensions) {
     sourceDimensions = (await exists(originalPath)) ? imageDimensions(await readFile(originalPath)) : undefined;
@@ -872,11 +902,9 @@ async function ensureVersionProductionAsset(options: {
   }
   if (!options.upscaler) return false;
   if (current?.status === "applied" && current.fingerprint === expectedFingerprint) {
-    const productionPath = sceneVersionProductionImagePath(options.root, story.slug, options.chapter, options.sceneId, version.versionNumber);
     const actual = await validPngFingerprint(productionPath);
     if (actual && actual === current.outputFingerprint) return false;
   }
-  const productionPath = sceneVersionProductionImagePath(options.root, story.slug, options.chapter, options.sceneId, version.versionNumber);
   const request = {
     sourcePath: originalPath,
     sourceWidth: sourceDimensions.width,
@@ -909,6 +937,29 @@ async function ensureVersionProductionAsset(options: {
     );
     return true;
   }
+}
+
+/** Derive (or record the skip of) the production derivative for ONE artwork
+ * version, always consuming the preserved ORIGINAL provider image — never a
+ * derivative. Generation is never failed by upscaler problems. */
+async function ensureVersionProductionAsset(options: {
+  root: string;
+  story: Story;
+  chapter: number;
+  sceneId: string;
+  version: ArtworkVersion;
+  upscaler?: ImageUpscaler;
+  warnings: string[];
+}): Promise<boolean> {
+  return ensureArtworkVersionProductionAssetForPaths({
+    story: options.story,
+    sceneId: options.sceneId,
+    version: options.version,
+    originalPath: sceneVersionImagePath(options.root, options.story.slug, options.chapter, options.sceneId, options.version.versionNumber),
+    productionPath: sceneVersionProductionImagePath(options.root, options.story.slug, options.chapter, options.sceneId, options.version.versionNumber),
+    upscaler: options.upscaler,
+    warnings: options.warnings,
+  });
 }
 
 /** Re-run ONLY the derivative step from preserved originals (no provider

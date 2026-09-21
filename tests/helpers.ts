@@ -6,6 +6,9 @@ import { qaResultSchema } from "../src/domain/qa.js";
 import { TTSProvider } from "../src/tts/provider.js";
 import { TTSRequest } from "../src/tts/types.js";
 import { defaultProductionProfiles } from "../src/production/types.js";
+import { ImageUpscaler, ImageUpscaleRequest } from "../src/artwork/upscaler.js";
+import { ConfigurationError } from "../src/pipeline/errors.js";
+import { atomicWrite } from "../src/storage/atomic-write.js";
 
 export class MockLLM implements LLMProvider {
   readonly name: "openai" | "gemini" | "kimi";
@@ -60,5 +63,32 @@ export function pngWithDims(width: number, height: number): Buffer {
   const iend = Buffer.alloc(12);
   iend.write("IEND", 4, "ascii");
   return Buffer.concat([signature, ihdr, iend]);
+}
+
+export class FakeUpscaler implements ImageUpscaler {
+  readonly name = "local-realesrgan";
+  readonly version = "fake-upscaler-v1";
+  upscaleCalls: ImageUpscaleRequest[] = [];
+  normalizeCalls: ImageUpscaleRequest[] = [];
+  constructor(readonly model = "realesrgan-x4plus", private behavior: "ok" | "unavailable" | "fail" = "ok") {}
+  async validateConfiguration() {
+    if (this.behavior === "unavailable") throw new ConfigurationError("Upscaler executable 'realesrgan-ncnn-vulkan' is unavailable. Install Real-ESRGAN or set UPSCALER_EXECUTABLE.");
+  }
+  private async derive(request: ImageUpscaleRequest, scaleFactor?: number) {
+    await this.validateConfiguration();
+    if (this.behavior === "fail") throw new Error("upscaler engine exploded");
+    await atomicWrite(request.outputPath, pngWithDims(request.targetWidth, request.targetHeight));
+    return {
+      outputPath: request.outputPath,
+      sourceDimensions: { width: request.sourceWidth, height: request.sourceHeight },
+      finalDimensions: { width: request.targetWidth, height: request.targetHeight },
+      engine: this.name,
+      model: this.model,
+      scaleFactor,
+      fit: "exact" as const,
+    };
+  }
+  async upscale(request: ImageUpscaleRequest) { this.upscaleCalls.push(request); return this.derive(request, 4); }
+  async normalize(request: ImageUpscaleRequest) { this.normalizeCalls.push(request); return this.derive(request); }
 }
 

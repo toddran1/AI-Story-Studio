@@ -426,6 +426,10 @@ export class StudioOperations {
   editSummaryScenes(slug: string, id: string, raw: unknown) { slugSchema.parse(slug); return withStoryLock(this.root, slug, "summary scene edits", () => this.summaryVisuals().editScenes(slug, id, raw)); }
   regenerateSummaryScene(slug: string, id: string, scene: string) { slugSchema.parse(slug); z.string().regex(/^scene-\d{3}$/).parse(scene); return this.jobs.createDurable(this.summaryJobsDirectory(), slug, () => withStoryLock(this.root, slug, "summary individual scene regeneration", () => withUsageScope({ story: slug, stage: "scenePlanning" }, () => this.summaryMedia().regenerateScene(slug, id, scene)))); }
   reviewSummaryArtwork(slug: string, id: string, scene: string, review: unknown) { slugSchema.parse(slug); return withStoryLock(this.root, slug, "summary artwork review", () => this.summaryVisuals().reviewArtwork(slug, id, scene, review)); }
+  reupscaleSummaryArtwork(slug: string, id: string, raw: unknown) {
+    slugSchema.parse(slug);
+    return withStoryLock(this.root, slug, "summary artwork re-upscale", () => this.summaryVisuals().reupscale(slug, id, raw));
+  }
   editSummaryNarration(slug: string, id: string, raw: unknown) {
     slugSchema.parse(slug); summaryNarrationEditSchema.parse(raw);
     return withStoryLock(this.root, slug, "summary narration edit", () => this.summaryMedia().editNarration(slug, id, raw));
