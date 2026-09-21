@@ -37,7 +37,7 @@ import { generateSubtitleTiming } from "../subtitles/timing.js";
 import { generateAlignedSubtitleTiming } from "../subtitles/aligned-timing.js";
 import { toSrt } from "../subtitles/srt.js";
 import { SummaryMediaService, summaryMediaPaths, summaryScenesInputSchema } from "./media.js";
-import { summarySchema, type StorySummary } from "./types.js";
+import { summarySchema, summaryScenePlanAvailable, type StorySummary } from "./types.js";
 import { summaryPath } from "./service.js";
 import { validateSceneCoverage } from "../scenes/timing.js";
 import { withUsageScope } from "../cost/context.js";
@@ -176,6 +176,9 @@ export class SummaryVisualService {
   private async alignWithPlan(slug: string, summary: StorySummary, progress?: SummaryVisualProgress) { await this.save(slug, summary); return this.align(slug, summary.id, progress); }
   async editScenes(slug: string, id: string, raw: unknown) {
     const input = summarySceneEditSchema.parse(raw); const summary = await this.media.get(slug, id); if (!summary.scenePlan || !summary.narration?.text) throw new Error("Generate scenes before editing them");
+    // Editorial policy (not availability): accepting or hand-editing a scene timeline marks it
+    // authoritative against reviewed, current narration, so it deliberately requires current narration
+    // even though scene *generation* only requires usable narration text.
     if (summary.narration.status !== "current") throw new Error("Review narration before accepting or editing scenes");
     let keepTiming = false;
     if ("scenes" in input) {
@@ -200,7 +203,8 @@ export class SummaryVisualService {
   async artwork(slug: string, id: string, raw: unknown = {}, progress?: SummaryVisualProgress, paused?: () => boolean, upscalerOverride?: ImageUpscaler) {
     const options = summaryVisualInputSchema.parse(raw);
     let summary = await this.get(slug, id);
-    if (!summary.scenePlan || summary.scenes?.status !== "current") throw new Error("Generate or review current scenes before artwork production");
+    // Availability, not freshness: a valid-but-stale scene plan is consumable for artwork.
+    if (!summary.scenePlan || !summaryScenePlanAvailable(summary)) throw new Error("Generate scenes before artwork production");
     const selected = summary.scenePlan.scenes.filter((scene) => !scene.disabled && (!options.scenes || options.scenes.includes(scene.id)));
     if (options.scenes?.some((sceneId) => !selected.some((scene) => scene.id === sceneId))) throw new Error("Selected scene was not found or is disabled");
 
@@ -542,9 +546,10 @@ export class SummaryVisualService {
   }
   async video(slug: string, id: string, raw: unknown = {}, progress?: SummaryVisualProgress) {
     const { force } = summaryVisualInputSchema.parse(raw); const summary = await this.get(slug, id); const { story } = await this.context(slug);
-    if (!summary.scenePlan || summary.scenes?.status !== "current" || summary.audio?.status !== "current" || !summary.audio.durationSeconds) throw new Error("Current audio and scenes are required for summary video");
-    const scenes = summary.scenePlan.scenes.filter((scene) => !scene.disabled);
     const paths = this.paths(slug, id);
+    // Availability + integrity, not freshness: stale-but-valid audio/scenes render with a warning upstream in the UI.
+    if (!summary.scenePlan || !summaryScenePlanAvailable(summary) || !summary.audio?.outputFingerprint || !summary.audio.durationSeconds || (await fileFingerprint(paths.audio)) !== summary.audio.outputFingerprint) throw new Error("Usable mastered audio and a scene plan are required for summary video");
+    const scenes = summary.scenePlan.scenes.filter((scene) => !scene.disabled);
     for (const scene of scenes) {
       const input = await this.imageInput(slug, scene);
       const actual = await validPngFingerprint(paths.image(scene.id));

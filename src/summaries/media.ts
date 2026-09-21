@@ -124,7 +124,8 @@ export class SummaryMediaService {
   async scenes(slug: string, id: string, raw: unknown = {}) {
     const options = summaryScenesInputSchema.parse(raw);
     const summary = await this.get(slug, id);
-    if (summary.narration?.status !== "current" || !summary.narration.text?.trim())
+    // Availability, not freshness: valid-but-stale narration text is consumable for scene planning.
+    if (!summary.narration?.text?.trim())
       throw new Error("Generate or review summary narration before planning scenes");
     const input = await this.inputs(slug, summary);
     const { force, ...pacing } = options;
@@ -171,7 +172,7 @@ export class SummaryMediaService {
 
   async regenerateScene(slug: string, id: string, sceneId: string) {
     const summary = await this.get(slug, id); const scene = summary.scenePlan?.scenes.find((item) => item.id === sceneId);
-    if (!scene || summary.narration?.status !== "current") throw new Error("A current narration and existing scene are required");
+    if (!scene || !summary.narration?.text?.trim()) throw new Error("Narration text and an existing scene are required");
     const input = await this.inputs(slug, summary); const config = input.story.pipeline.scenePlanner;
     const planned = await planVisualScenes(this.llms.forStage(config), config, { sourceType: "summary", sourceId: id,
       sourceLabel: `SUMMARY: ${summary.title} — regenerate ${sceneId} only`, narration: scene.narrationText ?? scene.summary,

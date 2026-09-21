@@ -141,4 +141,78 @@ describe("summary visual production", () => {
     expect(renderToStaticMarkup(<SummaryScenePanel {...props} />)).toContain("Regenerate scene"); expect(renderToStaticMarkup(<SummaryArtworkPanel {...props} />)).toContain("Approve / retain"); expect(renderToStaticMarkup(<SummaryVideoPanel {...props} />)).toContain("Download MP4");
     expect(renderToStaticMarkup(<SummaryLayers {...props} slug="demo-story" busy={false}>Canonical</SummaryLayers>)).toContain("Artwork");
   });
+  const markStale = async (...stages: Array<"narration" | "tts" | "audio" | "scenes">) => {
+    const stored = await summaries.get("demo-story", id);
+    for (const stage of stages) stored[stage]!.status = "stale";
+    await atomicWriteJson(summaryPath(root, "demo-story", id), stored);
+  };
+  const button = (markup: string, label: string) => new RegExp(`<button[^>]*>${label}</button>`).exec(markup)?.[0] ?? "";
+  it("generates scenes from stale-but-valid narration and audio without regenerating upstream stages", async () => {
+    await media.audio("demo-story", id); await markStale("narration", "tts", "audio");
+    const before = await media.get("demo-story", id);
+    expect(before).toMatchObject({ narration: { status: "stale" }, audio: { status: "stale" } }); expect(before.scenePlan).toBeUndefined();
+    const llmCalls = llm.calls.length; const ttsCalls = tts.calls; const structured = vi.mocked(llm.generateStructured).mock.calls.length;
+    const result = await visuals.scenes("demo-story", id, { sceneCount: 2 });
+    expect(result.scenes?.status).toBe("current"); expect(result.scenePlan?.scenes).toHaveLength(2);
+    // Stale audio is not a scene-generation dependency: estimated timing fallback is used.
+    expect(result.scenePlan?.timingMethod).toBe("estimated");
+    // Only the scene planner ran: no narration regeneration, no TTS regeneration, upstream stays stale.
+    expect(vi.mocked(llm.generateStructured).mock.calls.length).toBe(structured + 1); expect(llm.calls.length).toBe(llmCalls);
+    expect(tts.calls).toBe(ttsCalls);
+    const after = await media.get("demo-story", id); expect(after).toMatchObject({ narration: { status: "stale" }, audio: { status: "stale" } });
+    // Regenerating narration later still correctly invalidates the scenes built from the stale text.
+    await media.narration("demo-story", id, { force: true });
+    expect((await media.get("demo-story", id)).scenes?.status).toBe("stale");
+  });
+  it("blocks scene generation only when narration text is genuinely missing", async () => {
+    await expect(visuals.scenes("demo-story", id, { sceneCount: 2 })).rejects.toThrow("Generate or review summary narration");
+  });
+  it("produces artwork from a stale-but-valid scene plan and blocks a missing plan", async () => {
+    await expect(visuals.artwork("demo-story", id)).rejects.toThrow("Generate scenes before artwork production");
+    await produce(); await markStale("scenes");
+    expect((await visuals.get("demo-story", id)).scenes?.status).toBe("stale");
+    const llmCalls = llm.calls.length;
+    await visuals.artwork("demo-story", id, { force: true, scenes: ["scene-001"] });
+    expect(images.generate).toHaveBeenCalledTimes(3); expect(llm.calls.length).toBe(llmCalls);
+    const after = await visuals.get("demo-story", id);
+    expect(after.scenes?.status).toBe("stale"); expect(after.scenePlan?.scenes[0]?.artwork.status).toBe("complete");
+  });
+  it("renders video from stale-but-valid audio and scenes, and blocks corrupt audio", async () => {
+    await produce(); await markStale("tts", "audio", "scenes");
+    const stale = await visuals.get("demo-story", id);
+    expect(stale).toMatchObject({ audio: { status: "stale" }, scenes: { status: "stale" } });
+    const ttsCalls = tts.calls; const imageCalls = images.generate.mock.calls.length; const llmCalls = llm.calls.length; const renders = render.mock.calls.length;
+    const rendered = await visuals.video("demo-story", id, { force: true });
+    expect(rendered.video?.status).toBe("current"); expect(rendered.video?.sourceFingerprint).toBe(stale.audio?.outputFingerprint);
+    expect(render.mock.calls.length).toBe(renders + 1); expect(tts.calls).toBe(ttsCalls);
+    expect(images.generate.mock.calls.length).toBe(imageCalls); expect(llm.calls.length).toBe(llmCalls);
+    await atomicWrite(summaryMediaPaths(root, "demo-story", id).audio, "corrupt-audio");
+    await expect(visuals.video("demo-story", id, { force: true })).rejects.toThrow("Usable mastered audio");
+  });
+  it("keeps editorial scene editing gated on reviewed current narration", async () => {
+    const result = await produce(); await markStale("narration");
+    await expect(visuals.editScenes("demo-story", id, { scenes: structuredClone(result.scenePlan!.scenes) })).rejects.toThrow("Review narration");
+    await expect(visuals.editScenes("demo-story", id, { acceptCurrent: true })).rejects.toThrow("Review narration");
+  });
+  it("enables manual generation from stale-but-valid inputs in the summary panels", async () => {
+    await media.audio("demo-story", id); await markStale("narration", "tts", "audio");
+    const staleInputs = await media.get("demo-story", id);
+    const props = { summary: staleInputs, base: `/stories/demo-story/summaries/${id}`, disabled: false, onChange: () => {}, onGenerate: () => {}, onError: () => {} };
+    const scenePanel = renderToStaticMarkup(<SummaryScenePanel {...props} />);
+    expect(button(scenePanel, "Generate scenes")).not.toContain("disabled");
+    expect(scenePanel).toContain("Using stale narration");
+    const missingNarration = renderToStaticMarkup(<SummaryScenePanel {...props} summary={{ ...staleInputs, narration: undefined }} />);
+    expect(button(missingNarration, "Generate scenes")).toContain("disabled");
+    vi.spyOn(llm, "generateText").mockImplementationOnce(async () => ({ text: narration, usage: { inputTokens: 10, outputTokens: 5 } }));
+    await produce(); await markStale("tts", "audio", "scenes");
+    const staleMedia = await visuals.get("demo-story", id);
+    const artworkPanel = renderToStaticMarkup(<SummaryArtworkPanel {...props} summary={staleMedia} />);
+    expect(button(artworkPanel, "Generate missing artwork")).not.toContain("disabled");
+    expect(artworkPanel).toContain("The scene plan is stale");
+    const videoPanel = renderToStaticMarkup(<SummaryVideoPanel {...props} summary={staleMedia} />);
+    expect(button(videoPanel, "Generate / update video")).not.toContain("disabled");
+    expect(videoPanel).toContain("stale audio/scene inputs");
+    const currentPanel = renderToStaticMarkup(<SummaryVideoPanel {...props} summary={await visuals.get("demo-story", id)} />);
+    expect(button(currentPanel, "Generate / update video")).not.toContain("disabled");
+  });
 });

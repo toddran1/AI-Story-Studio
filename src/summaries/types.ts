@@ -90,6 +90,18 @@ export const summarySchema = z.object({
 });
 
 export type StorySummary = z.infer<typeof summarySchema>;
+
+// Manual-operation eligibility is availability-based: valid-but-stale inputs are consumable.
+// Freshness (current/stale) is surfaced as a warning, never treated as missing.
+export function summaryNarrationTextAvailable(summary: Pick<StorySummary, "narration">) {
+  return Boolean(summary.narration?.text?.trim());
+}
+export function summaryScenePlanAvailable(summary: Pick<StorySummary, "scenePlan">) {
+  return Boolean(summary.scenePlan?.scenes.some((scene) => !scene.disabled));
+}
+export function summaryAudioAvailable(summary: Pick<StorySummary, "audio">) {
+  return Boolean(summary.audio?.outputFingerprint && summary.audio.durationSeconds);
+}
 export type SummaryGenerationInput = z.infer<typeof summaryGenerationInputSchema>;
 export type SummaryType = z.infer<typeof summaryTypeSchema>;
 export type SummarySourceMode = z.infer<typeof summarySourceModeSchema>;
