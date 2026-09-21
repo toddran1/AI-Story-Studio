@@ -124,6 +124,80 @@ describe("web UI", () => {
     expect(staleHtml.match(/class="qa-recheck-split"/g)).toHaveLength(1);
     expect(staleHtml).toContain("button primary");
   });
+  it("surfaces total QA score in attention head and places stale notice below header", () => {
+    const currentDetail = {
+      chapter: 1,
+      state: {
+        score: 0.92,
+        status: "pass" as const,
+        findings: [qaFinding({})],
+        checks: {},
+        issues: [],
+      },
+      counts: { open: 1, resolved: 0, safeFixesAvailable: 0 },
+      qaStale: false,
+    };
+    const currentHtml = renderToStaticMarkup(
+      <QaDetail
+        slug="demo-story"
+        chapter={1}
+        onJob={() => undefined}
+        onEditManually={() => undefined}
+        onChanged={() => undefined}
+        initialData={currentDetail}
+      />
+    );
+    expect(currentHtml).toContain("92 / 100");
+    expect(currentHtml).not.toContain("Previous score");
+    expect(currentHtml).not.toContain("artifact-status-notice");
+
+    const staleDetail = {
+      chapter: 1,
+      state: {
+        score: 0.70,
+        status: "warn" as const,
+        findings: [qaFinding({})],
+        checks: {},
+        issues: [],
+      },
+      counts: { open: 1, resolved: 0, safeFixesAvailable: 0 },
+      qaStale: true,
+    };
+    const staleHtml = renderToStaticMarkup(
+      <QaDetail
+        slug="demo-story"
+        chapter={1}
+        onJob={() => undefined}
+        onEditManually={() => undefined}
+        onChanged={() => undefined}
+        initialData={staleDetail}
+      />
+    );
+    expect(staleHtml).toContain("70 / 100");
+    expect(staleHtml).toContain("Previous score");
+
+    // Ensure DOM order: attention head comes BEFORE the stale notice banner
+    const headIndex = staleHtml.indexOf("qa-attention-head");
+    const noticeIndex = staleHtml.indexOf("artifact-status-notice");
+    expect(headIndex).toBeGreaterThan(-1);
+    expect(noticeIndex).toBeGreaterThan(headIndex);
+
+    // QA not run state must not fabricate a score
+    const notRunHtml = renderToStaticMarkup(
+      <QaDetail
+        slug="demo-story"
+        chapter={1}
+        onJob={() => undefined}
+        onEditManually={() => undefined}
+        onChanged={() => undefined}
+        initialData={undefined}
+        initialError="Chapter 1 does not have a QA result."
+      />
+    );
+    expect(notRunHtml).toContain("QA not run");
+    expect(notRunHtml).toContain("Run QA");
+    expect(notRunHtml).not.toContain("/ 100");
+  });
   it("keeps dismissed QA findings visible without a selectable checkbox", () => {
     const html = renderToStaticMarkup(<QaResolvedFindings defaultOpen busy="" expanded={[`resolved:qaf_0123456789abcdef01234567`]} onToggle={() => undefined} onReopen={() => undefined} findings={[qaFinding({ status: "dismissed", resolution: { action: "dismiss", reason: "Intentional softening", resolvedAt: "2026-09-16T14:00:00.000Z" } })]} />);
     expect(html).toContain("Dismissed"); expect(html).toContain("Resolved issues (1)"); expect(html).toContain("reason: Intentional softening"); expect(html).not.toContain('type="checkbox"');
