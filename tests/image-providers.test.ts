@@ -13,7 +13,6 @@ import {
   imageModelCompatible,
   imageNativeTiers,
 } from "../src/artwork/providers.js";
-import { pngWithDims } from "./artwork-resolution.test.js";
 import { ImageProviderRouter } from "../src/artwork/router.js";
 import { ConfigurationError } from "../src/pipeline/errors.js";
 import { chapterSchema } from "../src/domain/chapter.js";
@@ -26,7 +25,7 @@ import { atomicWrite, atomicWriteJson } from "../src/storage/atomic-write.js";
 import { storyPaths, visualProfileRefPath } from "../src/storage/paths.js";
 import { saveVisualProfiles } from "../src/visual-canon/profiles.js";
 import { pricingFor, calculateCost } from "../src/cost/pricing.js";
-import { testStory } from "./helpers.js";
+import { pngWithDims, testStory } from "./helpers.js";
 
 const PNG_1X1 = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64");
 const PNG_ALT = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==", "base64");

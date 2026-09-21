@@ -50,8 +50,6 @@ export function planResolution(input: {
   if (input.upscaling === "off") return { ...base, action: "none", upscaleRequired: false, reason: "upscaling disabled" };
   if (!native) return { ...base, action: "none", upscaleRequired: false, reason: "native dimensions unknown" };
   const nativeMeetsTarget = native.width >= target.width && native.height >= target.height;
-  if (nativeMeetsTarget && input.upscaling === "automatic")
-    return { ...base, action: "none", upscaleRequired: false, reason: "native generation already meets the target resolution" };
   if (nativeMeetsTarget)
     return native.width === target.width && native.height === target.height
       ? { ...base, action: "none", upscaleRequired: false, reason: "native generation already matches the target resolution" }

@@ -228,14 +228,18 @@ describe("local Real-ESRGAN upscaler adapter", () => {
     const calls: Array<{ args: string[] }> = [];
     const run = async (_command: string, args: string[]) => { calls.push({ args }); return { stdout: "", stderr: "" }; };
     const resize = ffmpegResizer("ffmpeg", run);
-    expect(await resize("in.png", "out.png", { width: 5504, height: 3072 }, { width: 3840, height: 2160 })).toEqual({ fit: "exact" });
-    expect(calls[0]!.args.join(" ")).toContain("scale=3840:2160:flags=lanczos");
-    expect(await resize("in.png", "out.png", { width: 1024, height: 1024 }, { width: 3840, height: 2160 })).toEqual({ fit: "crop" });
-    expect(calls[1]!.args.join(" ")).toContain("force_original_aspect_ratio=increase,crop=3840:2160");
+    // Exact aspect ratio match: lanczos scaling
     expect(await resize("in.png", "out.png", { width: 3840, height: 2160 }, { width: 1920, height: 1080 })).toEqual({ fit: "exact" });
     expect(calls[0]!.args.join(" ")).toContain("scale=1920:1080:flags=lanczos");
+    // Aspect ratio mismatch (1:1 -> 16:9): cover-crop
+    expect(await resize("in.png", "out.png", { width: 1024, height: 1024 }, { width: 3840, height: 2160 })).toEqual({ fit: "crop" });
+    expect(calls[1]!.args.join(" ")).toContain("force_original_aspect_ratio=increase,crop=3840:2160");
+    // Minor aspect ratio difference (Gemini 2752x1536 [1.7917] vs 1920x1080 [1.7778]): cover-crop prevents stretching
     expect(await resize("in.png", "out.png", { width: 2752, height: 1536 }, { width: 1920, height: 1080 })).toEqual({ fit: "crop" });
-    expect(calls[1]!.args.join(" ")).toContain("force_original_aspect_ratio=increase,crop=1920:1080");
+    expect(calls[2]!.args.join(" ")).toContain("force_original_aspect_ratio=increase,crop=1920:1080");
+    // Gemini 4K (5504x3072 [1.7917] vs 3840x2160 [1.7778]): cover-crop prevents stretching
+    expect(await resize("in.png", "out.png", { width: 5504, height: 3072 }, { width: 3840, height: 2160 })).toEqual({ fit: "crop" });
+    expect(calls[3]!.args.join(" ")).toContain("force_original_aspect_ratio=increase,crop=3840:2160");
   });
   it("fails explicitly when 4x cannot reach the target on either axis", async () => {
     const captured: any = {};
@@ -270,7 +274,6 @@ describe("artwork generation with production derivatives", () => {
     expect(asset.path).toBe(sceneVersionProductionImagePath(root, story.slug, 1, "scene-001", 1));
   });
 
-  it("skips upscaling in automatic mode when native generation meets the target", async () => {
   it("normalizes without an AI pass in automatic mode when native generation exceeds the target", async () => {
     const { root, story, paths } = await fixture({ outputResolution: "720p" });
     const upscaler = new FakeUpscaler();
@@ -295,7 +298,6 @@ describe("artwork generation with production derivatives", () => {
     expect(upscaler.normalizeCalls).toHaveLength(0);
     const version = (await readManifest(paths)).scenes[0]!.artwork.versions[0]!;
     expect(version.upscale?.status).toBe("skipped-not-required");
-    expect((await readFile(join(paths.scenesDirectory, "scene-001.png"))).equals(NATIVE)).toBe(true);
     expect((await readFile(join(paths.scenesDirectory, "scene-001.png"))).equals(matchingImage)).toBe(true);
   });
 

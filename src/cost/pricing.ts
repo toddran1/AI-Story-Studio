@@ -30,9 +30,6 @@ export function pricingFor(provider: string, model: string, image?: {quality?:st
     const imagePrice = OPENAI_IMAGE_PRICE_TABLES[model]?.[image.quality]?.[image.size];
     if (imagePrice !== undefined) return { catalogVersion: PRICING_CATALOG_VERSION, priceId: `openai-${model}-${image.quality}-${image.size}-2026-09`, effectiveFrom: "2026-09-10", currency: "USD", sourceUrl: `https://developers.openai.com/api/docs/models/${model}`, basis: "image", imagePrice };
   }
-  if (provider === "gemini" && model === "gemini-3.1-flash-image" && image?.quality) {
-    const imagePrice = GEMINI_IMAGE_PRICES[image.quality];
-    if (imagePrice !== undefined) return { catalogVersion: PRICING_CATALOG_VERSION, priceId: `gemini-${model}-${image.quality}-2026-09`, effectiveFrom: "2026-09-19", currency: "USD", sourceUrl: "https://ai.google.dev/gemini-api/docs/pricing", basis: "image", imagePrice };
   if (provider === "gemini" && (model === "gemini-3.1-flash-image" || model === "gemini-2.5-flash-image") && image?.quality) {
     const quality = model === "gemini-2.5-flash-image" ? "low" : image.quality;
     const imagePrice = GEMINI_IMAGE_PRICES[quality];

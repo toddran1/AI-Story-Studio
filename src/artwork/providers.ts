@@ -13,7 +13,6 @@ type ImageProviderCatalogEntry = {
   supportsReferenceImages: (model: string) => boolean;
   /** Native generation tiers per aspect ratio, ordered ascending. Providers
    * are only ever asked for these tiers — never arbitrary dimensions. */
-  nativeTiers: Partial<Record<"16:9" | "1:1" | "9:16", ImageNativeTier[]>>;
   nativeTiers:
     | Partial<Record<"16:9" | "1:1" | "9:16", ImageNativeTier[]>>
     | ((model: string) => Partial<Record<"16:9" | "1:1" | "9:16", ImageNativeTier[]>> | undefined);
@@ -61,34 +60,13 @@ export const IMAGE_PROVIDER_CATALOG: Record<ImageProviderName, ImageProviderCata
   },
   gemini: {
     defaultModel: "gemini-3.1-flash-image",
-    models: ["gemini-3.1-flash-image"],
     models: ["gemini-3.1-flash-image", "gemini-2.5-flash-image"],
     supportsReferenceImages: (model) => /^gemini-.*-image/.test(model),
-    // Quality intent selects the tier: low -> 1K, medium -> 2K, high -> 4K.
-    nativeTiers: {
-      "16:9": [
-        { label: "1K", width: 1376, height: 768 },
-        { label: "2K", width: 2752, height: 1536 },
-        { label: "4K", width: 5504, height: 3072 },
-      ],
-      "1:1": [
-        { label: "1K", width: 1024, height: 1024 },
-        { label: "2K", width: 2048, height: 2048 },
-        { label: "4K", width: 4096, height: 4096 },
-      ],
-      "9:16": [
-        { label: "1K", width: 768, height: 1376 },
-        { label: "2K", width: 1536, height: 2752 },
-        { label: "4K", width: 3072, height: 5504 },
-      ],
-    },
     // Quality intent selects the tier: low -> 1K, medium -> 2K, high -> 4K (or 1K only on 1K-native models).
     nativeTiers: (model: string) => (model === "gemini-2.5-flash-image" ? GEMINI_1K_TIERS : GEMINI_FULL_TIERS),
   },
 };
 
-export function imageNativeTiers(provider: string, aspectRatio: "16:9" | "1:1" | "9:16"): ImageNativeTier[] | undefined {
-  return IMAGE_PROVIDER_CATALOG[provider as ImageProviderName]?.nativeTiers[aspectRatio];
 export function imageNativeTiers(provider: string, aspectRatio: "16:9" | "1:1" | "9:16", model?: string): ImageNativeTier[] | undefined {
   const entry = IMAGE_PROVIDER_CATALOG[provider as ImageProviderName];
   if (!entry) return undefined;

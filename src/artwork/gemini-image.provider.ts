@@ -1,7 +1,6 @@
 import { GoogleGenAI } from "@google/genai";
 import { ConfigurationError, ArtworkError, ProviderError } from "../pipeline/errors.js";
 import { ImageGenerationRequest, ImageGenerationResult, ImageProvider, ImageProviderCapabilities, ImageQualityIntent } from "./provider.js";
-import { IMAGE_PROVIDER_CATALOG, MAX_REFERENCE_IMAGES } from "./providers.js";
 import { geminiSupportedImageSizes, IMAGE_PROVIDER_CATALOG, MAX_REFERENCE_IMAGES } from "./providers.js";
 
 const IMAGE_SIZE_BY_QUALITY: Record<ImageQualityIntent, string> = { low: "1K", medium: "2K", high: "4K" };
@@ -36,7 +35,6 @@ export class GeminiImageProvider implements ImageProvider {
         contents: [{ role: "user", parts }],
         config: {
           responseModalities: ["IMAGE"],
-          imageConfig: { aspectRatio: request.aspectRatio, imageSize: IMAGE_SIZE_BY_QUALITY[request.quality] },
           imageConfig: { aspectRatio: request.aspectRatio, imageSize },
         },
       });
