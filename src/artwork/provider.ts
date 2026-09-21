@@ -16,7 +16,10 @@ export type ImageGenerationRequest = {
   outputFormat: "png";
   referenceImages?: ImageReferenceImage[];
 };
-export type ImageGenerationResult = { data: Buffer; mimeType: "image/png"; revisedPrompt?: string; requestId?: string };
+export type ImageGenerationResult = { data: Buffer; mimeType: "image/png"; revisedPrompt?: string; requestId?: string; width?: number; height?: number };
+
+/** A native generation tier a provider model can produce, ordered ascending. */
+export type ImageNativeTier = { label: string; width: number; height: number };
 
 export type ImageProviderCapabilities = {
   supportsReferenceImages: boolean;

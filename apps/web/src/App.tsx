@@ -17,8 +17,8 @@ import { VocalizationList } from "./VocalizationList.js";
 import { getEntityStatusOptions, isStandardEntityStatus, statusKey } from "../../../src/story-bible/entity-status.js";
 import { VisualProfileModal } from "./VisualProfileModal.js";
 import { ArtDirectionModal } from "./ArtDirectionModal.js";
-import { reviewArtworkVersion, updateSceneContinuity, resetSceneContinuity, ShotType, CameraAngle, CompositionTendency, ARTWORK_PROVIDERS } from "./api.js";
-import type { PreviousVisualHandoff, SceneContinuity, VisualCharacterState, VisualContinuityChange, VisualContinuityOverrideEntryInput, VisualContinuityReferenceDecision, VisualContinuityState, VisualEnvironmentState, VisualObjectState } from "./api.js";
+import { reviewArtworkVersion, reupscaleArtwork, updateSceneContinuity, resetSceneContinuity, ShotType, CameraAngle, CompositionTendency, ARTWORK_PROVIDERS } from "./api.js";
+import type { ArtworkSettings, ArtworkVersion, PreviousVisualHandoff, ResolvedArtworkBehavior, SceneContinuity, VideoResolution, VideoSettings, VisualCharacterState, VisualContinuityChange, VisualContinuityOverrideEntryInput, VisualContinuityReferenceDecision, VisualContinuityState, VisualEnvironmentState, VisualObjectState } from "./api.js";
 import { Pagination } from "./Pagination.js";
 export { Pagination, type PaginationProps, type PaginationVariant } from "./Pagination.js";
 import "./entity-sheet-actions.css";
@@ -1608,6 +1608,81 @@ export function artworkModelOptionsFor(provider: string, currentModel: string): 
   return entry.models.includes(currentModel) ? entry.models : [...entry.models, currentModel];
 }
 
+// Mirrors src/artwork/resolution.ts TARGET_DIMENSIONS for the 16:9 video canvas.
+export const VIDEO_RESOLUTION_PRESETS: Record<VideoResolution, { width: number; height: number; label: string }> = {
+  "720p": { width: 1280, height: 720, label: "720p" },
+  "1080p": { width: 1920, height: 1080, label: "1080p" },
+  "1440p": { width: 2560, height: 1440, label: "1440p" },
+  "2160p": { width: 3840, height: 2160, label: "4K (2160p)" },
+};
+export type VideoResolutionPreset = VideoResolution | "custom";
+
+/** A story without a resolution preset uses its explicit custom dimensions. */
+export function videoResolutionFor(video: VideoSettings): VideoResolutionPreset {
+  return video.resolution ?? "custom";
+}
+
+/** Selecting a preset drives width/height; "custom" keeps explicit dims and drops the preset. */
+export function applyVideoResolutionPreset(video: VideoSettings, preset: VideoResolutionPreset): VideoSettings {
+  if (preset === "custom") return { ...video, resolution: undefined };
+  const target = VIDEO_RESOLUTION_PRESETS[preset];
+  return { ...video, resolution: preset, width: target.width, height: target.height };
+}
+
+/** Re-upscale only makes sense when a non-native target is set and upscaling is allowed. */
+export function reupscaleAvailable(artwork: Pick<ArtworkSettings, "outputResolution" | "upscaling">): boolean {
+  return artwork.outputResolution !== "native" && artwork.upscaling !== "off";
+}
+
+/** Compact pre-generation estimate line. Never shown when behavior is unknown. */
+export function resolvedBehaviorSummary(behavior: ResolvedArtworkBehavior): string | undefined {
+  if (behavior.upscaling === "unknown") return undefined;
+  const parts: string[] = [];
+  if (behavior.nativeEstimate) parts.push(`Native generation: ~${behavior.nativeEstimate}`);
+  if (behavior.target) parts.push(`Target: ${behavior.target.width}×${behavior.target.height}`);
+  parts.push(`Upscaling: ${behavior.upscaling === "not-required" ? "not required" : behavior.upscaling}`);
+  return parts.join(" · ");
+}
+
+export function ResolvedBehaviorHint({ behavior }: { behavior: ResolvedArtworkBehavior }) {
+  const summary = resolvedBehaviorSummary(behavior);
+  if (!summary) return null;
+  return (
+    <small className="field-note artwork-resolution-hint" title="Pre-generation estimate — actual dimensions are known only after generation.">
+      Estimate — {summary}
+    </small>
+  );
+}
+
+/** One or two compact metadata lines for an artwork version, plus any upscaler warning. */
+export function artworkVersionMetadata(version: ArtworkVersion): { original?: string; production?: string; warning?: string } {
+  const original = version.original
+    ? `Original ${version.original.width}×${version.original.height} · ${version.provider} ${version.model}`
+    : undefined;
+  let production: string | undefined;
+  if (version.production) {
+    production = version.production.upscaled
+      ? `Production ${version.production.width}×${version.production.height} · AI upscaled${version.production.engine ? ` (${version.production.engine})` : ""}`
+      : `Production ${version.production.width}×${version.production.height} · original (upscaling off or not required)`;
+  }
+  const warning = version.upscale?.status === "unavailable"
+    ? `Upscaler unavailable — using original${version.upscale.warning ? ` (${version.upscale.warning})` : ""}`
+    : undefined;
+  return { original, production, warning };
+}
+
+export function ArtworkVersionMetadata({ version }: { version: ArtworkVersion }) {
+  const meta = artworkVersionMetadata(version);
+  if (!meta.original && !meta.production && !meta.warning) return null;
+  return (
+    <div className="version-metadata">
+      {meta.original && <small>{meta.original}</small>}
+      {meta.production && <small>{meta.production}</small>}
+      {meta.warning && <small className="version-metadata-warning">{meta.warning}</small>}
+    </div>
+  );
+}
+
 const CONTINUITY_CHARACTER_LABELS: Record<string, string> = {
   appearanceDelta: "appearance",
   wardrobe: "wardrobe",
@@ -1887,6 +1962,7 @@ export function ScenesPage({ slug, onJob, navigate, initialData }: { slug: strin
   const [activeVisualProfile, setActiveVisualProfile] = useState<{ id: string; name?: string } | null>(null);
   const [showArtDirectionModal, setShowArtDirectionModal] = useState(false);
   const [continuityBusy, setContinuityBusy] = useState(false);
+  const [reupscaling, setReupscaling] = useState(false);
   const watcher = useRef<(() => void) | undefined>(undefined);
 
   const load = async (chapter?: number) => {
@@ -1994,6 +2070,23 @@ export function ScenesPage({ slug, onJob, navigate, initialData }: { slug: strin
     }
   };
 
+  // Re-derives upscaled production assets from preserved originals only — no
+  // paid image generation is involved.
+  const handleReupscale = async () => {
+    if (!data?.selectedChapter) return;
+    try {
+      setReupscaling(true);
+      setError("");
+      const result = await reupscaleArtwork(slug, data.selectedChapter);
+      if (result.warnings.length) setError(result.warnings.join(" "));
+      await load(data.selectedChapter);
+    } catch (cause) {
+      setError(message(cause));
+    } finally {
+      setReupscaling(false);
+    }
+  };
+
   const edit = (id: string, patch: Partial<Scene>) =>
     setDraft((current) => current.map((scene) => (scene.id === id ? { ...scene, ...patch } : scene)));
 
@@ -2061,6 +2154,8 @@ export function ScenesPage({ slug, onJob, navigate, initialData }: { slug: strin
     if (sceneFilter === "video-ready") return state.label === "Video Ready";
     return true;
   });
+
+  const canReupscale = reupscaleAvailable(data.artwork);
 
   const filterCounts = {
     all: draft.length,
@@ -2195,6 +2290,15 @@ export function ScenesPage({ slug, onJob, navigate, initialData }: { slug: strin
           >
             Generate artwork
           </button>
+          <button
+            type="button"
+            className="button"
+            disabled={!canReupscale || reupscaling || !data.selectedChapter}
+            title={canReupscale ? "Re-run upscaling from existing originals — no new image generation" : "Re-upscale needs a Final resolution other than Native and Upscaling not Off (Artwork settings)"}
+            onClick={() => void handleReupscale()}
+          >
+            {reupscaling ? "Re-upscaling…" : "Re-upscale"}
+          </button>
         </div>
 
         {rangeError && (
@@ -2204,6 +2308,7 @@ export function ScenesPage({ slug, onJob, navigate, initialData }: { slug: strin
         )}
 
         {estimate !== undefined && <ArtworkEstimateSummary estimate={estimate} />}
+        {data.resolvedBehavior && <ResolvedBehaviorHint behavior={data.resolvedBehavior} />}
       </div>
 
       {error && <ErrorBox text={error} />}
@@ -2324,7 +2429,7 @@ export function ScenesPage({ slug, onJob, navigate, initialData }: { slug: strin
                                 type="button"
                                 className={`version-tab ${isSelected ? "active" : ""} ${isApproved ? "is-approved" : ""}`}
                                 onClick={() => setSelectedVersionByScene({ ...selectedVersionByScene, [scene.id]: ver.id })}
-                                title={`Version ${ver.versionNumber}: ${new Date(ver.createdAt).toLocaleTimeString()} (${ver.provider}/${ver.model})${ver.provenance?.referencesUsed ? ` · references: ${ver.provenance.referencesUsed}${ver.provenance.referenceImageCount ? ` (${ver.provenance.referenceImageCount} image${ver.provenance.referenceImageCount === 1 ? "" : "s"})` : ""}` : ""}${isApproved ? " · approved" : ""}`}
+                                title={`Version ${ver.versionNumber}: ${new Date(ver.createdAt).toLocaleTimeString()} (${ver.provider}/${ver.model})${ver.original ? ` · Original ${ver.original.width}×${ver.original.height}` : ""}${ver.production ? ` · Production ${ver.production.width}×${ver.production.height}${ver.production.upscaled ? " (AI upscaled)" : ""}` : ""}${ver.upscale?.status === "unavailable" ? " · Upscaler unavailable — using original" : ""}${ver.provenance?.referencesUsed ? ` · references: ${ver.provenance.referencesUsed}${ver.provenance.referenceImageCount ? ` (${ver.provenance.referenceImageCount} image${ver.provenance.referenceImageCount === 1 ? "" : "s"})` : ""}` : ""}${isApproved ? " · approved" : ""}`}
                               >
                                 v{ver.versionNumber}{isApproved ? " ✓" : ""}
                               </button>
@@ -2348,6 +2453,7 @@ export function ScenesPage({ slug, onJob, navigate, initialData }: { slug: strin
                         )}
                       </div>
                     )}
+                    {displayedVersion && <ArtworkVersionMetadata version={displayedVersion} />}
 
                     <Field label="Summary">
                       <textarea
@@ -2996,27 +3102,101 @@ function SettingsPage({ slug, onJob }: { slug: string; onJob: (job: Job) => void
         <Field label="Abbreviation speech overrides"><textarea value={formatSpeechAbbreviations(story.narrationSettings.speechAbbreviations)} placeholder={"EXP = experience points\nNPC = non-player character"} onChange={(event) => setStory({ ...story, narrationSettings: { ...story.narrationSettings, speechAbbreviations: parseSpeechAbbreviations(event.target.value) } })} /><small className="field-note">One <code>WRITTEN = spoken form</code> per line. Defaults cover EXP, XP, HP, MP, and NPC; overrides affect TTS only.</small></Field>
       </div>
       <div className="settings-group artwork-settings"><h3>Artwork</h3>
-        <Field label="Image provider">
+        <section className="settings-subsection"><h4>Image Generation</h4>
+          <Field label="Image provider">
+            <select
+              value={story.artwork.provider}
+              onChange={(event) => {
+                const provider = event.target.value as StoryConfig["artwork"]["provider"];
+                const entry = ARTWORK_PROVIDERS.find((item) => item.name === provider);
+                setStory({ ...story, artwork: { ...story.artwork, provider, model: entry?.defaultModel ?? story.artwork.model } });
+              }}
+            >
+              {ARTWORK_PROVIDERS.map((item) => <option key={item.name} value={item.name}>{item.name === "openai" ? "OpenAI" : "Gemini"}</option>)}
+            </select>
+          </Field>
+          <Field label="Image model">
+            <select
+              value={story.artwork.model}
+              onChange={(event) => setStory({ ...story, artwork: { ...story.artwork, model: event.target.value } })}
+            >
+              {artworkModelOptions.map((value) => <option key={value} value={value}>{value}</option>)}
+            </select>
+            <small className="field-note">Switching the provider preselects its default model. Style, aspect ratio, and quality settings are unchanged.</small>
+          </Field>
+          <Field label="Generation quality">
+            <select
+              value={story.artwork.quality}
+              onChange={(event) => setStory({ ...story, artwork: { ...story.artwork, quality: event.target.value as ArtworkSettings["quality"] } })}
+            >
+              <option value="low">Low</option>
+              <option value="medium">Medium</option>
+              <option value="high">High</option>
+            </select>
+            <small className="field-note">Generation effort and cost per image. Final size is set under Output Quality.</small>
+          </Field>
+          <Field label="Aspect ratio">
+            <select
+              value={story.artwork.aspectRatio}
+              onChange={(event) => setStory({ ...story, artwork: { ...story.artwork, aspectRatio: event.target.value as ArtworkSettings["aspectRatio"] } })}
+            >
+              <option value="16:9">16:9 · landscape</option>
+              <option value="1:1">1:1 · square</option>
+              <option value="9:16">9:16 · portrait</option>
+            </select>
+          </Field>
+        </section>
+        <section className="settings-subsection"><h4>Output Quality</h4>
+          <Field label="Final resolution">
+            <select
+              value={story.artwork.outputResolution}
+              onChange={(event) => setStory({ ...story, artwork: { ...story.artwork, outputResolution: event.target.value as ArtworkSettings["outputResolution"] } })}
+            >
+              <option value="native">Native · provider decides</option>
+              <option value="720p">720p</option>
+              <option value="1080p">1080p</option>
+              <option value="1440p">1440p</option>
+              <option value="2160p">4K (2160p)</option>
+            </select>
+            <small className="field-note">Final production image size.</small>
+          </Field>
+          <Field label="Upscaling">
+            <select
+              value={story.artwork.upscaling}
+              onChange={(event) => setStory({ ...story, artwork: { ...story.artwork, upscaling: event.target.value as ArtworkSettings["upscaling"] } })}
+            >
+              <option value="off">Off · use the provider's image as-is</option>
+              <option value="automatic">Automatic · only when the generated image is smaller than the target</option>
+              <option value="always">Always</option>
+            </select>
+          </Field>
+          <Field label="Upscaler">
+            <select value={story.artwork.upscaler} disabled>
+              <option value="local-realesrgan">Local AI · Real-ESRGAN</option>
+            </select>
+            <small className="field-note">Runs locally on preserved originals — no paid image requests.</small>
+          </Field>
+        </section>
+      </div>
+      <div className="settings-group video-settings"><h3>Video</h3>
+        <Field label="Resolution">
           <select
-            value={story.artwork.provider}
-            onChange={(event) => {
-              const provider = event.target.value as StoryConfig["artwork"]["provider"];
-              const entry = ARTWORK_PROVIDERS.find((item) => item.name === provider);
-              setStory({ ...story, artwork: { ...story.artwork, provider, model: entry?.defaultModel ?? story.artwork.model } });
-            }}
+            value={videoResolutionFor(story.video)}
+            onChange={(event) => setStory({ ...story, video: applyVideoResolutionPreset(story.video, event.target.value as VideoResolutionPreset) })}
           >
-            {ARTWORK_PROVIDERS.map((item) => <option key={item.name} value={item.name}>{item.name === "openai" ? "OpenAI" : "Gemini"}</option>)}
+            {(Object.entries(VIDEO_RESOLUTION_PRESETS) as Array<[VideoResolution, (typeof VIDEO_RESOLUTION_PRESETS)[VideoResolution]]>).map(([value, preset]) => (
+              <option key={value} value={value}>{preset.label} · {preset.width}×{preset.height}</option>
+            ))}
+            <option value="custom">Custom</option>
           </select>
+          <small className="field-note">A preset drives the render canvas size. Choose Custom to set exact dimensions.</small>
         </Field>
-        <Field label="Image model">
-          <select
-            value={story.artwork.model}
-            onChange={(event) => setStory({ ...story, artwork: { ...story.artwork, model: event.target.value } })}
-          >
-            {artworkModelOptions.map((value) => <option key={value} value={value}>{value}</option>)}
-          </select>
-          <small className="field-note">Switching the provider preselects its default model. Style, aspect ratio, and quality settings are unchanged.</small>
-        </Field>
+        {videoResolutionFor(story.video) === "custom" && (
+          <div className="field-row">
+            <Field label="Width"><input type="number" min="640" max="3840" value={story.video.width} onChange={(event) => setStory({ ...story, video: { ...story.video, width: Number(event.target.value) } })} /></Field>
+            <Field label="Height"><input type="number" min="360" max="2160" value={story.video.height} onChange={(event) => setStory({ ...story, video: { ...story.video, height: Number(event.target.value) } })} /></Field>
+          </div>
+        )}
       </div>
       <div className="settings-group"><h3>Voice</h3>
         <Field label="Audio provider"><select value={story.pipeline.tts.provider} disabled={audioProviderIds.length === 1}>{audioProviderIds.map((id) => <option key={id} value={id}>{audioProviderCatalog[id].label}</option>)}</select></Field>

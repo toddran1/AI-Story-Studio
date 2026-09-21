@@ -11,6 +11,7 @@ import { JobConflictError } from "./job-manager.js";
 import { StudioOperations } from "./operations.js";
 import { exportPaths, mediaDownloadName, padChapterNumber, previewPaths, rangeMediaDownloadName, sanitizeFilenamePart, sceneImagePath, sceneVersionImagePath, storyPaths, videoExportPaths, visualProfileRefPath, voicePreviewPaths } from "../../src/storage/paths.js";
 import { SceneManifest, sceneManifestSchema } from "../../src/scenes/types.js";
+import { bestProductionAsset } from "../../src/artwork/generator.js";
 import { readJsonIfExists } from "../../src/storage/story-files.js";
 import { BatchValidationError, ConfigurationError, ProviderError, SceneError, StorageError } from "../../src/pipeline/errors.js";
 import { SummaryArtifactNotFoundError } from "../../src/summaries/visuals.js";
@@ -235,6 +236,11 @@ export function createApiHandler(operations: StudioOperations) {
         const version = scene?.artwork.versions?.find((v) => v.id === sceneVersionImageMatch[4]);
         if (!scene || !version) return send(response, 404, { error: "Artwork version was not found" });
         const vPath = sceneVersionImagePath(operations.root, sceneVersionImageMatch[1]!, chapterNumber, scene.id, version.versionNumber);
+        if (url.searchParams.get("variant") !== "original") {
+          const story = await loadStory(storyPaths(operations.root, sceneVersionImageMatch[1]!, chapterNumber).storyConfig);
+          const asset = await bestProductionAsset(operations.root, story, chapterNumber, scene.id, version);
+          if (asset.upscaled || url.searchParams.get("variant") === "production") return sendFile(request, response, asset.path, "image/png");
+        }
         if (await exists(vPath)) {
           return sendFile(request, response, vPath, "image/png");
         }
@@ -374,6 +380,11 @@ export function createApiHandler(operations: StudioOperations) {
             review
           ),
         });
+      }
+      const artworkReupscaleMatch = /^\/api\/stories\/([a-z0-9-]+)\/chapters\/(\d+)\/artwork\/reupscale$/.exec(url.pathname);
+      if (artworkReupscaleMatch && request.method === "POST") {
+        const body = await jsonBody(request).catch(() => ({}));
+        return send(response, 200, await operations.reupscaleArtwork(artworkReupscaleMatch[1]!, chapterParam(artworkReupscaleMatch[2]!), body));
       }
       const exportMatch = /^\/api\/stories\/([a-z0-9-]+)\/exports\/(\d+)-(\d+)\.(mp3|m4b)$/.exec(url.pathname);
       if (exportMatch && request.method === "GET") {

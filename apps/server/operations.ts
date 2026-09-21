@@ -46,7 +46,7 @@ import { LLMProvider } from "../../src/llm/provider.js";
 import { planStoredScenes, updateStoredSceneManifest } from "../../src/scenes/manifest.js";
 import { SceneManifest, sceneManifestSchema } from "../../src/scenes/types.js";
 import { persistChapterVisualContinuity, removeVisualContinuityOverride, upsertVisualContinuityOverride, visualContinuityOverrideEntrySchema } from "../../src/visual-canon/continuity.js";
-import { generateStoredArtwork, reviewStoredArtwork, reviewStoredArtworkVersion } from "../../src/artwork/generator.js";
+import { generateStoredArtwork, reviewStoredArtwork, reviewStoredArtworkVersion, reupscaleStoredArtwork } from "../../src/artwork/generator.js";
 import { ImageProvider } from "../../src/artwork/provider.js";
 import { ImageProviderSource, resolveImageProvider } from "../../src/artwork/providers.js";
 import {
@@ -1195,6 +1195,15 @@ export class StudioOperations {
         versionId,
         review: parsedReview,
       });
+    });
+  }
+
+  async reupscaleArtwork(slug: string, chapter: number, raw: unknown) {
+    slugSchema.parse(slug);
+    const input = z.object({ sceneId: z.string().regex(/^scene-\d{3}$/).optional(), versionNumber: z.number().int().positive().optional() }).strict().parse(raw ?? {});
+    return withStoryLock(this.root, slug, "artwork re-upscale", async () => {
+      const story = await loadStory(storyPaths(this.root, slug, chapter).storyConfig);
+      return reupscaleStoredArtwork({ root: this.root, story, chapter, sceneId: input.sceneId, versionNumber: input.versionNumber });
     });
   }
 

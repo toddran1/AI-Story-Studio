@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { visualContinuityChangeInputSchema, visualContinuityChangeSchema } from "../visual-canon/continuity-state.js";
+import { artworkOutputResolutionSchema, artworkUpscalingModeSchema, upscalerEngineSchema } from "../artwork/resolution.js";
 
 export const sceneSettingsSchema = z.object({
   targetDurationSeconds: z.number().min(10).max(30).default(20),
@@ -15,10 +16,14 @@ export const artworkSettingsSchema = z.object({
   model: z.string().trim().min(1).default("gpt-image-2.5-flare"),
   stylePrompt: z.string().trim().min(1).max(4000).default("cinematic illustrated fiction, dramatic natural lighting, consistent character design, widescreen composition"),
   aspectRatio: z.enum(["16:9", "1:1", "9:16"]).default("16:9"),
+  // Generation effort only — final output resolution is controlled separately.
   quality: z.enum(["low", "medium", "high"]).default("medium"),
   size: z.enum(["1536x1024", "1024x1024", "1024x1536"]).default("1536x1024"),
   outputFormat: z.literal("png").default("png"),
-}).default({ provider: "openai", model: "gpt-image-2.5-flare", stylePrompt: "cinematic illustrated fiction, dramatic natural lighting, consistent character design, widescreen composition", aspectRatio: "16:9", quality: "medium", size: "1536x1024", outputFormat: "png" });
+  outputResolution: artworkOutputResolutionSchema.default("native"),
+  upscaling: artworkUpscalingModeSchema.default("automatic"),
+  upscaler: upscalerEngineSchema.default("local-realesrgan"),
+}).default({ provider: "openai", model: "gpt-image-2.5-flare", stylePrompt: "cinematic illustrated fiction, dramatic natural lighting, consistent character design, widescreen composition", aspectRatio: "16:9", quality: "medium", size: "1536x1024", outputFormat: "png", outputResolution: "native", upscaling: "automatic", upscaler: "local-realesrgan" });
 
 export const artworkReviewSchema = z.enum(["unreviewed", "approved", "rejected", "needs-regeneration"]);
 export const sceneImportanceSchema = z.enum(["transition", "standard", "major"]);
@@ -79,6 +84,27 @@ export const sceneOverridesSchema = z.object({
 });
 export type SceneOverrides = z.infer<typeof sceneOverridesSchema>;
 
+export const artworkUpscaleStatusSchema = z.enum(["applied", "skipped-not-required", "unavailable", "failed"]);
+export type ArtworkUpscaleStatus = z.infer<typeof artworkUpscaleStatusSchema>;
+
+const imageDimensionsSchema = z.object({ width: z.number().int().positive(), height: z.number().int().positive() });
+
+export const artworkVersionUpscaleSchema = z.object({
+  engine: z.string(),
+  model: z.string().optional(),
+  sourceFingerprint: z.string(),
+  sourceDimensions: imageDimensionsSchema,
+  targetDimensions: imageDimensionsSchema,
+  finalDimensions: imageDimensionsSchema.optional(),
+  scaleFactor: z.number().optional(),
+  status: artworkUpscaleStatusSchema,
+  fingerprint: z.string().optional(),
+  outputFingerprint: z.string().optional(),
+  fit: z.enum(["exact", "crop", "pad"]).optional(),
+  warning: z.string().optional(),
+});
+export type ArtworkVersionUpscale = z.infer<typeof artworkVersionUpscaleSchema>;
+
 export const artworkVersionSchema = z.object({
   id: z.string().min(1),
   versionNumber: z.number().int().positive(),
@@ -103,6 +129,12 @@ export const artworkVersionSchema = z.object({
     aspectRatio: z.string().optional(),
     outputFormat: z.string().optional(),
   }).default({}),
+  original: imageDimensionsSchema.extend({
+    fingerprint: z.string(),
+    provider: z.string(),
+    model: z.string(),
+  }).optional(),
+  upscale: artworkVersionUpscaleSchema.optional(),
   cost: z.object({
     requests: z.number().optional(),
     estimatedCostUsd: z.number().optional(),

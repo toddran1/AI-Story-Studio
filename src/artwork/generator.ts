@@ -1,9 +1,9 @@
 import { readFile } from "node:fs/promises";
 import { Chapter, chapterSchema } from "../domain/chapter.js";
 import { Story } from "../domain/story.js";
-import { ArtworkError } from "../pipeline/errors.js";
+import { ArtworkError, ConfigurationError } from "../pipeline/errors.js";
 import { atomicWrite, atomicWriteJson } from "../storage/atomic-write.js";
-import { sceneImagePath, sceneVersionImagePath, storyPaths } from "../storage/paths.js";
+import { sceneImagePath, sceneVersionImagePath, sceneVersionProductionImagePath, storyPaths } from "../storage/paths.js";
 import { exists, readJsonIfExists } from "../storage/story-files.js";
 import { fingerprint } from "../utils/hash.js";
 import { sceneContentFingerprint } from "../scenes/manifest.js";
@@ -17,10 +17,26 @@ import { loadStoryArtDirection, resolveActiveArtDirection } from "../visual-cano
 import { resolveVisualCanonPrompt, ResolvedSceneVisualPrompt } from "../visual-canon/resolver.js";
 import { renderSceneContinuity, resolveChapterVisualContinuity, VisualContinuityReferenceDecision } from "../visual-canon/continuity.js";
 import { emptyStoryBible, storyBibleSchema, StoryBible } from "../domain/story-bible.js";
-import { assertImageModelCompatible, MAX_REFERENCE_IMAGES, MAX_REFERENCE_IMAGE_BYTES, MAX_REFERENCE_TOTAL_BYTES, providerSupportsReferenceImages } from "./providers.js";
+import { assertImageModelCompatible, imageNativeTiers, MAX_REFERENCE_IMAGES, MAX_REFERENCE_IMAGE_BYTES, MAX_REFERENCE_TOTAL_BYTES, providerSupportsReferenceImages } from "./providers.js";
 import { findVisualReferenceFile, mimeForVisualReferenceExtension } from "../visual-canon/assets.js";
 import { VisualReferenceImage } from "../domain/visual-profile.js";
 import { stageFreshness, stalePrerequisiteWarning } from "../studio/artifact-state.js";
+import { estimateNativeDimensions, imageDimensions, planResolution, qualityTierIndex, resolveTargetDimensions } from "./resolution.js";
+import { ImageUpscaler, upscaleFingerprint } from "./upscaler.js";
+import { createLocalUpscaler } from "./local-realesrgan.upscaler.js";
+import { loadEnvironment } from "../config/env.js";
+
+/** Derivative production assets are only derived when a final output
+ * resolution is requested and upscaling is enabled. Generation fingerprints
+ * never include these settings — originals stay reusable across resolution
+ * changes. */
+function needsProductionDerivative(story: Story): boolean {
+  return story.artwork.outputResolution !== "native" && story.artwork.upscaling !== "off";
+}
+
+function resolveUpscaler(provided?: ImageUpscaler): ImageUpscaler {
+  return provided ?? createLocalUpscaler(loadEnvironment());
+}
 
 export async function generateStoredArtwork(options: {
   root: string;
@@ -30,6 +46,7 @@ export async function generateStoredArtwork(options: {
   sceneId?: string;
   force?: boolean;
   dryRun?: boolean;
+  upscaler?: ImageUpscaler;
   onProgress?: (event: { type: string; chapter: number; scene?: string; index?: number; total?: number; warnings?: string[] }) => void;
 }) {
   const paths = storyPaths(options.root, options.story.slug, options.chapter);
@@ -172,6 +189,31 @@ export async function generateStoredArtwork(options: {
     };
   }
 
+  // Derivative freshness is per-version: scenes whose ORIGINALS are reused
+  // still get stale/missing production derivatives rebuilt from those
+  // originals (no provider calls).
+  const candidateSceneIds = new Set(candidates.map((item) => item.scene.id));
+  const upscaler = needsProductionDerivative(options.story) ? resolveUpscaler(options.upscaler) : undefined;
+  let derivativesChanged = false;
+  for (const scene of selected) {
+    if (candidateSceneIds.has(scene.id) || scene.artwork.status !== "complete") continue;
+    const version = backingArtworkVersion(scene);
+    if (!version) continue;
+    const changed = await ensureVersionProductionAsset({
+      root: options.root, story: options.story, chapter: options.chapter,
+      sceneId: scene.id, version, upscaler, warnings,
+    });
+    const synced = await syncCanonicalSceneImage(options.root, options.story, options.chapter, scene);
+    derivativesChanged = derivativesChanged || changed || synced;
+  }
+  if (derivativesChanged) {
+    manifest.updatedAt = new Date().toISOString();
+    await atomicWriteJson(paths.scenesManifest, manifest);
+    chapter.stages.video = { status: "pending" };
+    chapter.video = undefined;
+    await persistChapter(paths.chapterMeta, chapter);
+  }
+
   if (!candidates.length) {
     return {
       dryRun: false,
@@ -231,6 +273,7 @@ export async function generateStoredArtwork(options: {
         referenceImages: references.images,
       });
       const imageFingerprint = fingerprint(result.data.toString("base64"));
+      const returnedDimensions = result.width && result.height ? { width: result.width, height: result.height } : imageDimensions(result.data);
 
       // Determine next version number
       const existingVersions = item.scene.artwork.versions ?? [];
@@ -238,7 +281,7 @@ export async function generateStoredArtwork(options: {
         existingVersions.length > 0 ? Math.max(...existingVersions.map((v) => v.versionNumber), 0) + 1 : 1;
       const versionId = `v${nextVersionNumber}`;
 
-      // Write version-specific file
+      // Write version-specific file (the immutable ORIGINAL provider image)
       const versionImagePath = sceneVersionImagePath(
         options.root,
         options.story.slug,
@@ -272,6 +315,9 @@ export async function generateStoredArtwork(options: {
           aspectRatio: options.story.artwork.aspectRatio,
           outputFormat: options.story.artwork.outputFormat,
         },
+        ...(returnedDimensions
+          ? { original: { ...returnedDimensions, fingerprint: imageFingerprint, provider: options.provider.name, model: options.story.artwork.model } }
+          : {}),
         provenance: {
           referencesUsed: references.mode,
           referenceImageCount: references.images.length,
@@ -281,18 +327,27 @@ export async function generateStoredArtwork(options: {
         review: "unreviewed",
       };
 
+      // Derive the production asset (upscaled/normalized derivative) from the
+      // preserved original. Never fails generation: an unavailable or failed
+      // upscaler leaves the original as the production asset with a warning.
+      await ensureVersionProductionAsset({
+        root: options.root, story: options.story, chapter: options.chapter,
+        sceneId: item.scene.id, version: newVersion, upscaler, warnings,
+      });
+
       item.scene.artwork.versions = [...existingVersions, newVersion];
       item.scene.artwork.status = "complete";
 
       // If no version is approved yet, keep standard scene image updated for preview
       if (!item.scene.artwork.approvedVersionId) {
+        const asset = await bestProductionAsset(options.root, options.story, options.chapter, item.scene.id, newVersion);
         const standardImagePath = sceneImagePath(options.root, options.story.slug, options.chapter, item.scene.id);
-        await atomicWrite(standardImagePath, result.data);
+        await atomicWrite(standardImagePath, await readFile(asset.path));
         item.scene.artwork.review = "unreviewed";
         item.scene.artwork.provider = options.provider.name;
         item.scene.artwork.model = options.story.artwork.model;
         item.scene.artwork.fingerprint = item.inputFingerprint;
-        item.scene.artwork.imageFingerprint = imageFingerprint;
+        item.scene.artwork.imageFingerprint = asset.fingerprint;
         item.scene.artwork.generatedAt = new Date().toISOString();
       }
 
@@ -406,18 +461,15 @@ export async function reviewStoredArtworkVersion(options: {
       throw new ArtworkError("Only intact, successfully generated artwork can be approved");
     }
 
-    // Sync approved image to sceneImagePath (${sceneId}.png) for downstream video
-    const standardImagePath = sceneImagePath(options.root, options.story.slug, options.chapter, scene.id);
-    const data = await readFile(versionPath);
-    await atomicWrite(standardImagePath, data);
-
     // Update versions state
     for (const v of scene.artwork.versions) {
       v.review = v.id === options.versionId ? "approved" : "unreviewed";
     }
     scene.artwork.approvedVersionId = options.versionId;
     scene.artwork.review = "approved";
-    scene.artwork.imageFingerprint = actualFingerprint;
+    // Sync the approved version's best production asset to sceneImagePath
+    // (${sceneId}.png) for downstream video.
+    await syncCanonicalSceneImage(options.root, options.story, options.chapter, scene);
     scene.artwork.fingerprint = version.promptFingerprint;
   } else {
     // Unapproving or marking needs-regeneration
@@ -595,10 +647,11 @@ type SceneReferencePayload = { images: ImageReferenceImage[]; available: number;
 /** Collect Visual Canon reference images for a scene, then the resolved visual
  * continuity reference (previous scene / previous chapter approved artwork)
  * after canonical refs within the same budget. Bytes are resolved only through
- * controlled scene/version paths. When the effective provider/model cannot
- * consume image input, the textual canon stays in the prompt and provenance
- * records the text-only fallback. A missing or unreadable continuity image is
- * skipped — generation never fails on it. */
+ * controlled scene/version paths — always the ORIGINAL provider images, never
+ * 4K production derivatives, so the reference budget stays bounded. When the
+ * effective provider/model cannot consume image input, the textual canon stays
+ * in the prompt and provenance records the text-only fallback. A missing or
+ * unreadable continuity image is skipped — generation never fails on it. */
 async function loadSceneReferenceImages(root: string, story: Story, resolved: ResolvedSceneVisualPrompt, continuityDecision?: VisualContinuityReferenceDecision, chapter?: number): Promise<SceneReferencePayload> {
   const wanted: VisualReferenceImage[] = [];
   for (const entity of resolved.resolvedEntities) {
@@ -685,6 +738,230 @@ export async function validPngFingerprint(path: string) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT" || error instanceof ArtworkError) return undefined;
     throw error;
   }
+}
+
+/** The version currently backing the canonical scene image: the approved
+ * version when one exists, otherwise the latest generated version. */
+export function backingArtworkVersion(scene: Scene): ArtworkVersion | undefined {
+  const versions = scene.artwork.versions ?? [];
+  if (!versions.length) return undefined;
+  if (scene.artwork.approvedVersionId) {
+    const approved = versions.find((version) => version.id === scene.artwork.approvedVersionId);
+    if (approved) return approved;
+  }
+  return versions[versions.length - 1];
+}
+
+/** The asset consumers should render: the production derivative when it is
+ * current (upscale fingerprint matches today's settings and the derivative
+ * file is intact), otherwise the immutable ORIGINAL provider image. */
+export async function bestProductionAsset(
+  root: string,
+  story: Story,
+  chapter: number,
+  sceneId: string,
+  version: ArtworkVersion
+): Promise<{ path: string; fingerprint: string; width?: number; height?: number; upscaled: boolean; engine?: string }> {
+  const originalPath = sceneVersionImagePath(root, story.slug, chapter, sceneId, version.versionNumber);
+  const original = {
+    path: originalPath,
+    fingerprint: version.imageFingerprint,
+    width: version.original?.width,
+    height: version.original?.height,
+    upscaled: false,
+  };
+  const upscale = version.upscale;
+  if (upscale?.status !== "applied" || !upscale.fingerprint || !upscale.outputFingerprint) return original;
+  const expected = upscaleFingerprint({
+    originalFingerprint: version.imageFingerprint,
+    resolution: story.artwork.outputResolution,
+    upscaling: story.artwork.upscaling,
+    engine: story.artwork.upscaler,
+    model: upscale.model,
+    target: resolveTargetDimensions(story.artwork.outputResolution, story.artwork.aspectRatio),
+  });
+  if (upscale.fingerprint !== expected) return original;
+  const productionPath = sceneVersionProductionImagePath(root, story.slug, chapter, sceneId, version.versionNumber);
+  const actual = await validPngFingerprint(productionPath);
+  if (!actual || actual !== upscale.outputFingerprint) return original;
+  return {
+    path: productionPath,
+    fingerprint: upscale.outputFingerprint,
+    width: upscale.finalDimensions?.width,
+    height: upscale.finalDimensions?.height,
+    upscaled: true,
+    engine: upscale.engine,
+  };
+}
+
+/** Keep the canonical ${sceneId}.png in sync with the backing version's best
+ * production asset. Returns true when the canonical image (or its recorded
+ * fingerprint) changed. */
+async function syncCanonicalSceneImage(root: string, story: Story, chapter: number, scene: Scene): Promise<boolean> {
+  const version = backingArtworkVersion(scene);
+  if (!version || scene.artwork.status !== "complete") return false;
+  const asset = await bestProductionAsset(root, story, chapter, scene.id, version);
+  const standardImagePath = sceneImagePath(root, story.slug, chapter, scene.id);
+  const current = await validPngFingerprint(standardImagePath);
+  if (current === asset.fingerprint && scene.artwork.imageFingerprint === asset.fingerprint) return false;
+  await atomicWrite(standardImagePath, await readFile(asset.path));
+  scene.artwork.imageFingerprint = asset.fingerprint;
+  return true;
+}
+
+/** Derive (or record the skip of) the production derivative for ONE artwork
+ * version, always consuming the preserved ORIGINAL provider image — never a
+ * derivative. Generation is never failed by upscaler problems. */
+async function ensureVersionProductionAsset(options: {
+  root: string;
+  story: Story;
+  chapter: number;
+  sceneId: string;
+  version: ArtworkVersion;
+  upscaler?: ImageUpscaler;
+  warnings: string[];
+}): Promise<boolean> {
+  const { story, version } = options;
+  const settings = story.artwork;
+  const originalPath = sceneVersionImagePath(options.root, story.slug, options.chapter, options.sceneId, version.versionNumber);
+  let sourceDimensions = version.original ? { width: version.original.width, height: version.original.height } : undefined;
+  if (!sourceDimensions) {
+    sourceDimensions = (await exists(originalPath)) ? imageDimensions(await readFile(originalPath)) : undefined;
+  }
+  const estimate = estimateNativeDimensions(
+    imageNativeTiers(settings.provider, settings.aspectRatio),
+    qualityTierIndex(settings.quality)
+  );
+  const plan = planResolution({
+    requested: settings.outputResolution,
+    aspectRatio: settings.aspectRatio,
+    upscaling: settings.upscaling,
+    nativeWidth: sourceDimensions?.width,
+    nativeHeight: sourceDimensions?.height,
+    nativeEstimate: estimate,
+  });
+  const expectedFingerprint = upscaleFingerprint({
+    originalFingerprint: version.imageFingerprint,
+    resolution: settings.outputResolution,
+    upscaling: settings.upscaling,
+    engine: settings.upscaler,
+    model: options.upscaler?.model,
+    target: plan.target,
+  });
+  if (!sourceDimensions) {
+    if (plan.action !== "none") options.warnings.push(`Scene ${options.sceneId}: cannot derive production asset, original image dimensions are unknown.`);
+    return false;
+  }
+  const base = {
+    engine: settings.upscaler,
+    model: options.upscaler?.model,
+    sourceFingerprint: version.imageFingerprint,
+    sourceDimensions,
+    targetDimensions: plan.target ?? sourceDimensions,
+    fingerprint: expectedFingerprint,
+  };
+  const current = version.upscale;
+  if (plan.action === "none") {
+    if (current?.status === "skipped-not-required" && current.fingerprint === expectedFingerprint) return false;
+    version.upscale = { ...base, status: "skipped-not-required" };
+    return true;
+  }
+  if (!options.upscaler) return false;
+  if (current?.status === "applied" && current.fingerprint === expectedFingerprint) {
+    const productionPath = sceneVersionProductionImagePath(options.root, story.slug, options.chapter, options.sceneId, version.versionNumber);
+    const actual = await validPngFingerprint(productionPath);
+    if (actual && actual === current.outputFingerprint) return false;
+  }
+  const productionPath = sceneVersionProductionImagePath(options.root, story.slug, options.chapter, options.sceneId, version.versionNumber);
+  const request = {
+    sourcePath: originalPath,
+    sourceWidth: sourceDimensions.width,
+    sourceHeight: sourceDimensions.height,
+    targetWidth: plan.target!.width,
+    targetHeight: plan.target!.height,
+    outputPath: productionPath,
+  };
+  try {
+    const result = plan.action === "normalize" ? await options.upscaler.normalize(request) : await options.upscaler.upscale(request);
+    const outputFingerprint = await validPngFingerprint(result.outputPath);
+    if (!outputFingerprint) throw new Error("upscaler produced an invalid image");
+    version.upscale = {
+      ...base,
+      status: "applied",
+      finalDimensions: result.finalDimensions,
+      scaleFactor: result.scaleFactor,
+      fit: result.fit,
+      outputFingerprint,
+    };
+    return true;
+  } catch (error) {
+    const unavailable = error instanceof ConfigurationError;
+    const warning = error instanceof Error ? error.message : String(error);
+    version.upscale = { ...base, status: unavailable ? "unavailable" : "failed", warning };
+    options.warnings.push(
+      unavailable
+        ? `Scene ${options.sceneId}: upscaler unavailable (${warning}). The original image remains the production asset.`
+        : `Scene ${options.sceneId}: upscaling failed (${warning}). The original image remains the production asset.`
+    );
+    return true;
+  }
+}
+
+/** Re-run ONLY the derivative step from preserved originals (no provider
+ * calls) for versions whose upscale fingerprint is stale or missing. Used
+ * when outputResolution/upscaling/upscaler settings change. */
+export async function reupscaleStoredArtwork(options: {
+  root: string;
+  story: Story;
+  chapter: number;
+  sceneId?: string;
+  versionNumber?: number;
+  upscaler?: ImageUpscaler;
+}) {
+  const paths = storyPaths(options.root, options.story.slug, options.chapter);
+  const raw = await readJsonIfExists<SceneManifest>(paths.scenesManifest);
+  if (!raw) throw new ArtworkError(`Chapter ${options.chapter} has no scene plan`);
+  const manifest = sceneManifestSchema.parse(raw);
+  const scenes = options.sceneId ? manifest.scenes.filter((scene) => scene.id === options.sceneId) : manifest.scenes;
+  if (options.sceneId && !scenes.length) throw new ArtworkError(`Scene '${options.sceneId}' was not found`);
+
+  const warnings: string[] = [];
+  const upscaler = needsProductionDerivative(options.story) ? resolveUpscaler(options.upscaler) : undefined;
+  const rederived: Array<{ sceneId: string; versionId: string; status: string }> = [];
+  let changed = false;
+  for (const scene of scenes) {
+    for (const version of scene.artwork.versions ?? []) {
+      if (options.versionNumber !== undefined && version.versionNumber !== options.versionNumber) continue;
+      const originalPath = sceneVersionImagePath(options.root, options.story.slug, options.chapter, scene.id, version.versionNumber);
+      const actual = await validPngFingerprint(originalPath);
+      if (!actual || actual !== version.imageFingerprint) {
+        warnings.push(`Scene ${scene.id} ${version.id}: original image is missing or corrupt, skipping re-upscale.`);
+        continue;
+      }
+      const didChange = await ensureVersionProductionAsset({
+        root: options.root, story: options.story, chapter: options.chapter,
+        sceneId: scene.id, version, upscaler, warnings,
+      });
+      if (didChange) {
+        changed = true;
+        rederived.push({ sceneId: scene.id, versionId: version.id, status: version.upscale?.status ?? "unknown" });
+      }
+    }
+    if (await syncCanonicalSceneImage(options.root, options.story, options.chapter, scene)) changed = true;
+  }
+
+  if (changed) {
+    manifest.updatedAt = new Date().toISOString();
+    await atomicWriteJson(paths.scenesManifest, manifest);
+    const chapterRaw = await readJsonIfExists<Chapter>(paths.chapterMeta);
+    if (chapterRaw) {
+      const chapter = chapterSchema.parse(chapterRaw);
+      chapter.stages.video = { status: "pending" };
+      chapter.video = undefined;
+      await persistChapter(paths.chapterMeta, chapter);
+    }
+  }
+  return { chapter: options.chapter, rederived, warnings };
 }
 
 async function persistChapter(path: string, chapter: Chapter) {

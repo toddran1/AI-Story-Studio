@@ -1,4 +1,8 @@
 import { z } from "zod";
+import { resolveTargetDimensions } from "../artwork/resolution.js";
+
+export const videoResolutionSchema = z.enum(["720p", "1080p", "1440p", "2160p"]);
+export type VideoResolution = z.infer<typeof videoResolutionSchema>;
 
 export const videoSettingsSchema = z.object({
   width: z.number().int().min(640).max(3840).default(1920), height: z.number().int().min(360).max(2160).default(1080),
@@ -6,5 +10,15 @@ export const videoSettingsSchema = z.object({
   quality: z.number().int().min(0).max(40).default(20), subtitleMode: z.enum(["none", "burn", "soft", "both"]).default("burn"),
   subtitleStyle: z.enum(["default", "large", "minimal"]).default("default"), backgroundMode: z.enum(["cover", "gradient", "kenBurns"]).default("cover"),
   introDurationSeconds: z.number().min(0).max(10).default(3),
+  // Optional canvas preset (16:9). When set it drives width/height; explicit
+  // width/height remain the advanced custom path when unset.
+  resolution: videoResolutionSchema.optional(),
 }).default({ width: 1920, height: 1080, fps: 30, codec: "libx264", quality: 20, subtitleMode: "burn", subtitleStyle: "default", backgroundMode: "cover", introDurationSeconds: 3 });
 export type VideoSettings = z.infer<typeof videoSettingsSchema>;
+
+/** Effective render settings: a resolution preset drives the canvas size. */
+export function resolveVideoSettings(settings: VideoSettings): VideoSettings {
+  if (!settings.resolution) return settings;
+  const target = resolveTargetDimensions(settings.resolution, "16:9")!;
+  return { ...settings, width: target.width, height: target.height };
+}

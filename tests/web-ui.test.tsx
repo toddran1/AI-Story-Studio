@@ -1,7 +1,7 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
-import { App, ArtworkEstimateSummary, artworkModelOptionsFor, CanonicalEntitySheet, chapterPageSize, ChapterPage, chunkPresetFor, clearJobDismissal, clearJobMinimized, continuityReferenceTriState, describeContinuityReference, dismissJob, EntityStatusField, ErrorBoundary, EXECUTABLE_CHAPTER_STAGES, getStageActionDetails, humanizeContinuityChanges, isJobConsoleMinimized, isJobDismissed, isTerminalJob, JobConsole, paginateRows, Pagination, PreviousHandoffBadge, QaDetail, QaFindingCard, QaResolvedFindings, SceneContinuityPanel, ScenesPage, setJobConsoleMinimized, shouldRefreshAfterJob, TtsQualityBadge, TtsSegmentRow } from "../apps/web/src/App.js";
-import type { ChapterDetail, Job, QaFinding, Scene, TtsQualityArtifact, TtsSegmentQuality, VisualContinuityChange } from "../apps/web/src/api.js";
+import { App, applyVideoResolutionPreset, ArtworkEstimateSummary, ArtworkVersionMetadata, artworkModelOptionsFor, CanonicalEntitySheet, chapterPageSize, ChapterPage, chunkPresetFor, clearJobDismissal, clearJobMinimized, continuityReferenceTriState, describeContinuityReference, dismissJob, EntityStatusField, ErrorBoundary, EXECUTABLE_CHAPTER_STAGES, getStageActionDetails, humanizeContinuityChanges, isJobConsoleMinimized, isJobDismissed, isTerminalJob, JobConsole, paginateRows, Pagination, PreviousHandoffBadge, QaDetail, QaFindingCard, QaResolvedFindings, resolvedBehaviorSummary, ResolvedBehaviorHint, reupscaleAvailable, SceneContinuityPanel, ScenesPage, setJobConsoleMinimized, shouldRefreshAfterJob, TtsQualityBadge, TtsSegmentRow, VIDEO_RESOLUTION_PRESETS, videoResolutionFor } from "../apps/web/src/App.js";
+import type { ArtworkVersion, ChapterDetail, Job, QaFinding, Scene, TtsQualityArtifact, TtsSegmentQuality, VideoSettings, VisualContinuityChange } from "../apps/web/src/api.js";
 import { pretty } from "../apps/web/src/format.js";
 import { ChapterImportPage, savedStorySourceUrl } from "../apps/web/src/ChapterImportPage.js";
 import { SummariesPage } from "../apps/web/src/SummariesPage.js";
@@ -1656,5 +1656,133 @@ describe("TTS quality guard UI", () => {
       expect(queueTsx.match(/<Pagination[^>]*position="top"/g)?.length).toBe(3);
       expect(queueTsx.match(/<Pagination[^>]*position="bottom"/g)?.length).toBe(3);
     });
+  });
+});
+
+describe("Milestone 23 — image output quality UI", () => {
+  const baseVersion: ArtworkVersion = {
+    id: "v1", versionNumber: 1, sceneId: "scene-001", imagePath: "p.png", imageFingerprint: "fp",
+    createdAt: new Date().toISOString(), provider: "gemini", model: "gemini-3.1-flash-image",
+    prompt: "a gate", promptFingerprint: "pf", review: "unreviewed",
+  };
+
+  it("renders the resolved-behavior estimate for required, not-required, and off — never unknown", () => {
+    const required = renderToStaticMarkup(<ResolvedBehaviorHint behavior={{ nativeEstimate: "2752x1536 (high)", target: { width: 3840, height: 2160 }, upscaling: "required" }} />);
+    expect(required).toContain("Native generation: ~2752x1536 (high)");
+    expect(required).toContain("Target: 3840×2160");
+    expect(required).toContain("Upscaling: required");
+    expect(required).toContain("Estimate —");
+    const notRequired = renderToStaticMarkup(<ResolvedBehaviorHint behavior={{ nativeEstimate: "2752x1536 (high)", target: { width: 1920, height: 1080 }, upscaling: "not-required" }} />);
+    expect(notRequired).toContain("Upscaling: not required");
+    const off = renderToStaticMarkup(<ResolvedBehaviorHint behavior={{ nativeEstimate: "2752x1536 (high)", target: { width: 3840, height: 2160 }, upscaling: "off" }} />);
+    expect(off).toContain("Upscaling: off");
+    const unknown = renderToStaticMarkup(<ResolvedBehaviorHint behavior={{ upscaling: "unknown" }} />);
+    expect(unknown).toBe("");
+    expect(resolvedBehaviorSummary({ upscaling: "unknown" })).toBeUndefined();
+  });
+
+  it("renders compact version metadata lines for original-only, upscaled production, and unavailable upscaler", () => {
+    const originalOnly = renderToStaticMarkup(<ArtworkVersionMetadata version={{ ...baseVersion, original: { width: 2752, height: 1536 } }} />);
+    expect(originalOnly).toContain("Original 2752×1536 · gemini gemini-3.1-flash-image");
+    expect(originalOnly).not.toContain("Production");
+    const upscaled = renderToStaticMarkup(<ArtworkVersionMetadata version={{
+      ...baseVersion,
+      original: { width: 2752, height: 1536 },
+      production: { width: 3840, height: 2160, upscaled: true, engine: "local-realesrgan" },
+    }} />);
+    expect(upscaled).toContain("Production 3840×2160 · AI upscaled (local-realesrgan)");
+    const notUpscaled = renderToStaticMarkup(<ArtworkVersionMetadata version={{
+      ...baseVersion,
+      original: { width: 2752, height: 1536 },
+      production: { width: 2752, height: 1536, upscaled: false },
+    }} />);
+    expect(notUpscaled).toContain("original (upscaling off or not required)");
+    const unavailable = renderToStaticMarkup(<ArtworkVersionMetadata version={{
+      ...baseVersion,
+      original: { width: 2752, height: 1536 },
+      production: { width: 2752, height: 1536, upscaled: false },
+      upscale: { engine: "local-realesrgan", sourceFingerprint: "s", sourceDimensions: { width: 2752, height: 1536 }, targetDimensions: { width: 3840, height: 2160 }, status: "unavailable", warning: "binary missing" },
+    }} />);
+    expect(unavailable).toContain("Upscaler unavailable — using original");
+    expect(unavailable).toContain('class="version-metadata-warning"');
+  });
+
+  it("maps video resolution presets to canvas dimensions and preserves custom dims", () => {
+    const custom: VideoSettings = { width: 1600, height: 900, fps: 30, codec: "libx264", quality: 20, subtitleMode: "burn", subtitleStyle: "default", backgroundMode: "cover", introDurationSeconds: 3 };
+    expect(videoResolutionFor(custom)).toBe("custom");
+    const preset = applyVideoResolutionPreset(custom, "2160p");
+    expect(preset).toMatchObject({ resolution: "2160p", width: 3840, height: 2160 });
+    expect(videoResolutionFor(preset)).toBe("2160p");
+    const backToCustom = applyVideoResolutionPreset(preset, "custom");
+    expect(backToCustom.resolution).toBeUndefined();
+    expect(backToCustom).toMatchObject({ width: 3840, height: 2160 });
+    expect(VIDEO_RESOLUTION_PRESETS["1080p"]).toMatchObject({ width: 1920, height: 1080 });
+  });
+
+  it("enables re-upscale only when a non-native target and upscaling apply", () => {
+    expect(reupscaleAvailable({ outputResolution: "2160p", upscaling: "automatic" })).toBe(true);
+    expect(reupscaleAvailable({ outputResolution: "1080p", upscaling: "always" })).toBe(true);
+    expect(reupscaleAvailable({ outputResolution: "native", upscaling: "automatic" })).toBe(false);
+    expect(reupscaleAvailable({ outputResolution: "2160p", upscaling: "off" })).toBe(false);
+  });
+
+  it("shows the estimate hint and a disabled Re-upscale in Scene Studio when native output is configured", () => {
+    const html = renderToStaticMarkup(
+      <ScenesPage
+        slug="demo-story"
+        onJob={() => undefined}
+        navigate={() => undefined}
+        initialData={{
+          settings: { targetDurationSeconds: 20, minimumDurationSeconds: 10, maximumDurationSeconds: 30, maximumScenesPerChapter: 50 },
+          artwork: { provider: "gemini", model: "gemini-3.1-flash-image", stylePrompt: "s", aspectRatio: "16:9", quality: "high", size: "1536x1024", outputFormat: "png", outputResolution: "native", upscaling: "automatic", upscaler: "local-realesrgan" },
+          resolvedBehavior: { nativeEstimate: "2752x1536 (high)", upscaling: "off" },
+          planner: { provider: "mock", model: "mock" },
+          selectedChapter: 1,
+          chapters: [{ chapter: 1, title: "Chapter 1", durationSeconds: 60, sceneStatus: "complete", artworkStatus: "complete" }],
+          counts: { chapters: 1, planned: 1, artworkReady: 1 },
+        }}
+      />
+    );
+    expect(html).toContain("Estimate —");
+    expect(html).toContain("Upscaling: off");
+    expect(html).toContain("Re-upscale");
+    expect(html).toMatch(/<button[^>]*disabled=""[^>]*>Re-upscale<\/button>/);
+  });
+
+  it("shows version metadata and an enabled Re-upscale in Scene Studio when upscaling applies", () => {
+    const html = renderToStaticMarkup(
+      <ScenesPage
+        slug="demo-story"
+        onJob={() => undefined}
+        navigate={() => undefined}
+        initialData={{
+          settings: { targetDurationSeconds: 20, minimumDurationSeconds: 10, maximumDurationSeconds: 30, maximumScenesPerChapter: 50 },
+          artwork: { provider: "gemini", model: "gemini-3.1-flash-image", stylePrompt: "s", aspectRatio: "16:9", quality: "high", size: "1536x1024", outputFormat: "png", outputResolution: "2160p", upscaling: "automatic", upscaler: "local-realesrgan" },
+          resolvedBehavior: { nativeEstimate: "2752x1536 (high)", target: { width: 3840, height: 2160 }, upscaling: "required" },
+          planner: { provider: "mock", model: "mock" },
+          selectedChapter: 1,
+          chapters: [{ chapter: 1, title: "Chapter 1", durationSeconds: 60, sceneStatus: "complete", artworkStatus: "complete" }],
+          counts: { chapters: 1, planned: 1, artworkReady: 1 },
+          manifest: {
+            version: 1, chapter: 1, durationSeconds: 60, planningFingerprint: "fp", manualRevision: 0, manuallyEdited: false, updatedAt: new Date().toISOString(),
+            scenes: [{
+              id: "scene-001", summary: "Hero arrives", startSeconds: 0, endSeconds: 30, characters: [], visualPrompt: "A gate", importance: "standard",
+              artwork: { status: "complete", review: "approved", approvedVersionId: "v1", versions: [{
+                ...baseVersion,
+                original: { width: 2752, height: 1536 },
+                production: { width: 3840, height: 2160, upscaled: true, engine: "local-realesrgan" },
+                imageUrl: "/api/x.png",
+              }] },
+            }],
+          },
+        }}
+      />
+    );
+    expect(html).toContain("Estimate —");
+    expect(html).toContain("Upscaling: required");
+    expect(html).toContain("Original 2752×1536");
+    expect(html).toContain("Production 3840×2160 · AI upscaled (local-realesrgan)");
+    expect(html).toMatch(/<button[^>]*>Re-upscale<\/button>/);
+    expect(html).not.toMatch(/<button[^>]*disabled=""[^>]*>Re-upscale<\/button>/);
   });
 });

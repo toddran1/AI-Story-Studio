@@ -51,9 +51,13 @@ export type StoryConfig = {
 };
 export type AudioSettings = { loudnessTarget: number; truePeak: number; segmentGapSeconds: number; chapterGapSeconds: number; format: "mp3"; bitrate: "64k" | "96k" | "128k" | "160k" | "192k" | "256k" | "320k"; sampleRate: 32000 | 44100 | 48000 };
 export type SubtitleSettings = { maxCharactersPerLine: number; maxLines: number; minimumDurationSeconds: number; maximumDurationSeconds: number };
-export type VideoSettings = { width: number; height: number; fps: 24 | 25 | 30 | 60; codec: "libx264"; quality: number; subtitleMode: "none" | "burn" | "soft" | "both"; subtitleStyle: "default" | "large" | "minimal"; backgroundMode: "cover" | "gradient" | "kenBurns"; introDurationSeconds: number };
+export type VideoResolution = "720p" | "1080p" | "1440p" | "2160p";
+export type VideoSettings = { width: number; height: number; fps: 24 | 25 | 30 | 60; codec: "libx264"; quality: number; subtitleMode: "none" | "burn" | "soft" | "both"; subtitleStyle: "default" | "large" | "minimal"; backgroundMode: "cover" | "gradient" | "kenBurns"; introDurationSeconds: number; resolution?: VideoResolution };
 export type SceneSettings = { targetDurationSeconds: number; minimumDurationSeconds: number; maximumDurationSeconds: number; maximumScenesPerChapter: number };
-export type ArtworkSettings = { provider: "openai" | "gemini"; model: string; stylePrompt: string; aspectRatio: "16:9" | "1:1" | "9:16"; quality: "low" | "medium" | "high"; size: "1536x1024" | "1024x1024" | "1024x1536"; outputFormat: "png" };
+export type ArtworkOutputResolution = "native" | "720p" | "1080p" | "1440p" | "2160p";
+export type ArtworkUpscalingMode = "off" | "automatic" | "always";
+export type UpscalerEngine = "local-realesrgan";
+export type ArtworkSettings = { provider: "openai" | "gemini"; model: string; stylePrompt: string; aspectRatio: "16:9" | "1:1" | "9:16"; quality: "low" | "medium" | "high"; size: "1536x1024" | "1024x1024" | "1024x1536"; outputFormat: "png"; outputResolution: ArtworkOutputResolution; upscaling: ArtworkUpscalingMode; upscaler: UpscalerEngine };
 export type ArtworkRouting = { provider: string; model: string; availableProviders: Array<{ name: string; models: string[]; defaultModel: string }> };
 // Mirrors the server IMAGE_PROVIDER_CATALOG; used where artworkRouting is unavailable (e.g. the settings page).
 export const ARTWORK_PROVIDERS: ArtworkRouting["availableProviders"] = [
@@ -271,6 +275,21 @@ export type SceneOverrides = {
   customNegativePrompt?: string;
 };
 
+export type ArtworkVersionUpscale = {
+  engine: string;
+  model?: string;
+  sourceFingerprint: string;
+  sourceDimensions: { width: number; height: number };
+  targetDimensions: { width: number; height: number };
+  finalDimensions?: { width: number; height: number };
+  scaleFactor?: number;
+  status: "applied" | "skipped-not-required" | "unavailable" | "failed";
+  fingerprint?: string;
+  outputFingerprint?: string;
+  fit?: "exact" | "crop" | "pad";
+  warning?: string;
+};
+
 export type ArtworkVersion = {
   id: string;
   versionNumber: number;
@@ -296,6 +315,11 @@ export type ArtworkVersion = {
     aspectRatio?: string;
     outputFormat?: string;
   };
+  // The dashboard strips the preserved original down to its dimensions and
+  // reports the effective production asset separately.
+  original?: { width: number; height: number };
+  production?: { width: number; height: number; upscaled: boolean; engine?: string };
+  upscale?: ArtworkVersionUpscale;
   review: "unreviewed" | "approved" | "rejected" | "needs-regeneration";
   imageUrl?: string;
 };
@@ -391,10 +415,12 @@ export type ResolvedSceneCharacter = {
 };
 
 export type SceneManifest = { version: 1; chapter: number; durationSeconds: number; planningFingerprint: string; manualRevision: number; manuallyEdited: boolean; updatedAt: string; scenes: Scene[] };
+export type ResolvedArtworkBehavior = { nativeEstimate?: string; target?: { width: number; height: number }; upscaling: "required" | "not-required" | "off" | "unknown" };
 export type ScenesDashboard = {
   settings: SceneSettings;
   artwork: ArtworkSettings;
   artworkRouting?: ArtworkRouting;
+  resolvedBehavior?: ResolvedArtworkBehavior;
   planner: Model;
   scenePlannerRouting?: ResolvedModelRouting;
   selectedChapter?: number;
@@ -551,5 +577,10 @@ export async function resetSceneContinuity(slug: string, chapter: number, sceneI
 
 export async function reviewArtworkVersion(slug: string, chapter: number, sceneId: string, versionId: string, review: string): Promise<SceneArtwork> {
   return post<SceneArtwork>(`/stories/${encodeURIComponent(slug)}/chapters/${chapter}/scenes/${encodeURIComponent(sceneId)}/versions/${encodeURIComponent(versionId)}/review`, { review });
+}
+
+export type ReupscaleArtworkResult = { chapter: number; rederived: Array<{ sceneId: string; versionId: string; status: string }>; warnings: string[] };
+export async function reupscaleArtwork(slug: string, chapter: number, sceneId?: string): Promise<ReupscaleArtworkResult> {
+  return post<ReupscaleArtworkResult>(`/stories/${encodeURIComponent(slug)}/chapters/${chapter}/artwork/reupscale`, sceneId ? { sceneId } : {});
 }
 

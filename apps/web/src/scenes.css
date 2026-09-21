@@ -168,3 +168,7 @@
   .modal-footer { flex-wrap: wrap; }
   .modal-footer-danger { width: 100%; margin-right: 0; }
 }
+.scene-toolbar .artwork-resolution-hint { grid-column: 1/-1; }
+.version-metadata { display: flex; flex-wrap: wrap; gap: 4px 12px; margin: 2px 0 4px; }
+.version-metadata small { font-size: 8px; color: var(--muted); font-family: var(--mono); }
+.version-metadata .version-metadata-warning { color: var(--warn); }

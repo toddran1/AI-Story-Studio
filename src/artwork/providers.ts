@@ -1,13 +1,20 @@
 import { z } from "zod";
 import { ArtworkError } from "../pipeline/errors.js";
 import { Story } from "../domain/story.js";
-import { ImageProvider } from "./provider.js";
+import { ImageNativeTier, ImageProvider } from "./provider.js";
 import { ImageProviderRouter } from "./router.js";
 
 export const imageProviderNameSchema = z.enum(["openai", "gemini"]);
 export type ImageProviderName = z.infer<typeof imageProviderNameSchema>;
 
-type ImageProviderCatalogEntry = { defaultModel: string; models: string[]; supportsReferenceImages: (model: string) => boolean };
+type ImageProviderCatalogEntry = {
+  defaultModel: string;
+  models: string[];
+  supportsReferenceImages: (model: string) => boolean;
+  /** Native generation tiers per aspect ratio, ordered ascending. Providers
+   * are only ever asked for these tiers — never arbitrary dimensions. */
+  nativeTiers: Partial<Record<"16:9" | "1:1" | "9:16", ImageNativeTier[]>>;
+};
 
 export const IMAGE_PROVIDER_CATALOG: Record<ImageProviderName, ImageProviderCatalogEntry> = {
   openai: {
@@ -15,13 +22,40 @@ export const IMAGE_PROVIDER_CATALOG: Record<ImageProviderName, ImageProviderCata
     models: ["gpt-image-2.5-flare", "gpt-image-2.5-sunburst", "gpt-image-1", "gpt-image-1-mini"],
     // Only the GPT Image 2.5 family accepts reference-image input.
     supportsReferenceImages: (model) => model.startsWith("gpt-image-2.5"),
+    nativeTiers: {
+      "16:9": [{ label: "1536x1024", width: 1536, height: 1024 }],
+      "1:1": [{ label: "1024x1024", width: 1024, height: 1024 }],
+      "9:16": [{ label: "1024x1536", width: 1024, height: 1536 }],
+    },
   },
   gemini: {
     defaultModel: "gemini-3.1-flash-image",
     models: ["gemini-3.1-flash-image"],
     supportsReferenceImages: (model) => /^gemini-.*-image/.test(model),
+    // Quality intent selects the tier: low -> 1K, medium -> 2K, high -> 4K.
+    nativeTiers: {
+      "16:9": [
+        { label: "1K", width: 1376, height: 768 },
+        { label: "2K", width: 2752, height: 1536 },
+        { label: "4K", width: 5504, height: 3072 },
+      ],
+      "1:1": [
+        { label: "1K", width: 1024, height: 1024 },
+        { label: "2K", width: 2048, height: 2048 },
+        { label: "4K", width: 4096, height: 4096 },
+      ],
+      "9:16": [
+        { label: "1K", width: 768, height: 1376 },
+        { label: "2K", width: 1536, height: 2752 },
+        { label: "4K", width: 3072, height: 5504 },
+      ],
+    },
   },
 };
+
+export function imageNativeTiers(provider: string, aspectRatio: "16:9" | "1:1" | "9:16"): ImageNativeTier[] | undefined {
+  return IMAGE_PROVIDER_CATALOG[provider as ImageProviderName]?.nativeTiers[aspectRatio];
+}
 
 export const MAX_REFERENCE_IMAGES = 4;
 export const MAX_REFERENCE_IMAGE_BYTES = 8 * 1024 * 1024;

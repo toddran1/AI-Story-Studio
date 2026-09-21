@@ -29,7 +29,9 @@ import { applyManualBibleOverlay } from "../../src/studio/workflow.js";
 import { getStorageUsage, invalidateStoryForConfigChange, loadGlobalSettings, readActivity } from "../../src/studio/projects.js";
 import { loadEnvironment } from "../../src/config/env.js";
 import { resolveModelRouting, resolveAllModelRoutings } from "../../src/config/model-routing.js";
-import { defaultImageModel, IMAGE_PROVIDER_CATALOG, imageModelCompatible } from "../../src/artwork/providers.js";
+import { defaultImageModel, IMAGE_PROVIDER_CATALOG, imageModelCompatible, imageNativeTiers } from "../../src/artwork/providers.js";
+import { estimateNativeDimensions, planResolution, qualityTierIndex, resolveTargetDimensions } from "../../src/artwork/resolution.js";
+import { videoResolutionSchema } from "../../src/video/config.js";
 import { fingerprint } from "../../src/utils/hash.js";
 import { fileFingerprint } from "../../src/utils/file-fingerprint.js";
 import { logger } from "../../src/utils/logger.js";
@@ -279,7 +281,7 @@ export const settingsUpdateSchema = z.object({
   audio: z.object({ loudnessTarget: z.number().min(-24).max(-12), truePeak: z.number().min(-6).max(-0.1), segmentGapSeconds: z.number().min(0).max(5),
     chapterGapSeconds: z.number().min(0).max(10), bitrate: z.enum(["64k", "96k", "128k", "160k", "192k", "256k", "320k"]), sampleRate: z.union([z.literal(32000), z.literal(44100), z.literal(48000)]) }).optional(),
   subtitles: z.object({ maxCharactersPerLine: z.number().int().min(20).max(80), maxLines: z.number().int().min(1).max(3), minimumDurationSeconds: z.number().min(.4).max(5), maximumDurationSeconds: z.number().min(2).max(12) }).optional(),
-  video: z.object({ width: z.number().int().min(640).max(3840), height: z.number().int().min(360).max(2160), fps: z.union([z.literal(24), z.literal(25), z.literal(30), z.literal(60)]), codec: z.literal("libx264"), quality: z.number().int().min(0).max(40), subtitleMode: z.enum(["none", "burn", "soft", "both"]), subtitleStyle: z.enum(["default", "large", "minimal"]), backgroundMode: z.enum(["cover", "gradient", "kenBurns"]), introDurationSeconds: z.number().min(0).max(10) }).optional(),
+  video: z.object({ width: z.number().int().min(640).max(3840), height: z.number().int().min(360).max(2160), fps: z.union([z.literal(24), z.literal(25), z.literal(30), z.literal(60)]), codec: z.literal("libx264"), quality: z.number().int().min(0).max(40), subtitleMode: z.enum(["none", "burn", "soft", "both"]), subtitleStyle: z.enum(["default", "large", "minimal"]), backgroundMode: z.enum(["cover", "gradient", "kenBurns"]), introDurationSeconds: z.number().min(0).max(10), resolution: videoResolutionSchema.optional() }).optional(),
   scenes: sceneSettingsSchema.optional(), artwork: artworkSettingsSchema.optional(),
 }).strict();
 
@@ -469,9 +471,9 @@ export async function getScenesDashboard(root: string, slug: string, selectedCha
   const visualProfiles = await loadVisualProfiles(root, slug);
 
   let manifest:
-    | (SceneManifest & {
+    | (Omit<SceneManifest, "scenes"> & {
         scenes: Array<
-          SceneManifest["scenes"][number] & {
+          Omit<SceneManifest["scenes"][number], "artwork"> & {
             imageUrl?: string;
             continuity?: {
               startState: ResolvedSceneContinuity["startState"];
@@ -480,9 +482,13 @@ export async function getScenesDashboard(root: string, slug: string, selectedCha
               referenceDecision?: ResolvedSceneContinuity["referenceDecision"];
               manualOverride?: ResolvedSceneContinuity["manualOverride"];
             };
-            artwork: SceneManifest["scenes"][number]["artwork"] & {
+            artwork: Omit<SceneManifest["scenes"][number]["artwork"], "versions"> & {
               versions: Array<
-                SceneManifest["scenes"][number]["artwork"]["versions"][number] & { imageUrl?: string }
+                Omit<SceneManifest["scenes"][number]["artwork"]["versions"][number], "original"> & {
+                  imageUrl?: string;
+                  original?: { width: number; height: number };
+                  production?: { width: number; height: number; upscaled: boolean; engine?: string };
+                }
               >;
             };
           }
@@ -518,6 +524,13 @@ export async function getScenesDashboard(root: string, slug: string, selectedCha
           const vExists = await exists(vPath);
           return {
             ...v,
+            original: v.original ? { width: v.original.width, height: v.original.height } : undefined,
+            production:
+              v.upscale?.status === "applied" && v.upscale.finalDimensions
+                ? { width: v.upscale.finalDimensions.width, height: v.upscale.finalDimensions.height, upscaled: true, engine: v.upscale.engine }
+                : v.original
+                  ? { width: v.original.width, height: v.original.height, upscaled: false }
+                  : undefined,
             imageUrl:
               vExists || hasMain
                 ? `/api/stories/${slug}/chapters/${chapterNumber}/scenes/${scene.id}/versions/${v.id}.png`
@@ -576,6 +589,7 @@ export async function getScenesDashboard(root: string, slug: string, selectedCha
         defaultModel: entry.defaultModel,
       })),
     },
+    resolvedBehavior: resolvedArtworkBehavior(story),
     planner: story.pipeline.scenePlanner,
     scenePlannerRouting,
     selectedChapter: chapterNumber,
@@ -596,6 +610,28 @@ export async function getScenesDashboard(root: string, slug: string, selectedCha
     artDirection,
     visualProfiles: Object.values(visualProfiles),
   };
+}
+
+/** Pre-generation resolution behavior estimate, derived only from catalog
+ * native tiers for the current provider/model/aspect — never a promise of
+ * exact dimensions before generation. */
+function resolvedArtworkBehavior(story: Story) {
+  const settings = story.artwork;
+  const target = resolveTargetDimensions(settings.outputResolution, settings.aspectRatio);
+  const estimate = estimateNativeDimensions(
+    imageNativeTiers(settings.provider, settings.aspectRatio),
+    qualityTierIndex(settings.quality)
+  );
+  const nativeEstimate = estimate ? `${estimate.width}x${estimate.height} (${estimate.label})` : undefined;
+  if (settings.upscaling === "off") return { nativeEstimate, target, upscaling: "off" as const };
+  if (!target || !estimate) return { nativeEstimate, target, upscaling: "unknown" as const };
+  const plan = planResolution({
+    requested: settings.outputResolution,
+    aspectRatio: settings.aspectRatio,
+    upscaling: settings.upscaling,
+    nativeEstimate: estimate,
+  });
+  return { nativeEstimate, target, upscaling: plan.upscaleRequired ? ("required" as const) : ("not-required" as const) };
 }
 
 export function publicProductionManifest(manifest: ProductionManifest, slug: string): ProductionManifest {

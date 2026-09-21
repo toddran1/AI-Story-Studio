@@ -38,6 +38,11 @@ export function sceneVersionImagePath(root: string, slug: string, chapter: numbe
   return join(storyPaths(root, slug, chapter).scenesDirectory, `${sceneId}-v${versionNumber}.png`);
 }
 
+export function sceneVersionProductionImagePath(root: string, slug: string, chapter: number, sceneId: string, versionNumber: number) {
+  if (!/^scene-\d{3}$/.test(sceneId)) throw new Error("Invalid scene ID");
+  return join(storyPaths(root, slug, chapter).scenesDirectory, `${sceneId}-v${versionNumber}-production.png`);
+}
+
 export function visualProfileRefPath(root: string, slug: string, entityId: string, refId: string, ext = "png") {
   if (!/^ent_[a-f0-9]{24}$/.test(entityId)) throw new Error("Invalid entity ID");
   if (!/^[a-zA-Z0-9_-]+$/.test(refId)) throw new Error("Invalid reference image ID");
