@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { visualContinuityChangeInputSchema, visualContinuityChangeSchema } from "../visual-canon/continuity.js";
+import { visualContinuityChangeInputSchema, visualContinuityChangeSchema } from "../visual-canon/continuity-state.js";
 
 export const sceneSettingsSchema = z.object({
   targetDurationSeconds: z.number().min(10).max(30).default(20),
