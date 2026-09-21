@@ -11,7 +11,9 @@ import {
   defaultImageModel,
   IMAGE_PROVIDER_CATALOG,
   imageModelCompatible,
+  imageNativeTiers,
 } from "../src/artwork/providers.js";
+import { pngWithDims } from "./artwork-resolution.test.js";
 import { ImageProviderRouter } from "../src/artwork/router.js";
 import { ConfigurationError } from "../src/pipeline/errors.js";
 import { chapterSchema } from "../src/domain/chapter.js";
@@ -130,6 +132,22 @@ describe("image provider registry", () => {
     expect(legacy.model).toBe("gpt-image-1");
     expect(artworkSettingsSchema.parse({ provider: "gemini", model: "gemini-3.1-flash-image" }).provider).toBe("gemini");
   });
+  it("provides model-aware native tiers reflecting differing model capabilities", () => {
+    // gemini-3.1-flash-image has 1K, 2K, 4K tiers
+    const flashTiers = imageNativeTiers("gemini", "16:9", "gemini-3.1-flash-image");
+    expect(flashTiers).toHaveLength(3);
+    expect(flashTiers?.map((t) => t.label)).toEqual(["1K", "2K", "4K"]);
+
+    // gemini-2.5-flash-image has only 1K tier
+    const liteTiers = imageNativeTiers("gemini", "16:9", "gemini-2.5-flash-image");
+    expect(liteTiers).toHaveLength(1);
+    expect(liteTiers?.[0]?.label).toBe("1K");
+
+    // OpenAI models all share legal tiers
+    const openaiTiers = imageNativeTiers("openai", "16:9", "gpt-image-2.5-flare");
+    expect(openaiTiers).toHaveLength(1);
+    expect(openaiTiers?.[0]?.width).toBe(1536);
+  });
 });
 
 describe("OpenAI image adapter", () => {
@@ -209,6 +227,19 @@ describe("Gemini image adapter", () => {
       await provider.generate({ ...request, quality, referenceImages: undefined });
       expect(captured.request.config.imageConfig.imageSize).toBe(imageSize);
     }
+  });
+  it("sends supported image sizes and clamps unsupported sizes for 1K-only models", async () => {
+    // gemini-3.1-flash-image supports 1K, 2K, 4K
+    const captured4K: any = {};
+    const provider = new GeminiImageProvider("key", 1000, geminiClient(captured4K, okResponse) as any);
+    await provider.generate({ ...request, model: "gemini-3.1-flash-image", quality: "high", referenceImages: undefined });
+    expect(captured4K.request.config.imageConfig.imageSize).toBe("4K");
+
+    // gemini-2.5-flash-image only supports 1K - requesting high must NOT send 4K, it clamps to 1K
+    const captured1K: any = {};
+    const provider1K = new GeminiImageProvider("key", 1000, geminiClient(captured1K, okResponse) as any);
+    await provider1K.generate({ ...request, model: "gemini-2.5-flash-image", quality: "high", referenceImages: undefined });
+    expect(captured1K.request.config.imageConfig.imageSize).toBe("1K");
   });
   it("fails safely on malformed, empty, or blocked responses", async () => {
     const textOnly = { candidates: [{ content: { parts: [{ text: "no image" }] } }] };
@@ -292,6 +323,42 @@ describe("artwork routing and provenance", () => {
     const providerSwitched: Story = { ...story, artwork: { ...story.artwork, provider: "gemini", model: "gemini-3.1-flash-image" } };
     expect(artworkFingerprint(manifest.scenes[0]!, [], providerSwitched, "gemini-images-v1")).not.toBe(artwork.versions[0]!.promptFingerprint);
   });
+  it("requests final 4K output on a 1K-native Gemini model and falls through to production upscaling", async () => {
+    const { root, story, paths } = await fixture({ provider: "gemini", model: "gemini-2.5-flash-image", outputResolution: "2160p", quality: "high" });
+    const images = fakeImages("gemini", pngWithDims(1376, 768));
+    class RecordingUpscaler {
+      readonly name = "local-realesrgan" as const;
+      readonly version = "fake-upscaler-v1";
+      upscaleCalls: any[] = [];
+      normalizeCalls: any[] = [];
+      async validateConfiguration() {}
+      async upscale(req: any) {
+        this.upscaleCalls.push(req);
+        await atomicWrite(req.outputPath, pngWithDims(req.targetWidth, req.targetHeight));
+        return {
+          outputPath: req.outputPath,
+          sourceDimensions: { width: req.sourceWidth, height: req.sourceHeight },
+          finalDimensions: { width: req.targetWidth, height: req.targetHeight },
+          engine: this.name,
+          model: "realesrgan-x4plus",
+          scaleFactor: 4,
+          fit: "crop" as const,
+        };
+      }
+      async normalize(req: any) {
+        this.normalizeCalls.push(req);
+        return req;
+      }
+    }
+    const upscaler = new RecordingUpscaler();
+    const result = await generateStoredArtwork({ root, story, chapter: 1, provider: images, sceneId: "scene-001", upscaler });
+    expect(result.generated).toBe(1);
+    expect(upscaler.upscaleCalls).toHaveLength(1);
+    expect(upscaler.upscaleCalls[0]).toMatchObject({ sourceWidth: 1376, sourceHeight: 768, targetWidth: 3840, targetHeight: 2160 });
+    const version = (await sceneManifestSchema.parse(JSON.parse(await readFile(paths.scenesManifest, "utf8")))).scenes[0]!.artwork.versions[0]!;
+    expect(version.original).toMatchObject({ width: 1376, height: 768 });
+    expect(version.upscale).toMatchObject({ status: "applied", finalDimensions: { width: 3840, height: 2160 } });
+  });
 });
 
 describe("image pricing", () => {
@@ -300,6 +367,7 @@ describe("image pricing", () => {
     expect(calculateCost(pricingFor("openai", "gpt-image-2.5-flare", { quality: "medium", size: "1536x1024" }), { imageCount: 1 })).toBeCloseTo(.0315, 9);
     expect(calculateCost(pricingFor("openai", "gpt-image-2.5-sunburst", { quality: "high", size: "1024x1024" }), { imageCount: 1 })).toBeCloseTo(.2505, 9);
     expect(calculateCost(pricingFor("gemini", "gemini-3.1-flash-image", { quality: "medium", size: "1536x1024" }), { imageCount: 3 })).toBeCloseTo(.135, 9);
+    expect(calculateCost(pricingFor("gemini", "gemini-2.5-flash-image", { quality: "high", size: "1536x1024" }), { imageCount: 1 })).toBeCloseTo(.02, 9);
     expect(pricingFor("openai", "unknown-image-model", { quality: "low", size: "1024x1024" })).toBeUndefined();
   });
 });

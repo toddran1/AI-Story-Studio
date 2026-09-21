@@ -15,6 +15,7 @@ export type DeterministicResizer = (input: string, output: string, source: { wid
 export function ffmpegResizer(ffmpegPath = process.env.FFMPEG_PATH || "ffmpeg", runner: CommandRunner = runCommand, timeoutMs?: number): DeterministicResizer {
   return async (input, output, source, target) => {
     const aspectMatches = Math.abs(source.width / source.height - target.width / target.height) / (target.width / target.height) < 0.01;
+    const aspectMatches = Math.abs(source.width / source.height - target.width / target.height) < 0.0001;
     const filter = aspectMatches
       ? `scale=${target.width}:${target.height}:flags=lanczos`
       : `scale=${target.width}:${target.height}:force_original_aspect_ratio=increase,crop=${target.width}:${target.height}`;
@@ -58,6 +59,16 @@ export class LocalRealEsrganUpscaler implements ImageUpscaler {
   async upscale(request: ImageUpscaleRequest): Promise<ImageUpscaleResult> {
     await this.validateConfiguration();
     const factor = request.sourceWidth * 2 >= request.targetWidth && request.sourceHeight * 2 >= request.targetHeight ? 2 : 4;
+    let factor: 2 | 4;
+    if (request.sourceWidth * 2 >= request.targetWidth && request.sourceHeight * 2 >= request.targetHeight) {
+      factor = 2;
+    } else if (request.sourceWidth * 4 >= request.targetWidth && request.sourceHeight * 4 >= request.targetHeight) {
+      factor = 4;
+    } else {
+      throw new ConfigurationError(
+        `Unsupported upscaling scale: source ${request.sourceWidth}x${request.sourceHeight} requires greater than 4x enlargement to reach target ${request.targetWidth}x${request.targetHeight}.`
+      );
+    }
     const directory = dirname(request.outputPath);
     await mkdir(directory, { recursive: true });
     // Not a dotfile: realesrgan-ncnn-vulkan silently skips hidden output paths.

@@ -2,6 +2,7 @@ import { GoogleGenAI } from "@google/genai";
 import { ConfigurationError, ArtworkError, ProviderError } from "../pipeline/errors.js";
 import { ImageGenerationRequest, ImageGenerationResult, ImageProvider, ImageProviderCapabilities, ImageQualityIntent } from "./provider.js";
 import { IMAGE_PROVIDER_CATALOG, MAX_REFERENCE_IMAGES } from "./providers.js";
+import { geminiSupportedImageSizes, IMAGE_PROVIDER_CATALOG, MAX_REFERENCE_IMAGES } from "./providers.js";
 
 const IMAGE_SIZE_BY_QUALITY: Record<ImageQualityIntent, string> = { low: "1K", medium: "2K", high: "4K" };
 
@@ -26,6 +27,9 @@ export class GeminiImageProvider implements ImageProvider {
     for (const reference of (request.referenceImages ?? []).slice(0, this.capabilities.maxReferenceImages)) {
       parts.push({ inlineData: { mimeType: reference.mimeType, data: reference.data.toString("base64") } });
     }
+    const desiredSize = IMAGE_SIZE_BY_QUALITY[request.quality];
+    const legalSizes = geminiSupportedImageSizes(request.model);
+    const imageSize = legalSizes.includes(desiredSize) ? desiredSize : legalSizes[legalSizes.length - 1] ?? "1K";
     try {
       const response = await this.client.models.generateContent({
         model: request.model,
@@ -33,6 +37,7 @@ export class GeminiImageProvider implements ImageProvider {
         config: {
           responseModalities: ["IMAGE"],
           imageConfig: { aspectRatio: request.aspectRatio, imageSize: IMAGE_SIZE_BY_QUALITY[request.quality] },
+          imageConfig: { aspectRatio: request.aspectRatio, imageSize },
         },
       });
       return decodeGeminiImageResponse(response);

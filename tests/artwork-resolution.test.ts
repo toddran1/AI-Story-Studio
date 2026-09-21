@@ -153,6 +153,7 @@ describe("artwork resolution model", () => {
     expect(planResolution({ requested: "2160p", aspectRatio: "16:9", upscaling: "automatic" })).toMatchObject({ action: "none", upscaleRequired: false, reason: "native dimensions unknown" });
     expect(planResolution({ requested: "1080p", aspectRatio: "16:9", upscaling: "automatic", nativeWidth: 1920, nativeHeight: 1080 })).toMatchObject({ action: "none", upscaleRequired: false });
     expect(planResolution({ requested: "2160p", aspectRatio: "16:9", upscaling: "automatic", nativeWidth: 1536, nativeHeight: 1024 })).toMatchObject({ action: "upscale", upscaleRequired: true });
+    expect(planResolution({ requested: "1080p", aspectRatio: "16:9", upscaling: "automatic", nativeWidth: 2752, nativeHeight: 1536 })).toMatchObject({ action: "normalize", upscaleRequired: false });
     expect(planResolution({ requested: "2160p", aspectRatio: "16:9", upscaling: "always", nativeWidth: 5504, nativeHeight: 3072 })).toMatchObject({ action: "normalize", upscaleRequired: false });
     expect(planResolution({ requested: "2160p", aspectRatio: "16:9", upscaling: "always", nativeWidth: 3840, nativeHeight: 2160 })).toMatchObject({ action: "none", upscaleRequired: false });
     expect(planResolution({ requested: "2160p", aspectRatio: "16:9", upscaling: "automatic", nativeEstimate: { width: 1536, height: 1024 } })).toMatchObject({ action: "upscale", upscaleRequired: true });
@@ -231,6 +232,17 @@ describe("local Real-ESRGAN upscaler adapter", () => {
     expect(calls[0]!.args.join(" ")).toContain("scale=3840:2160:flags=lanczos");
     expect(await resize("in.png", "out.png", { width: 1024, height: 1024 }, { width: 3840, height: 2160 })).toEqual({ fit: "crop" });
     expect(calls[1]!.args.join(" ")).toContain("force_original_aspect_ratio=increase,crop=3840:2160");
+    expect(await resize("in.png", "out.png", { width: 3840, height: 2160 }, { width: 1920, height: 1080 })).toEqual({ fit: "exact" });
+    expect(calls[0]!.args.join(" ")).toContain("scale=1920:1080:flags=lanczos");
+    expect(await resize("in.png", "out.png", { width: 2752, height: 1536 }, { width: 1920, height: 1080 })).toEqual({ fit: "crop" });
+    expect(calls[1]!.args.join(" ")).toContain("force_original_aspect_ratio=increase,crop=1920:1080");
+  });
+  it("fails explicitly when 4x cannot reach the target on either axis", async () => {
+    const captured: any = {};
+    const upscaler = new LocalRealEsrganUpscaler("realesrgan-ncnn-vulkan", "realesrgan-x4plus", 1000, runner(captured));
+    await expect(
+      upscaler.upscale({ ...request, sourceWidth: 640, sourceHeight: 360, targetWidth: 3840, targetHeight: 2160, outputPath: "out.png" })
+    ).rejects.toThrow(/Unsupported upscaling scale/);
   });
 });
 
@@ -259,14 +271,32 @@ describe("artwork generation with production derivatives", () => {
   });
 
   it("skips upscaling in automatic mode when native generation meets the target", async () => {
+  it("normalizes without an AI pass in automatic mode when native generation exceeds the target", async () => {
     const { root, story, paths } = await fixture({ outputResolution: "720p" });
     const upscaler = new FakeUpscaler();
     await generateStoredArtwork({ root, story, chapter: 1, provider: fakeImages(), sceneId: "scene-001", upscaler });
+    expect(upscaler.upscaleCalls).toHaveLength(0);
+    expect(upscaler.normalizeCalls).toHaveLength(1);
+    expect(upscaler.normalizeCalls[0]).toMatchObject({ sourceWidth: 1536, sourceHeight: 1024, targetWidth: 1280, targetHeight: 720 });
+    const version = (await readManifest(paths)).scenes[0]!.artwork.versions[0]!;
+    expect(version.upscale).toMatchObject({ status: "applied", finalDimensions: { width: 1280, height: 720 } });
+    expect(version.upscale?.scaleFactor).toBeUndefined();
+    const derivative = await readFile(sceneVersionProductionImagePath(root, story.slug, 1, "scene-001", 1));
+    expect(imageDimensions(derivative)).toEqual({ width: 1280, height: 720 });
+    expect((await readFile(join(paths.scenesDirectory, "scene-001.png"))).equals(derivative)).toBe(true);
+  });
+
+  it("skips normalization and upscaling in automatic mode when native generation exactly matches the target", async () => {
+    const { root, story, paths } = await fixture({ outputResolution: "1080p" });
+    const upscaler = new FakeUpscaler();
+    const matchingImage = pngWithDims(1920, 1080);
+    await generateStoredArtwork({ root, story, chapter: 1, provider: fakeImages(matchingImage), sceneId: "scene-001", upscaler });
     expect(upscaler.upscaleCalls).toHaveLength(0);
     expect(upscaler.normalizeCalls).toHaveLength(0);
     const version = (await readManifest(paths)).scenes[0]!.artwork.versions[0]!;
     expect(version.upscale?.status).toBe("skipped-not-required");
     expect((await readFile(join(paths.scenesDirectory, "scene-001.png"))).equals(NATIVE)).toBe(true);
+    expect((await readFile(join(paths.scenesDirectory, "scene-001.png"))).equals(matchingImage)).toBe(true);
   });
 
   it("derives nothing when upscaling is off", async () => {

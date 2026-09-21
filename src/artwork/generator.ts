@@ -830,6 +830,7 @@ async function ensureVersionProductionAsset(options: {
   }
   const estimate = estimateNativeDimensions(
     imageNativeTiers(settings.provider, settings.aspectRatio),
+    imageNativeTiers(settings.provider, settings.aspectRatio, settings.model),
     qualityTierIndex(settings.quality)
   );
   const plan = planResolution({

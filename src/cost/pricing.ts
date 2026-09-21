@@ -33,6 +33,10 @@ export function pricingFor(provider: string, model: string, image?: {quality?:st
   if (provider === "gemini" && model === "gemini-3.1-flash-image" && image?.quality) {
     const imagePrice = GEMINI_IMAGE_PRICES[image.quality];
     if (imagePrice !== undefined) return { catalogVersion: PRICING_CATALOG_VERSION, priceId: `gemini-${model}-${image.quality}-2026-09`, effectiveFrom: "2026-09-19", currency: "USD", sourceUrl: "https://ai.google.dev/gemini-api/docs/pricing", basis: "image", imagePrice };
+  if (provider === "gemini" && (model === "gemini-3.1-flash-image" || model === "gemini-2.5-flash-image") && image?.quality) {
+    const quality = model === "gemini-2.5-flash-image" ? "low" : image.quality;
+    const imagePrice = GEMINI_IMAGE_PRICES[quality];
+    if (imagePrice !== undefined) return { catalogVersion: PRICING_CATALOG_VERSION, priceId: `gemini-${model}-${quality}-2026-09`, effectiveFrom: "2026-09-19", currency: "USD", sourceUrl: "https://ai.google.dev/gemini-api/docs/pricing", basis: "image", imagePrice };
   }
   return prices.find((item) => item.provider === provider && item.model === model)?.snapshot;
 }

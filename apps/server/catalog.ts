@@ -620,6 +620,7 @@ function resolvedArtworkBehavior(story: Story) {
   const target = resolveTargetDimensions(settings.outputResolution, settings.aspectRatio);
   const estimate = estimateNativeDimensions(
     imageNativeTiers(settings.provider, settings.aspectRatio),
+    imageNativeTiers(settings.provider, settings.aspectRatio, settings.model),
     qualityTierIndex(settings.quality)
   );
   const nativeEstimate = estimate ? `${estimate.width}x${estimate.height} (${estimate.label})` : undefined;
