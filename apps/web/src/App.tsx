@@ -2859,21 +2859,22 @@ export function chapterPageSize(search: string) { const value = Number(new URLSe
 export function paginateRows<T>(items: readonly T[], page: number, pageSize: number) { const pages = Math.max(1, Math.ceil(items.length / pageSize)); const currentPage = Math.min(Math.max(1, page), pages); return { items: items.slice((currentPage - 1) * pageSize, currentPage * pageSize), page: currentPage, pages, total: items.length }; }
 function formatSpeechAbbreviations(value: Record<string, string> | undefined) { return Object.entries(value ?? {}).map(([written, spoken]) => `${written} = ${spoken}`).join("\n"); }
 function parseSpeechAbbreviations(value: string) { return Object.fromEntries(value.split("\n").map((line) => line.split("=")).map(([written, spoken]) => [written?.trim(), spoken?.trim()] as const).filter(([written, spoken]) => Boolean(written && spoken))); }
-function SettingsPage({ slug, onJob }: { slug: string; onJob: (job: Job) => void }) {
-  const [story, setStory] = useState<StoryConfig>();
-  const [effectiveRouting, setEffectiveRouting] = useState<Record<string, ResolvedModelRouting>>();
+export function SettingsPage({ slug, onJob, initialStory, initialEffectiveRouting }: { slug: string; onJob: (job: Job) => void; initialStory?: StoryConfig; initialEffectiveRouting?: Record<string, ResolvedModelRouting> }) {
+  const [story, setStory] = useState<StoryConfig | undefined>(initialStory);
+  const [effectiveRouting, setEffectiveRouting] = useState<Record<string, ResolvedModelRouting> | undefined>(initialEffectiveRouting);
   const [saved, setSaved] = useState(false);
   const [saving, setSaving] = useState(false);
   const [translating, setTranslating] = useState(false);
   const [error, setError] = useState("");
   useEffect(() => {
+    if (initialStory) return;
     setStory(undefined);
     setError("");
     api<any>("/stories/" + slug).then((x) => {
       setStory(x.story);
       setEffectiveRouting(x.effectiveRouting);
     }).catch((value) => setError(message(value)));
-  }, [slug]);
+  }, [slug, initialStory]);
   if (error && !story) return <LoadFailure error={error} />;
   if (!story) return <Loading />;
   const save = async (event: FormEvent) => {
@@ -3207,7 +3208,6 @@ function SettingsPage({ slug, onJob }: { slug: string; onJob: (job: Job) => void
         <Field label="Delivery intensity"><select value={story.pipeline.tts.deliveryIntensity} onChange={(event) => setStory({ ...story, pipeline: { ...story.pipeline, tts: { ...story.pipeline.tts, deliveryIntensity: event.target.value as "none" | "restrained" | "expressive" } } })}><option value="none">None · no emotion cues</option><option value="restrained">Restrained · consistent</option><option value="expressive">Expressive · more variation</option></select></Field>
         <div className="voice-casting" role="group" aria-label="TTS chunk size"><span>TTS CHUNK SIZE</span>{([{"id":"conservative","label":"Conservative · ~1,000 chars","detail":"More, smaller requests. Smallest blast radius when a request fails.","recommended":false},{"id":"balanced","label":"Balanced · ~1,750 chars","detail":"Recommended default for most voices.","recommended":true},{"id":"long","label":"Long · ~3,000 chars","detail":"Fewer requests; only for very stable voices.","recommended":false},{"id":"custom","label":"Custom","detail":"Choose an exact size between 500 and 20,000 characters.","recommended":false}] as const).map((option) => <button key={option.id} type="button" aria-pressed={chunkPresetFor(story.pipeline.tts.maxCharsPerRequest) === option.id} className={`${chunkPresetFor(story.pipeline.tts.maxCharsPerRequest) === option.id ? "active" : ""} ${option.recommended ? "recommended" : ""}`.trim()} onClick={() => setStory({ ...story, pipeline: { ...story.pipeline, tts: { ...story.pipeline.tts, maxCharsPerRequest: option.id === "conservative" ? 1000 : option.id === "balanced" ? 1750 : option.id === "long" ? 3000 : story.pipeline.tts.maxCharsPerRequest } } })}><b>{option.label}</b><small>{option.detail}</small></button>)}</div>
         {chunkPresetFor(story.pipeline.tts.maxCharsPerRequest) === "custom" && <Field label="Custom chunk size · characters"><input type="number" min="500" max="20000" step="50" value={story.pipeline.tts.maxCharsPerRequest} onChange={(event) => setStory({ ...story, pipeline: { ...story.pipeline, tts: { ...story.pipeline.tts, maxCharsPerRequest: Math.max(500, Math.min(20000, Number(event.target.value) || 500)) } } })} /></Field>}
-        <label className={`narration-policy ${story.pipeline.tts.qualityGuard ? "active" : ""}`}><div><span>QUALITY</span><b>Quality guard</b><small>Verify generated speech against the expected narration — each segment is transcribed locally and failed segments are retried automatically. Fish's request-level quality protection is included.</small></div><input type="checkbox" checked={story.pipeline.tts.qualityGuard} onChange={(event) => setStory({ ...story, pipeline: { ...story.pipeline, tts: { ...story.pipeline.tts, qualityGuard: event.target.checked } } })} /><i aria-hidden="true" /></label>
         <label className={`narration-policy ${story.pipeline.tts.qualityGuard ? "active" : ""}`}><div><span>QUALITY</span><b>Post-Generation Quality Guard</b><small>Transcribes generated audio and checks it against the expected narration to detect missing, incorrect, repeated, or unexpected speech.</small></div><input type="checkbox" checked={story.pipeline.tts.qualityGuard} onChange={(event) => setStory({ ...story, pipeline: { ...story.pipeline, tts: { ...story.pipeline.tts, qualityGuard: event.target.checked } } })} /><i aria-hidden="true" /></label>
         <Field label="Max quality retries"><input type="number" min="0" max="5" step="1" value={story.pipeline.tts.maxQualityRetries} onChange={(event) => setStory({ ...story, pipeline: { ...story.pipeline, tts: { ...story.pipeline.tts, maxQualityRetries: Math.max(0, Math.min(5, Math.round(Number(event.target.value) || 0))) } } })} /><small className="field-note">Regenerate only the failed segment, up to this many extra attempts. Verification-only — changing it does not regenerate existing audio.</small></Field>
         <div className="diagnostic-delivery"><div><span>TROUBLESHOOTING</span><small>Flattens delivery and disables vocalization rendering to isolate unstable voices. Updates this form — save to apply.</small></div><button type="button" className="button" onClick={() => setStory({ ...story, pipeline: { ...story.pipeline, tts: { ...story.pipeline.tts, deliveryIntensity: "none" } }, narrationSettings: { ...story.narrationSettings, speechVocalizations: { ...story.narrationSettings.speechVocalizations, mode: "disabled" } } })}>Use diagnostic delivery (flat, no vocalizations)</button></div>

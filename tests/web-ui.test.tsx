@@ -1,6 +1,6 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
-import { App, applyVideoResolutionPreset, ArtworkEstimateSummary, ArtworkVersionMetadata, artworkModelOptionsFor, CanonicalEntitySheet, chapterPageSize, ChapterPage, chunkPresetFor, clearJobDismissal, clearJobMinimized, continuityReferenceTriState, describeContinuityReference, dismissJob, EntityStatusField, ErrorBoundary, EXECUTABLE_CHAPTER_STAGES, getStageActionDetails, humanizeContinuityChanges, isJobConsoleMinimized, isJobDismissed, isTerminalJob, JobConsole, paginateRows, Pagination, PreviousHandoffBadge, QaDetail, QaFindingCard, QaResolvedFindings, resolvedBehaviorSummary, ResolvedBehaviorHint, reupscaleAvailable, SceneContinuityPanel, ScenesPage, setJobConsoleMinimized, shouldRefreshAfterJob, TtsQualityBadge, TtsSegmentRow, VIDEO_RESOLUTION_PRESETS, videoResolutionFor } from "../apps/web/src/App.js";
+import { App, applyVideoResolutionPreset, ArtworkEstimateSummary, ArtworkVersionMetadata, artworkModelOptionsFor, CanonicalEntitySheet, chapterPageSize, ChapterPage, chunkPresetFor, clearJobDismissal, clearJobMinimized, continuityReferenceTriState, describeContinuityReference, dismissJob, EntityStatusField, ErrorBoundary, EXECUTABLE_CHAPTER_STAGES, getStageActionDetails, humanizeContinuityChanges, isJobConsoleMinimized, isJobDismissed, isTerminalJob, JobConsole, paginateRows, Pagination, PreviousHandoffBadge, QaDetail, QaFindingCard, QaResolvedFindings, resolvedBehaviorSummary, ResolvedBehaviorHint, reupscaleAvailable, SceneContinuityPanel, ScenesPage, setJobConsoleMinimized, SettingsPage, shouldRefreshAfterJob, TtsQualityBadge, TtsSegmentRow, VIDEO_RESOLUTION_PRESETS, videoResolutionFor } from "../apps/web/src/App.js";
 import type { ArtworkVersion, ChapterDetail, Job, QaFinding, Scene, TtsQualityArtifact, TtsSegmentQuality, VideoSettings, VisualContinuityChange } from "../apps/web/src/api.js";
 import { pretty } from "../apps/web/src/format.js";
 import { ChapterImportPage, savedStorySourceUrl } from "../apps/web/src/ChapterImportPage.js";
@@ -1785,4 +1785,109 @@ describe("Milestone 23 — image output quality UI", () => {
     expect(html).toMatch(/<button[^>]*>Re-upscale<\/button>/);
     expect(html).not.toMatch(/<button[^>]*disabled=""[^>]*>Re-upscale<\/button>/);
   });
+
+  describe("Story Settings TTS Quality Guard controls", () => {
+    const createMockStory = (qualityGuard = true, providerQualityGuard = false) => ({
+      slug: "test-story",
+      title: "Test Story",
+      author: "Author",
+      description: "Description",
+      tags: ["fantasy"],
+      notes: "",
+      sourceLanguage: "zh-CN",
+      outputLanguage: "en-US",
+      context: { recentChapterSummaries: 5 },
+      qaMode: "production" as const,
+      narrationSettings: {
+        profanityMode: "preserve" as const,
+        bleepStrongProfanity: false,
+        includeChapterTitle: true,
+        speechNormalization: "automatic" as const,
+        timeSpeechMode: "natural_12h" as const,
+        speechVocalizations: { mode: "automatic" as const, fallback: "safe_normalize" as const },
+        speechAbbreviations: {},
+      },
+      pipeline: {
+        translation: { provider: "openai", model: "gpt-4o" },
+        narration: { provider: "openai", model: "gpt-4o" },
+        qa: { provider: "openai", model: "gpt-4o" },
+        storyBible: { provider: "openai", model: "gpt-4o" },
+        scenePlanner: { provider: "openai", model: "gpt-4o" },
+        tts: {
+          provider: "fish" as const,
+          model: "s2.1-pro-free",
+          referenceId: "narrator",
+          voiceMode: "same-voice-dialogue" as const,
+          deliveryIntensity: "restrained" as const,
+          qualityGuard,
+          providerQualityGuard,
+          maxCharsPerRequest: 1750,
+          maxQualityRetries: 2,
+          speed: 1,
+        },
+      },
+      audio: {
+        loudnessTarget: -19,
+        truePeak: -1.5,
+        segmentGapSeconds: 0.75,
+        chapterGapSeconds: 2,
+        bitrate: "192k" as const,
+        sampleRate: 44100 as const,
+      },
+      video: {
+        width: 1920,
+        height: 1080,
+        fps: 30 as const,
+        codec: "libx264" as const,
+        quality: 20,
+        subtitleMode: "burn" as const,
+        subtitleStyle: "default" as const,
+        backgroundMode: "cover" as const,
+        introDurationSeconds: 1,
+      },
+      artwork: {
+        provider: "openai" as const,
+        model: "dall-e-3",
+        autoGenerate: "chapter-first" as const,
+        upscaler: "local-realesrgan" as const,
+      },
+    });
+
+    it("renders Post-Generation Quality Guard once and eliminates the obsolete generic Quality guard control", () => {
+      const story = createMockStory(true, false);
+      const html = renderToStaticMarkup(<SettingsPage slug="test-story" onJob={() => undefined} initialStory={story as any} />);
+
+      // Exactly one Post-Generation Quality Guard control
+      const postGuardMatches = html.match(/Post-Generation Quality Guard/g);
+      expect(postGuardMatches).toHaveLength(1);
+
+      // Exactly one Provider Quality Guard control
+      const providerGuardMatches = html.match(/Provider Quality Guard/g);
+      expect(providerGuardMatches).toHaveLength(1);
+
+      // Obsolete generic "Quality guard" control is completely gone
+      expect(html).not.toContain("<b>Quality guard</b>");
+
+      // Post-generation quality guard description is preserved
+      expect(html).toContain("Transcribes generated audio and checks it against the expected narration to detect missing, incorrect, repeated, or unexpected speech.");
+
+      // Max quality retries is present alongside post-generation quality guard
+      expect(html).toContain("Max quality retries");
+    });
+
+    it("independently binds qualityGuard and providerQualityGuard states", () => {
+      // Case 1: qualityGuard=true, providerQualityGuard=false
+      const storyA = createMockStory(true, false);
+      const htmlA = renderToStaticMarkup(<SettingsPage slug="test-story" onJob={() => undefined} initialStory={storyA as any} />);
+      expect(htmlA).toContain('<b>Post-Generation Quality Guard</b><small>Transcribes generated audio and checks it against the expected narration to detect missing, incorrect, repeated, or unexpected speech.</small></div><input type="checkbox" checked=""');
+      expect(htmlA).toContain('<b>Provider Quality Guard</b><small>Use the TTS provider&#x27;s native quality-control feature when supported.</small></div><input type="checkbox"/>');
+
+      // Case 2: qualityGuard=false, providerQualityGuard=true
+      const storyB = createMockStory(false, true);
+      const htmlB = renderToStaticMarkup(<SettingsPage slug="test-story" onJob={() => undefined} initialStory={storyB as any} />);
+      expect(htmlB).toContain('<b>Post-Generation Quality Guard</b><small>Transcribes generated audio and checks it against the expected narration to detect missing, incorrect, repeated, or unexpected speech.</small></div><input type="checkbox"/>');
+      expect(htmlB).toContain('<b>Provider Quality Guard</b><small>Use the TTS provider&#x27;s native quality-control feature when supported.</small></div><input type="checkbox" checked=""');
+    });
+  });
 });
+
