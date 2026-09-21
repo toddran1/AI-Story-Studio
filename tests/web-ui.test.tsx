@@ -1,6 +1,6 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
-import { App, applyVideoResolutionPreset, ArtworkEstimateSummary, ArtworkVersionMetadata, artworkModelOptionsFor, CanonicalEntitySheet, chapterPageSize, ChapterPage, chunkPresetFor, clearJobDismissal, clearJobMinimized, continuityReferenceTriState, describeContinuityReference, dismissJob, EntityStatusField, ErrorBoundary, EXECUTABLE_CHAPTER_STAGES, getStageActionDetails, humanizeContinuityChanges, isJobConsoleMinimized, isJobDismissed, isTerminalJob, JobConsole, paginateRows, Pagination, PreviousHandoffBadge, QaDetail, QaFindingCard, QaResolvedFindings, resolvedBehaviorSummary, ResolvedBehaviorHint, reupscaleAvailable, SceneContinuityPanel, ScenesPage, setJobConsoleMinimized, SettingsPage, shouldRefreshAfterJob, TtsQualityBadge, TtsSegmentRow, VIDEO_RESOLUTION_PRESETS, videoResolutionFor } from "../apps/web/src/App.js";
+import { App, applyVideoResolutionPreset, ArtworkEstimateSummary, ArtworkVersionMetadata, artworkModelOptionsFor, CanonicalEntitySheet, chapterPageSize, ChapterPage, chapterQaStatusView, chunkPresetFor, clearJobDismissal, clearJobMinimized, continuityReferenceTriState, describeContinuityReference, dismissJob, EntityStatusField, ErrorBoundary, EXECUTABLE_CHAPTER_STAGES, getStageActionDetails, humanizeContinuityChanges, isJobConsoleMinimized, isJobDismissed, isTerminalJob, JobConsole, paginateRows, Pagination, PreviousHandoffBadge, QaDetail, QaFindingCard, QaResolvedFindings, resolvedBehaviorSummary, ResolvedBehaviorHint, reupscaleAvailable, SceneContinuityPanel, ScenesPage, setJobConsoleMinimized, SettingsPage, shouldRefreshAfterJob, Status, TtsQualityBadge, TtsSegmentRow, VIDEO_RESOLUTION_PRESETS, videoResolutionFor } from "../apps/web/src/App.js";
 import type { ArtworkVersion, ChapterDetail, Job, QaFinding, Scene, TtsQualityArtifact, TtsSegmentQuality, VideoSettings, VisualContinuityChange } from "../apps/web/src/api.js";
 import { pretty } from "../apps/web/src/format.js";
 import { ChapterImportPage, savedStorySourceUrl } from "../apps/web/src/ChapterImportPage.js";
@@ -1075,7 +1075,6 @@ describe("web UI", () => {
     it("maps all executable chapter stages and excludes non-executable views", () => {
       expect(EXECUTABLE_CHAPTER_STAGES.translation).toEqual({ stage: "translation", label: "Translation" });
       expect(EXECUTABLE_CHAPTER_STAGES.narration).toEqual({ stage: "narration", label: "Narration" });
-      expect(EXECUTABLE_CHAPTER_STAGES.quality).toEqual({ stage: "qa", label: "QA" });
       expect(EXECUTABLE_CHAPTER_STAGES.context).toEqual({ stage: "storyBible", label: "Story Bible" });
       expect(EXECUTABLE_CHAPTER_STAGES.audio).toEqual({ stage: "audioMastering", label: "Audio" });
       expect(EXECUTABLE_CHAPTER_STAGES.subtitles).toEqual({ stage: "subtitles", label: "Subtitles" });
@@ -1083,14 +1082,16 @@ describe("web UI", () => {
       expect(EXECUTABLE_CHAPTER_STAGES.artwork).toEqual({ stage: "artwork", label: "Artwork" });
       expect(EXECUTABLE_CHAPTER_STAGES.video).toEqual({ stage: "video", label: "Video" });
 
+      expect(EXECUTABLE_CHAPTER_STAGES.quality).toBeUndefined();
       expect(EXECUTABLE_CHAPTER_STAGES.compare).toBeUndefined();
       expect(EXECUTABLE_CHAPTER_STAGES.original).toBeUndefined();
     });
 
     it("calculates accurate stage action details across all stage lifecycle states", () => {
-      // 1. Compare and Original tabs return undefined
+      // 1. Compare, Original, and Quality tabs return undefined (no top generic stage action)
       expect(getStageActionDetails({ tab: "compare", data: mockChapterDetail, working: "", chapter: 2 })).toBeUndefined();
       expect(getStageActionDetails({ tab: "original", data: mockChapterDetail, working: "", chapter: 2 })).toBeUndefined();
+      expect(getStageActionDetails({ tab: "quality", data: mockChapterDetail, working: "", chapter: 2 })).toBeUndefined();
 
       // 2. Missing stage (not generated)
       const missingDetails = getStageActionDetails({
@@ -1341,6 +1342,143 @@ describe("web UI", () => {
       );
       expect(subtitlesHtml).toContain("chapter-stage-action");
       expect(subtitlesHtml).toContain("Generate Subtitles");
+    });
+
+    it("Quality tab suppresses duplicate top stage action button and renders contextual QA panel", () => {
+      const mockQaDetail = {
+        chapter: 2,
+        state: {
+          status: "pass" as const,
+          score: 0.92,
+          issues: [],
+          checks: {},
+          findings: [],
+        },
+        counts: {
+          open: 0,
+          resolved: 0,
+          safeFixesAvailable: 0,
+        },
+        stats: {
+          current: { critical: 0, warnings: 0, open: 0, score: 0.92, status: "pass" as const },
+          history: { fixedManual: 0, fixedAi: 0, dismissed: 0, obsolete: 0, total: 0 },
+          needsVerification: 0,
+        },
+        qaStale: false,
+      };
+
+      const html = renderToStaticMarkup(
+        <ChapterPage
+          slug="demo-story"
+          chapter={2}
+          initialData={mockChapterDetail}
+          initialQaDetail={mockQaDetail}
+          initialTab="quality"
+          onJob={() => undefined}
+        />
+      );
+
+      // Generic top stage action must be suppressed on the Quality tab
+      expect(html).not.toContain("chapter-stage-action");
+
+      // Contextual QA panel must be rendered cleanly with its single authoritative action
+      expect(html).toContain("qa-detail stateful");
+      expect(html).toContain("Recheck QA");
+
+      // Verify that "Recheck QA" button appears exactly once in the entire page (zero top action, one panel action)
+      const recheckButtons = html.match(/<button[^>]*>[^<]*Recheck QA[^<]*<\/button>/g);
+      expect(recheckButtons).toHaveLength(1);
+    });
+
+    it("chapterQaStatusView maps all QA lifecycle states cleanly", () => {
+      // 1. Current / passing
+      expect(chapterQaStatusView({ qa: "pass", qaScore: 0.92 })).toEqual({
+        status: "pass",
+        label: "QA 92",
+        title: "Quality score: 92",
+      });
+
+      // 2. Current with warnings
+      expect(chapterQaStatusView({ qa: "warn", qaScore: 0.78 })).toEqual({
+        status: "warn",
+        label: "QA 78",
+        title: "Quality score: 78",
+      });
+
+      // 3. Current with failures
+      expect(chapterQaStatusView({ qa: "fail", qaScore: 0.54 })).toEqual({
+        status: "fail",
+        label: "QA 54",
+        title: "Quality score: 54",
+      });
+
+      // 4. Stale with score (retains score, indicates stale, status=warn)
+      expect(chapterQaStatusView({ qa: "pass", qaScore: 0.92, qaStale: true })).toEqual({
+        status: "warn",
+        label: "QA 92 · stale",
+        title: "QA evaluated on an earlier version of upstream artifacts — recheck required",
+      });
+
+      // 5. Running
+      expect(chapterQaStatusView({ qaStage: "running" })).toEqual({
+        status: "pending",
+        label: "Running QA…",
+        title: "QA review in progress",
+      });
+
+      // 6. Running even if older QA data exists
+      expect(chapterQaStatusView({ qa: "pass", qaScore: 0.92, qaStage: "running" })).toEqual({
+        status: "pending",
+        label: "Running QA…",
+        title: "QA review in progress",
+      });
+
+      // 7. Failed execution
+      expect(chapterQaStatusView({ qaStage: "failed" })).toEqual({
+        status: "fail",
+        label: "QA failed",
+        title: "QA execution failed",
+      });
+
+      // 8. Missing artifact when stage marked complete
+      expect(chapterQaStatusView({ qaStage: "complete" })).toEqual({
+        status: "fail",
+        label: "QA missing",
+        title: "QA stage marked complete but QA result artifact is missing",
+      });
+
+      // 9. Never evaluated / pending
+      expect(chapterQaStatusView({ qaStage: "pending" })).toEqual({
+        status: "pending",
+        label: "Not evaluated",
+        title: "QA has not been run for this chapter",
+        empty: true,
+      });
+
+      expect(chapterQaStatusView({})).toEqual({
+        status: "pending",
+        label: "Not evaluated",
+        title: "QA has not been run for this chapter",
+        empty: true,
+      });
+    });
+
+    it("renders QA score and stale badge in chapter table row", () => {
+      const passingView = chapterQaStatusView({ qa: "pass", qaScore: 0.92 });
+      const staleView = chapterQaStatusView({ qa: "pass", qaScore: 0.92, qaStale: true });
+      const failedView = chapterQaStatusView({ qaStage: "failed" });
+      const runningView = chapterQaStatusView({ qaStage: "running" });
+      const emptyView = chapterQaStatusView({});
+
+      expect(renderToStaticMarkup(<Status status={passingView.status} label={passingView.label} title={passingView.title} />))
+        .toContain("QA 92");
+      expect(renderToStaticMarkup(<Status status={staleView.status} label={staleView.label} title={staleView.title} />))
+        .toContain("QA 92 · stale");
+      expect(renderToStaticMarkup(<Status status={failedView.status} label={failedView.label} title={failedView.title} />))
+        .toContain("QA failed");
+      expect(renderToStaticMarkup(<Status status={runningView.status} label={runningView.label} title={runningView.title} />))
+        .toContain("Running QA…");
+      expect(emptyView.empty).toBe(true);
     });
   });
 });

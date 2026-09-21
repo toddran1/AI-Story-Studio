@@ -285,7 +285,7 @@ function StoryPage({ slug, navigate, onJob }: { slug: string; navigate: (path: s
     <div className="table-tools"><div className="segmented">{[["all", "All"], ["unprocessed", "Unprocessed"], ["warn", "QA warn"], ["fail", "QA fail"], ["complete", "Complete"]].map(([value, label]) => <button className={filter === value ? "active" : ""} onClick={() => { setFilter(value); setPage(1); }} key={value}>{label}</button>)}</div><div className="chapter-table-controls"><label className="chapter-page-size"><span>Chapters per page</span><select value={pageSize} onChange={(event) => { const next = Number(event.target.value); setPageSize(next); setPage(1); const url = new URL(location.href); url.searchParams.set("pageSize", String(next)); history.replaceState({}, "", `${url.pathname}${url.search}`); }}><option value="10">10</option><option value="25">25</option><option value="50">50</option><option value="100">100</option></select></label><input className="search" placeholder="Find chapter or title" value={query} onChange={(e) => { setQuery(e.target.value); setPage(1); }} /></div></div>
     {selectedChapters.length > 0 && <div className="stage-selection-rail"><span><b>{selectedChapters.length}</b> chapter{selectedChapters.length === 1 ? "" : "s"} selected</span><small>Only existing artifacts can be accepted. Nothing will regenerate.</small><button className="button" onClick={() => setSelectedChapters((current) => [...new Set([...current, ...(chapters?.items.map((item) => item.chapter) ?? [])])])}>Select visible</button><button className="button" onClick={() => void selectMatchingChapters()}>Select matching</button><button className="button" onClick={() => setSelectedChapters([])}>Clear</button><button className="button primary" onClick={() => setMarkCurrentOpen(true)}>Mark stages current</button></div>}
     {chapters && <Pagination position="top" page={chapters.page} pages={chapters.pages} total={chapters.total} itemLabel="chapters" onPrevious={() => setPage(page - 1)} onNext={() => setPage(page + 1)} />}
-    <div className="chapter-table"><div className="tr th selectable"><span>Select</span><span>Chapter</span><span>Translation</span><span>Narration</span><span>Quality</span><span>Mastered</span></div>{chapters?.items.map((chapter) => <div className="tr selectable" key={chapter.chapter}><label className="row-check"><input type="checkbox" checked={selectedChapters.includes(chapter.chapter)} onChange={(event) => setSelectedChapters((current) => event.target.checked ? [...new Set([...current, chapter.chapter])] : current.filter((value) => value !== chapter.chapter))} aria-label={`Select chapter ${chapter.chapter}`} /></label><button className="chapter-row-link" onClick={() => navigate(`/stories/${slug}/chapters/${chapter.chapter}`)}><span><b>{String(chapter.chapter).padStart(4, "0")}</b><small>{chapter.originalTitle ?? "Untitled chapter"}</small></span><Stage value={chapter.translation} /><Stage value={chapter.narration} /><span>{chapter.qa ? <Status status={chapter.qaStale ? "warn" : chapter.qa} label={`${chapter.qaStale ? "retained · " : ""}${chapter.qa}${chapter.qaScore !== undefined ? ` · ${Math.round(chapter.qaScore * 100)}` : ""}`} /> : <em>—</em>}</span><span><Stage value={chapter.audioStale ? "stale" : chapter.audioAvailable ? (chapter.audioMastering === "pending" ? "complete" : chapter.audioMastering) : chapter.audioMastering} />{chapter.durationSeconds && <small className="duration">{formatDuration(chapter.durationSeconds)}</small>}</span></button></div>)}</div>
+    <div className="chapter-table"><div className="tr th selectable"><span>Select</span><span>Chapter</span><span>Translation</span><span>Narration</span><span>Quality</span><span>Mastered</span></div>{chapters?.items.map((chapter) => { const qaView = chapterQaStatusView(chapter); return <div className="tr selectable" key={chapter.chapter}><label className="row-check"><input type="checkbox" checked={selectedChapters.includes(chapter.chapter)} onChange={(event) => setSelectedChapters((current) => event.target.checked ? [...new Set([...current, chapter.chapter])] : current.filter((value) => value !== chapter.chapter))} aria-label={`Select chapter ${chapter.chapter}`} /></label><button className="chapter-row-link" onClick={() => navigate(`/stories/${slug}/chapters/${chapter.chapter}`)}><span><b>{String(chapter.chapter).padStart(4, "0")}</b><small>{chapter.originalTitle ?? "Untitled chapter"}</small></span><Stage value={chapter.translation} /><Stage value={chapter.narration} /><span>{qaView.empty ? <em title="Not evaluated">—</em> : <Status status={qaView.status} label={qaView.label} title={qaView.title} />}</span><span><Stage value={chapter.audioStale ? "stale" : chapter.audioAvailable ? (chapter.audioMastering === "pending" ? "complete" : chapter.audioMastering) : chapter.audioMastering} />{chapter.durationSeconds && <small className="duration">{formatDuration(chapter.durationSeconds)}</small>}</span></button></div>; })}</div>
     {chapters && <Pagination position="bottom" page={chapters.page} pages={chapters.pages} total={chapters.total} itemLabel="chapters" onPrevious={() => setPage(page - 1)} onNext={() => setPage(page + 1)} />}
     {markCurrentOpen && <MarkCurrentDialog slug={slug} chapters={selectedChapters} onClose={() => setMarkCurrentOpen(false)} onDone={() => { setMarkCurrentOpen(false); setSelectedChapters([]); api<any>(`/stories/${slug}/chapters?page=${page}&pageSize=${pageSize}&filter=${filter}&q=${encodeURIComponent(deferredQuery)}`).then(setChapters); }} />}
   </section>;
@@ -321,7 +321,6 @@ function MarkCurrentDialog({ slug, chapters, onClose, onDone }: { slug: string; 
 export const EXECUTABLE_CHAPTER_STAGES: Record<string, { stage: StageName; label: string }> = {
   translation: { stage: "translation", label: "Translation" },
   narration: { stage: "narration", label: "Narration" },
-  quality: { stage: "qa", label: "QA" },
   context: { stage: "storyBible", label: "Story Bible" },
   audio: { stage: "audioMastering", label: "Audio" },
   subtitles: { stage: "subtitles", label: "Subtitles" },
@@ -329,6 +328,81 @@ export const EXECUTABLE_CHAPTER_STAGES: Record<string, { stage: StageName; label
   artwork: { stage: "artwork", label: "Artwork" },
   video: { stage: "video", label: "Video" },
 };
+
+export function chapterQaStatusView(chapter: {
+  qa?: "pass" | "warn" | "fail";
+  qaScore?: number;
+  qaStale?: boolean;
+  qaStage?: string;
+}): {
+  status: "pass" | "warn" | "fail" | "pending";
+  label: string;
+  title?: string;
+  empty?: boolean;
+} {
+  if (chapter.qaStage === "running") {
+    return {
+      status: "pending",
+      label: "Running QA…",
+      title: "QA review in progress",
+    };
+  }
+
+  if (typeof chapter.qaScore === "number" && !Number.isNaN(chapter.qaScore)) {
+    const scoreVal = chapter.qaScore <= 1 ? Math.round(chapter.qaScore * 100) : Math.round(chapter.qaScore);
+    if (chapter.qaStale) {
+      return {
+        status: "warn",
+        label: `QA ${scoreVal} · stale`,
+        title: "QA evaluated on an earlier version of upstream artifacts — recheck required",
+      };
+    }
+    const status = chapter.qa ?? (scoreVal >= 85 ? "pass" : scoreVal >= 70 ? "warn" : "fail");
+    return {
+      status,
+      label: `QA ${scoreVal}`,
+      title: `Quality score: ${scoreVal}`,
+    };
+  }
+
+  if (chapter.qa) {
+    if (chapter.qaStale) {
+      return {
+        status: "warn",
+        label: "QA · stale",
+        title: "QA evaluated on an earlier version of upstream artifacts — recheck required",
+      };
+    }
+    return {
+      status: chapter.qa,
+      label: `QA ${chapter.qa}`,
+      title: `QA status: ${chapter.qa}`,
+    };
+  }
+
+  if (chapter.qaStage === "failed") {
+    return {
+      status: "fail",
+      label: "QA failed",
+      title: "QA execution failed",
+    };
+  }
+
+  if (chapter.qaStage === "complete") {
+    return {
+      status: "fail",
+      label: "QA missing",
+      title: "QA stage marked complete but QA result artifact is missing",
+    };
+  }
+
+  return {
+    status: "pending",
+    label: "Not evaluated",
+    title: "QA has not been run for this chapter",
+    empty: true,
+  };
+}
 
 export function getStageActionDetails({
   tab,
@@ -402,10 +476,6 @@ export function getStageActionDetails({
       exists = Boolean(data.narration);
       isStale = Boolean(data.stale || data.metadata?.stages?.narration?.staleReason);
       break;
-    case "qa":
-      exists = Boolean(data.qa);
-      isStale = Boolean(data.qaStale);
-      break;
     case "storyBible":
       exists = Boolean(data.storyContext);
       isStale = Boolean(data.storyContextStale);
@@ -439,8 +509,8 @@ export function getStageActionDetails({
         label,
         statusClass: "warn",
         statusText: "Stale",
-        buttonText: stage === "qa" ? "Recheck QA" : stage === "storyBible" ? "Update Story Bible" : `Regenerate ${label}`,
-        actionLabel: stage === "qa" ? "Recheck QA" : stage === "storyBible" ? "Update Story Bible" : `Regenerate ${label}`,
+        buttonText: stage === "storyBible" ? "Update Story Bible" : `Regenerate ${label}`,
+        actionLabel: stage === "storyBible" ? "Update Story Bible" : `Regenerate ${label}`,
         disabled: false,
         isRunning: false,
       };
@@ -450,8 +520,8 @@ export function getStageActionDetails({
       label,
       statusClass: "pass",
       statusText: "Current",
-      buttonText: stage === "qa" ? "Recheck QA" : stage === "storyBible" ? "Update Story Bible" : `Regenerate ${label}`,
-      actionLabel: stage === "qa" ? "Recheck QA" : stage === "storyBible" ? "Update Story Bible" : `Regenerate ${label}`,
+      buttonText: stage === "storyBible" ? "Update Story Bible" : `Regenerate ${label}`,
+      actionLabel: stage === "storyBible" ? "Update Story Bible" : `Regenerate ${label}`,
       disabled: false,
       isRunning: false,
     };
@@ -462,8 +532,8 @@ export function getStageActionDetails({
     label,
     statusClass: "pending",
     statusText: "Not generated",
-    buttonText: stage === "translation" ? "Run Translation" : stage === "qa" ? "Run QA" : stage === "storyBible" ? "Update Story Bible" : `Generate ${label}`,
-    actionLabel: stage === "translation" ? "Run Translation" : stage === "qa" ? "Run QA" : stage === "storyBible" ? "Update Story Bible" : `Generate ${label}`,
+    buttonText: stage === "translation" ? "Run Translation" : stage === "storyBible" ? "Update Story Bible" : `Generate ${label}`,
+    actionLabel: stage === "translation" ? "Run Translation" : stage === "storyBible" ? "Update Story Bible" : `Generate ${label}`,
     disabled: false,
     isRunning: false,
   };
@@ -477,6 +547,7 @@ export function ChapterPage({
   activeJob,
   initialData,
   initialTab: propInitialTab,
+  initialQaDetail,
 }: {
   slug: string;
   chapter: number;
@@ -485,6 +556,7 @@ export function ChapterPage({
   activeJob?: Job;
   initialData?: ChapterDetail;
   initialTab?: string;
+  initialQaDetail?: ChapterQaDetail;
 }) {
   const chapterTabs = ["compare", "original", "translation", "narration", "quality", "context", "audio", "subtitles", "scenes", "artwork", "video"] as const;
   const initialTab = () => {
@@ -683,7 +755,7 @@ export function ChapterPage({
                 {data.navigation?.previous ? <b>Chapter {String(data.navigation.previous.chapter).padStart(4, "0")}</b> : <b>Start</b>}
               </span>
             </button>
-            {data.qa && <Status status={data.qaStale ? "warn" : data.qa.status} label={`${data.qaStale ? "retained · " : ""}${Math.round(data.qa.score * 100)} quality score`} />}
+            {data.qa && <Status status={data.qaStale ? "warn" : data.qa.status} label={`${data.qaStale ? "retained · " : ""}${Math.round(data.qa.score * 100)} quality score`} title={`Quality score: ${Math.round(data.qa.score * 100)}${data.qaStale ? " (stale)" : ""}`} />}
             <button
               className="chapter-step next"
               disabled={!data.navigation?.next}
@@ -762,7 +834,7 @@ export function ChapterPage({
         </div>
       </>}
       {tab === "quality" && <>
-        <QaDetail slug={slug} chapter={chapter} onJob={onJob} onEditManually={() => selectTab("compare")} onChanged={() => void load()} />
+        <QaDetail slug={slug} chapter={chapter} onJob={onJob} onEditManually={() => selectTab("compare")} onChanged={() => void load()} initialData={initialQaDetail} />
         {saved && <p className="save-note">{saved}</p>}
       </>}
       {tab === "context" && (data.storyContext ? <>
@@ -3610,7 +3682,7 @@ function DismissFindingDialog({ slug, chapter, finding, busy, onClose, onDone, o
     <footer><small>Dismissed findings stay visible under Resolved issues and are respected by future rechecks.</small><button className="button primary" disabled={working || busy || (remember && !value.trim())} onClick={() => void submit()}>{working ? "Dismissing…" : "Dismiss finding"}</button></footer></section></div>;
 }
 function Stage({ value = "pending" }: { value?: string }) { return <span className={`stage ${value}`}><i />{value === "complete" ? "Complete" : pretty(value)}</span>; }
-function Status({ status, label }: { status: string; label: string }) { return <span className={`status ${status}`}><i />{label}</span>; }
+export function Status({ status, label, title }: { status: string; label: string; title?: string }) { return <span className={`status ${status}`} title={title}><i />{label}</span>; }
 function Field({ label, children }: { label: string; children: ReactNode }) { return <label className="field"><span>{label}</span>{children}</label>; }
 function Loading() { return <div className="loading"><i /><i /><i /></div>; }
 function LoadFailure({ error }: { error: string }) { return <section className="page"><ErrorBox text={error} /><button className="button" onClick={() => location.reload()}>Retry</button></section>; }
