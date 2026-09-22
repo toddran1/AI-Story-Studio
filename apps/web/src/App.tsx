@@ -1,4 +1,4 @@
-import { Component, ErrorInfo, FormEvent, ReactNode, useDeferredValue, useEffect, useRef, useState } from "react";
+import { Component, ErrorInfo, FormEvent, ReactNode, useDeferredValue, useEffect, useId, useRef, useState } from "react";
 import type { StageName } from "../../../src/domain/chapter.js";
 import { api, ApiError, AudioDashboard, ChapterDetail, ChapterQaDetail, ChapterRow, CostAnalytics, Counts, del, ErrorDiagnostic, formatDiagnostic, Job, Model, OutputItem, post, put, ProductionManifest, ProductionPlan, QaException, QaExceptionMatchKind, QaFinding, QaRecheckSummary, QaResult, Scene, ScenesDashboard, StoryCard, StoryConfig, StoryDashboard, TtsQualityArtifact, TtsQualityIssueType, TtsSegmentQuality, VideoDashboard, acceptChapterTtsSegment, chapterTtsSegmentAudioUrl, getChapterTtsQuality, regenerateChapterTtsSegment, verifyChapterTtsQuality } from "./api.js";
 import { ArtifactStatusNotice } from "./ArtifactStatusNotice.js";
@@ -21,6 +21,7 @@ import { reviewArtworkVersion, reupscaleArtwork, updateSceneContinuity, resetSce
 import type { ArtworkSettings, ArtworkVersion, PreviousVisualHandoff, ResolvedArtworkBehavior, SceneContinuity, VideoResolution, VideoSettings, VisualCharacterState, VisualContinuityChange, VisualContinuityOverrideEntryInput, VisualContinuityReferenceDecision, VisualContinuityState, VisualEnvironmentState, VisualObjectState } from "./api.js";
 import { Pagination } from "./Pagination.js";
 import { BatchProcessingPanel } from "./BatchProcessingPanel.js";
+import { OPENAI_TEXT_MODELS } from "../../../src/llm/openai/models.js";
 export { Pagination, type PaginationProps, type PaginationVariant } from "./Pagination.js";
 import "./entity-sheet-actions.css";
 import "./stage-execution.css";
@@ -2060,6 +2061,18 @@ export function ScenesPage({ slug, onJob, navigate, initialData }: { slug: strin
     setPendingArtworkExtra(null);
   };
 
+  const reopenArtworkPreflight = async () => {
+    if (!pendingArtworkExtra) return;
+    try {
+      const fromNum = Number(range.from); const toNum = Number(range.to);
+      const preflight = await post<any>(`/stories/${slug}/artwork/visual-preflight`, { from: fromNum, to: toNum, ...pendingArtworkExtra });
+      // Keep the gate visible even when every profile is now ready: the user
+      // must explicitly choose Continue before any paid generation starts.
+      setVisualPreflight(preflight);
+      setOneTimeUnprofiled([]);
+    } catch (value) { setError(message(value)); }
+  };
+
   const persistSkipPolicy = async (entityId: string) => {
     try {
       await put(`/stories/${slug}/visual-profiles/${entityId}/policy`, { mode: "skip" });
@@ -2755,7 +2768,7 @@ export function ScenesPage({ slug, onJob, navigate, initialData }: { slug: strin
                               checked={scene.direction?.useCharacterReferences !== false}
                               onChange={(e) => editDirection(scene.id, { useCharacterReferences: e.target.checked })}
                             />
-                            Use Approved Entity Profiles
+                            Use approved character Visual Profile & references
                           </label>
                           <label style={{ display: "inline-flex", alignItems: "center", gap: "5px", cursor: "pointer" }}>
                             <input
@@ -2763,7 +2776,7 @@ export function ScenesPage({ slug, onJob, navigate, initialData }: { slug: strin
                               checked={scene.direction?.preserveWardrobeEquipment !== false}
                               onChange={(e) => editDirection(scene.id, { preserveWardrobeEquipment: e.target.checked })}
                             />
-                            Preserve Equipment Canon
+                            Preserve default wardrobe & equipment canon
                           </label>
                         </div>
                       </div>
@@ -2839,7 +2852,7 @@ export function ScenesPage({ slug, onJob, navigate, initialData }: { slug: strin
             <div className="visual-preflight-list">
               {visualPreflight.requiresDecision.map((entity: any) => {
                 const oneTime = oneTimeUnprofiled.includes(entity.entityId);
-                return <article key={entity.entityId} className="visual-preflight-entity"><div><span className="visual-preflight-type">{entity.type}</span><h4>{entity.name}</h4><small>{entity.state === "draft_profile" ? "Draft Visual Profile" : "No Visual Profile"} · {entity.affectedSceneIds.length} selected scene{entity.affectedSceneIds.length === 1 ? "" : "s"}</small></div><div className="visual-preflight-actions"><button type="button" className="button" onClick={() => { setVisualPreflight(null); setPendingArtworkExtra(null); setActiveVisualProfile({ id: entity.entityId, name: entity.name }); }}>{entity.state === "draft_profile" ? "Review / finish profile" : "Create Visual Profile"}</button><button type="button" className={oneTime ? "button active" : "button"} onClick={() => setOneTimeUnprofiled((current) => current.includes(entity.entityId) ? current.filter((id) => id !== entity.entityId) : [...current, entity.entityId])}>{oneTime ? "Will use fallback" : "Generate without profile"}</button><button type="button" className="button subtle-warning" onClick={() => void persistSkipPolicy(entity.entityId)}>Always use fallback</button></div></article>;
+                return <article key={entity.entityId} className="visual-preflight-entity"><div><span className="visual-preflight-type">{entity.type}</span><h4>{entity.name}</h4><small>{entity.state === "draft_profile" ? "Draft Visual Profile" : "No Visual Profile"} · {entity.affectedSceneIds.length} selected scene{entity.affectedSceneIds.length === 1 ? "" : "s"}</small></div><div className="visual-preflight-actions"><button type="button" className="button" onClick={() => { setVisualPreflight(null); setActiveVisualProfile({ id: entity.entityId, name: entity.name }); }}>{entity.state === "draft_profile" ? "Review / finish profile" : "Create Visual Profile"}</button><button type="button" className={oneTime ? "button active" : "button"} onClick={() => setOneTimeUnprofiled((current) => current.includes(entity.entityId) ? current.filter((id) => id !== entity.entityId) : [...current, entity.entityId])}>{oneTime ? "Will use fallback" : "Generate without profile"}</button><button type="button" className="button subtle-warning" onClick={() => void persistSkipPolicy(entity.entityId)}>Always use fallback</button></div></article>;
               })}
             </div>
             <footer><small>“Generate without profile” applies only to this request. “Always use fallback” can be reset in the entity’s Visual Profile.</small><button type="button" className="button primary" disabled={visualPreflight.requiresDecision.some((entity: any) => !oneTimeUnprofiled.includes(entity.entityId))} onClick={continueArtworkAfterPreflight}>Continue generation</button></footer>
@@ -2852,8 +2865,8 @@ export function ScenesPage({ slug, onJob, navigate, initialData }: { slug: strin
           slug={slug}
           entityId={activeVisualProfile.id}
           entityName={activeVisualProfile.name}
-          onClose={() => setActiveVisualProfile(null)}
-          onUpdated={() => load(data?.selectedChapter)}
+          onClose={() => { setActiveVisualProfile(null); void reopenArtworkPreflight(); }}
+          onUpdated={() => { void load(data?.selectedChapter); void reopenArtworkPreflight(); }}
         />
       )}
     </section>
@@ -3517,7 +3530,10 @@ export function JobConsole({ job, onUpdate, onClose, navigate, initialQaComparis
 }
 
 function PresetEditor({ label, value, onChange }: { label: string; value: any; onChange: (value: any) => void }) { return <div className="preset"><span className="eyebrow">{label}</span>{(["translation", "narration", "qa"] as const).map((key) => <ModelEditor key={key} label={pretty(key)} value={value[key]} onChange={(next) => onChange({ ...value, [key]: next })} />)}</div>; }
-function ModelEditor({ label, value, onChange }: { label: string; value: Model; onChange: (value: Model) => void }) { return <div className="model-editor">{label ? <label>{label}</label> : null}<select value={value.provider} onChange={(e) => onChange({ ...value, provider: e.target.value as Model["provider"] })}><option value="openai">OpenAI</option><option value="gemini">Gemini</option><option value="kimi">Kimi</option></select><input value={value.model} onChange={(e) => onChange({ ...value, model: e.target.value })} /></div>; }
+function ModelEditor({ label, value, onChange }: { label: string; value: Model; onChange: (value: Model) => void }) {
+  const modelListId = useId();
+  return <div className="model-editor">{label ? <label>{label}</label> : null}<select value={value.provider} onChange={(e) => onChange({ ...value, provider: e.target.value as Model["provider"] })}><option value="openai">OpenAI</option><option value="gemini">Gemini</option><option value="kimi">Kimi</option></select><input aria-label={`${label || "Model"} model ID`} list={value.provider === "openai" ? modelListId : undefined} value={value.model} onChange={(e) => onChange({ ...value, model: e.target.value })} />{value.provider === "openai" && <datalist id={modelListId}>{OPENAI_TEXT_MODELS.map((model) => <option key={model} value={model} />)}</datalist>}</div>;
+}
 function PreviewResult({ choice, result, onChoose }: { choice: "a" | "b"; result: any; onChoose: () => void }) { const qa = result[choice === "a" ? "qaA" : "qaB"]; return <article className="preview-result"><div className="preview-result-head"><span className="option-letter">{choice.toUpperCase()}</span><Status status={qa.status} label={`${Math.round(qa.score * 100)} score`} /></div><Manuscript title="Translation" text={result[choice === "a" ? "translationA" : "translationB"]} compact /><Manuscript title="Narration" text={result[choice === "a" ? "narrationA" : "narrationB"]} compact />{result[choice === "a" ? "audioA" : "audioB"] && <AudioDeck src={`/api/stories/${result.manifest.story}/previews/${result.manifest.id}/audio-${choice}`} title={`Option ${choice.toUpperCase()} sample`} />}<button className="button primary" onClick={onChoose}>Use option {choice.toUpperCase()}</button></article>; }
 function Manuscript({ title, text, compact }: { title: string; text?: string; compact?: boolean }) { return <article className={`manuscript ${compact ? "compact" : ""}`}><header className="manuscript-header"><span>{title}</span><small className="mono">{text?.split(/\s+/).filter(Boolean).length ?? 0} words</small></header><div>{text ? text.split(/\n\n+/).map((paragraph, index) => <p key={index}>{paragraph}</p>) : <p className="empty-line">This stage has not produced text yet.</p>}</div></article>; }
 function CompareTextEditor({ title, value, savedValue, saving, onChange, onSave }: { title: string; value: string; savedValue?: string; saving: boolean; onChange: (value: string) => void; onSave: () => void }) {

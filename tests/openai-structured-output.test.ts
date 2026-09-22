@@ -9,6 +9,7 @@ import {
   toOpenAiProviderError,
 } from "../src/llm/openai/openai.provider.js";
 import { ConfigurationError, ProviderError } from "../src/pipeline/errors.js";
+import { OPENAI_TEXT_MODELS } from "../src/llm/openai/models.js";
 
 function stubClient(provider: OpenAIProvider, create: (params: Record<string, unknown>) => Promise<unknown>) {
   Object.assign(provider as unknown as Record<string, unknown>, {
@@ -55,6 +56,21 @@ describe("OpenAI structured output schemas", () => {
 });
 
 describe("OpenAIProvider execution & error diagnostics", () => {
+  it.each(["gpt-6-sol", "gpt-6-luna"])("passes %s to Responses for text and structured output", async (model) => {
+    expect(OPENAI_TEXT_MODELS).toContain(model);
+    const provider = new OpenAIProvider("test-key");
+    const create = vi.fn(async (params: Record<string, unknown>) => ({
+      id: "resp_model",
+      output_text: params.text ? JSON.stringify({ ok: true }) : "ready",
+    }));
+    stubClient(provider, create);
+
+    expect((await provider.generateText({ model, instructions: "Translate", input: "你好" })).text).toBe("ready");
+    expect((await provider.generateStructured({ model, instructions: "Check", input: "ready", schemaName: "check", schema: z.object({ ok: z.boolean() }) })).value).toEqual({ ok: true });
+    expect(create).toHaveBeenCalledTimes(2);
+    expect(create.mock.calls.every(([request]) => request.model === model)).toBe(true);
+  });
+
   it("successfully parses structured response with usage", async () => {
     const provider = new OpenAIProvider("test-key");
     const output = {
@@ -173,4 +189,3 @@ describe("OpenAIProvider execution & error diagnostics", () => {
     ).rejects.toBeInstanceOf(ConfigurationError);
   });
 });
-

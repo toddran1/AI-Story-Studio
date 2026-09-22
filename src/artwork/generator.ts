@@ -134,34 +134,6 @@ export async function generateStoredArtwork(options: {
   let selected = options.sceneId ? manifest.scenes.filter((scene) => scene.id === options.sceneId) : manifest.scenes;
   if (options.sceneId && !selected.length) throw new ArtworkError(`Scene '${options.sceneId}' was not found`);
 
-  // Revalidate at the spend boundary. The browser's earlier inspection is only a
-  // convenience; this authoritative read prevents a stale UI from bypassing the
-  // Visual Profile decision gate.
-  const preflight = await inspectArtworkVisualPreflight({
-    root: options.root,
-    slug: options.story.slug,
-    chapters: [options.chapter],
-    sceneId: options.sceneId,
-    allowUnprofiledEntityIds: options.allowUnprofiledEntityIds,
-  });
-  if (!preflight.ready) {
-    if (options.dryRun) {
-      return {
-        dryRun: true,
-        chapter: options.chapter,
-        provider: options.story.artwork.provider,
-        model: options.story.artwork.model,
-        planned: manifest.scenes.length,
-        selected: selected.length,
-        imagesToGenerate: 0,
-        sceneIds: [],
-        warnings,
-        preflight,
-      };
-    }
-    throw new ArtworkError(`Visual Profile Check required before generating artwork: ${preflight.requiresDecision.map((entity) => entity.name).join(", ")}`);
-  }
-
   const candidates: Array<{
     scene: Scene;
     prompt: string;
@@ -214,6 +186,19 @@ export async function generateStoredArtwork(options: {
     if (needs) {
       candidates.push({ scene, prompt: resolved.prompt, resolved, refs, continuityReference: sceneContinuity?.referenceDecision, inputFingerprint });
     }
+  }
+
+  // Revalidate at the spend boundary, but only for scenes that will actually
+  // call an image provider. Reused artwork never needs a new profile decision.
+  const preflight = await inspectArtworkVisualPreflight({
+    root: options.root,
+    slug: options.story.slug,
+    chapters: [options.chapter],
+    sceneIds: candidates.map((candidate) => candidate.scene.id),
+    allowUnprofiledEntityIds: options.allowUnprofiledEntityIds,
+  });
+  if (!preflight.ready && !options.dryRun) {
+    throw new ArtworkError(`Visual Profile Check required before generating artwork: ${preflight.requiresDecision.map((entity) => entity.name).join(", ")}`);
   }
 
   if (options.dryRun) {
@@ -704,6 +689,7 @@ type SceneReferencePayload = { images: ImageReferenceImage[]; available: number;
 async function loadSceneReferenceImages(root: string, story: Story, resolved: ResolvedSceneVisualPrompt, continuityDecision?: VisualContinuityReferenceDecision, chapter?: number): Promise<SceneReferencePayload> {
   const wanted: VisualReferenceImage[] = [];
   for (const entity of resolved.resolvedEntities) {
+    if (!entity.useVisualProfile) continue;
     const refs = entity.references ?? [];
     // Draft uploads and generated candidates are visible to the editor but do
     // not steer paid scene artwork until a person explicitly approves them.

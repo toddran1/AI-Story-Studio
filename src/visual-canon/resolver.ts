@@ -18,6 +18,7 @@ export type ResolvedEntityCanon = {
   weapons?: string;
   visualPrompt?: string;
   references?: VisualReferenceImage[];
+  useVisualProfile: boolean;
 };
 
 export type ResolvedSceneVisualPrompt = {
@@ -46,7 +47,10 @@ export function resolveVisuallyRelevantCanonicalEntities(scene: Scene, bible: St
   const matchedEntities = new Map<string, CanonicalEntity>();
   for (const id of scene.entityIds ?? []) {
     const found = bible.canonicalEntities.find((entity) => entity.id === id);
-    if (found) matchedEntities.set(found.id, found);
+    // An attached ID is explicit visual evidence only for things an image can
+    // depict directly. Context-only concepts, abilities, and organizations do
+    // not become on-screen just because planning linked them to the scene.
+    if (found && ["character", "item"].includes(found.type)) matchedEntities.set(found.id, found);
   }
   for (const entity of resolveVisualEntities(scene.characters, bible.canonicalEntities)) {
     matchedEntities.set(entity.id, entity);
@@ -61,6 +65,15 @@ export function resolveVisuallyRelevantCanonicalEntities(scene: Scene, bible: St
     if (location) matchedEntities.set(location.id, location);
   }
   return [...matchedEntities.values()];
+}
+
+/** Shared policy for both preflight and prompt resolution. When a scene turns
+ * off a profile category, its Story Bible description remains available but no
+ * profile or reference-image decision is required. */
+export function shouldUseVisualProfileForEntity(scene: Scene, entity: CanonicalEntity): boolean {
+  if (entity.type === "character") return scene.direction?.useCharacterReferences !== false;
+  if (entity.type === "location") return scene.direction?.useLocationReferences !== false;
+  return true;
 }
 
 export function resolveVisualCanonPrompt(options: {
@@ -89,7 +102,8 @@ export function resolveVisualCanonPrompt(options: {
   for (const entity of matchedEntities) {
     const entityId = entity.id;
     const profile = visualProfiles[entityId];
-    const isApproved = profile?.status === "approved";
+    const useVisualProfile = shouldUseVisualProfileForEntity(scene, entity);
+    const isApproved = useVisualProfile && profile?.status === "approved";
 
     if (isApproved && profile) {
       if (profile.negativePrompt?.trim()) {
@@ -113,7 +127,8 @@ export function resolveVisualCanonPrompt(options: {
       // default state. Other temporary state remains in continuity / scene
       // layers below, where it is explicitly higher priority.
       const wardrobeOverride = overrides.wardrobeOverrides?.[entityId] ?? overrides.wardrobeOverrides?.[entity.canonicalName];
-      const activeWardrobe = wardrobeOverride || profile.character?.defaultOutfit || undefined;
+      const preserveWardrobeEquipment = direction.preserveWardrobeEquipment !== false;
+      const activeWardrobe = wardrobeOverride || (preserveWardrobeEquipment ? profile.character?.defaultOutfit : undefined);
 
       const traits: string[] = [];
       if (profile.visualPrompt) traits.push(profile.visualPrompt);
@@ -132,11 +147,11 @@ export function resolveVisualCanonPrompt(options: {
         ].filter(Boolean).join(", ");
         if (details) traits.push(details);
         if (wardrobeOverride) traits.push(`Scene override attire: ${wardrobeOverride}`);
-        else if (c.defaultOutfit) traits.push(`Default attire (overridable by current scene): ${c.defaultOutfit}`);
-        if (c.shoes) traits.push(`Default footwear (overridable by current scene): ${c.shoes}`);
-        if (c.accessories) traits.push(`Default accessories (overridable by current scene): ${c.accessories}`);
-        if (c.weapons) traits.push(`Default weapons (overridable by current scene): ${c.weapons}`);
-        if (c.equipment) traits.push(`Default equipment (overridable by current scene): ${c.equipment}`);
+        else if (preserveWardrobeEquipment && c.defaultOutfit) traits.push(`Default attire (overridable by current scene): ${c.defaultOutfit}`);
+        if (preserveWardrobeEquipment && c.shoes) traits.push(`Default footwear (overridable by current scene): ${c.shoes}`);
+        if (preserveWardrobeEquipment && c.accessories) traits.push(`Default accessories (overridable by current scene): ${c.accessories}`);
+        if (preserveWardrobeEquipment && c.weapons) traits.push(`Default weapons (overridable by current scene): ${c.weapons}`);
+        if (preserveWardrobeEquipment && c.equipment) traits.push(`Default equipment (overridable by current scene): ${c.equipment}`);
       } else if (profile.location) {
         const l = profile.location;
         if (l.canonicalEnvironmentPrompt) traits.push(l.canonicalEnvironmentPrompt);
@@ -170,6 +185,7 @@ export function resolveVisualCanonPrompt(options: {
         weapons: profile.character?.weapons,
         visualPrompt: profile.visualPrompt,
         references: profile.references,
+        useVisualProfile,
       });
 
       entityCanonLines.push(`CANONICAL ${entity.type.toUpperCase()} [${entity.canonicalName}]: ${description}`);
@@ -183,6 +199,7 @@ export function resolveVisualCanonPrompt(options: {
         type: entity.type,
         hasApprovedProfile: false,
         description: desc,
+        useVisualProfile,
       });
       entityCanonLines.push(`STORY BIBLE ${entity.type.toUpperCase()} [${entity.canonicalName}]: ${desc}`);
     }
@@ -192,7 +209,7 @@ export function resolveVisualCanonPrompt(options: {
   const promptParts: string[] = [];
 
   // Layer 1: Story Art Direction
-  const styleHeader = [
+  const styleHeader = direction.useStoryArtDirection === false ? "" : [
     `ART STYLE: ${artDirection.artStyle}`,
     artDirection.customStylePrompt && `STYLE PROMPT: ${artDirection.customStylePrompt}`,
     artDirection.visualTone && `TONE: ${artDirection.visualTone}`,
@@ -205,7 +222,7 @@ export function resolveVisualCanonPrompt(options: {
     artDirection.additionalVisualInstructions && `INSTRUCTIONS: ${artDirection.additionalVisualInstructions}`,
   ].filter(Boolean).join(" | ");
 
-  promptParts.push(`STORY ART DIRECTION: ${styleHeader}`);
+  if (styleHeader) promptParts.push(`STORY ART DIRECTION: ${styleHeader}`);
 
   // Layer 2: Entity Visual Canon
   if (entityCanonLines.length > 0) {
@@ -268,7 +285,7 @@ export function resolveVisualCanonPrompt(options: {
   }
 
   // Layer 6: Aspect-ratio-aware composition guidance & guard instructions
-  const aspectRatio = resolveArtworkAspectRatio(story, artDirection);
+  const aspectRatio = resolveArtworkAspectRatio(story, direction.useStoryArtDirection === false ? undefined : artDirection);
   promptParts.push(artworkCompositionGuidance(aspectRatio));
   promptParts.push("Create one polished still illustration. No text, captions, speech bubbles, logos, or watermarks.");
 
@@ -276,7 +293,7 @@ export function resolveVisualCanonPrompt(options: {
 
   // Negative Prompt
   const negParts = [
-    artDirection.globalNegativePrompt,
+    direction.useStoryArtDirection === false ? undefined : artDirection.globalNegativePrompt,
     ...entityNegativePrompts,
     overrides.customNegativePrompt,
     "text, watermark, subtitles, borders, split frame, multiple panels, collage",
@@ -284,7 +301,7 @@ export function resolveVisualCanonPrompt(options: {
   const negativePrompt = negParts.join(", ");
 
   // Fingerprints
-  const artDirectionFingerprint = fingerprint({
+  const artDirectionFingerprint = fingerprint(direction.useStoryArtDirection === false ? { disabled: true } : {
     id: artDirection.id,
     name: artDirection.name,
     artStyle: artDirection.artStyle,

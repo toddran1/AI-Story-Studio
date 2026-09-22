@@ -287,6 +287,17 @@ describe("artwork routing and provenance", () => {
     await generateStoredArtwork({ root, story, chapter: 1, provider: images, sceneId: "scene-001" });
     expect(images.calls[0]!.referenceImages).toHaveLength(1);
   });
+  it("does not attach character profile references when the scene disables them", async () => {
+    const { root, story, paths } = await fixture({ provider: "gemini", model: "gemini-3.1-flash-image" }, { withCanon: true });
+    const manifest = sceneManifestSchema.parse(JSON.parse(await readFile(paths.scenesManifest, "utf8")));
+    manifest.scenes[0]!.direction = { ...manifest.scenes[0]!.direction, useCharacterReferences: false };
+    await atomicWriteJson(paths.scenesManifest, manifest);
+    const images = fakeImages("gemini");
+    await generateStoredArtwork({ root, story, chapter: 1, provider: images, sceneId: "scene-001" });
+    expect(images.calls[0]!.referenceImages ?? []).toHaveLength(0);
+    expect(images.calls[0]!.prompt).toContain("Young swordsman with a ragged cloak");
+    expect(images.calls[0]!.prompt).not.toContain("young swordsman, raven hair, charcoal robe");
+  });
   it("rejects an incompatible provider/model before any provider call", async () => {
     const { root, story } = await fixture({ provider: "openai", model: "gemini-3.1-flash-image" });
     const images = fakeImages("openai");

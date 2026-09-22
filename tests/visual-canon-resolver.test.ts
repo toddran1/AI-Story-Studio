@@ -241,6 +241,23 @@ describe("Visual Canon Prompt Resolver", () => {
     expect(resolved.prompt).toContain("Default attire (overridable by current scene): black academy jacket and white shirt");
   });
 
+  it("honors scene Visual Canon toggles without removing Story Bible fallback", () => {
+    const profile: VisualEntityProfile = {
+      id: "vp-toggle", entityId: entityId1, visualType: "character", status: "approved", revision: 1,
+      createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), appearance: "profile appearance", visualPrompt: "profile identity", notes: "", negativePrompt: "profile-negative", variants: [], references: [],
+      character: { defaultOutfit: "academy uniform", weapons: "signature sword" },
+    };
+    const resolved = resolveVisualCanonPrompt({
+      scene: { ...baseScene, entityIds: [entityId1], direction: { useCharacterReferences: false, preserveWardrobeEquipment: false, useStoryArtDirection: false } as any },
+      story, bible, artDirection, visualProfiles: { [entityId1]: profile },
+    });
+    expect(resolved.prompt).toContain("Young swordsman from the Mount Hua sect");
+    expect(resolved.prompt).not.toContain("profile identity");
+    expect(resolved.prompt).not.toContain("academy uniform");
+    expect(resolved.prompt).not.toContain("STORY ART DIRECTION:");
+    expect(resolved.negativePrompt).not.toContain("profile-negative");
+  });
+
   it("detects fine-grained fingerprint staleness accurately", () => {
     const profile: VisualEntityProfile = {
       id: "vp-1",

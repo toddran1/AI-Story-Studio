@@ -1,7 +1,9 @@
 import { PricingSnapshot } from "./types.js";
 
-export const PRICING_CATALOG_VERSION = "2026-09-10";
+export const PRICING_CATALOG_VERSION = "2026-09-22";
 const prices: Array<{ provider: string; model: string; snapshot: PricingSnapshot }> = [
+  { provider: "openai", model: "gpt-6-sol", snapshot: { catalogVersion: PRICING_CATALOG_VERSION, priceId: "openai-gpt-6-sol-standard-2026-09", effectiveFrom: "2026-09-22", currency: "USD", sourceUrl: "https://developers.openai.com/api/docs/models/gpt-6-sol", basis: "tokens", inputPerMillion: 2, cachedInputPerMillion: .2, outputPerMillion: 10 } },
+  { provider: "openai", model: "gpt-6-luna", snapshot: { catalogVersion: PRICING_CATALOG_VERSION, priceId: "openai-gpt-6-luna-standard-2026-09", effectiveFrom: "2026-09-22", currency: "USD", sourceUrl: "https://developers.openai.com/api/docs/models/gpt-6-luna", basis: "tokens", inputPerMillion: .1, cachedInputPerMillion: .01, outputPerMillion: .5 } },
   { provider: "openai", model: "gpt-5.6-terra", snapshot: { catalogVersion: PRICING_CATALOG_VERSION, priceId: "openai-gpt-5.6-terra-standard-2026-09", effectiveFrom: "2026-09-10", currency: "USD", sourceUrl: "https://developers.openai.com/api/docs/models/gpt-5.6-terra", basis: "tokens", inputPerMillion: 2, cachedInputPerMillion: .2, outputPerMillion: 12 } },
   { provider: "gemini", model: "gemini-3.8-flash", snapshot: { catalogVersion: PRICING_CATALOG_VERSION, priceId: "gemini-3.8-flash-standard-intro-2026", effectiveFrom: "2026-09-10", currency: "USD", sourceUrl: "https://ai.google.dev/gemini-api/docs/pricing", basis: "tokens", inputPerMillion: .75, cachedInputPerMillion: .075, outputPerMillion: 3.75 } },
   { provider: "kimi", model: "kimi-k2-0905-preview", snapshot: { catalogVersion: PRICING_CATALOG_VERSION, priceId: "kimi-k2-0905-preview-standard-2026-09", effectiveFrom: "2026-09-15", currency: "USD", sourceUrl: "https://platform.moonshot.ai/docs/pricing", basis: "tokens", inputPerMillion: .6, outputPerMillion: 2.5 } },

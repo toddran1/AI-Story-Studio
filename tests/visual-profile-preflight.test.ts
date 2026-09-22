@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -11,6 +11,8 @@ import { sceneManifestSchema } from "../src/scenes/types.js";
 import { atomicWriteJson } from "../src/storage/atomic-write.js";
 import { storyPaths } from "../src/storage/paths.js";
 import { testStory } from "./helpers.js";
+
+const PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64");
 
 const characterId = "ent_111111111111111111111111";
 const locationId = "ent_222222222222222222222222";
@@ -77,5 +79,34 @@ describe("Artwork Visual Profile Preflight", () => {
     const provider = { name: story.artwork.provider, version: "test", validateConfiguration: async () => { calls++; }, generate: async () => { calls++; return { data: Buffer.from("png"), mimeType: "image/png" as const }; } };
     await expect(generateStoredArtwork({ root, story, chapter: 1, provider })).rejects.toThrow("Visual Profile Check required");
     expect(calls).toBe(0);
+  });
+
+  it("does not require a profile decision for artwork that can be reused, but does when forced", async () => {
+    const { root, story, paths } = await fixture();
+    await atomicWriteJson(paths.chapterMeta, { chapter: 1, sourceLanguage: story.sourceLanguage, outputLanguage: story.outputLanguage, counts: { originalCharacters: 1, englishWords: 1, narrationWords: 1 }, createdAt: now, updatedAt: now, stages: { ingestion: { status: "complete", fingerprint: "a", outputFingerprint: "a" }, translation: { status: "complete", fingerprint: "b", outputFingerprint: "b" }, narration: { status: "complete", fingerprint: "c", outputFingerprint: "c" }, qa: { status: "complete", fingerprint: "d", outputFingerprint: "d" }, storyBible: { status: "complete", fingerprint: "e", outputFingerprint: "e" }, tts: { status: "pending" } } });
+    let calls = 0;
+    const provider = { name: story.artwork.provider, version: "test", validateConfiguration: async () => {}, generate: async () => { calls++; return { data: PNG, mimeType: "image/png" as const }; } };
+    await generateStoredArtwork({ root, story, chapter: 1, provider, allowUnprofiledEntityIds: [characterId, locationId] });
+    const reused = await generateStoredArtwork({ root, story, chapter: 1, provider });
+    expect(reused).toMatchObject({ generated: 0, reused: 2 });
+    expect(calls).toBe(2);
+    await expect(generateStoredArtwork({ root, story, chapter: 1, provider, sceneId: "scene-001", force: true })).rejects.toThrow("Visual Profile Check required");
+  });
+
+  it("does not ask for profiles for context-only ability and organization IDs", async () => {
+    const { root, story, paths } = await fixture();
+    const abilityId = "ent_333333333333333333333333";
+    const organizationId = "ent_444444444444444444444444";
+    const raw = sceneManifestSchema.parse(JSON.parse(await readFile(paths.scenesManifest, "utf8")));
+    raw.scenes[0]!.characters = []; raw.scenes[0]!.location = undefined; raw.scenes[0]!.entityIds = [abilityId, organizationId];
+    await atomicWriteJson(paths.scenesManifest, raw);
+    const bible = await loadStoryBibleWithCanonicalOverlay(root, story.slug);
+    bible.canonicalEntities.push(
+      canonicalEntitySchema.parse({ id: abilityId, type: "ability", canonicalName: "Star Sight", aliases: [], description: "A magical ability.", firstAppearance: 1, lastKnownAppearance: 1 }),
+      canonicalEntitySchema.parse({ id: organizationId, type: "organization", canonicalName: "Astral Society", aliases: [], description: "A scholarly group.", firstAppearance: 1, lastKnownAppearance: 1 }),
+    );
+    await atomicWriteJson(paths.bible, bible);
+    const preflight = await inspectArtworkVisualPreflight({ root, slug: story.slug, chapters: [1], sceneId: "scene-001" });
+    expect(preflight).toMatchObject({ ready: true, entities: [] });
   });
 });

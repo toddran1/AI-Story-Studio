@@ -106,7 +106,6 @@ import { resolveQaFindingsByIndex, recheckChapterQa, transitionQaFinding, type Q
 import { addQaException, listQaExceptions, removeQaException } from "../../src/qa/exceptions.js";
 import { resetChapterQa, resetChapterQaBatch, qaResetScopeSchema } from "../../src/qa/reset.js";
 import { applyNarrationNamingPreferences } from "../../src/narration/naming-preferences.js";
-import { inspectArtworkVisualPreflight } from "../../src/visual-canon/preflight.js";
 import { loadNarrationNamingEntities } from "../../src/story-bible/narration-names.js";
 import { issueRepairTargets, repairQaText, repairTargets } from "../../src/qa/repair.js";
 import { LLMRouter } from "../../src/llm/router.js";
@@ -1146,7 +1145,32 @@ export class StudioOperations {
     slugSchema.parse(slug);
     const input = artworkJobSchema.parse(raw);
     const selected = selectChapterRange((await loadImportedChapters(this.root, slug)).chapters, input.from, input.to);
-    return inspectArtworkVisualPreflight({ root: this.root, slug, chapters: selected.map((chapter) => chapter.chapter), sceneId: input.scene, allowUnprofiledEntityIds: input.allowUnprofiledEntityIds });
+    const story = await loadStory(storyPaths(this.root, slug, 1).storyConfig);
+    // Reuse the exact candidate calculation and authoritative preflight from
+    // generation. dryRun never validates or calls the provider.
+    const reports = await Promise.all(selected.map((chapter) => generateStoredArtwork({
+      root: this.root,
+      story,
+      chapter: chapter.chapter,
+      provider: resolveImageProvider(this.image, story),
+      sceneId: input.scene,
+      force: input.force,
+      dryRun: true,
+      allowUnprofiledEntityIds: input.allowUnprofiledEntityIds,
+    })));
+    const preflights = reports.map((report) => {
+      if (!report.preflight) throw new Error("Artwork dry-run did not return a Visual Profile preflight");
+      return report.preflight;
+    });
+    const entities = new Map<string, any>();
+    for (const preflight of preflights) for (const entity of preflight.entities) {
+      const current = entities.get(entity.entityId);
+      if (current) current.affectedSceneIds = [...new Set([...current.affectedSceneIds, ...entity.affectedSceneIds])];
+      else entities.set(entity.entityId, { ...entity, affectedSceneIds: [...entity.affectedSceneIds] });
+    }
+    const all = [...entities.values()];
+    const requiresDecision = all.filter((entity) => (entity.state === "missing_profile" || entity.state === "draft_profile") && !input.allowUnprofiledEntityIds.includes(entity.entityId));
+    return { ready: requiresDecision.length === 0, entities: all, requiresDecision, fingerprint: fingerprint({ reports: preflights.map((preflight) => preflight.fingerprint) }), imageCountEstimate: reports.reduce((total, report) => total + report.imagesToGenerate, 0) };
   }
 
   async updateEntityVisualProfilePolicy(slug: string, entityId: string, raw: unknown) {

@@ -2,7 +2,7 @@ import { readJsonIfExists } from "../storage/story-files.js";
 import { storyPaths } from "../storage/paths.js";
 import { loadStoryBibleWithCanonicalOverlay } from "../story-bible/canonical.js";
 import { loadVisualProfiles } from "./profiles.js";
-import { resolveVisuallyRelevantCanonicalEntities } from "./resolver.js";
+import { resolveVisuallyRelevantCanonicalEntities, shouldUseVisualProfileForEntity } from "./resolver.js";
 import { sceneManifestSchema } from "../scenes/types.js";
 import { fingerprint } from "../utils/hash.js";
 
@@ -33,6 +33,7 @@ export async function inspectArtworkVisualPreflight(options: {
   slug: string;
   chapters: number[];
   sceneId?: string;
+  sceneIds?: readonly string[];
   allowUnprofiledEntityIds?: readonly string[];
 }): Promise<ArtworkVisualPreflight> {
   const [bible, profiles] = await Promise.all([
@@ -46,10 +47,12 @@ export async function inspectArtworkVisualPreflight(options: {
     const raw = await readJsonIfExists(storyPaths(options.root, options.slug, chapter).scenesManifest);
     if (!raw) continue;
     const manifest = sceneManifestSchema.parse(raw);
-    const scenes = options.sceneId ? manifest.scenes.filter((scene) => scene.id === options.sceneId) : manifest.scenes;
+    const requestedIds = options.sceneIds ? new Set(options.sceneIds) : undefined;
+    const scenes = options.sceneId ? manifest.scenes.filter((scene) => scene.id === options.sceneId) : requestedIds ? manifest.scenes.filter((scene) => requestedIds.has(scene.id)) : manifest.scenes;
     if (options.sceneId && !scenes.length) throw new Error(`Scene '${options.sceneId}' was not found in chapter ${chapter}`);
     for (const scene of scenes) {
       for (const entity of resolveVisuallyRelevantCanonicalEntities(scene, bible)) {
+        if (!shouldUseVisualProfileForEntity(scene, entity)) continue;
         const profile = profiles[entity.id];
         const policy = entity.visualProfilePolicy?.mode ?? "prompt";
         const state: ArtworkVisualProfileState = profile?.status === "approved"
@@ -89,6 +92,7 @@ export async function inspectArtworkVisualPreflight(options: {
     fingerprint: fingerprint({
       chapters: options.chapters,
       sceneId: options.sceneId,
+      sceneIds: options.sceneIds ? [...options.sceneIds].sort() : undefined,
       entities: entities.map(({ entityId, state, policy, profileId, profileRevision, affectedSceneIds }) => ({ entityId, state, policy, profileId, profileRevision, affectedSceneIds })),
       allowed: [...allowed].sort(),
     }),
