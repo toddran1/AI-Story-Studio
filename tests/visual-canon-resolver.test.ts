@@ -189,6 +189,58 @@ describe("Visual Canon Prompt Resolver", () => {
     expect(resolved.negativePrompt).toContain("sunny, bright smiles");
   });
 
+  it("keeps permanent identity while current continuity and scene overrides win over profile defaults", () => {
+    const profile: VisualEntityProfile = {
+      id: "vp-state", entityId: entityId1, visualType: "character", status: "approved", revision: 1,
+      createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), appearance: "", visualPrompt: "", notes: "", negativePrompt: "", variants: [], references: [],
+      character: {
+        apparentAge: "nineteen", build: "lean", hairColor: "black", hairstyle: "long tied hair", eyeColor: "amber",
+        distinguishingFeatures: "a crescent scar under his left eye",
+        defaultOutfit: "black academy jacket and white shirt", shoes: "black boots", accessories: "silver pendant",
+        weapons: "signature sword", equipment: "leather satchel",
+      },
+    };
+    const resolved = resolveVisualCanonPrompt({
+      scene: {
+        ...baseScene,
+        entityIds: [entityId1],
+        visualPrompt: "Li Chen lies unconscious on the ground, shirtless and bleeding from a chest wound.",
+        direction: { characterExpressions: { "Li Chen": "screaming in rage" } } as any,
+        overrides: { wardrobeOverrides: { "Li Chen": "ceremonial white robe" }, customVisualPrompt: "His signature sword has been lost." },
+      },
+      story,
+      bible,
+      artDirection,
+      visualProfiles: { [entityId1]: profile },
+      visualContinuity: "Li Chen remains bloodied with torn-away clothing from the previous scene.",
+    });
+
+    expect(resolved.prompt).toContain("Age: nineteen");
+    expect(resolved.prompt).toContain("Hair: black, long tied hair");
+    expect(resolved.prompt).toContain("Default weapons (overridable by current scene): signature sword");
+    expect(resolved.prompt).toContain("Scene override attire: ceremonial white robe");
+    expect(resolved.prompt).toContain("shirtless and bleeding from a chest wound");
+    expect(resolved.prompt).toContain("remains bloodied with torn-away clothing");
+    expect(resolved.prompt).toContain("His signature sword has been lost");
+    expect(resolved.prompt.match(/SCENE-STATE PRIORITY/g)).toHaveLength(1);
+    expect(resolved.prompt).toContain("Do not infer a change from an omitted detail.");
+    // Resolving a temporary state is read-only: the stored profile remains a default.
+    expect(profile.character?.defaultOutfit).toBe("black academy jacket and white shirt");
+  });
+
+  it("keeps profile defaults available when the current scene does not contradict them", () => {
+    const profile: VisualEntityProfile = {
+      id: "vp-default", entityId: entityId1, visualType: "character", status: "approved", revision: 1,
+      createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), appearance: "", visualPrompt: "", notes: "", negativePrompt: "", variants: [],
+      references: [], character: { defaultOutfit: "black academy jacket and white shirt" },
+    };
+    const resolved = resolveVisualCanonPrompt({
+      scene: { ...baseScene, entityIds: [entityId1], visualPrompt: "Li Chen walks into a room." },
+      story, bible, artDirection, visualProfiles: { [entityId1]: profile },
+    });
+    expect(resolved.prompt).toContain("Default attire (overridable by current scene): black academy jacket and white shirt");
+  });
+
   it("detects fine-grained fingerprint staleness accurately", () => {
     const profile: VisualEntityProfile = {
       id: "vp-1",

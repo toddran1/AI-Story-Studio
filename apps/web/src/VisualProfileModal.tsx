@@ -10,6 +10,8 @@ import {
   generateStyleSheet,
   approveVisualReference,
   deleteVisualReference,
+  getVisualProfilePolicy,
+  updateVisualProfilePolicy,
   applyVisualProfileProposal,
   inspectVisualProfile,
   proposeVisualProfile,
@@ -71,6 +73,7 @@ export function VisualProfileModal({
   const [selectedRegenerationFields, setSelectedRegenerationFields] = useState<string[]>([]);
   const [viewingReference, setViewingReference] = useState<VisualEntityProfile["references"][number] | null>(null);
   const [referenceZoom, setReferenceZoom] = useState(1);
+  const [visualProfilePolicy, setVisualProfilePolicy] = useState<"prompt" | "skip">("prompt");
   const [error, setError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<"appearance" | "details" | "references">("appearance");
   const [uploadRole, setUploadRole] = useState<VisualRole>("general_reference");
@@ -113,6 +116,20 @@ export function VisualProfileModal({
       active = false;
     };
   }, [slug, entityId]);
+
+  useEffect(() => {
+    let active = true;
+    void getVisualProfilePolicy(slug, entityId).then((policy) => { if (active) setVisualProfilePolicy(policy.mode); }).catch(() => undefined);
+    return () => { active = false; };
+  }, [slug, entityId]);
+
+  const handleVisualProfilePolicy = async (mode: "prompt" | "skip") => {
+    try {
+      setError(null);
+      await updateVisualProfilePolicy(slug, entityId, mode);
+      setVisualProfilePolicy(mode);
+    } catch (err) { setError(err instanceof Error ? err.message : String(err)); }
+  };
 
   useEffect(() => {
     if (!viewingReference) return;
@@ -948,6 +965,13 @@ export function VisualProfileModal({
                     {uploading ? "Uploading..." : "Upload Reference Image"}
                   </button>
                 </div>
+                <label className="visual-profile-policy">
+                  <span>Artwork profile policy</span>
+                  <select value={visualProfilePolicy} onChange={(event) => void handleVisualProfilePolicy(event.target.value as "prompt" | "skip") }>
+                    <option value="prompt">Ask when needed</option>
+                    <option value="skip">Generate without profile</option>
+                  </select>
+                </label>
                 <button
                   type="button"
                   className="btn btn-outline"

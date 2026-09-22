@@ -106,6 +106,7 @@ import { resolveQaFindingsByIndex, recheckChapterQa, transitionQaFinding, type Q
 import { addQaException, listQaExceptions, removeQaException } from "../../src/qa/exceptions.js";
 import { resetChapterQa, resetChapterQaBatch, qaResetScopeSchema } from "../../src/qa/reset.js";
 import { applyNarrationNamingPreferences } from "../../src/narration/naming-preferences.js";
+import { inspectArtworkVisualPreflight } from "../../src/visual-canon/preflight.js";
 import { loadNarrationNamingEntities } from "../../src/story-bible/narration-names.js";
 import { issueRepairTargets, repairQaText, repairTargets } from "../../src/qa/repair.js";
 import { LLMRouter } from "../../src/llm/router.js";
@@ -148,7 +149,7 @@ const rangeJobSchema = z.object({ from: z.number().int().positive().optional(), 
 const alignmentJobSchema = z.object({ chapter: z.number().int().positive(), force: z.boolean().default(false), forceEstimated: z.boolean().default(false), requireAligned: z.boolean().default(false) }).strict();
 const videoJobSchema = rangeJobSchema.extend({ subtitleMode: z.enum(["none", "burn", "soft", "both"]).optional() }).strict();
 const explicitRangeJobSchema = z.object({ from: z.number().int().positive(), to: z.number().int().positive(), force: z.boolean().default(false) }).strict().refine((value) => value.to >= value.from, { message: "Range end must be at or after range start" });
-const artworkJobSchema = z.object({ from: z.number().int().positive(), to: z.number().int().positive(), force: z.boolean().default(false), scene: z.string().regex(/^scene-\d{3}$/).optional(), dryRun: z.boolean().default(false) }).strict().refine((value) => value.to >= value.from, { message: "Range end must be at or after range start" }).refine((value) => !value.scene || value.from === value.to, { message: "A single-scene job must select one chapter" });
+const artworkJobSchema = z.object({ from: z.number().int().positive(), to: z.number().int().positive(), force: z.boolean().default(false), scene: z.string().regex(/^scene-\d{3}$/).optional(), dryRun: z.boolean().default(false), allowUnprofiledEntityIds: z.array(canonicalEntitySchema.shape.id).max(100).default([]) }).strict().refine((value) => value.to >= value.from, { message: "Range end must be at or after range start" }).refine((value) => !value.scene || value.from === value.to, { message: "A single-scene job must select one chapter" });
 const productionInputSchema = z.object({ from: z.number().int().positive(), to: z.number().int().positive(), profile: z.string().optional(), outputs: z.array(productionOutputSchema).min(1).optional(), artwork: z.boolean().optional(), repairQa: z.boolean().optional(), alignment: z.boolean().optional(), refresh: z.boolean().default(false), dryRun: z.boolean().default(false), force: productionForceSchema.optional(), audiobookFormat: z.enum(["mp3", "m4b"]).optional(), maxProviderBudgetUsd: z.number().positive().max(1_000_000).optional() }).strict().refine((value) => value.to >= value.from, { message: "Range end must be at or after range start" });
 
 type InspectionRecord = { inspection: SourceInspection; temporaryDirectory?: string; createdAt: number; bytes: number };
@@ -1141,7 +1142,29 @@ export class StudioOperations {
 
   startScenes(slug: string, raw: unknown) { slugSchema.parse(slug); const input = explicitRangeJobSchema.parse(raw); return this.jobs.create("scenes", slug, async (control) => withStoryLock(this.root, slug, "web scene planning", async () => { const story = await loadStory(storyPaths(this.root, slug, 1).storyConfig); const selected = selectChapterRange((await loadImportedChapters(this.root, slug)).chapters, input.from, input.to); const shutdown = new ShutdownController(); control.setPause(() => shutdown.request()); let planned = 0; let reused = 0; const warnings: string[] = []; for (let index = 0; index < selected.length; index++) { if (shutdown.isRequested) return { status: "paused", planned, reused, warnings: [...new Set(warnings)] }; const chapter = selected[index]!.chapter; control.update({ type: "scenes.chapter.started", chapter, index: index + 1, total: selected.length }); const provider = this.scenePlanner ?? this.runtime.router.forStage(story.pipeline.scenePlanner); const result = await withUsageScope({story:slug,chapter,stage:"scenePlanning"},()=>planStoredScenes({ root: this.root, story, chapter, provider, force: input.force })); result.reused ? reused++ : planned++; warnings.push(...(result.warnings ?? [])); control.update({ type: "scenes.chapter.completed", chapter, index: index + 1, total: selected.length, scenes: result.manifest.scenes.length, reused: result.reused, warnings: result.warnings }); } return { planned, reused, total: selected.length, warnings: [...new Set(warnings)] }; }), raw); }
 
-  startArtwork(slug: string, raw: unknown) { slugSchema.parse(slug); const input = artworkJobSchema.parse(raw); return this.jobs.create("artwork", slug, async (control) => withStoryLock(this.root, slug, "web artwork generation", async () => { const story = await loadStory(storyPaths(this.root, slug, 1).storyConfig); const selected = selectChapterRange((await loadImportedChapters(this.root, slug)).chapters, input.from, input.to); const shutdown = new ShutdownController(); control.setPause(() => shutdown.request()); let generated = 0; let estimate = 0; const warnings: string[] = []; for (let index = 0; index < selected.length; index++) { if (shutdown.isRequested) return { status: "paused", generated, estimate, warnings: [...new Set(warnings)] }; const chapter = selected[index]!.chapter; const result = await withUsageScope({story:slug,chapter,stage:"artwork"},()=>generateStoredArtwork({ root: this.root, story, chapter, provider: resolveImageProvider(this.image, story), sceneId: input.scene, force: input.force, dryRun: input.dryRun, onProgress: (event) => control.update({ ...event, chapterIndex: index + 1, chapterTotal: selected.length }) })); generated += "generated" in result ? result.generated ?? 0 : 0; estimate += result.imagesToGenerate; warnings.push(...(result.warnings ?? [])); } return { dryRun: input.dryRun, generated, imageCountEstimate: estimate, chapters: selected.length, provider: story.artwork.provider, model: story.artwork.model, warnings: [...new Set(warnings)] }; }), raw); }
+  async inspectArtworkVisualPreflight(slug: string, raw: unknown) {
+    slugSchema.parse(slug);
+    const input = artworkJobSchema.parse(raw);
+    const selected = selectChapterRange((await loadImportedChapters(this.root, slug)).chapters, input.from, input.to);
+    return inspectArtworkVisualPreflight({ root: this.root, slug, chapters: selected.map((chapter) => chapter.chapter), sceneId: input.scene, allowUnprofiledEntityIds: input.allowUnprofiledEntityIds });
+  }
+
+  async updateEntityVisualProfilePolicy(slug: string, entityId: string, raw: unknown) {
+    slugSchema.parse(slug);
+    canonicalEntitySchema.shape.id.parse(entityId);
+    const input = z.object({ mode: z.enum(["prompt", "skip"]) }).strict().parse(raw);
+    return this.updateCanonicalEntity(slug, entityId, { visualProfilePolicy: input });
+  }
+
+  async getEntityVisualProfilePolicy(slug: string, entityId: string) {
+    slugSchema.parse(slug);
+    canonicalEntitySchema.shape.id.parse(entityId);
+    const entity = (await getStoryBible(this.root, slug)).canonicalEntities.find((item) => item.id === entityId);
+    if (!entity) throw new Error("Canonical entity was not found");
+    return { mode: entity.visualProfilePolicy?.mode ?? "prompt" };
+  }
+
+  startArtwork(slug: string, raw: unknown) { slugSchema.parse(slug); const input = artworkJobSchema.parse(raw); return this.jobs.create("artwork", slug, async (control) => withStoryLock(this.root, slug, "web artwork generation", async () => { const story = await loadStory(storyPaths(this.root, slug, 1).storyConfig); const selected = selectChapterRange((await loadImportedChapters(this.root, slug)).chapters, input.from, input.to); const shutdown = new ShutdownController(); control.setPause(() => shutdown.request()); let generated = 0; let estimate = 0; const warnings: string[] = []; for (let index = 0; index < selected.length; index++) { if (shutdown.isRequested) return { status: "paused", generated, estimate, warnings: [...new Set(warnings)] }; const chapter = selected[index]!.chapter; const result = await withUsageScope({story:slug,chapter,stage:"artwork"},()=>generateStoredArtwork({ root: this.root, story, chapter, provider: resolveImageProvider(this.image, story), sceneId: input.scene, force: input.force, dryRun: input.dryRun, allowUnprofiledEntityIds: input.allowUnprofiledEntityIds, onProgress: (event) => control.update({ ...event, chapterIndex: index + 1, chapterTotal: selected.length }) })); generated += "generated" in result ? result.generated ?? 0 : 0; estimate += result.imagesToGenerate; warnings.push(...(result.warnings ?? [])); } return { dryRun: input.dryRun, generated, imageCountEstimate: estimate, chapters: selected.length, provider: story.artwork.provider, model: story.artwork.model, warnings: [...new Set(warnings)] }; }), raw); }
 
   getActiveStoryJob(slug: string) {
     slugSchema.parse(slug);
@@ -1250,7 +1273,14 @@ export class StudioOperations {
       }
       const rawProfile = (typeof input === "object" && input !== null && "profile" in input) ? (input as any).profile : input;
       const parsed = visualProfileSchema.parse({ ...rawProfile, entityId });
-      return updateVisualProfile(this.root, slug, entityId, parsed);
+      const updated = await updateVisualProfile(this.root, slug, entityId, parsed);
+      // An approved profile supersedes an earlier opt-out. Keep the policy
+      // explicit, but never let a stale skip hide newly approved visual canon.
+      if (updated.status === "approved" && entity.visualProfilePolicy?.mode === "skip") {
+        const base = await getStoryBible(this.root, slug, { includeCanonicalOverlay: false });
+        await updateCanonicalEntity(this.root, slug, base, entityId, { visualProfilePolicy: { mode: "prompt" } });
+      }
+      return updated;
     });
   }
 

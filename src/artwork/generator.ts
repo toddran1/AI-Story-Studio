@@ -26,6 +26,16 @@ import { estimateNativeDimensions, imageDimensions, planResolution, qualityTierI
 import { ImageUpscaler, upscaleFingerprint } from "./upscaler.js";
 import { createLocalUpscaler } from "./local-realesrgan.upscaler.js";
 import { loadEnvironment } from "../config/env.js";
+import { inspectArtworkVisualPreflight } from "../visual-canon/preflight.js";
+
+/** Reference images establish recognizable identity only. They must never
+ * silently override temporary state described by the current scene. */
+export const REFERENCE_USAGE_INSTRUCTION =
+  "REFERENCE USAGE: Use supplied reference images only to preserve recognizable identity and permanent traits. Do not copy conflicting clothing, shoes, accessories, weapons, equipment, pose, expression, injury state, dirt, damage, or environment from a reference image. Follow CURRENT VISUAL CONTINUITY, SCENE BEAT, SCENE DIRECTION, and SCENE OVERRIDES for this artwork.";
+
+// Bump when shared Visual Canon prompt semantics change. This intentionally
+// makes old artwork eligible for regeneration without touching story text.
+const VISUAL_CANON_ARTWORK_VERSION = "visual-canon-v2";
 
 /** Derivative production assets are only derived when a final output
  * resolution is requested and upscaling is enabled. Generation fingerprints
@@ -47,6 +57,8 @@ export async function generateStoredArtwork(options: {
   sceneId?: string;
   force?: boolean;
   dryRun?: boolean;
+  /** Explicit, one-request fallback; never persisted by generation itself. */
+  allowUnprofiledEntityIds?: string[];
   upscaler?: ImageUpscaler;
   onProgress?: (event: { type: string; chapter: number; scene?: string; index?: number; total?: number; warnings?: string[] }) => void;
 }) {
@@ -122,6 +134,34 @@ export async function generateStoredArtwork(options: {
   let selected = options.sceneId ? manifest.scenes.filter((scene) => scene.id === options.sceneId) : manifest.scenes;
   if (options.sceneId && !selected.length) throw new ArtworkError(`Scene '${options.sceneId}' was not found`);
 
+  // Revalidate at the spend boundary. The browser's earlier inspection is only a
+  // convenience; this authoritative read prevents a stale UI from bypassing the
+  // Visual Profile decision gate.
+  const preflight = await inspectArtworkVisualPreflight({
+    root: options.root,
+    slug: options.story.slug,
+    chapters: [options.chapter],
+    sceneId: options.sceneId,
+    allowUnprofiledEntityIds: options.allowUnprofiledEntityIds,
+  });
+  if (!preflight.ready) {
+    if (options.dryRun) {
+      return {
+        dryRun: true,
+        chapter: options.chapter,
+        provider: options.story.artwork.provider,
+        model: options.story.artwork.model,
+        planned: manifest.scenes.length,
+        selected: selected.length,
+        imagesToGenerate: 0,
+        sceneIds: [],
+        warnings,
+        preflight,
+      };
+    }
+    throw new ArtworkError(`Visual Profile Check required before generating artwork: ${preflight.requiresDecision.map((entity) => entity.name).join(", ")}`);
+  }
+
   const candidates: Array<{
     scene: Scene;
     prompt: string;
@@ -187,6 +227,7 @@ export async function generateStoredArtwork(options: {
       imagesToGenerate: candidates.length,
       sceneIds: candidates.map((item) => item.scene.id),
       warnings,
+      preflight,
     };
   }
 
@@ -269,7 +310,10 @@ export async function generateStoredArtwork(options: {
 
     try {
       const references = await loadSceneReferenceImages(options.root, options.story, item.resolved, item.continuityReference, options.chapter);
-      const result = await generateSceneImage(options.provider, options.story, item.prompt, {
+      const providerPrompt = references.images.length
+        ? `${item.prompt}\n\n${REFERENCE_USAGE_INSTRUCTION}`
+        : item.prompt;
+      const result = await generateSceneImage(options.provider, options.story, providerPrompt, {
         negativePrompt: item.resolved.negativePrompt || undefined,
         referenceImages: references.images,
       });
@@ -302,7 +346,7 @@ export async function generateStoredArtwork(options: {
         createdAt: new Date().toISOString(),
         provider: options.provider.name,
         model: options.story.artwork.model,
-        prompt: item.prompt,
+        prompt: providerPrompt,
         promptFingerprint: item.inputFingerprint,
         resolvedVisualProfileReferences: item.resolved.resolvedEntities.map((e) => ({
           entityId: e.entityId,
@@ -589,6 +633,7 @@ export function artworkFingerprint(
     provider: story.artwork.provider,
     model: story.artwork.model,
     providerVersion,
+    visualCanonArtworkVersion: VISUAL_CANON_ARTWORK_VERSION,
     ...(artDirectionFingerprint ? { artDirectionFingerprint } : {}),
     ...(extra?.entityVisualFingerprints && Object.keys(extra.entityVisualFingerprints).length > 0
       ? { entityVisualFingerprints: extra.entityVisualFingerprints }

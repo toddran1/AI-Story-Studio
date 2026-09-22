@@ -80,6 +80,9 @@ export const canonicalEntitySchema = z.object({
   preferredNarrationName: z.string().trim().min(1).max(300).optional(), aliasNarrationRules: z.array(aliasNarrationRuleSchema).max(100).default([]),
   localizedNaming: localizedNamingSchema.optional(),
   pronunciation: pronunciationSchema.optional(),
+  // A deliberate production decision, stored with the canonical identity rather
+  // than encoded as a fake empty Visual Profile.
+  visualProfilePolicy: z.object({ mode: z.enum(["prompt", "skip"]) }).optional(),
   firstAppearance: z.number().int().positive(), lastKnownAppearance: z.number().int().positive(), status: z.string().max(500).default("unknown"), notes: z.string().max(10_000).default(""), canonicalNameLocked: z.boolean().default(false),
   origin: factOriginSchema.default("automatic"), provenance: z.array(provenanceSchema).default([]), mergedFromIds: z.array(z.string()).default([]),
 });

@@ -263,6 +263,8 @@ describe("artwork routing and provenance", () => {
     expect(images.calls).toHaveLength(1);
     expect(images.calls[0]!.referenceImages).toHaveLength(1);
     expect(images.calls[0]!.referenceImages![0]!.data.equals(PNG_ALT)).toBe(true);
+    expect(images.calls[0]!.prompt).toContain("REFERENCE USAGE:");
+    expect(images.calls[0]!.prompt).toContain("Do not copy conflicting clothing");
     expect(images.calls[0]!.aspectRatio).toBe("16:9");
     const manifest = sceneManifestSchema.parse(JSON.parse(await readFile(paths.scenesManifest, "utf8")));
     const version = manifest.scenes[0]!.artwork.versions[0]!;
@@ -275,6 +277,7 @@ describe("artwork routing and provenance", () => {
     const images = fakeImages("openai");
     await generateStoredArtwork({ root, story, chapter: 1, provider: images, sceneId: "scene-001" });
     expect(images.calls[0]!.referenceImages ?? []).toHaveLength(0);
+    expect(images.calls[0]!.prompt).not.toContain("REFERENCE USAGE:");
     const manifest = sceneManifestSchema.parse(JSON.parse(await readFile(paths.scenesManifest, "utf8")));
     expect(manifest.scenes[0]!.artwork.versions[0]!.provenance).toMatchObject({ referencesUsed: "text-only", referenceImageCount: 0, availableReferenceCount: 1 });
   });

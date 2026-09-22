@@ -538,6 +538,11 @@ export function createApiHandler(operations: StudioOperations) {
       if (scenesJobMatch && request.method === "POST") return send(response, 202, operations.startScenes(scenesJobMatch[1]!, await jsonBody(request)));
       const artworkJobMatch = /^\/api\/stories\/([a-z0-9-]+)\/jobs\/artwork$/.exec(url.pathname);
       if (artworkJobMatch && request.method === "POST") return send(response, 202, operations.startArtwork(artworkJobMatch[1]!, await jsonBody(request)));
+      const artworkPreflightMatch = /^\/api\/stories\/([a-z0-9-]+)\/artwork\/visual-preflight$/.exec(url.pathname);
+      if (artworkPreflightMatch && request.method === "POST") return send(response, 200, await operations.inspectArtworkVisualPreflight(artworkPreflightMatch[1]!, await jsonBody(request)));
+      const visualProfilePolicyMatch = /^\/api\/stories\/([a-z0-9-]+)\/visual-profiles\/(ent_[a-f0-9]{24})\/policy$/.exec(url.pathname);
+      if (visualProfilePolicyMatch && request.method === "GET") return send(response, 200, await operations.getEntityVisualProfilePolicy(visualProfilePolicyMatch[1]!, visualProfilePolicyMatch[2]!));
+      if (visualProfilePolicyMatch && request.method === "PUT") return send(response, 200, await operations.updateEntityVisualProfilePolicy(visualProfilePolicyMatch[1]!, visualProfilePolicyMatch[2]!, await jsonBody(request)));
       const productionJobMatch = /^\/api\/stories\/([a-z0-9-]+)\/jobs\/production$/.exec(url.pathname);
       if (productionJobMatch && request.method === "POST") return send(response, 202, await operations.submitProduction(productionJobMatch[1]!, await jsonBody(request)));
       const voicePreviewJobMatch = /^\/api\/stories\/([a-z0-9-]+)\/jobs\/voice-preview$/.exec(url.pathname);

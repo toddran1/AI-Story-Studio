@@ -8,7 +8,7 @@ import { readJsonIfExists } from "../storage/story-files.js";
 import { normalizeEntityName } from "./updater.js";
 import { rebuildStoryBibleBeforeChapter } from "./rebuild.js";
 
-const overrideSchema = z.object({ canonicalName: z.string().trim().min(1).max(300).optional(), aliases: z.array(z.string().trim().min(1).max(300)).max(100).optional(), canonicalNameLocked: z.boolean().optional(), notes: z.string().max(10_000).optional(), status: z.string().max(500).optional(), preferredNarrationName: z.string().trim().min(1).max(300).nullable().optional(), aliasNarrationRules: canonicalEntitySchema.shape.aliasNarrationRules.optional(), localizedNaming: localizedNamingSchema.nullable().optional(), pronunciation: canonicalEntitySchema.shape.pronunciation.unwrap().nullable().optional(), snapshot: canonicalEntitySchema.optional(), updatedAt: z.string() });
+const overrideSchema = z.object({ canonicalName: z.string().trim().min(1).max(300).optional(), aliases: z.array(z.string().trim().min(1).max(300)).max(100).optional(), canonicalNameLocked: z.boolean().optional(), notes: z.string().max(10_000).optional(), status: z.string().max(500).optional(), preferredNarrationName: z.string().trim().min(1).max(300).nullable().optional(), aliasNarrationRules: canonicalEntitySchema.shape.aliasNarrationRules.optional(), localizedNaming: localizedNamingSchema.nullable().optional(), pronunciation: canonicalEntitySchema.shape.pronunciation.unwrap().nullable().optional(), visualProfilePolicy: canonicalEntitySchema.shape.visualProfilePolicy.optional(), snapshot: canonicalEntitySchema.optional(), updatedAt: z.string() });
 const manualMergeSchema = z.object({ id: z.string().uuid(), targetEntityId: z.string(), sourceEntityIds: z.array(z.string()).min(1), reason: z.string().min(1), createdAt: z.string(), undoneAt: z.string().optional() });
 export const manualDemotionSchema = z.object({
   entityId: z.string(),
@@ -286,6 +286,7 @@ function applyOverride(entity: CanonicalEntity, value: z.infer<typeof overrideSc
   if (value.preferredNarrationName !== undefined) entity.preferredNarrationName = value.preferredNarrationName ?? undefined;
   if (value.localizedNaming !== undefined) entity.localizedNaming = value.localizedNaming ?? undefined;
   if (value.pronunciation !== undefined) entity.pronunciation = value.pronunciation ?? undefined;
+  if (value.visualProfilePolicy !== undefined) entity.visualProfilePolicy = value.visualProfilePolicy;
   if (value.aliasNarrationRules) { const aliases = new Set(entity.aliases.map(normalizeEntityName)); entity.aliasNarrationRules = uniqueRules(value.aliasNarrationRules.filter((rule) => aliases.has(normalizeEntityName(rule.alias)))); }
   entity.origin = "manual";
   return entity;

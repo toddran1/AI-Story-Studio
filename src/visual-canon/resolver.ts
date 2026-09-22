@@ -31,6 +31,38 @@ export type ResolvedSceneVisualPrompt = {
   resolvedEntities: ResolvedEntityCanon[];
 };
 
+/**
+ * Keep identity canon separate from a character's temporary state. This is
+ * deliberately prompt-level guidance: scene narration and editorial overrides
+ * are evidence for this one image, never a reason to mutate the profile.
+ */
+export const SCENE_STATE_PRIORITY_INSTRUCTION =
+  "SCENE-STATE PRIORITY: Preserve Story Bible identity and approved Visual Profile traits such as face, age, build, hair, eyes, and permanent distinguishing features. Treat profile attire, footwear, accessories, weapons, and equipment as defaults only. Current visual continuity, the current scene, scene direction, and explicit scene overrides take precedence for temporary clothing, injuries, blood, dirt, damage, equipment, pose, expression, and environmental effects. Do not infer a change from an omitted detail.";
+
+/** The one authoritative definition of entities visibly represented by a scene.
+ * It intentionally uses scene identity fields only—not broad narration matching—
+ * so preflight and prompt resolution cannot disagree about who is on screen. */
+export function resolveVisuallyRelevantCanonicalEntities(scene: Scene, bible: StoryBible): CanonicalEntity[] {
+  const matchedEntities = new Map<string, CanonicalEntity>();
+  for (const id of scene.entityIds ?? []) {
+    const found = bible.canonicalEntities.find((entity) => entity.id === id);
+    if (found) matchedEntities.set(found.id, found);
+  }
+  for (const entity of resolveVisualEntities(scene.characters, bible.canonicalEntities)) {
+    matchedEntities.set(entity.id, entity);
+  }
+  if (scene.location) {
+    const normalizedLocation = scene.location.trim().toLowerCase();
+    const location = bible.canonicalEntities.find((entity) => entity.type === "location" && (
+      entity.canonicalName.toLowerCase() === normalizedLocation ||
+      entity.aliases.some((alias) => alias.toLowerCase() === normalizedLocation) ||
+      entity.originalName?.toLowerCase() === normalizedLocation
+    ));
+    if (location) matchedEntities.set(location.id, location);
+  }
+  return [...matchedEntities.values()];
+}
+
 export function resolveVisualCanonPrompt(options: {
   scene: Scene;
   story: Story;
@@ -42,34 +74,7 @@ export function resolveVisualCanonPrompt(options: {
   const { scene, story, bible, artDirection, visualProfiles, visualContinuity } = options;
 
   // 1. Resolve canonical entities in the scene
-  const matchedEntities = new Map<string, CanonicalEntity>();
-
-  // Resolve from entityIds if populated
-  if (scene.entityIds && scene.entityIds.length > 0) {
-    for (const id of scene.entityIds) {
-      const found = bible.canonicalEntities.find((e) => e.id === id);
-      if (found) matchedEntities.set(found.id, found);
-    }
-  }
-
-  // Also resolve from character names
-  const characterEntities = resolveVisualEntities(scene.characters, bible.canonicalEntities);
-  for (const entity of characterEntities) {
-    matchedEntities.set(entity.id, entity);
-  }
-
-  // Also resolve location if matching a canonical location entity
-  if (scene.location) {
-    const locNorm = scene.location.trim().toLowerCase();
-    const locEntity = bible.canonicalEntities.find(
-      (e) =>
-        e.type === "location" &&
-        (e.canonicalName.toLowerCase() === locNorm ||
-          e.aliases.some((a) => a.toLowerCase() === locNorm) ||
-          (e.originalName && e.originalName.toLowerCase() === locNorm)),
-    );
-    if (locEntity) matchedEntities.set(locEntity.id, locEntity);
-  }
+  const matchedEntities = resolveVisuallyRelevantCanonicalEntities(scene, bible);
 
   // 2. Build Entity Visual Canon & collect fingerprints
   const resolvedEntities: ResolvedEntityCanon[] = [];
@@ -81,7 +86,8 @@ export function resolveVisualCanonPrompt(options: {
   const entityCanonLines: string[] = [];
   const entityNegativePrompts: string[] = [];
 
-  for (const [entityId, entity] of matchedEntities.entries()) {
+  for (const entity of matchedEntities) {
+    const entityId = entity.id;
     const profile = visualProfiles[entityId];
     const isApproved = profile?.status === "approved";
 
@@ -103,7 +109,9 @@ export function resolveVisualCanonPrompt(options: {
         status: profile.status,
       });
 
-      // Wardrobe override check
+      // An editorial wardrobe override is the one exception to the profile's
+      // default state. Other temporary state remains in continuity / scene
+      // layers below, where it is explicitly higher priority.
       const wardrobeOverride = overrides.wardrobeOverrides?.[entityId] ?? overrides.wardrobeOverrides?.[entity.canonicalName];
       const activeWardrobe = wardrobeOverride || profile.character?.defaultOutfit || undefined;
 
@@ -123,8 +131,12 @@ export function resolveVisualCanonPrompt(options: {
           c.tattoos && `Tattoos: ${c.tattoos}`,
         ].filter(Boolean).join(", ");
         if (details) traits.push(details);
-        if (activeWardrobe) traits.push(`Attire: ${activeWardrobe}`);
-        if (c.weapons) traits.push(`Weapons: ${c.weapons}`);
+        if (wardrobeOverride) traits.push(`Scene override attire: ${wardrobeOverride}`);
+        else if (c.defaultOutfit) traits.push(`Default attire (overridable by current scene): ${c.defaultOutfit}`);
+        if (c.shoes) traits.push(`Default footwear (overridable by current scene): ${c.shoes}`);
+        if (c.accessories) traits.push(`Default accessories (overridable by current scene): ${c.accessories}`);
+        if (c.weapons) traits.push(`Default weapons (overridable by current scene): ${c.weapons}`);
+        if (c.equipment) traits.push(`Default equipment (overridable by current scene): ${c.equipment}`);
       } else if (profile.location) {
         const l = profile.location;
         if (l.canonicalEnvironmentPrompt) traits.push(l.canonicalEnvironmentPrompt);
@@ -200,11 +212,15 @@ export function resolveVisualCanonPrompt(options: {
     promptParts.push(`ENTITY VISUAL CANON:\n${entityCanonLines.join("\n")}`);
   }
 
+  // One shared hierarchy keeps profiles and reference images from freezing a
+  // character in a default outfit, pose, or injury state.
+  promptParts.push(SCENE_STATE_PRIORITY_INSTRUCTION);
+
   // Layer 2.5: Current Visual Continuity — temporary state, clearly delimited
   // from the permanent canon above. Manual Scene Studio overrides still win
   // (they are applied in a later layer).
   if (visualContinuity) {
-    promptParts.push(`CURRENT VISUAL CONTINUITY (temporary state — the canonical identity above still applies):\n${visualContinuity}`);
+    promptParts.push(`CURRENT VISUAL CONTINUITY (temporary state — overrides profile defaults and references while preserving canonical identity):\n${visualContinuity}`);
   }
 
   // Layer 3: Scene Content
