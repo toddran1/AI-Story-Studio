@@ -33,6 +33,8 @@ import { resolveVisualEntities } from "../scenes/identity.js";
 import { bindNarrationSpans } from "../scenes/narration-spans.js";
 import { productionSceneFingerprint } from "../scenes/manifest.js";
 import { sceneImportanceSchema, type Scene } from "../scenes/types.js";
+import { loadStoryArtDirection } from "../visual-canon/art-direction.js";
+import { resolveSummarySceneArtDirection } from "./art-direction.js";
 
 export const summaryMediaInputSchema = z.object({ force: z.boolean().default(false) }).strict();
 export const summaryScenesInputSchema = scenePacingSchema.safeExtend({ force: z.boolean().default(false) });
@@ -61,7 +63,8 @@ export function summarySceneVisualSnapshot(scene: Scene) {
 export function summarySceneProposalSourceFingerprint(scene: Scene) {
   return fingerprint({ visual: summarySceneVisualSnapshot(scene), startSeconds: scene.startSeconds,
     endSeconds: scene.endSeconds, disabled: scene.disabled, narrationText: scene.narrationText,
-    narrationStartWord: scene.narrationStartWord, narrationEndWord: scene.narrationEndWord });
+    narrationStartWord: scene.narrationStartWord, narrationEndWord: scene.narrationEndWord,
+    direction: scene.direction, overrides: scene.overrides });
 }
 export const summaryExportTypeSchema = z.enum(["summary", "narration", "audio"]);
 export function summaryMediaPaths(root: string, story: string, id: string) {
@@ -200,6 +203,9 @@ export class SummaryMediaService {
     if (!scene || !summary.narration?.text?.trim()) throw new Error("Narration text and an existing scene are required");
     const input = await this.inputs(slug, summary); const config = input.story.pipeline.scenePlanner;
     const provider = this.llms.forStage(config);
+    const storyArtDirection = await loadStoryArtDirection(this.root, slug);
+    const effectiveDirection = resolveSummarySceneArtDirection(storyArtDirection, summary.artDirectionOverride, scene);
+    const visualDirectionContext = JSON.stringify({ source: effectiveDirection.source, preset: effectiveDirection.source === "disabled" ? undefined : effectiveDirection.preset, missingPresetId: effectiveDirection.missingPresetId, direction: scene.direction, overrides: scene.overrides });
     const current = summarySceneVisualSnapshot(scene);
     let proposed: typeof current;
     if (mode === "image_prompt") {
@@ -207,8 +213,8 @@ export class SummaryMediaService {
       const result = await provider.generateStructured({ model: config.model,
         schemaName: "summary_scene_image_prompt_proposal",
         schema: z.object({ visualPrompt: z.string().trim().min(1).max(8000) }).strict(),
-        instructions: "Rewrite only the image prompt for this saved summary scene. Keep its visual beat, characters, location, importance, narration coverage, timing, and identity unchanged. Describe the same moment with clear composition and scene state. Return only visualPrompt.",
-        input: JSON.stringify({ scene: current, narration: scene.narrationText ?? scene.summary,
+        instructions: "Rewrite only the image prompt for this saved summary scene. Keep its visual beat, characters, location, importance, narration coverage, timing, and identity unchanged. Treat saved visual direction and manual overrides as editorial constraints, not suggestions. Describe the same moment with clear composition and scene state. Return only visualPrompt.",
+        input: JSON.stringify({ scene: current, visualDirectionContext, narration: scene.narrationText ?? scene.summary,
           canonicalSummary: summary.text, canonicalEntities: input.context.canonicalEntities.map((entity) => ({ id: entity.id, name: entity.canonicalName, description: entity.description })) }),
       });
       proposed = { ...current, visualPrompt: result.value.visualPrompt };
@@ -216,6 +222,7 @@ export class SummaryMediaService {
       const planned = await planVisualScenes(provider, config, { sourceType: "summary", sourceId: id,
         sourceLabel: `SUMMARY: ${summary.title} — regenerate ${sceneId} visual direction only`, narration: scene.narrationText ?? scene.summary,
         durationSeconds: scene.endSeconds - scene.startSeconds, targetSceneCount: 1, bible: input.context, settings: input.story.scenes,
+        visualDirectionContext,
         canonicalSummary: summary.text, sourceChapters: summary.chapters,
         namingIdentities: input.context.canonicalEntities.map((entity) => ({ entityId: entity.id, canonicalName: entity.canonicalName, originalName: entity.originalName, narrationNames: [entity.localizedNaming?.fullName, entity.localizedNaming?.shortName, entity.preferredNarrationName].filter((value): value is string => Boolean(value)) })) });
       if (planned.value.scenes.length !== 1) throw new Error("Individual scene regeneration must return exactly one scene");

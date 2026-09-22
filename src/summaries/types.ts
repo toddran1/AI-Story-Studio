@@ -8,6 +8,12 @@ export const summaryTypeSchema = z.enum(["brief", "detailed", "mini-chapter", "a
 export const summarySourceModeSchema = z.enum(["original", "translated", "chapter-summaries"]);
 export const summaryStatusSchema = z.enum(["generating", "complete", "failed"]);
 export const summaryIdSchema = z.string().regex(/^sum_[a-f0-9-]{36}$/);
+export const summaryArtDirectionOverrideSchema = z.discriminatedUnion("mode", [
+  z.object({ mode: z.literal("story-default") }).strict(),
+  z.object({ mode: z.literal("preset"), presetId: z.string().trim().min(1).max(200) }).strict(),
+  z.object({ mode: z.literal("disabled") }).strict(),
+]);
+export type SummaryArtDirectionOverride = z.infer<typeof summaryArtDirectionOverrideSchema>;
 
 export const SUMMARY_WORDS_PER_MINUTE = 150;
 export function estimateSummaryMinutes(text: string, wordsPerMinute = SUMMARY_WORDS_PER_MINUTE) {
@@ -79,6 +85,8 @@ export const summarySchema = z.object({
   scenes: summaryDerivativeSchema.optional(),
   artwork: summaryDerivativeSchema.optional(), video: summaryDerivativeSchema.optional(),
   scenePacing: scenePacingSchema.optional(),
+  /** Omitted on older summaries means Story Default. */
+  artDirectionOverride: summaryArtDirectionOverrideSchema.optional(),
   alignment: alignmentArtifactSchema.omit({ chapter: true }).extend({ sourceType: z.literal("summary"), sourceId: summaryIdSchema }).optional(),
   scenePlan: productionSceneManifestSchema.extend({ sourceType: z.literal("summary") }).optional(),
   provenance: z.object({

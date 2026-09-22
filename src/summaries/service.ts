@@ -47,7 +47,7 @@ export class SummaryService {
     const id = existingId ? summaryIdSchema.parse(existingId) : `sum_${randomUUID()}`; const previous = existingId ? await this.get(storySlug, id) : undefined;
     const model: StageModelConfig = input.model ?? story.pipeline.narration; const now = new Date().toISOString();
     let record = summarySchema.parse({ id, storyId: story.id, title: input.title, chapters, chapterRange: contiguousRange(chapters), summaryType: input.summaryType, sourceMode: input.sourceMode, targetLength: { words: input.targetWords }, focus: input.focus, instructions: input.instructions, text: previous?.text ?? "", status: "generating", origin: "generated", manuallyEdited: false, contextEligible: input.contextEligible, createdAt: previous?.createdAt ?? now, updatedAt: now, provenance: { model, promptVersion: SUMMARY_PROMPT_VERSION, chapterSources: [], levels: [] } });
-    if (previous) record = summarySchema.parse({ ...record, origin: previous.origin, manuallyEdited: previous.manuallyEdited, narration: previous.narration, tts: previous.tts, audio: previous.audio, scenes: previous.scenes, scenePlan: previous.scenePlan, scenePacing: previous.scenePacing, artwork: previous.artwork, video: previous.video, alignment: previous.alignment });
+    if (previous) record = summarySchema.parse({ ...record, origin: previous.origin, manuallyEdited: previous.manuallyEdited, narration: previous.narration, tts: previous.tts, audio: previous.audio, scenes: previous.scenes, scenePlan: previous.scenePlan, scenePacing: previous.scenePacing, artDirectionOverride: previous.artDirectionOverride, artwork: previous.artwork, video: previous.video, alignment: previous.alignment });
     await atomicWriteJson(summaryPath(this.root, storySlug, id), record);
     try {
       progress?.({ phase: "preparing", completed: 0, total: chapters.length });
@@ -113,7 +113,7 @@ export class SummaryService {
   }
 }
 
-export const updateSchema = z.object({ title: z.string().trim().min(1).max(200).optional(), text: z.string().min(1).max(1_000_000).optional(), contextEligible: z.boolean().optional() }).strict().refine((value) => value.title !== undefined || value.text !== undefined || value.contextEligible !== undefined, { message: "Provide a title, summary text, or context setting to update" });
+export const updateSchema = z.object({ title: z.string().trim().min(1).max(200).optional(), text: z.string().min(1).max(1_000_000).optional(), contextEligible: z.boolean().optional(), artDirectionOverride: summarySchema.shape.artDirectionOverride }).strict().refine((value) => value.title !== undefined || value.text !== undefined || value.contextEligible !== undefined || value.artDirectionOverride !== undefined, { message: "Provide a title, summary text, context setting, or art direction to update" });
 export const regenerateSchema = z.object({ title: z.string().trim().min(1).max(200).optional(), summaryType: summaryTypeSchema.optional(), sourceMode: summarySourceModeSchema.optional(), targetWords: z.number().int().min(50).max(20_000).optional(), instructions: z.string().trim().max(5_000).optional(), focus: z.string().trim().max(500).optional(), model: stageModelConfigSchema.optional(), chunkSize: z.number().int().min(1).max(100).optional(), contextEligible: z.boolean().optional() }).strict();
 const listOptionsSchema = z.object({ query: z.string().trim().max(500).optional(), type: summaryTypeSchema.optional(), status: z.enum(["generating", "complete", "failed"]).optional(), sort: z.enum(["coverage", "created", "updated"]).default("updated") }).strict();
 

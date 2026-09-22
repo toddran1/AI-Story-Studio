@@ -61,7 +61,7 @@ export function SummaryLayers({ slug, summary, busy, children, onChange, onGener
       {summary.audio?.outputFingerprint ? <AudioDeck key={summary.audio.outputFingerprint} title={summary.title} src={`/api${base}/export/audio?v=${summary.audio.outputFingerprint}`} /> : <p>No audio yet. Generate a listening copy below.</p>}
       <footer><button className="button primary" disabled={disabled || summary.status !== "complete"} onClick={() => void action("audio")}>{summary.audio ? "Generate / update audio" : "Generate audio"}</button>{summary.audio?.outputFingerprint && <a className="button" download href={download("audio")}>Download MP3</a>}</footer>
     </div>}
-    <div hidden={tab !== "scenes"}><SummaryScenePanel key={summary.id} summary={summary} base={base} disabled={disabled} onChange={onChange} onGenerate={onGenerate} onError={onError} focusSceneId={focusSceneId} /></div>
+    <div hidden={tab !== "scenes"}><SummaryScenePanel key={summary.id} slug={slug} summary={summary} base={base} disabled={disabled} onChange={onChange} onGenerate={onGenerate} onError={onError} focusSceneId={focusSceneId} /></div>
     {disabled && <p className="summary-media-working" role="status">Working… this may take a few minutes. You can track progress in the job panel.</p>}
   </div>;
 }

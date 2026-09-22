@@ -26,6 +26,9 @@ import { StudioOperations } from "../apps/server/operations.js";
 import { loadEnvironment } from "../src/config/env.js";
 import { saveVisualProfiles } from "../src/visual-canon/profiles.js";
 import { loadStoryBibleWithCanonicalOverlay } from "../src/story-bible/canonical.js";
+import { createDefaultArtDirection } from "../src/domain/art-direction.js";
+import { saveStoryArtDirection } from "../src/visual-canon/art-direction.js";
+import { resolveSummarySceneArtDirection } from "../src/summaries/art-direction.js";
 
 const PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64");
 const narration = "Malakai enters the dungeon. Malakai faces the monsters.";
@@ -82,6 +85,37 @@ describe("summary visual production", () => {
     disabled: scene.disabled, importance: scene.importance, direction: scene.direction, overrides: scene.overrides,
     ...patch,
   } });
+  it("resolves story, summary and scene art direction with safe fallback for deleted presets", async () => {
+    const direction = createDefaultArtDirection();
+    direction.presets.push({ ...direction.presets[0]!, id: "preset-flashback", name: "Flashback", isDefault: false, customStylePrompt: "soft sepia memory" });
+    const plan = await produce(); const scene = plan.scenePlan!.scenes[0]!;
+    expect(resolveSummarySceneArtDirection(direction, undefined, scene)).toMatchObject({ source: "story-default", preset: { id: "preset_main_style" } });
+    expect(resolveSummarySceneArtDirection(direction, { mode: "preset", presetId: "preset-flashback" }, scene)).toMatchObject({ source: "summary-override", preset: { id: "preset-flashback" } });
+    expect(resolveSummarySceneArtDirection(direction, { mode: "disabled" }, scene).source).toBe("disabled");
+    const storyDefaultScene = { ...scene, overrides: { ...scene.overrides, artDirectionMode: "story-default" as const } };
+    expect(resolveSummarySceneArtDirection(direction, { mode: "preset", presetId: "preset-flashback" }, storyDefaultScene)).toMatchObject({ source: "story-default", preset: { id: "preset_main_style" } });
+    const ownPreset = { ...scene, overrides: { ...scene.overrides, artDirectionPresetId: "preset-main" } };
+    expect(resolveSummarySceneArtDirection(direction, { mode: "preset", presetId: "preset-flashback" }, ownPreset)).toMatchObject({ source: "story-default", preset: { id: "preset_main_style" }, missingPresetId: "preset-main" });
+    const own = { ...scene, overrides: { ...scene.overrides, artDirectionPresetId: "preset-flashback" } };
+    expect(resolveSummarySceneArtDirection(direction, { mode: "disabled" }, own)).toMatchObject({ source: "scene-override", preset: { id: "preset-flashback" } });
+  });
+  it("saves summary art direction without provider calls and only invalidates scenes that inherit it", async () => {
+    const planned = await produce();
+    const direction = createDefaultArtDirection();
+    direction.presets.push({ ...direction.presets[0]!, id: "preset-flashback", name: "Flashback", isDefault: false, customStylePrompt: "soft sepia memory" });
+    await saveStoryArtDirection(root, "demo-story", direction);
+    const second = planned.scenePlan!.scenes[1]!;
+    await visuals.updateScene("demo-story", id, second.id, sceneEdit(second, { overrides: { ...second.overrides, artDirectionPresetId: "preset_main_style" } }));
+    await visuals.artwork("demo-story", id, { scenes: [second.id] });
+    const imageCalls = images.generate.mock.calls.length, llmCalls = llm.calls.length, ttsCalls = tts.calls;
+    const updated = await summaries.update("demo-story", id, { artDirectionOverride: { mode: "preset", presetId: "preset-flashback" } });
+    expect(updated.artDirectionOverride).toEqual({ mode: "preset", presetId: "preset-flashback" });
+    expect(images.generate).toHaveBeenCalledTimes(imageCalls); expect(llm.calls).toHaveLength(llmCalls); expect(tts.calls).toBe(ttsCalls);
+    const planAfterChange = await visuals.artwork("demo-story", id, { dryRun: true });
+    expect(planAfterChange).toMatchObject({ sceneIds: ["scene-001"], imagesToGenerate: 1 });
+    const stored = await summaries.get("demo-story", id);
+    expect(stored.narration?.status).toBe("current"); expect(stored.scenePlan!.scenes[1]!.artwork.versions!.at(-1)?.provenance?.artDirection).toMatchObject({ source: "scene-override", presetId: "preset_main_style", presetName: "Main Style" });
+  });
   it("plans produce dry-runs without generating, rendering, or changing summary metadata", async () => {
     const before = await readFile(summaryPath(root, "demo-story", id), "utf8");
     const llmCalls = llm.calls.length, ttsCalls = tts.calls, imageCalls = images.generate.mock.calls.length, renderCalls = render.mock.calls.length;
@@ -375,11 +409,17 @@ describe("summary visual production", () => {
     } finally { await operations.close(); }
   });
   it("supports individual scene regeneration, reordering, disabling and deleting without losing narration coverage", async () => {
-    const result = await produce(); const protectedScene = structuredClone(result.scenePlan!.scenes[1]!);
-    vi.spyOn(llm, "generateStructured").mockImplementation(async (request) => ({ value: request.schema.parse({ scenes: [{ summary: "New arrival", startSeconds: 0, endSeconds: 8, characters: ["Malakai"], visualPrompt: "A new arrival at the dungeon", importance: "major" }] }) }));
+    const result = await produce(); const initial = result.scenePlan!.scenes[0]!;
+    const direction = { ...initial.direction!, cameraAngle: "low_angle" as const, useCharacterReferences: false };
+    const overrides = { ...initial.overrides!, customVisualPrompt: "Keep a silver crescent on the gauntlet", customNegativePrompt: "no modern clothing" };
+    const edited = await visuals.updateScene("demo-story", id, initial.id, sceneEdit(initial, { direction, overrides }));
+    const protectedScene = structuredClone(result.scenePlan!.scenes[1]!);
+    let regenerationInput = "";
+    vi.spyOn(llm, "generateStructured").mockImplementation(async (request) => { regenerationInput = request.input; return { value: request.schema.parse({ scenes: [{ summary: "New arrival", startSeconds: 0, endSeconds: 8, characters: ["Malakai"], visualPrompt: "A new arrival at the dungeon", importance: "major" }] }) }; });
     const proposal = await media.previewSceneRegeneration("demo-story", id, "scene-001", { mode: "full_visual_direction" });
+    expect(regenerationInput).toContain("Keep a silver crescent on the gauntlet"); expect(regenerationInput).toContain("low_angle");
     expect((await visuals.get("demo-story", id)).scenePlan?.scenes[0]?.summary).toBe(result.scenePlan?.scenes[0]?.summary);
-    const regenerated = await visuals.applySceneRegeneration("demo-story", id, "scene-001", proposal); expect(regenerated.scenePlan?.scenes[1]).toEqual(protectedScene); expect(regenerated.scenePlan?.scenes[0]?.narrationText).toBe(result.scenePlan?.scenes[0]?.narrationText);
+    const regenerated = await visuals.applySceneRegeneration("demo-story", id, "scene-001", proposal); expect(regenerated.scenePlan?.scenes[1]).toEqual(protectedScene); expect(regenerated.scenePlan?.scenes[0]?.narrationText).toBe(result.scenePlan?.scenes[0]?.narrationText); expect(regenerated.scenePlan?.scenes[0]?.direction).toMatchObject(direction); expect(regenerated.scenePlan?.scenes[0]?.overrides).toMatchObject(overrides);
     const reordered = await visuals.editScenes("demo-story", id, { scenes: [...regenerated.scenePlan!.scenes].reverse() }); expect(reordered.scenePlan?.scenes[0]?.id).toBe("scene-002"); expect(reordered.scenePlan?.scenes[0]?.startSeconds).toBe(0);
     const scenes = structuredClone(reordered.scenePlan!.scenes); scenes[0]!.disabled = true; const disabled = await visuals.editScenes("demo-story", id, { scenes }); expect(disabled.scenePlan?.scenes[1]?.startSeconds).toBe(0); expect(disabled.scenePlan?.scenes[1]?.endSeconds).toBe(12);
     const kept = [{ ...disabled.scenePlan!.scenes[1]!, disabled: false }]; const deleted = await visuals.editScenes("demo-story", id, { scenes: kept }); expect(deleted.scenePlan?.scenes).toHaveLength(1); expect(deleted.scenePlan?.scenes[0]?.narrationEndWord).toBe(8);
@@ -403,18 +443,24 @@ describe("summary visual production", () => {
   });
   it("previews image-prompt regeneration without writes and rejects a proposal after a newer scene edit", async () => {
     const before = await produce(); const original = structuredClone(before.scenePlan!.scenes[0]!);
+    const direction = { ...original.direction!, composition: "symmetrical" as const, useLocationReferences: false };
+    const overrides = { ...original.overrides!, customVisualPrompt: "Keep the cracked red lantern", wardrobeOverrides: { "Malakai": "black travel cloak" } };
+    await visuals.updateScene("demo-story", id, original.id, sceneEdit(original, { direction, overrides }));
+    const configured = (await summaries.get("demo-story", id)).scenePlan!.scenes[0]!;
     const storedBefore = await readFile(summaryPath(root, "demo-story", id), "utf8");
-    vi.spyOn(llm, "generateStructured").mockImplementation(async (request) => ({ value: request.schema.parse({ visualPrompt: "A tighter cinematic angle at the entrance" }) }));
+    let regenerationInput = "";
+    vi.spyOn(llm, "generateStructured").mockImplementation(async (request) => { regenerationInput = request.input; return { value: request.schema.parse({ visualPrompt: "A tighter cinematic angle at the entrance" }) }; });
     const proposal = await media.previewSceneRegeneration("demo-story", id, original.id, { mode: "image_prompt" });
+    expect(regenerationInput).toContain("Keep the cracked red lantern"); expect(regenerationInput).toContain("black travel cloak");
     expect(proposal.proposed).toMatchObject({ summary: original.summary, characters: original.characters, location: original.location, importance: original.importance, visualPrompt: "A tighter cinematic angle at the entrance" });
     expect(await readFile(summaryPath(root, "demo-story", id), "utf8")).toBe(storedBefore);
-    const newer = await visuals.updateScene("demo-story", id, original.id, sceneEdit(original, { summary: "A manual visual beat" }));
+    const newer = await visuals.updateScene("demo-story", id, original.id, sceneEdit(configured, { summary: "A manual visual beat" }));
     await expect(visuals.applySceneRegeneration("demo-story", id, original.id, proposal)).rejects.toThrow("changed since the proposal");
     expect((await visuals.get("demo-story", id)).scenePlan!.scenes[0]!.summary).toBe("A manual visual beat");
     const fresh = await media.previewSceneRegeneration("demo-story", id, original.id, { mode: "image_prompt" });
     const applied = await visuals.applySceneRegeneration("demo-story", id, original.id, fresh);
     expect(applied.scenePlan!.scenes[0]).toMatchObject({ summary: newer.scenePlan!.scenes[0]!.summary, startSeconds: original.startSeconds, endSeconds: original.endSeconds, narrationText: original.narrationText, visualPrompt: "A tighter cinematic angle at the entrance" });
-    expect(applied.scenePlan!.scenes[0]!.artwork.versions).toEqual(original.artwork.versions);
+    expect(applied.scenePlan!.scenes[0]!.artwork.versions).toEqual(original.artwork.versions); expect(applied.scenePlan!.scenes[0]!.direction).toMatchObject(direction); expect(applied.scenePlan!.scenes[0]!.overrides).toMatchObject(overrides);
     expect((await visuals.sceneArtworkGrounding("demo-story", id))[0]!.status).toBe("stale");
   });
   it("surfaces image/video failures, preserves successful work and rejects mismatched video duration", async () => {
@@ -445,6 +491,7 @@ describe("summary visual production", () => {
     const props = { summary, base: `/stories/demo-story/summaries/${id}`, disabled: false, onChange: () => {}, onGenerate: () => {}, onError: () => {} };
     const scenePanel = renderToStaticMarkup(<SummaryScenePanel {...props} />);
     expect(scenePanel).toContain("Regenerate scene"); expect(scenePanel).toContain("Save this scene"); expect(scenePanel).toContain("Save all scene edits"); expect(scenePanel).toContain("Revert changes");
+    expect(scenePanel).toContain("Summary Art Direction"); expect(scenePanel).toContain("No Story Art Direction"); expect(scenePanel).toContain("Advanced visual direction"); expect(scenePanel).toContain("Custom negative prompt");
     expect(scenePanel).toContain("Image prompt only"); expect(scenePanel).toContain("Full visual direction");
     const artworkPanel = renderToStaticMarkup(<SummaryArtworkPanel {...props} />);
     expect(artworkPanel).toContain("Approve / retain"); expect(artworkPanel).toContain("Regenerate artwork from current saved scene"); expect(artworkPanel).toContain("Edit scene");

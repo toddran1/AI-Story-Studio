@@ -78,6 +78,7 @@ export type SceneDirection = z.infer<typeof sceneDirectionSchema>;
 
 export const sceneOverridesSchema = z.object({
   wardrobeOverrides: z.record(z.string(), z.string().trim().max(1000)).default({}),
+  artDirectionMode: z.enum(["inherit-summary", "story-default"]).optional(),
   artDirectionPresetId: z.string().optional(),
   customVisualPrompt: z.string().trim().max(8000).optional(),
   customNegativePrompt: z.string().trim().max(2000).optional(),
