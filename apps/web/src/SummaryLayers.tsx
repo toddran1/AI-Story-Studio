@@ -10,6 +10,7 @@ type Props = { slug: string; summary: StorySummary; busy: boolean; children: Rea
 
 export function SummaryLayers({ slug, summary, busy, children, onChange, onGenerate, onError }: Props) {
   const [tab, setTab] = useState<"summary" | "narration" | "audio" | "scenes" | "artwork" | "video">("summary");
+  const [focusSceneId, setFocusSceneId] = useState<string>();
   const [text, setText] = useState(summary.narration?.text ?? "");
   const [working, setWorking] = useState(false);
   const [spoken, setSpoken] = useState<{ spokenText: string; transformations?: Array<{ kind: string; written: string; spoken: string }> }>();
@@ -29,7 +30,7 @@ export function SummaryLayers({ slug, summary, busy, children, onChange, onGener
   };
   const disabled = busy || working;
   return <div className="summary-layers"><nav className="summary-layer-tabs" aria-label="Summary layers">
-    {(["summary", "narration", "audio", "scenes", "artwork", "video"] as const).map((value) => <button key={value} aria-pressed={tab === value} className={tab === value ? "active" : ""} onClick={() => setTab(value)}>{value[0]!.toUpperCase() + value.slice(1)}<small>{value === "summary" ? "Canonical text" : summary[value]?.status ?? "Not generated"}</small></button>)}
+    {(["summary", "narration", "audio", "scenes", "artwork", "video"] as const).map((value) => <button key={value} aria-pressed={tab === value} className={tab === value ? "active" : ""} onClick={() => { setFocusSceneId(undefined); setTab(value); }}>{value[0]!.toUpperCase() + value.slice(1)}<small>{value === "summary" ? "Canonical text" : summary[value]?.status ?? "Not generated"}</small></button>)}
   </nav>
     {tab === "summary" ? <><div className="summary-layer-note">Canonical recap · naming and voice settings do not change this text.<a className="button" download href={download("summary")}>Download TXT</a></div>{children}</> : tab === "narration" ? <div className="summary-media-editor">
       <header><span className="eyebrow">Text used for audio</span><h3>Narration recap</h3><p>Uses this book’s localization, preferred names, alias rules, and narration preferences.</p></header>
@@ -39,7 +40,7 @@ export function SummaryLayers({ slug, summary, busy, children, onChange, onGener
       <textarea aria-label="Edit summary narration" value={text} onChange={(event) => setText(event.target.value)} placeholder="Generate narration from the canonical summary first." />
       {spokenText && spokenText !== text && <details className="spoken-text-preview"><summary>View spoken text</summary><p>This is the provider-neutral representation sent through pronunciation and TTS processing. Your visible narration remains unchanged.</p><pre>{spokenText}</pre><VocalizationList transformations={spoken?.transformations} /></details>}
       <footer><button className="button" disabled={disabled} onClick={() => void action("narration")}>{summary.narration ? "Regenerate narration" : "Generate narration"}</button>{summary.narration?.reviewRequired && <button className="button" disabled={disabled} onClick={() => void save(true)}>Retain / mark current</button>}<button className="button primary" disabled={disabled || !text.trim()} onClick={() => void save()}>Save narration edits</button>{summary.narration?.text && <a className="button" download href={download("narration")}>Download TXT</a>}</footer>
-    </div> : tab === "scenes" ? <SummaryScenePanel key={summary.id} summary={summary} base={base} disabled={disabled} onChange={onChange} onGenerate={onGenerate} onError={onError} /> : tab === "artwork" ? <SummaryArtworkPanel key={summary.id} summary={summary} base={base} disabled={disabled} onChange={onChange} onGenerate={onGenerate} onError={onError} /> : tab === "video" ? <SummaryVideoPanel key={summary.id} summary={summary} base={base} disabled={disabled} onChange={onChange} onGenerate={onGenerate} onError={onError} /> : <div className="summary-media-editor">
+    </div> : tab === "scenes" ? null : tab === "artwork" ? <SummaryArtworkPanel key={summary.id} summary={summary} base={base} disabled={disabled} onChange={onChange} onGenerate={onGenerate} onError={onError} onEditScene={(sceneId) => { setFocusSceneId(sceneId); setTab("scenes"); }} /> : tab === "video" ? <SummaryVideoPanel key={summary.id} summary={summary} base={base} disabled={disabled} onChange={onChange} onGenerate={onGenerate} onError={onError} /> : <div className="summary-media-editor">
       <header><span className="eyebrow">Listening copy</span><h3>Summary audio</h3><p>Generated from narration, using this book’s configured voice, delivery, censoring, and mastering.</p></header>
       <div className="summary-meta"><span>{summary.audio?.status ?? "Not generated"}</span>{summary.audio?.durationSeconds !== undefined && <span>{(summary.audio.durationSeconds / 60).toFixed(1)} minutes · MP3</span>}{summary.audio?.model && <span>{summary.audio.provider} · {summary.audio.model}</span>}{summary.audio?.voice && <span>Voice {summary.audio.voice}</span>}</div>
       {summary.audio?.status === "stale" && <div className="summary-media-warning">This audio uses older inputs. Regenerate to apply the current settings.</div>}
@@ -47,6 +48,7 @@ export function SummaryLayers({ slug, summary, busy, children, onChange, onGener
       {summary.audio?.outputFingerprint ? <AudioDeck key={summary.audio.outputFingerprint} title={summary.title} src={`/api${base}/export/audio?v=${summary.audio.outputFingerprint}`} /> : <p>No audio yet. Generate a listening copy below.</p>}
       <footer><button className="button primary" disabled={disabled || summary.status !== "complete"} onClick={() => void action("audio")}>{summary.audio ? "Generate / update audio" : "Generate audio"}</button>{summary.audio?.outputFingerprint && <a className="button" download href={download("audio")}>Download MP3</a>}</footer>
     </div>}
+    <div hidden={tab !== "scenes"}><SummaryScenePanel key={summary.id} summary={summary} base={base} disabled={disabled} onChange={onChange} onGenerate={onGenerate} onError={onError} focusSceneId={focusSceneId} /></div>
     {disabled && <p className="summary-media-working" role="status">Working… this may take a few minutes. You can track progress in the job panel.</p>}
   </div>;
 }

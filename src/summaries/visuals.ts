@@ -11,7 +11,7 @@ import { fingerprint } from "../utils/hash.js";
 import { loadNarrationNamingEntities } from "../story-bible/narration-names.js";
 import { resolveVisualEntities } from "../scenes/identity.js";
 import { productionSceneFingerprint } from "../scenes/manifest.js";
-import { sceneSchema, artworkReviewSchema, type Scene, type ArtworkVersion } from "../scenes/types.js";
+import { sceneSchema, sceneDirectionSchema, sceneOverridesSchema, artworkReviewSchema, type Scene, type ArtworkVersion } from "../scenes/types.js";
 import { bindNarrationSpans, timeNarrationScenes } from "../scenes/narration-spans.js";
 import { loadCharacterVisualReferences } from "../scenes/visual-references.js";
 import {
@@ -36,7 +36,7 @@ import { reconcileAndValidateAlignment } from "../alignment/quality.js";
 import { generateSubtitleTiming } from "../subtitles/timing.js";
 import { generateAlignedSubtitleTiming } from "../subtitles/aligned-timing.js";
 import { toSrt } from "../subtitles/srt.js";
-import { SummaryMediaService, summaryMediaPaths, summaryScenesInputSchema } from "./media.js";
+import { SummaryMediaService, summaryMediaPaths, summaryScenesInputSchema, summarySceneProposalSourceFingerprint, summarySceneRegenerationProposalSchema, SummarySceneProposalConflictError } from "./media.js";
 import { summarySchema, summaryAudioAvailable, summaryNarrationTextAvailable, summaryScenePlanAvailable, type StorySummary } from "./types.js";
 import { summaryPath } from "./service.js";
 import { validateSceneCoverage } from "../scenes/timing.js";
@@ -62,6 +62,13 @@ export const summarySceneEditSchema = z.union([
   z.object({ scenes: z.array(sceneSchema).min(1).max(100) }).strict(),
   z.object({ acceptCurrent: z.literal(true) }).strict(),
 ]);
+export const summarySingleSceneEditSchema = z.object({ scene: z.object({
+  summary: z.string().trim().min(1).max(1000), visualPrompt: z.string().trim().min(1).max(8000),
+  characters: z.array(z.string().trim().min(1)).max(20), entityIds: z.array(z.string().trim().min(1)).max(100),
+  location: z.string().trim().max(300).optional(), startSeconds: z.number().min(0), endSeconds: z.number().positive(),
+  disabled: z.boolean().optional(), importance: z.enum(["transition", "standard", "major"]),
+  direction: sceneDirectionSchema.optional(), overrides: sceneOverridesSchema.optional(),
+}).strict() }).strict();
 export type SummaryVisualProgress = (event: {
   type: string;
   scene?: string;
@@ -119,6 +126,8 @@ export class SummaryVisualService {
       ...context,
       prompt,
       entityIds: entities.map((entity) => entity.id),
+      grounding: entities.map((entity) => ({ name: entity.canonicalName, source: "Story Bible canon" as const,
+        reference: refs.some((ref) => ref.name.toLocaleLowerCase() === entity.canonicalName.toLocaleLowerCase()) })),
       inputFingerprint: fingerprint({
         version: "source-artwork-v1",
         prompt,
@@ -199,6 +208,47 @@ export class SummaryVisualService {
     const { story } = await this.context(slug);
     summary.scenes = { ...summary.scenes!, status: "current", manuallyEdited: true, reviewRequired: false, outputFingerprint: productionSceneFingerprint(summary.scenePlan), sourceFingerprint: fingerprint(summary.narration.text), configurationFingerprint: fingerprint({ config: story.pipeline.scenePlanner, settings: story.scenes }) };
     if (summary.video) summary.video.status = "stale"; return this.save(slug, summary);
+  }
+  async updateScene(slug: string, id: string, sceneId: string, raw: unknown) {
+    const input = summarySingleSceneEditSchema.parse(raw);
+    const summary = await this.media.get(slug, id);
+    const previous = summary.scenePlan?.scenes.find((scene) => scene.id === sceneId);
+    if (!previous || !summary.scenePlan) throw new Error("Scene was not found");
+    const replacement = sceneSchema.parse({ ...previous, ...input.scene, id: previous.id, artwork: previous.artwork,
+      narrationText: previous.narrationText, narrationStartWord: previous.narrationStartWord, narrationEndWord: previous.narrationEndWord });
+    const editable = (scene: Scene) => ({ summary: scene.summary, visualPrompt: scene.visualPrompt, characters: scene.characters,
+      entityIds: scene.entityIds, location: scene.location, startSeconds: scene.startSeconds, endSeconds: scene.endSeconds,
+      disabled: scene.disabled, importance: scene.importance, direction: scene.direction, overrides: scene.overrides });
+    if (fingerprint(editable(previous)) === fingerprint(editable(replacement))) return this.get(slug, id);
+    const scenes = summary.scenePlan.scenes.map((scene) => scene.id === sceneId ? replacement : scene);
+    return this.editScenes(slug, id, { scenes });
+  }
+  async applySceneRegeneration(slug: string, id: string, sceneId: string, raw: unknown) {
+    const proposal = summarySceneRegenerationProposalSchema.parse(raw);
+    if (proposal.sceneId !== sceneId) throw new Error("Proposal scene ID does not match the selected scene");
+    const summary = await this.media.get(slug, id);
+    const scene = summary.scenePlan?.scenes.find((item) => item.id === sceneId);
+    if (!scene) throw new Error("Scene was not found");
+    if (summarySceneProposalSourceFingerprint(scene) !== proposal.sourceFingerprint) throw new SummarySceneProposalConflictError("This scene changed since the proposal was generated. Generate a new proposal before applying it.");
+    const proposed = proposal.mode === "image_prompt" ? { visualPrompt: proposal.proposed.visualPrompt } : proposal.proposed;
+    return this.updateScene(slug, id, sceneId, { scene: {
+      summary: scene.summary, characters: scene.characters, entityIds: scene.entityIds ?? [],
+      location: scene.location, startSeconds: scene.startSeconds, endSeconds: scene.endSeconds,
+      disabled: scene.disabled, importance: scene.importance, direction: scene.direction, overrides: scene.overrides,
+      ...proposed,
+    } });
+  }
+  async sceneArtworkGrounding(slug: string, id: string) {
+    const summary = await this.media.get(slug, id);
+    const paths = this.paths(slug, id);
+    return Promise.all((summary.scenePlan?.scenes ?? []).map(async (scene) => {
+      const input = await this.imageInput(slug, scene);
+      const actual = await validPngFingerprint(paths.image(scene.id));
+      const hasImage = Boolean(actual && scene.artwork.imageFingerprint === actual);
+      const current = hasImage && scene.artwork.status === "complete" && scene.artwork.fingerprint === input.inputFingerprint;
+      return { sceneId: scene.id, status: !hasImage ? "missing" as const : current ? "current" as const : "stale" as const,
+        grounding: input.grounding, approvedHistoricalVersion: Boolean(!current && (scene.artwork.review === "approved" || scene.artwork.versions?.some((version) => version.review === "approved"))) };
+    }));
   }
   async artwork(slug: string, id: string, raw: unknown = {}, progress?: SummaryVisualProgress, paused?: () => boolean, upscalerOverride?: ImageUpscaler) {
     const options = summaryVisualInputSchema.parse(raw);

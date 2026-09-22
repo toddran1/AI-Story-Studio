@@ -37,6 +37,7 @@ import { z } from "zod";
 import { SourceConflictError, SourceInputError, SourceUpstreamError, SourceValidationError } from "../src/source/errors.js";
 import { ConfigurationError, SceneError } from "../src/pipeline/errors.js";
 import { SummaryArtifactNotFoundError } from "../src/summaries/visuals.js";
+import { SummarySceneProposalConflictError } from "../src/summaries/media.js";
 import { QaFindingLifecycleConflictError } from "../src/qa/review.js";
 
 const webAudio: AudioMasteringProcessor = { version: "web-audio-v1", master: async (_inputs, output) => { await atomicWrite(output, Buffer.from("mastered")); return { durationSeconds: 9, codec: "mp3", container: "mp3" }; } };
@@ -110,6 +111,32 @@ describe("web service layer", () => {
   it("classifies invalid summary scenes and unavailable summary media as client errors", () => {
     expect(statusFor(new SceneError("scene-001 has an invalid time range"))).toBe(400);
     expect(statusFor(new SummaryArtifactNotFoundError("Summary video is missing or damaged; generate it first"))).toBe(404);
+    expect(statusFor(new SummarySceneProposalConflictError("Scene changed since preview"))).toBe(409);
+  });
+  it("routes summary single-scene save, proposal, apply and grounding separately", async () => {
+    const summaryId = `sum_${randomUUID()}`, prefix = `/api/stories/demo-story/summaries/${summaryId}/scenes`;
+    const operations = { root: "/tmp/story-web-route-test",
+      updateSummaryScene: vi.fn(async () => ({ id: summaryId })),
+      previewSummarySceneRegeneration: vi.fn(async () => ({ sceneId: "scene-001", mode: "image_prompt" })),
+      applySummarySceneRegeneration: vi.fn(async () => ({ id: summaryId })),
+      summarySceneArtworkGrounding: vi.fn(async () => [{ sceneId: "scene-001", status: "missing" }]),
+    } as unknown as StudioOperations;
+    const handler = createApiHandler(operations);
+    const request = async (method: string, suffix: string, body?: unknown) => {
+      const req = Object.assign(Readable.from(body === undefined ? [] : [JSON.stringify(body)]), { method, url: `${prefix}${suffix}`, headers: { host: "localhost:3000", ...(body === undefined ? {} : { "content-type": "application/json" }) } });
+      const output: Buffer[] = []; let status = 0;
+      const res = Object.assign(new PassThrough(), { writeHead: (value: number) => { status = value; } });
+      res.on("data", (chunk) => output.push(Buffer.from(chunk)));
+      const done = new Promise<void>((resolve) => res.on("finish", resolve));
+      await handler(req as unknown as IncomingMessage, res as unknown as ServerResponse); await done;
+      return { status, body: JSON.parse(Buffer.concat(output).toString("utf8")) };
+    };
+    expect((await request("PUT", "/scene-001", { scene: { summary: "Changed" } })).status).toBe(200);
+    expect((await request("POST", "/scene-001/regenerate-preview", { mode: "image_prompt" })).body.proposal.mode).toBe("image_prompt");
+    expect((await request("PUT", "/scene-001/apply-regeneration", { sceneId: "scene-001" })).status).toBe(200);
+    expect((await request("GET", "/grounding")).body.scenes[0].status).toBe("missing");
+    expect(operations.updateSummaryScene).toHaveBeenCalledWith("demo-story", summaryId, "scene-001", { scene: { summary: "Changed" } });
+    expect(operations.previewSummarySceneRegeneration).toHaveBeenCalledWith("demo-story", summaryId, "scene-001", { mode: "image_prompt" });
   });
   it("classifies QA lifecycle conflicts as recoverable client conflicts", () => {
     expect(statusFor(new QaFindingLifecycleConflictError("QA_FINDING_ALREADY_RESOLVED", "already resolved"))).toBe(409);

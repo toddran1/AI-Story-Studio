@@ -32,6 +32,7 @@ import { scenePacingSchema, estimateScenePacing } from "../scenes/pacing.js";
 import { resolveVisualEntities } from "../scenes/identity.js";
 import { bindNarrationSpans } from "../scenes/narration-spans.js";
 import { productionSceneFingerprint } from "../scenes/manifest.js";
+import { sceneImportanceSchema, type Scene } from "../scenes/types.js";
 
 export const summaryMediaInputSchema = z.object({ force: z.boolean().default(false) }).strict();
 export const summaryScenesInputSchema = scenePacingSchema.safeExtend({ force: z.boolean().default(false) });
@@ -39,6 +40,29 @@ export const summaryNarrationEditSchema = z.union([
   z.object({ text: z.string().trim().min(1).max(1_000_000) }).strict(),
   z.object({ acceptCurrent: z.literal(true) }).strict(),
 ]);
+export const summarySceneRegenerationModeSchema = z.enum(["image_prompt", "full_visual_direction"]);
+export class SummarySceneProposalConflictError extends Error {}
+const summarySceneVisualSnapshotSchema = z.object({
+  summary: z.string().trim().min(1).max(1000), visualPrompt: z.string().trim().min(1).max(8000),
+  characters: z.array(z.string().trim().min(1)).max(20), entityIds: z.array(z.string().trim().min(1)).max(100),
+  location: z.string().max(300).optional(), importance: sceneImportanceSchema,
+}).strict();
+export const summarySceneRegenerationProposalSchema = z.object({
+  sceneId: z.string().regex(/^scene-\d{3}$/), mode: summarySceneRegenerationModeSchema,
+  sourceFingerprint: z.string().min(1), current: summarySceneVisualSnapshotSchema,
+  proposed: summarySceneVisualSnapshotSchema, provider: z.string().min(1), model: z.string().min(1),
+}).strict();
+export type SummarySceneRegenerationProposal = z.infer<typeof summarySceneRegenerationProposalSchema>;
+export function summarySceneVisualSnapshot(scene: Scene) {
+  return summarySceneVisualSnapshotSchema.parse({ summary: scene.summary, visualPrompt: scene.visualPrompt,
+    characters: scene.characters, entityIds: scene.entityIds ?? [], location: scene.location,
+    importance: scene.importance });
+}
+export function summarySceneProposalSourceFingerprint(scene: Scene) {
+  return fingerprint({ visual: summarySceneVisualSnapshot(scene), startSeconds: scene.startSeconds,
+    endSeconds: scene.endSeconds, disabled: scene.disabled, narrationText: scene.narrationText,
+    narrationStartWord: scene.narrationStartWord, narrationEndWord: scene.narrationEndWord });
+}
 export const summaryExportTypeSchema = z.enum(["summary", "narration", "audio"]);
 export function summaryMediaPaths(root: string, story: string, id: string) {
   const record = summaryPath(root, story, id);
@@ -170,23 +194,38 @@ export class SummaryMediaService {
     }
   }
 
-  async regenerateScene(slug: string, id: string, sceneId: string) {
+  async previewSceneRegeneration(slug: string, id: string, sceneId: string, raw: unknown) {
+    const { mode } = z.object({ mode: summarySceneRegenerationModeSchema }).strict().parse(raw);
     const summary = await this.get(slug, id); const scene = summary.scenePlan?.scenes.find((item) => item.id === sceneId);
     if (!scene || !summary.narration?.text?.trim()) throw new Error("Narration text and an existing scene are required");
     const input = await this.inputs(slug, summary); const config = input.story.pipeline.scenePlanner;
-    const planned = await planVisualScenes(this.llms.forStage(config), config, { sourceType: "summary", sourceId: id,
-      sourceLabel: `SUMMARY: ${summary.title} — regenerate ${sceneId} only`, narration: scene.narrationText ?? scene.summary,
-      durationSeconds: scene.endSeconds - scene.startSeconds, targetSceneCount: 1, bible: input.context, settings: input.story.scenes,
-      canonicalSummary: summary.text, sourceChapters: summary.chapters,
-      namingIdentities: input.context.canonicalEntities.map((entity) => ({ entityId: entity.id, canonicalName: entity.canonicalName, originalName: entity.originalName, narrationNames: [entity.localizedNaming?.fullName, entity.localizedNaming?.shortName, entity.preferredNarrationName].filter((value): value is string => Boolean(value)) })) });
-    if (planned.value.scenes.length !== 1) throw new Error("Individual scene regeneration must return exactly one scene");
-    const next = planned.value.scenes[0]!;
-    Object.assign(scene, { summary: next.summary, characters: next.characters, location: next.location, visualPrompt: next.visualPrompt, importance: next.importance,
-      entityIds: resolveVisualEntities(next.characters, input.context.canonicalEntities).map((entity) => entity.id) });
-    summary.scenePlan!.manuallyEdited = true; summary.scenePlan!.manualRevision++;
-    summary.scenes = { ...summary.scenes!, status: "current", manuallyEdited: true, outputFingerprint: productionSceneFingerprint(summary.scenePlan) };
-    if (summary.video) summary.video.status = "stale";
-    return this.save(slug, summary);
+    const provider = this.llms.forStage(config);
+    const current = summarySceneVisualSnapshot(scene);
+    let proposed: typeof current;
+    if (mode === "image_prompt") {
+      await provider.validateConfiguration();
+      const result = await provider.generateStructured({ model: config.model,
+        schemaName: "summary_scene_image_prompt_proposal",
+        schema: z.object({ visualPrompt: z.string().trim().min(1).max(8000) }).strict(),
+        instructions: "Rewrite only the image prompt for this saved summary scene. Keep its visual beat, characters, location, importance, narration coverage, timing, and identity unchanged. Describe the same moment with clear composition and scene state. Return only visualPrompt.",
+        input: JSON.stringify({ scene: current, narration: scene.narrationText ?? scene.summary,
+          canonicalSummary: summary.text, canonicalEntities: input.context.canonicalEntities.map((entity) => ({ id: entity.id, name: entity.canonicalName, description: entity.description })) }),
+      });
+      proposed = { ...current, visualPrompt: result.value.visualPrompt };
+    } else {
+      const planned = await planVisualScenes(provider, config, { sourceType: "summary", sourceId: id,
+        sourceLabel: `SUMMARY: ${summary.title} — regenerate ${sceneId} visual direction only`, narration: scene.narrationText ?? scene.summary,
+        durationSeconds: scene.endSeconds - scene.startSeconds, targetSceneCount: 1, bible: input.context, settings: input.story.scenes,
+        canonicalSummary: summary.text, sourceChapters: summary.chapters,
+        namingIdentities: input.context.canonicalEntities.map((entity) => ({ entityId: entity.id, canonicalName: entity.canonicalName, originalName: entity.originalName, narrationNames: [entity.localizedNaming?.fullName, entity.localizedNaming?.shortName, entity.preferredNarrationName].filter((value): value is string => Boolean(value)) })) });
+      if (planned.value.scenes.length !== 1) throw new Error("Individual scene regeneration must return exactly one scene");
+      const next = planned.value.scenes[0]!;
+      proposed = summarySceneVisualSnapshotSchema.parse({ summary: next.summary, visualPrompt: next.visualPrompt,
+        characters: next.characters, entityIds: resolveVisualEntities(next.characters, input.context.canonicalEntities).map((entity) => entity.id),
+        location: next.location ?? undefined, importance: next.importance });
+    }
+    return summarySceneRegenerationProposalSchema.parse({ sceneId, mode, sourceFingerprint: summarySceneProposalSourceFingerprint(scene),
+      current, proposed, provider: config.provider, model: config.model });
   }
 
   async narration(slug: string, id: string, raw: unknown = {}) {

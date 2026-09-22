@@ -15,6 +15,7 @@ import { bestProductionAsset } from "../../src/artwork/generator.js";
 import { readJsonIfExists } from "../../src/storage/story-files.js";
 import { BatchValidationError, ConfigurationError, ProviderError, SceneError, StorageError } from "../../src/pipeline/errors.js";
 import { SummaryArtifactNotFoundError } from "../../src/summaries/visuals.js";
+import { SummarySceneProposalConflictError } from "../../src/summaries/media.js";
 import { WebHttpError } from "../../src/source/web/http-client.js";
 import { SourceOperationError } from "../../src/source/errors.js";
 import { logger } from "../../src/utils/logger.js";
@@ -127,8 +128,13 @@ export function createApiHandler(operations: StudioOperations) {
       if (summaryReupscaleMatch && request.method === "POST") return send(response, 200, await operations.reupscaleSummaryArtwork(summaryReupscaleMatch[1]!, summaryReupscaleMatch[2]!, await jsonBody(request)));
       if (summaryMediaMatch && summaryMediaMatch[3] === "narration" && request.method === "PUT") return send(response, 200, { summary: await operations.editSummaryNarration(summaryMediaMatch[1]!, summaryMediaMatch[2]!, await jsonBody(request)) });
       if (summaryMediaMatch && summaryMediaMatch[3] === "scenes" && request.method === "PUT") return send(response, 200, { summary: await operations.editSummaryScenes(summaryMediaMatch[1]!, summaryMediaMatch[2]!, await jsonBody(request)) });
-      const summarySceneRegenerateMatch = /^\/api\/stories\/([a-z0-9-]+)\/summaries\/(sum_[a-f0-9-]{36})\/scenes\/(scene-\d{3})\/regenerate$/.exec(url.pathname);
-      if (summarySceneRegenerateMatch && request.method === "POST") { z.object({}).strict().parse(await jsonBody(request)); return send(response, 202, await operations.regenerateSummaryScene(summarySceneRegenerateMatch[1]!, summarySceneRegenerateMatch[2]!, summarySceneRegenerateMatch[3]!)); }
+      const summarySceneGroundingMatch = /^\/api\/stories\/([a-z0-9-]+)\/summaries\/(sum_[a-f0-9-]{36})\/scenes\/grounding$/.exec(url.pathname);
+      if (summarySceneGroundingMatch && request.method === "GET") return send(response, 200, { scenes: await operations.summarySceneArtworkGrounding(summarySceneGroundingMatch[1]!, summarySceneGroundingMatch[2]!) });
+      const summarySingleSceneMatch = /^\/api\/stories\/([a-z0-9-]+)\/summaries\/(sum_[a-f0-9-]{36})\/scenes\/(scene-\d{3})$/.exec(url.pathname);
+      if (summarySingleSceneMatch && request.method === "PUT") return send(response, 200, { summary: await operations.updateSummaryScene(summarySingleSceneMatch[1]!, summarySingleSceneMatch[2]!, summarySingleSceneMatch[3]!, await jsonBody(request)) });
+      const summarySceneProposalMatch = /^\/api\/stories\/([a-z0-9-]+)\/summaries\/(sum_[a-f0-9-]{36})\/scenes\/(scene-\d{3})\/(regenerate-preview|apply-regeneration)$/.exec(url.pathname);
+      if (summarySceneProposalMatch && request.method === "POST" && summarySceneProposalMatch[4] === "regenerate-preview") return send(response, 200, { proposal: await operations.previewSummarySceneRegeneration(summarySceneProposalMatch[1]!, summarySceneProposalMatch[2]!, summarySceneProposalMatch[3]!, await jsonBody(request)) });
+      if (summarySceneProposalMatch && request.method === "PUT" && summarySceneProposalMatch[4] === "apply-regeneration") return send(response, 200, { summary: await operations.applySummarySceneRegeneration(summarySceneProposalMatch[1]!, summarySceneProposalMatch[2]!, summarySceneProposalMatch[3]!, await jsonBody(request)) });
       const summaryImageMatch = /^\/api\/stories\/([a-z0-9-]+)\/summaries\/(sum_[a-f0-9-]{36})\/artwork\/(scene-\d{3})$/.exec(url.pathname);
       if (summaryImageMatch && request.method === "PUT") { const input = z.object({ review: z.enum(["unreviewed", "approved", "rejected", "needs-regeneration"]) }).strict().parse(await jsonBody(request)); return send(response, 200, { summary: await operations.reviewSummaryArtwork(summaryImageMatch[1]!, summaryImageMatch[2]!, summaryImageMatch[3]!, input.review) }); }
       if (summaryImageMatch && request.method === "GET") { const artifact = await operations.summaryVisuals().export(summaryImageMatch[1]!, summaryImageMatch[2]!, "artwork", summaryImageMatch[3]!); const downloadName = url.searchParams.get("download") === "1" ? artifact.name : undefined; return sendFile(request, response, artifact.path, artifact.contentType, { downloadName }); }
@@ -632,6 +638,7 @@ export function statusFor(error: unknown): number {
   if (error instanceof z.ZodError) return 400;
   if (error instanceof JobConflictError || /locked by PID|already has active job/.test(String(error))) return 409;
   if (error instanceof QaFindingLifecycleConflictError) return 409;
+  if (error instanceof SummarySceneProposalConflictError) return 409;
   if (error instanceof QueueConflictError) return 409;
   if (error instanceof QueueNotFoundError) return 404;
   if (error instanceof SummaryArtifactNotFoundError) return 404;

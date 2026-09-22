@@ -50,6 +50,12 @@ describe("summary visual production", () => {
   });
   afterEach(async () => { await rm(root, { recursive: true, force: true }); });
   const produce = () => visuals.produce("demo-story", id, { pacing: "custom", sceneCount: 2 });
+  const sceneEdit = (scene: NonNullable<Awaited<ReturnType<typeof produce>>["scenePlan"]>["scenes"][number], patch: Record<string, unknown> = {}) => ({ scene: {
+    summary: scene.summary, visualPrompt: scene.visualPrompt, characters: scene.characters, entityIds: scene.entityIds ?? [],
+    location: scene.location, startSeconds: scene.startSeconds, endSeconds: scene.endSeconds,
+    disabled: scene.disabled, importance: scene.importance, direction: scene.direction, overrides: scene.overrides,
+    ...patch,
+  } });
   it("plans produce dry-runs without generating, rendering, or changing summary metadata", async () => {
     const before = await readFile(summaryPath(root, "demo-story", id), "utf8");
     const llmCalls = llm.calls.length, ttsCalls = tts.calls, imageCalls = images.generate.mock.calls.length, renderCalls = render.mock.calls.length;
@@ -126,11 +132,45 @@ describe("summary visual production", () => {
   it("supports individual scene regeneration, reordering, disabling and deleting without losing narration coverage", async () => {
     const result = await produce(); const protectedScene = structuredClone(result.scenePlan!.scenes[1]!);
     vi.spyOn(llm, "generateStructured").mockImplementation(async (request) => ({ value: request.schema.parse({ scenes: [{ summary: "New arrival", startSeconds: 0, endSeconds: 8, characters: ["Malakai"], visualPrompt: "A new arrival at the dungeon", importance: "major" }] }) }));
-    const regenerated = await media.regenerateScene("demo-story", id, "scene-001"); expect(regenerated.scenePlan?.scenes[1]).toEqual(protectedScene); expect(regenerated.scenePlan?.scenes[0]?.narrationText).toBe(result.scenePlan?.scenes[0]?.narrationText);
+    const proposal = await media.previewSceneRegeneration("demo-story", id, "scene-001", { mode: "full_visual_direction" });
+    expect((await visuals.get("demo-story", id)).scenePlan?.scenes[0]?.summary).toBe(result.scenePlan?.scenes[0]?.summary);
+    const regenerated = await visuals.applySceneRegeneration("demo-story", id, "scene-001", proposal); expect(regenerated.scenePlan?.scenes[1]).toEqual(protectedScene); expect(regenerated.scenePlan?.scenes[0]?.narrationText).toBe(result.scenePlan?.scenes[0]?.narrationText);
     const reordered = await visuals.editScenes("demo-story", id, { scenes: [...regenerated.scenePlan!.scenes].reverse() }); expect(reordered.scenePlan?.scenes[0]?.id).toBe("scene-002"); expect(reordered.scenePlan?.scenes[0]?.startSeconds).toBe(0);
     const scenes = structuredClone(reordered.scenePlan!.scenes); scenes[0]!.disabled = true; const disabled = await visuals.editScenes("demo-story", id, { scenes }); expect(disabled.scenePlan?.scenes[1]?.startSeconds).toBe(0); expect(disabled.scenePlan?.scenes[1]?.endSeconds).toBe(12);
     const kept = [{ ...disabled.scenePlan!.scenes[1]!, disabled: false }]; const deleted = await visuals.editScenes("demo-story", id, { scenes: kept }); expect(deleted.scenePlan?.scenes).toHaveLength(1); expect(deleted.scenePlan?.scenes[0]?.narrationEndWord).toBe(8);
     await expect(visuals.editScenes("demo-story", id, { scenes: [{ ...kept[0]!, disabled: true }] })).rejects.toThrow("at least one");
+  });
+  it("saves only the selected scene, validates full-plan timing and avoids provider calls", async () => {
+    const before = await produce(); const first = before.scenePlan!.scenes[0]!, second = structuredClone(before.scenePlan!.scenes[1]!);
+    const modelCalls = llm.calls.length, imageCalls = images.generate.mock.calls.length;
+    const changed = await visuals.updateScene("demo-story", id, first.id, sceneEdit(first, { visualPrompt: "A revised image prompt" }));
+    expect(changed.scenePlan!.scenes[0]!.visualPrompt).toBe("A revised image prompt");
+    expect(changed.scenePlan!.scenes[1]).toEqual(second);
+    expect(changed.scenePlan!.manualRevision).toBe(before.scenePlan!.manualRevision + 1);
+    expect(changed.scenePlan!.manuallyEdited).toBe(true);
+    expect((await visuals.sceneArtworkGrounding("demo-story", id))[0]).toMatchObject({ sceneId: first.id, status: "stale" });
+    expect(changed.scenePlan!.scenes[0]!.artwork.versions).toEqual(first.artwork.versions);
+    expect(changed.video?.status).toBe("stale");
+    expect(llm.calls.length).toBe(modelCalls); expect(images.generate.mock.calls.length).toBe(imageCalls);
+    await expect(visuals.updateScene("demo-story", id, first.id, sceneEdit(changed.scenePlan!.scenes[0]!, { endSeconds: first.endSeconds - 1 }))).rejects.toThrow();
+    expect((await visuals.get("demo-story", id)).scenePlan!.scenes[0]!.endSeconds).toBe(first.endSeconds);
+    await expect(visuals.updateScene("demo-story", id, "scene-999", sceneEdit(first))).rejects.toThrow("Scene was not found");
+  });
+  it("previews image-prompt regeneration without writes and rejects a proposal after a newer scene edit", async () => {
+    const before = await produce(); const original = structuredClone(before.scenePlan!.scenes[0]!);
+    const storedBefore = await readFile(summaryPath(root, "demo-story", id), "utf8");
+    vi.spyOn(llm, "generateStructured").mockImplementation(async (request) => ({ value: request.schema.parse({ visualPrompt: "A tighter cinematic angle at the entrance" }) }));
+    const proposal = await media.previewSceneRegeneration("demo-story", id, original.id, { mode: "image_prompt" });
+    expect(proposal.proposed).toMatchObject({ summary: original.summary, characters: original.characters, location: original.location, importance: original.importance, visualPrompt: "A tighter cinematic angle at the entrance" });
+    expect(await readFile(summaryPath(root, "demo-story", id), "utf8")).toBe(storedBefore);
+    const newer = await visuals.updateScene("demo-story", id, original.id, sceneEdit(original, { summary: "A manual visual beat" }));
+    await expect(visuals.applySceneRegeneration("demo-story", id, original.id, proposal)).rejects.toThrow("changed since the proposal");
+    expect((await visuals.get("demo-story", id)).scenePlan!.scenes[0]!.summary).toBe("A manual visual beat");
+    const fresh = await media.previewSceneRegeneration("demo-story", id, original.id, { mode: "image_prompt" });
+    const applied = await visuals.applySceneRegeneration("demo-story", id, original.id, fresh);
+    expect(applied.scenePlan!.scenes[0]).toMatchObject({ summary: newer.scenePlan!.scenes[0]!.summary, startSeconds: original.startSeconds, endSeconds: original.endSeconds, narrationText: original.narrationText, visualPrompt: "A tighter cinematic angle at the entrance" });
+    expect(applied.scenePlan!.scenes[0]!.artwork.versions).toEqual(original.artwork.versions);
+    expect((await visuals.sceneArtworkGrounding("demo-story", id))[0]!.status).toBe("stale");
   });
   it("surfaces image/video failures, preserves successful work and rejects mismatched video duration", async () => {
     await media.audio("demo-story", id); await visuals.scenes("demo-story", id, { sceneCount: 2 }); images.generate.mockRejectedValueOnce(new Error("invalid image response"));
@@ -146,8 +186,14 @@ describe("summary visual production", () => {
     expect(summary.video.status).toBe("current"); output = "";
     await runSummaryCommand(parseSummaryArgs(["export", "demo-story", id, "--type", "video"]), { root, service: summaries, media, visuals, stdout: (text) => { output += text; }, stderr: () => {} }); expect(JSON.parse(output).contentType).toBe("video/mp4");
     const props = { summary, base: `/stories/demo-story/summaries/${id}`, disabled: false, onChange: () => {}, onGenerate: () => {}, onError: () => {} };
-    expect(renderToStaticMarkup(<SummaryScenePanel {...props} />)).toContain("Regenerate scene"); expect(renderToStaticMarkup(<SummaryArtworkPanel {...props} />)).toContain("Approve / retain"); expect(renderToStaticMarkup(<SummaryVideoPanel {...props} />)).toContain("Download MP4");
-    expect(renderToStaticMarkup(<SummaryLayers {...props} slug="demo-story" busy={false}>Canonical</SummaryLayers>)).toContain("Artwork");
+    const scenePanel = renderToStaticMarkup(<SummaryScenePanel {...props} />);
+    expect(scenePanel).toContain("Regenerate scene"); expect(scenePanel).toContain("Save this scene"); expect(scenePanel).toContain("Save all scene edits"); expect(scenePanel).toContain("Revert changes");
+    expect(scenePanel).toContain("Image prompt only"); expect(scenePanel).toContain("Full visual direction");
+    const artworkPanel = renderToStaticMarkup(<SummaryArtworkPanel {...props} />);
+    expect(artworkPanel).toContain("Approve / retain"); expect(artworkPanel).toContain("Regenerate artwork from current saved scene"); expect(artworkPanel).toContain("Edit scene");
+    expect(renderToStaticMarkup(<SummaryVideoPanel {...props} />)).toContain("Download MP4");
+    const layers = renderToStaticMarkup(<SummaryLayers {...props} slug="demo-story" busy={false}>Canonical</SummaryLayers>);
+    expect(layers).toContain("Artwork"); expect(layers).toContain('hidden=""'); expect(layers).toContain("Save this scene");
   });
   it("rejects summary CLI flags that do not apply to their command", () => {
     expect(() => parseSummaryArgs(["scenes", "demo-story", id, "--dry-run"])).toThrow(/Unknown scenes option/);
