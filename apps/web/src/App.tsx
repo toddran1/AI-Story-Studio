@@ -1,6 +1,6 @@
 import { Component, ErrorInfo, FormEvent, ReactNode, useDeferredValue, useEffect, useRef, useState } from "react";
 import type { StageName } from "../../../src/domain/chapter.js";
-import { api, AudioDashboard, ChapterDetail, ChapterQaDetail, ChapterRow, CostAnalytics, Counts, del, ErrorDiagnostic, formatDiagnostic, Job, Model, OutputItem, post, put, ProductionManifest, ProductionPlan, QaException, QaExceptionMatchKind, QaFinding, QaRecheckSummary, QaResult, Scene, ScenesDashboard, StoryCard, StoryConfig, StoryDashboard, TtsQualityArtifact, TtsQualityIssueType, TtsSegmentQuality, VideoDashboard, acceptChapterTtsSegment, chapterTtsSegmentAudioUrl, getChapterTtsQuality, regenerateChapterTtsSegment, verifyChapterTtsQuality } from "./api.js";
+import { api, ApiError, AudioDashboard, ChapterDetail, ChapterQaDetail, ChapterRow, CostAnalytics, Counts, del, ErrorDiagnostic, formatDiagnostic, Job, Model, OutputItem, post, put, ProductionManifest, ProductionPlan, QaException, QaExceptionMatchKind, QaFinding, QaRecheckSummary, QaResult, Scene, ScenesDashboard, StoryCard, StoryConfig, StoryDashboard, TtsQualityArtifact, TtsQualityIssueType, TtsSegmentQuality, VideoDashboard, acceptChapterTtsSegment, chapterTtsSegmentAudioUrl, getChapterTtsQuality, regenerateChapterTtsSegment, verifyChapterTtsQuality } from "./api.js";
 import { ArtifactStatusNotice } from "./ArtifactStatusNotice.js";
 import { pretty } from "./format.js";
 import { GlobalSettingsPage, LibraryPage, ManageStoryPage, NewStoryPage } from "./Milestone12.js";
@@ -978,50 +978,28 @@ function SubtitleWorkspace({ data, cues, working, onCue, onAlign, onGenerate, on
   </div>;
 }
 
-function ResetQaDialog({ slug, defaultChapter, onClose, onDone }: { slug: string; defaultChapter?: number; onClose: () => void; onDone: (summary: string) => void }) {
-  const [scope, setScope] = useState<"chapter" | "range" | "all">(defaultChapter ? "chapter" : "all");
-  const [targetChapter, setTargetChapter] = useState(String(defaultChapter ?? 1));
+function ResetQaDialog({ slug, chapterNumbers, onClose, onDone }: { slug: string; chapterNumbers: number[]; onClose: () => void; onDone: (summary: string) => void }) {
+  const [scope, setScope] = useState<"range" | "all">("all");
   const [fromChapter, setFromChapter] = useState("1");
   const [toChapter, setToChapter] = useState("1");
-  const [totalChapters, setTotalChapters] = useState<number | undefined>();
   const [typedConfirmation, setTypedConfirmation] = useState("");
   const [working, setWorking] = useState(false);
   const [error, setError] = useState("");
   const [batchResult, setBatchResult] = useState<{ requested: number; reset: number; alreadyClean: number; failed: number; failures: Array<{ chapter: number; reason: string }> } | undefined>();
 
-  useEffect(() => {
-    api<{ total: number }>(`/stories/${slug}/chapters?pageSize=1`).then((res) => {
-      if (res && typeof res.total === "number") {
-        setTotalChapters(res.total);
-        if (res.total >= 1) setToChapter(String(res.total));
-      }
-    }).catch(() => undefined);
-  }, [slug]);
-
-  const isMulti = scope === "all" || scope === "range";
-  const affectedCount = scope === "chapter"
-    ? 1
-    : scope === "all"
-      ? (totalChapters ?? "all")
-      : Math.max(0, Number(toChapter) - Number(fromChapter) + 1);
-
-  const canSubmit = !working && (
-    scope === "chapter"
-      ? Number.isInteger(Number(targetChapter)) && Number(targetChapter) >= 1
-      : typedConfirmation.trim() === "RESET QA"
-  );
+  const from = Number(fromChapter); const to = Number(toChapter);
+  const rangeValid = Number.isSafeInteger(from) && Number.isSafeInteger(to) && from >= 1 && to >= from;
+  const affectedChapterNumbers = scope === "all" ? chapterNumbers : rangeValid ? chapterNumbers.filter((chapter) => chapter >= from && chapter <= to) : [];
+  const rangeError = !rangeValid ? "Starting chapter must be less than or equal to ending chapter." : !affectedChapterNumbers.length ? "No existing chapters fall within this range." : "";
+  const canSubmit = !working && typedConfirmation.trim() === "RESET QA" && (scope === "all" ? chapterNumbers.length > 0 : !rangeError);
 
   const submit = async () => {
     try {
       setWorking(true);
       setError("");
       setBatchResult(undefined);
-      if (scope === "chapter") {
-        const ch = Number(targetChapter);
-        const res = await del<{ reset: boolean; skipped?: boolean }>(`/stories/${slug}/chapters/${ch}/qa`);
-        onDone(res.reset ? `QA data reset for Chapter ${ch}. Other stages were not changed.` : `Chapter ${ch} already had no QA data.`);
-      } else {
-        const body = scope === "all" ? { all: true } : { from: Number(fromChapter), to: Number(toChapter) };
+      {
+        const body = scope === "all" ? { type: "book" } : { type: "range", fromChapter: from, toChapter: to };
         const res = await post<{ requested: number; reset: number; alreadyClean: number; skipped: number; failed: number; failures: Array<{ chapter: number; reason: string }> }>(`/stories/${slug}/qa/reset`, body);
         if (res.failed > 0) {
           setBatchResult(res);
@@ -1077,20 +1055,11 @@ function ResetQaDialog({ slug, defaultChapter, onClose, onDone }: { slug: string
           </div>
         )}
         <div className="stage-choices">
-          {defaultChapter && (
-            <label>
-              <input type="radio" name="scope" checked={scope === "chapter"} onChange={() => setScope("chapter")} />
-              <span>
-                <b>Current chapter only</b>
-                <small>Chapter {defaultChapter}</small>
-              </span>
-            </label>
-          )}
           <label>
             <input type="radio" name="scope" checked={scope === "all"} onChange={() => setScope("all")} />
             <span>
               <b>Entire book</b>
-              <small>{totalChapters ? `${totalChapters} chapters in project` : "All existing chapters"}</small>
+              <small>{chapterNumbers.length} chapters in project</small>
             </span>
           </label>
           <label>
@@ -1101,13 +1070,6 @@ function ResetQaDialog({ slug, defaultChapter, onClose, onDone }: { slug: string
             </span>
           </label>
         </div>
-
-        {scope === "chapter" && !defaultChapter && (
-          <label className="field">
-            <span>Chapter number</span>
-            <input type="number" min={1} value={targetChapter} onChange={(e) => setTargetChapter(e.target.value)} />
-          </label>
-        )}
 
         {scope === "range" && (
           <div style={{ display: "flex", gap: "12px", marginBottom: "16px" }}>
@@ -1122,11 +1084,12 @@ function ResetQaDialog({ slug, defaultChapter, onClose, onDone }: { slug: string
           </div>
         )}
 
-        {isMulti && (
+        {
           <div className="naming-notice" style={{ marginTop: "12px", marginBottom: "12px" }}>
             <p>
-              This will permanently delete QA data for <b>{affectedCount} chapter{affectedCount === 1 ? "" : "s"}</b>. Other production data will not be changed.
+              This will permanently delete QA data for <b>{affectedChapterNumbers.length} existing chapter{affectedChapterNumbers.length === 1 ? "" : "s"}</b>{scope === "range" && rangeValid ? <>: Chapters {from}–{to}</> : ""}. Other production data will not be changed.
             </p>
+            {rangeError && <p className="error-text">{rangeError}</p>}
             <label className="field" style={{ marginTop: "8px" }}>
               <span>Type <code>RESET QA</code> to continue:</span>
               <input
@@ -1141,9 +1104,7 @@ function ResetQaDialog({ slug, defaultChapter, onClose, onDone }: { slug: string
 
         <footer>
           <small>
-            {isMulti
-              ? `Affected chapters: ${affectedCount}`
-              : `Chapter ${targetChapter} will return to QA-not-run`}
+            Affected chapters: {affectedChapterNumbers.length}
           </small>
           <button
             className="button primary"
@@ -1156,6 +1117,12 @@ function ResetQaDialog({ slug, defaultChapter, onClose, onDone }: { slug: string
       </section>
     </div>
   );
+}
+
+function ResetChapterQaDialog({ slug, chapter, onClose, onDone }: { slug: string; chapter: number; onClose: () => void; onDone: (result: unknown) => void | Promise<void> }) {
+  const [working, setWorking] = useState(false); const [error, setError] = useState("");
+  const submit = async () => { try { setWorking(true); setError(""); const result = await post(`/stories/${slug}/chapters/${chapter}/qa/reset`, { scope: { type: "chapter", chapterNumber: chapter } }); await onDone(result); } catch (value) { setWorking(false); setError(message(value)); } };
+  return <div className="stage-modal-backdrop" role="presentation"><section className="stage-modal" role="dialog" aria-modal="true" aria-labelledby="reset-chapter-qa-title"><header><div><span className="eyebrow">Maintenance</span><h3 id="reset-chapter-qa-title">Reset Chapter QA</h3></div><button className="button" disabled={working} onClick={onClose}>Cancel</button></header><p>Permanently remove all QA data for <b>Chapter {chapter}</b>: its score, findings, resolutions, verification history, and QA run state.</p><p>Translation, narration, Story Bible, pronunciation, audio, scenes, artwork, video, and other production data remain unchanged. The next QA run starts from a clean QA state.</p>{error && <ErrorBox text={error} />}<footer><small>This action affects Chapter {chapter} only.</small><button className="button primary" disabled={working} onClick={() => void submit()}>{working ? "Resetting QA…" : "Reset Chapter QA"}</button></footer></section></div>;
 }
 
 function QaPage({ slug, navigate }: { slug: string; navigate: (path: string) => void }) {
@@ -1174,7 +1141,7 @@ function QaPage({ slug, navigate }: { slug: string; navigate: (path: string) => 
       </div>
     </div>
     {banner && <div className="naming-notice" style={{ marginBottom: "16px" }}>{banner}</div>}
-    {resetModalOpen && <ResetQaDialog slug={slug} onClose={() => setResetModalOpen(false)} onDone={(msg) => { setResetModalOpen(false); setBanner(msg); load(); }} />}
+    {resetModalOpen && <ResetQaDialog slug={slug} chapterNumbers={data.chapters.map((item: { chapter: number }) => item.chapter)} onClose={() => setResetModalOpen(false)} onDone={(msg) => { setResetModalOpen(false); setBanner(msg); load(); }} />}
     <div className="qa-summary">{(["pass", "warn", "fail"] as const).map((key) => <button onClick={() => setStatus(key)} className={`qa-count ${key}`} key={key}><span>{key}</span><b>{data.counts[key]}</b><i /></button>)}</div>
     {data.counts.needsVerification > 0 && <p className="qa-unverified-label">{data.counts.needsVerification} previous finding{data.counts.needsVerification === 1 ? "" : "s"} need verification — recheck the affected chapters to make their QA current.</p>}
     <div className="category-strip">{Object.entries(data.categories).map(([key, value]) => <span key={key}>{pretty(key)} <b>{String(value)}</b></span>)}</div>
@@ -3551,16 +3518,35 @@ export function QaDetail({ slug, chapter, onJob, onEditManually, onChanged, init
   const [data, setData] = useState<ChapterQaDetail | undefined>(initialData); const [error, setError] = useState(initialError ?? ""); const [note, setNote] = useState(""); const [busy, setBusy] = useState("");
   const [dismissTarget, setDismissTarget] = useState<QaFinding>(); const [resetOpen, setResetOpen] = useState(false);
   const [expanded, setExpanded] = useState<string[]>([]); const [recheckSummary, setRecheckSummary] = useState<QaRecheckSummary>();
-  const watcher = useRef<(() => void) | undefined>(undefined);
-  const load = async () => { const next = await api<ChapterQaDetail>(`/stories/${slug}/chapters/${chapter}/qa`); setData(next); };
-  useEffect(() => { if (!initialData && !initialError) { setData(undefined); setError(""); setRecheckSummary(undefined); void load().catch((value) => setError(message(value))); } return () => watcher.current?.(); }, [slug, chapter]);
+  const watcher = useRef<(() => void) | undefined>(undefined); const mutationInFlight = useRef(false); const qaRevision = useRef(0);
+  const load = async () => { const revision = qaRevision.current; const next = await api<ChapterQaDetail>(`/stories/${slug}/chapters/${chapter}/qa`); if (revision === qaRevision.current) setData(next); return next; };
+  const applyAuthoritativeQa = (result: unknown) => {
+    const presentation = (result as { presentation?: ChapterQaDetail } | undefined)?.presentation;
+    if (presentation) { qaRevision.current++; setData(presentation); }
+  };
+  const isLifecycleConflict = (value: unknown) => value instanceof ApiError
+    ? value.code === "QA_FINDING_ALREADY_RESOLVED" || value.code === "QA_FINDING_ALREADY_OPEN"
+    : /QA finding (?:has already been resolved|is already open|is not open)/i.test(message(value));
+  const reconcileLifecycleConflict = async (value: unknown) => {
+    if (!isLifecycleConflict(value)) return false;
+    qaRevision.current++; setDismissTarget(undefined); setBusy(""); setError("");
+    try {
+      await load(); onChanged();
+      setNote(value instanceof ApiError && value.code === "QA_FINDING_ALREADY_OPEN"
+        ? "This finding was already open. QA state was refreshed."
+        : "This finding had already been resolved. QA state was refreshed.");
+    } catch (reloadError) { setError(message(reloadError)); }
+    return true;
+  };
+  const reconcileMutation = async (result: unknown) => { applyAuthoritativeQa(result); await load(); onChanged(); };
+  useEffect(() => { qaRevision.current++; if (!initialData && !initialError) { setData(undefined); setError(""); setRecheckSummary(undefined); void load().catch((value) => setError(message(value))); } return () => watcher.current?.(); }, [slug, chapter]);
   const toggleExpanded = (key: string) => setExpanded((current) => current.includes(key) ? current.filter((item) => item !== key) : [...current, key]);
-  const runJob = (kind: string, job: Job, onComplete?: (job: Job) => void) => { setError(""); setNote(""); setBusy(kind); onJob(job); watcher.current?.(); watcher.current = watchJob(job.id, async (next) => { onJob(next); if (next.status === "completed") { setBusy(""); onComplete?.(next); await load(); onChanged(); } else if (next.status === "failed") { setBusy(""); setError(next.error ?? "QA job failed"); } }, (value) => { setBusy(""); setError(message(value)); }); };
+  const runJob = (kind: string, job: Job, onComplete?: (job: Job) => void) => { setError(""); setNote(""); setBusy(kind); onJob(job); watcher.current?.(); watcher.current = watchJob(job.id, async (next) => { onJob(next); if (next.status === "completed") { setBusy(""); mutationInFlight.current = false; applyAuthoritativeQa(next.result); onComplete?.(next); await load(); onChanged(); } else if (next.status === "failed") { setBusy(""); mutationInFlight.current = false; if (!await reconcileLifecycleConflict(next.error ?? "QA job failed")) setError(next.error ?? "QA job failed"); } }, (value) => { setBusy(""); mutationInFlight.current = false; setError(message(value)); }); };
   const recheck = async (mode: "changed" | "full") => { try { const job = await post<Job>(`/stories/${slug}/chapters/${chapter}/qa/recheck`, { mode }); runJob("recheck", job, (done) => { const summary = done.result?.summary as QaRecheckSummary | undefined; if (summary) setRecheckSummary(summary); }); } catch (value) { setError(message(value)); } };
   const safeFixes = async () => { if (!data || !confirm(`Apply AI fixes to ${data.counts.safeFixesAvailable} finding${data.counts.safeFixesAvailable === 1 ? "" : "s"} marked safe to fix, then recheck the chapter? This may incur provider charges.`)) return; try { const job = await post<Job>(`/stories/${slug}/chapters/${chapter}/qa/safe-fixes`, {}); runJob("safeFixes", job, (done) => { const fixed: string[] = done.result?.fixed ?? []; const failed: Array<{ id: string; message: string }> = done.result?.failed ?? []; setNote(`Applied ${fixed.length} safe fix${fixed.length === 1 ? "" : "es"}.${failed.length ? ` ${failed.length} failed: ${failed.map((item) => item.message).join("; ")}` : ""}`); }); } catch (value) { setError(message(value)); } };
-  const fixWithAi = async (finding: QaFinding) => { if (!confirm(`Send this finding and the chapter text to the configured AI model for repair, then recheck QA? This may incur provider charges.`)) return; try { const job = await post<Job>(`/stories/${slug}/chapters/${chapter}/qa/findings/${finding.id}/fix-ai`, {}); runJob(`fix:${finding.id}`, job, (done) => { const repaired: string[] = done.result?.repaired ?? []; setNote(done.result?.fixed ? `Finding repaired in ${repaired.join(" and ") || "chapter text"} and verified by recheck.` : "Repair was applied, but the recheck still reports the problem — it was reopened."); }); } catch (value) { setError(message(value)); } };
-  const resolveManual = async (finding: QaFinding) => { try { setError(""); setNote(""); setBusy(`resolve:${finding.id}`); await post(`/stories/${slug}/chapters/${chapter}/qa/findings/${finding.id}/resolve-manual`, {}); setBusy(""); setNote("Finding marked as fixed manually. A future recheck will verify it."); await load(); onChanged(); } catch (value) { setBusy(""); setError(message(value)); } };
-  const reopen = async (finding: QaFinding) => { try { setError(""); setNote(""); setBusy(`reopen:${finding.id}`); await post(`/stories/${slug}/chapters/${chapter}/qa/findings/${finding.id}/reopen`, {}); setBusy(""); await load(); onChanged(); } catch (value) { setBusy(""); setError(message(value)); } };
+  const fixWithAi = async (finding: QaFinding) => { if (mutationInFlight.current || busy || !confirm(`Send this finding and the chapter text to the configured AI model for repair, then recheck QA? This may incur provider charges.`)) return; mutationInFlight.current = true; try { const job = await post<Job>(`/stories/${slug}/chapters/${chapter}/qa/findings/${finding.id}/fix-ai`, {}); runJob(`fix:${finding.id}`, job, (done) => { const repaired: string[] = done.result?.repaired ?? []; setNote(done.result?.fixed ? `Finding repaired in ${repaired.join(" and ") || "chapter text"} and verified by recheck.` : "Repair was applied, but the recheck still reports the problem — it was reopened."); }); } catch (value) { mutationInFlight.current = false; if (!await reconcileLifecycleConflict(value)) setError(message(value)); } };
+  const resolveManual = async (finding: QaFinding) => { if (mutationInFlight.current || busy) return; mutationInFlight.current = true; try { setError(""); setNote(""); setBusy(`resolve:${finding.id}`); const result = await post(`/stories/${slug}/chapters/${chapter}/qa/findings/${finding.id}/resolve-manual`, {}); setBusy(""); setNote("Finding marked as fixed manually. A future recheck will verify it."); await reconcileMutation(result); } catch (value) { setBusy(""); if (!await reconcileLifecycleConflict(value)) setError(message(value)); } finally { mutationInFlight.current = false; } };
+  const reopen = async (finding: QaFinding) => { if (mutationInFlight.current || busy) return; mutationInFlight.current = true; try { setError(""); setNote(""); setBusy(`reopen:${finding.id}`); const result = await post(`/stories/${slug}/chapters/${chapter}/qa/findings/${finding.id}/reopen`, {}); setBusy(""); await reconcileMutation(result); } catch (value) { setBusy(""); if (!await reconcileLifecycleConflict(value)) setError(message(value)); } finally { mutationInFlight.current = false; } };
   if (error && !data) {
     const isNoQa = /does not have a QA result|no QA result|QA has not been run/i.test(error);
     if (isNoQa) {
@@ -3619,8 +3605,8 @@ export function QaDetail({ slug, chapter, onJob, onEditManually, onChanged, init
       {!openFindingsList.length && !stale && <Empty title="Nothing needs attention" text="Every finding for this chapter is resolved. Recheck QA after editing the manuscript to verify it stays clear." />}
     </div>
     {resolvedFindings.length > 0 && <QaResolvedFindings findings={resolvedFindings} busy={busy} expanded={expanded} currentFingerprint={data.currentFingerprint} onToggle={toggleExpanded} onReopen={(finding) => void reopen(finding)} />}
-    {dismissTarget && <DismissFindingDialog slug={slug} chapter={chapter} finding={dismissTarget} busy={Boolean(busy)} onClose={() => setDismissTarget(undefined)} onDone={async (remembered) => { setDismissTarget(undefined); setNote(remembered ? "Finding dismissed and remembered as a story-level exception." : "Finding dismissed. A future recheck will respect this decision."); await load(); onChanged(); }} onError={(value) => { setDismissTarget(undefined); setError(value); }} />}
-    {resetOpen && <ResetQaDialog slug={slug} defaultChapter={chapter} onClose={() => setResetOpen(false)} onDone={async (msg) => { setResetOpen(false); if (msg) setNote(msg); setData(undefined); setError(""); try { await load(); } catch (err) { setError(message(err)); } onChanged(); }} />}
+    {dismissTarget && <DismissFindingDialog slug={slug} chapter={chapter} finding={dismissTarget} busy={Boolean(busy)} onClose={() => setDismissTarget(undefined)} onDone={async (result, remembered) => { setDismissTarget(undefined); setError(""); setNote(remembered ? "Finding dismissed and remembered as a story-level exception." : "Finding dismissed. A future recheck will respect this decision."); await reconcileMutation(result); }} onError={(value) => { setDismissTarget(undefined); void reconcileLifecycleConflict(value).then((recovered) => { if (!recovered) setError(message(value)); }); }} />}
+    {resetOpen && <ResetChapterQaDialog slug={slug} chapter={chapter} onClose={() => setResetOpen(false)} onDone={async () => { setResetOpen(false); setNote(`QA data reset for Chapter ${chapter}. Other stages were not changed.`); setData(undefined); setError(""); try { await load(); } catch (err) { setError(message(err)); } onChanged(); }} />}
   </div>;
 }
 
@@ -3650,12 +3636,12 @@ export function QaResolvedFindings({ findings, busy, expanded, currentFingerprin
   </div>;
 }
 
-function DismissFindingDialog({ slug, chapter, finding, busy, onClose, onDone, onError }: { slug: string; chapter: number; finding: QaFinding; busy: boolean; onClose: () => void; onDone: (remembered: boolean) => void | Promise<void>; onError: (error: string) => void }) {
+function DismissFindingDialog({ slug, chapter, finding, busy, onClose, onDone, onError }: { slug: string; chapter: number; finding: QaFinding; busy: boolean; onClose: () => void; onDone: (result: unknown, remembered: boolean) => void | Promise<void>; onError: (error: unknown) => void }) {
   const [reason, setReason] = useState(""); const [remember, setRemember] = useState(false);
   const [matchKind, setMatchKind] = useState<QaExceptionMatchKind>("terminology"); const [value, setValue] = useState(() => guessExceptionValue(finding.message));
-  const [working, setWorking] = useState(false);
-  const submit = async () => { try { setWorking(true); await post(`/stories/${slug}/chapters/${chapter}/qa/findings/${finding.id}/dismiss`, { reason: reason.trim() || undefined, remember: remember ? { matchKind, value: value.trim() } : undefined }); await onDone(remember); } catch (cause) { setWorking(false); onError(message(cause)); } };
-  return <div className="stage-modal-backdrop" role="presentation"><section className="stage-modal qa-dismiss-modal" role="dialog" aria-modal="true" aria-labelledby="dismiss-finding-title"><header><div><span className="eyebrow">{pretty(finding.category)} finding</span><h3 id="dismiss-finding-title">Dismiss finding</h3></div><button className="button" onClick={onClose}>Close</button></header><p>{finding.message}</p>
+  const [working, setWorking] = useState(false); const submitting = useRef(false);
+  const submit = async () => { if (submitting.current || working || busy) return; submitting.current = true; try { setWorking(true); const result = await post(`/stories/${slug}/chapters/${chapter}/qa/findings/${finding.id}/dismiss`, { reason: reason.trim() || undefined, remember: remember ? { matchKind, value: value.trim() } : undefined }); await onDone(result, remember); } catch (cause) { setWorking(false); onError(cause); } finally { submitting.current = false; } };
+  return <div className="stage-modal-backdrop" role="presentation"><section className="stage-modal qa-dismiss-modal" role="dialog" aria-modal="true" aria-labelledby="dismiss-finding-title"><header><div><span className="eyebrow">{pretty(finding.category)} finding</span><h3 id="dismiss-finding-title">Dismiss finding</h3></div><button className="button" disabled={working || busy} onClick={onClose}>Close</button></header><p>{finding.message}</p>
     <label className="field"><span>Reason (optional)</span><input value={reason} maxLength={1000} placeholder="Why this finding needs no action" onChange={(event) => setReason(event.target.value)} /></label>
     <label className="toggle-line"><input type="checkbox" checked={remember} onChange={(event) => setRemember(event.target.checked)} /> Remember this decision for this story</label>
     {remember && <div className="field-row"><Field label="Match kind"><select value={matchKind} onChange={(event) => setMatchKind(event.target.value as QaExceptionMatchKind)}><option value="terminology">Terminology</option><option value="entity">Entity</option><option value="rule">Rule</option><option value="other">Other</option></select></Field><Field label="Value to ignore"><input value={value} maxLength={300} placeholder="Text this exception matches" onChange={(event) => setValue(event.target.value)} /></Field></div>}

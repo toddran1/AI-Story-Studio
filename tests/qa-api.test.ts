@@ -161,6 +161,7 @@ describe("finding lifecycle endpoints", () => {
     const before = chapterSchema.parse(await readJsonIfExists(paths.chapterMeta));
     const result = await operations.resolveQaFindingManually(story.slug, 1, id, { finalText: "The keeper counted the azure flames." });
     expect(result.finding).toMatchObject({ status: "fixed_manual", resolution: { action: "manual_fix" } });
+    expect(result.presentation).toMatchObject({ counts: { open: 0, resolved: 1 }, state: { findings: [expect.objectContaining({ id, status: "fixed_manual" })] } });
     expect(result.finding.resolution?.finalTextFingerprint).toBeTruthy();
     const after = chapterSchema.parse(await readJsonIfExists(paths.chapterMeta));
     expect(after.stages.tts).toEqual(before.stages.tts);
@@ -177,6 +178,7 @@ describe("finding lifecycle endpoints", () => {
     const { operations } = operationsWith(root, openaiQa());
     const dismissed = await operations.dismissQaFinding(story.slug, 1, id, { reason: "Author-approved term", remember: { matchKind: "terminology", value: "Azure Flame" } });
     expect(dismissed.finding).toMatchObject({ status: "dismissed", resolution: { action: "dismiss", reason: "Author-approved term" } });
+    expect(dismissed.presentation).toMatchObject({ counts: { open: 0, resolved: 1 }, state: { findings: [expect.objectContaining({ id, status: "dismissed" })] } });
     expect(dismissed.exception).toMatchObject({ category: "terminology", matchKind: "terminology", value: "Azure Flame" });
     await operations.close();
     // A materially reworded re-detection would normally be a new finding; the
@@ -202,9 +204,10 @@ describe("finding lifecycle endpoints", () => {
     await operations.dismissQaFinding(story.slug, 1, id, { reason: "Not an issue" });
     const reopened = await operations.reopenQaFinding(story.slug, 1, id);
     expect(reopened.finding.status).toBe("open");
+    expect(reopened.presentation).toMatchObject({ counts: { open: 1, resolved: 0 }, state: { findings: [expect.objectContaining({ id, status: "open" })] } });
     expect(reopened.finding.reopenedAt).toBeTruthy();
     expect(reopened.finding.resolution).toMatchObject({ action: "dismiss", reason: "Not an issue" });
-    await expect(operations.reopenQaFinding(story.slug, 1, id)).rejects.toThrow("already open");
+    await expect(operations.reopenQaFinding(story.slug, 1, id)).rejects.toMatchObject({ code: "QA_FINDING_ALREADY_OPEN" });
     await operations.close();
   });
 });

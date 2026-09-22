@@ -1,6 +1,6 @@
 export type ErrorDiagnostic = { id:string;timestamp:string;summary:string;category:"transient"|"rate_limit"|"configuration"|"content_qa"|"permanent";retryable:boolean;recommendedAction:string;chapter?:number;stage?:string;provider?:string;model?:string;code?:string;technicalDetails?:string;issues?:Array<{category:string;severity:string;message:string;evidence?:string}>;qaDependencyFingerprint?:string };
 export type ApiValidationIssue = { path: string; message: string; code?: string };
-export class ApiError extends Error { constructor(message: string, public readonly diagnostic?: ErrorDiagnostic, public readonly validation?: ApiValidationIssue[]) { super(formatApiError(message, diagnostic, validation)); this.name = "ApiError"; } }
+export class ApiError extends Error { constructor(message: string, public readonly diagnostic?: ErrorDiagnostic, public readonly validation?: ApiValidationIssue[], public readonly code?: string) { super(formatApiError(message, diagnostic, validation)); this.name = "ApiError"; } }
 export function formatDiagnostic(diagnostic: ErrorDiagnostic) { return `${diagnostic.summary}\nNext: ${diagnostic.recommendedAction}\nReference: ${diagnostic.id}`; }
 export function formatApiError(message: string, diagnostic?: ErrorDiagnostic, validation?: ApiValidationIssue[]) {
   const fields = validation?.length ? `Please correct:\n${validation.map((issue) => `• ${issue.path}: ${issue.message}`).join("\n")}` : undefined;
@@ -13,7 +13,7 @@ export async function api<T>(path: string, options?: RequestInit): Promise<T> {
   try { response = await fetch(`/api${path}`, { ...options, headers: { ...(binary ? {} : { "content-type": "application/json" }), ...options?.headers } }); }
   catch (cause) { throw new ApiError("Cannot reach the local Story Studio service. Confirm `npm run web` is running, then try again.", undefined, undefined); }
   const value = await response.json().catch(() => ({}));
-  if (!response.ok) throw new ApiError(typeof value.error === "string" ? value.error : `Request failed (${response.status})`, value.diagnostic, parseValidationIssues(value.validation));
+  if (!response.ok) throw new ApiError(typeof value.error === "string" ? value.error : `Request failed (${response.status})`, value.diagnostic, parseValidationIssues(value.validation), typeof value.code === "string" ? value.code : undefined);
   return value as T;
 }
 
@@ -583,4 +583,3 @@ export type ReupscaleArtworkResult = { chapter: number; rederived: Array<{ scene
 export async function reupscaleArtwork(slug: string, chapter: number, sceneId?: string): Promise<ReupscaleArtworkResult> {
   return post<ReupscaleArtworkResult>(`/stories/${encodeURIComponent(slug)}/chapters/${chapter}/artwork/reupscale`, sceneId ? { sceneId } : {});
 }
-

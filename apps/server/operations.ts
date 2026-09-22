@@ -102,7 +102,7 @@ import { migrateQaState, openFindings, qaCounts, qaFindingStats } from "../../sr
 import { deriveChapterQaFreshness } from "../../src/qa/freshness.js";
 import { resolveQaFindingsByIndex, recheckChapterQa, transitionQaFinding, type QaFindingTransition } from "../../src/qa/review.js";
 import { addQaException, listQaExceptions, removeQaException } from "../../src/qa/exceptions.js";
-import { resetChapterQa, resetChapterQaBatch, resetQaBatchOptionsSchema } from "../../src/qa/reset.js";
+import { resetChapterQa, resetChapterQaBatch, qaResetScopeSchema } from "../../src/qa/reset.js";
 import { applyNarrationNamingPreferences } from "../../src/narration/naming-preferences.js";
 import { loadNarrationNamingEntities } from "../../src/story-bible/narration-names.js";
 import { issueRepairTargets, repairQaText, repairTargets } from "../../src/qa/repair.js";
@@ -553,8 +553,8 @@ export class StudioOperations {
 
   async resetQaBatch(slug: string, raw: unknown) {
     slugSchema.parse(slug);
-    const options = resetQaBatchOptionsSchema.parse(raw);
-    const result = await resetChapterQaBatch(this.root, slug, options);
+    const scope = qaResetScopeSchema.parse(raw);
+    const result = await resetChapterQaBatch(this.root, slug, scope);
     if (result.reset > 0) {
       invalidateCatalogCache(this.root, slug);
       await recordActivity(this.root, slug, "qa.batch_reset", `Reset QA evaluation data for ${result.reset} chapter(s)`);
@@ -589,7 +589,7 @@ export class StudioOperations {
       const finalTextFingerprint = input.finalText?.trim() ? fingerprint(input.finalText) : undefined;
       const { finding, state } = await this.mutateQaFindingState(slug, chapter, id, "manual_fix", { finalTextFingerprint });
       await recordActivity(this.root, slug, "chapter.qa_manually_fixed", `Marked QA finding ${id} for Chapter ${chapter} manually fixed`);
-      return { chapter, finding, qa: state };
+      return { chapter, finding, qa: state, presentation: await this.getChapterQa(slug, chapter) };
     });
   }
 
@@ -604,7 +604,7 @@ export class StudioOperations {
         invalidateCatalogCache(this.root, slug);
       }
       await recordActivity(this.root, slug, "chapter.qa_dismissed", `Dismissed QA finding ${id} for Chapter ${chapter}${exception ? " and remembered the decision" : ""}`);
-      return { chapter, finding, qa: state, exception };
+      return { chapter, finding, qa: state, exception, presentation: await this.getChapterQa(slug, chapter) };
     });
   }
 
@@ -614,7 +614,7 @@ export class StudioOperations {
     return withStoryLock(this.root, slug, "QA finding reopen", async () => {
       const { finding, state } = await this.mutateQaFindingState(slug, chapter, id, "reopen");
       await recordActivity(this.root, slug, "chapter.qa_reopened", `Reopened QA finding ${id} for Chapter ${chapter}`);
-      return { chapter, finding, qa: state };
+      return { chapter, finding, qa: state, presentation: await this.getChapterQa(slug, chapter) };
     });
   }
 
@@ -659,7 +659,7 @@ export class StudioOperations {
       const recheck = await withUsageScope({ story: slug, chapter, stage: "qa" }, () => recheckChapterQa({ root: this.root, story, chapter, provider: this.llm.forStage(story.pipeline.qa), mode: "full" }));
       const finalFinding = recheck.state.findings.find((candidate) => candidate.id === id);
       invalidateCatalogCache(this.root, slug); await recordActivity(this.root, slug, "chapter.qa_repaired", `AI repaired Chapter ${chapter} ${repaired.join(" and ")} for QA finding ${id}`);
-      return { chapter, findingId: id, repaired, fixed: finalFinding?.status === "fixed_ai", finding: finalFinding, summary: recheck.summary };
+      return { chapter, findingId: id, repaired, fixed: finalFinding?.status === "fixed_ai", finding: finalFinding, summary: recheck.summary, presentation: await this.getChapterQa(slug, chapter) };
     }));
   }
 

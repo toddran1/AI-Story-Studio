@@ -24,6 +24,7 @@ import { durableJobStatusSchema } from "../../src/queue/types.js";
 import { QueueConflictError, QueueNotFoundError } from "../../src/queue/repository.js";
 import { productionForceSchema } from "../../src/production/types.js";
 import { createErrorDiagnostic } from "../../src/errors/diagnostic.js";
+import { QaFindingLifecycleConflictError } from "../../src/qa/review.js";
 import { findVisualReferenceFile, mimeForVisualReferenceExtension } from "../../src/visual-canon/assets.js";
 
 const MAX_BODY_BYTES = 50_000_000;
@@ -165,6 +166,13 @@ export function createApiHandler(operations: StudioOperations) {
       if (chapterQaRepairMatch && request.method === "POST") return send(response, 202, operations.startQaRepair(chapterQaRepairMatch[1]!, chapterParam(chapterQaRepairMatch[2]!), await jsonBody(request)));
       const chapterQaDismissMatch = /^\/api\/stories\/([a-z0-9-]+)\/chapters\/(\d+)\/qa\/dismiss$/.exec(url.pathname);
       if (chapterQaDismissMatch && request.method === "PUT") return send(response, 200, await operations.dismissQaFindings(chapterQaDismissMatch[1]!, chapterParam(chapterQaDismissMatch[2]!), await jsonBody(request)));
+      const chapterQaResetMatch = /^\/api\/stories\/([a-z0-9-]+)\/chapters\/(\d+)\/qa\/reset$/.exec(url.pathname);
+      if (chapterQaResetMatch && request.method === "POST") {
+        const chapter = chapterParam(chapterQaResetMatch[2]!);
+        const input = z.object({ scope: z.object({ type: z.literal("chapter"), chapterNumber: z.number().int().positive() }).strict() }).strict().parse(await jsonBody(request));
+        if (input.scope.chapterNumber !== chapter) throw new HttpError("Reset scope must match the chapter route", 400);
+        return send(response, 200, await operations.resetQaBatch(chapterQaResetMatch[1]!, input.scope));
+      }
       const chapterQaStateMatch = /^\/api\/stories\/([a-z0-9-]+)\/chapters\/(\d+)\/qa$/.exec(url.pathname);
       if (chapterQaStateMatch && request.method === "GET") return send(response, 200, await operations.getChapterQa(chapterQaStateMatch[1]!, chapterParam(chapterQaStateMatch[2]!)));
       if (chapterQaStateMatch && request.method === "DELETE") return send(response, 200, await operations.resetChapterQa(chapterQaStateMatch[1]!, chapterParam(chapterQaStateMatch[2]!)));
@@ -526,7 +534,7 @@ export function createApiHandler(operations: StudioOperations) {
       const displayError = error instanceof z.ZodError ? new Error(z.prettifyError(error), { cause: error }) : error;
       const diagnostic = createErrorDiagnostic(displayError);
       if (status >= 500) logger.error({ event: "web.api.failed", diagnosticId: diagnostic.id, category: diagnostic.category, method: request.method, path: url.pathname, status, error: error instanceof Error ? error.message : String(error) });
-      return send(response, status, { error: diagnostic.summary, diagnostic: publicJob(diagnostic, operations.root), validation: validationIssues(error) });
+      return send(response, status, { error: diagnostic.summary, diagnostic: publicJob(diagnostic, operations.root), validation: validationIssues(error), ...(error instanceof QaFindingLifecycleConflictError ? { code: error.code } : {}) });
     }
   };
 }
@@ -589,6 +597,7 @@ export function statusFor(error: unknown): number {
   if (error instanceof SourceOperationError) return error.status;
   if (error instanceof z.ZodError) return 400;
   if (error instanceof JobConflictError || /locked by PID|already has active job/.test(String(error))) return 409;
+  if (error instanceof QaFindingLifecycleConflictError) return 409;
   if (error instanceof QueueConflictError) return 409;
   if (error instanceof QueueNotFoundError) return 404;
   if (error instanceof SummaryArtifactNotFoundError) return 404;

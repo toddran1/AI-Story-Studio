@@ -439,6 +439,14 @@ export function resolveQaFindingsByIndex(
 
 export type QaFindingTransition = "manual_fix" | "ai_fix" | "dismiss" | "reopen";
 
+/** Stable lifecycle conflicts that clients can reconcile by reloading QA state. */
+export class QaFindingLifecycleConflictError extends Error {
+  constructor(readonly code: "QA_FINDING_ALREADY_RESOLVED" | "QA_FINDING_ALREADY_OPEN", message: string) {
+    super(message);
+    this.name = "QaFindingLifecycleConflictError";
+  }
+}
+
 /** Single-finding status transition with resolution history; recomputes the summary from open findings. */
 export function transitionQaFinding(
   value: QaState,
@@ -451,11 +459,11 @@ export function transitionQaFinding(
   const finding = findings.find((candidate) => candidate.id === id);
   if (!finding) throw new Error("QA finding was not found. Reload the chapter and try again.");
   if (action === "reopen") {
-    if (finding.status === "open") throw new Error("QA finding is already open.");
+    if (finding.status === "open") throw new QaFindingLifecycleConflictError("QA_FINDING_ALREADY_OPEN", "QA finding is already open.");
     finding.status = "open";
     finding.reopenedAt = now;
   } else {
-    if (finding.status !== "open") throw new Error("QA finding has already been resolved. Reload the chapter and select an open finding.");
+    if (finding.status !== "open") throw new QaFindingLifecycleConflictError("QA_FINDING_ALREADY_RESOLVED", "QA finding has already been resolved. Reload the chapter and select an open finding.");
     finding.status = action === "dismiss" ? "dismissed" : action === "manual_fix" ? "fixed_manual" : "fixed_ai";
     finding.resolution = {
       action,

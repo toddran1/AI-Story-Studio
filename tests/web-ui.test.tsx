@@ -1,6 +1,7 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 import { App, applyVideoResolutionPreset, ArtworkEstimateSummary, ArtworkVersionMetadata, artworkModelOptionsFor, CanonicalEntitySheet, chapterPageSize, ChapterPage, chapterQaStatusView, chunkPresetFor, clearJobDismissal, clearJobMinimized, continuityReferenceTriState, describeContinuityReference, dismissJob, EntityStatusField, ErrorBoundary, EXECUTABLE_CHAPTER_STAGES, getStageActionDetails, humanizeContinuityChanges, isJobConsoleMinimized, isJobDismissed, isTerminalJob, JobConsole, paginateRows, Pagination, PreviousHandoffBadge, QaDetail, QaFindingCard, QaResolvedFindings, resolvedBehaviorSummary, ResolvedBehaviorHint, reupscaleAvailable, SceneContinuityPanel, ScenesPage, setJobConsoleMinimized, SettingsPage, shouldRefreshAfterJob, Status, TtsQualityBadge, TtsSegmentRow, VIDEO_RESOLUTION_PRESETS, videoResolutionFor } from "../apps/web/src/App.js";
+import { api, ApiError } from "../apps/web/src/api.js";
 import type { ArtworkVersion, ChapterDetail, Job, QaFinding, Scene, TtsQualityArtifact, TtsSegmentQuality, VideoSettings, VisualContinuityChange } from "../apps/web/src/api.js";
 import { pretty } from "../apps/web/src/format.js";
 import { ChapterImportPage, savedStorySourceUrl } from "../apps/web/src/ChapterImportPage.js";
@@ -13,6 +14,11 @@ import { formatChapterSelection, parseChapterSelection } from "../src/batch/rang
 import type { StageExecutionBatchPlan } from "../src/studio/stage-execution.js";
 
 describe("web UI", () => {
+  it("keeps structured QA lifecycle conflict codes available for UI reconciliation", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ error: "QA finding has already been resolved.", code: "QA_FINDING_ALREADY_RESOLVED" }), { status: 409, headers: { "content-type": "application/json" } })));
+    await expect(api("/stories/demo/chapters/1/qa/findings/qaf_0123456789abcdef01234567/dismiss", { method: "POST", body: "{}" })).rejects.toMatchObject({ name: "ApiError", code: "QA_FINDING_ALREADY_RESOLVED" } satisfies Partial<ApiError>);
+    vi.unstubAllGlobals();
+  });
   it("renders Chapter Dispatch with grouped stage checkboxes, quick-select presets, and radio-card execution modes", () => {
     const html = renderToStaticMarkup(<BatchProcessingPanel slug="demo-story" selectedChapters={[5, 10, 13, 40, 41]} onSelectionChange={() => undefined} onSelectVisible={() => undefined} onSelectMatching={() => undefined} onSelectAll={() => undefined} onJob={() => undefined} watchJob={() => () => undefined} />);
     expect(html).toContain("Chapter Dispatch"); expect(html).toContain('value="5, 10, 13, 40-41"'); expect(html).toContain("5 chapters selected");

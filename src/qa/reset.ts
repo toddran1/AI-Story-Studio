@@ -18,14 +18,15 @@ export interface ResetChapterQaResult {
   newQaStatus: "pending" | "not_run";
 }
 
-export interface ResetQaBatchOptions {
-  chapters?: number[];
-  from?: number;
-  to?: number;
-  all?: boolean;
-}
+export type QaResetScope =
+  | { type: "book" }
+  | { type: "range"; fromChapter: number; toChapter: number }
+  | { type: "chapter"; chapterNumber: number };
 
 export interface ResetQaBatchResult {
+  scope: QaResetScope;
+  affectedChapterNumbers: number[];
+  affectedCount: number;
   requested: number;
   reset: number;
   alreadyClean: number;
@@ -37,19 +38,12 @@ export interface ResetQaBatchResult {
   skippedChapters: number[];
 }
 
-export const resetQaBatchOptionsSchema = z.union([
-  z.object({
-    chapters: z.array(z.number().int().positive()).min(1),
+export const qaResetScopeSchema = z.discriminatedUnion("type", [
+  z.object({ type: z.literal("book") }).strict(),
+  z.object({ type: z.literal("range"), fromChapter: z.number().int().positive(), toChapter: z.number().int().positive() }).strict().refine((data) => data.fromChapter <= data.toChapter, {
+    message: "Starting chapter must be less than or equal to ending chapter.", path: ["toChapter"],
   }),
-  z.object({
-    from: z.number().int().positive(),
-    to: z.number().int().positive(),
-  }).refine((data) => data.to >= data.from, {
-    message: "Range end chapter must be greater than or equal to start chapter",
-  }),
-  z.object({
-    all: z.literal(true),
-  }),
+  z.object({ type: z.literal("chapter"), chapterNumber: z.number().int().positive() }).strict(),
 ]);
 
 /**
@@ -197,33 +191,25 @@ export async function resetChapterQa(
 export async function resetChapterQaBatch(
   root: string,
   slug: string,
-  options: ResetQaBatchOptions,
+  scope: QaResetScope,
 ): Promise<ResetQaBatchResult> {
-  const parsed = resetQaBatchOptionsSchema.parse(options);
+  const parsed = qaResetScopeSchema.parse(scope);
 
   const availableChapters = await listStoryChapterNumbers(root, slug);
   let targetChapters: number[] = [];
 
-  if ("all" in parsed && parsed.all) {
+  if (parsed.type === "book") {
     targetChapters = availableChapters;
-  } else if ("from" in parsed && "to" in parsed) {
-    targetChapters = availableChapters.filter((ch) => ch >= parsed.from && ch <= parsed.to);
-  } else if ("chapters" in parsed && parsed.chapters) {
-    targetChapters = [...new Set(parsed.chapters)].sort((a, b) => a - b);
+  } else if (parsed.type === "range") {
+    targetChapters = availableChapters.filter((ch) => ch >= parsed.fromChapter && ch <= parsed.toChapter);
+  } else {
+    targetChapters = availableChapters.includes(parsed.chapterNumber) ? [parsed.chapterNumber] : [];
   }
 
   if (!targetChapters.length) {
-    return {
-      requested: 0,
-      reset: 0,
-      alreadyClean: 0,
-      skipped: 0,
-      failed: 0,
-      failures: [],
-      chapters: [],
-      resetChapters: [],
-      skippedChapters: [],
-    };
+    if (parsed.type === "range") throw new Error(`No existing chapters fall within range ${parsed.fromChapter}–${parsed.toChapter}`);
+    if (parsed.type === "chapter") throw new Error(`Chapter ${parsed.chapterNumber} does not exist in story '${slug}'`);
+    throw new Error(`Story '${slug}' has no chapters to reset`);
   }
 
   return withStoryLock(root, slug, `reset QA batch (${targetChapters.length} chapters)`, async () => {
@@ -252,6 +238,9 @@ export async function resetChapterQaBatch(
     }
 
     return {
+      scope: parsed,
+      affectedChapterNumbers: targetChapters,
+      affectedCount: targetChapters.length,
       requested: targetChapters.length,
       reset: resetCount,
       alreadyClean: alreadyCleanCount,
