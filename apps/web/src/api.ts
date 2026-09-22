@@ -88,9 +88,12 @@ export type VisualReferenceImage = {
   approved: boolean;
   prompt?: string;
   provenance?: Record<string, unknown>;
+  replacesReferenceId?: string;
   imageUrl?: string;
 };
 export type VisualFieldProvenance = { source: "source_text" | "story_bible" | "continuity" | "approved_artwork" | "ai_generated" | "user_edit" | "manual_override"; locked: boolean; provider?: string; model?: string; generatedAt?: string; contextFingerprint?: string };
+export type VisualProfileConflict = { id: string; field: string; canonicalValue: string; visualValue: string; visualProvenance?: VisualFieldProvenance; detectedAt: string; status: "needs_review" | "resolved"; resolution?: "accept_canonical" | "retain_manual_override"; resolvedAt?: string };
+export type VisualProfileFieldState = { path: string; value?: string; source?: string; locked: boolean; missing: boolean; canonical: boolean; regenerable: boolean; conflict?: VisualProfileConflict };
 export type VisualProfileProposal = { entityId: string; visualType: VisualEntityType; values: Record<string, string>; rationale: string; eligibleFields: string[]; protectedFields: string[]; contextFingerprint: string; provider: string; model: string };
 
 export type VisualEntityType =
@@ -188,6 +191,7 @@ export type VisualEntityProfile = {
   variants: VisualVariant[];
   references: VisualReferenceImage[];
   fieldProvenance?: Record<string, VisualFieldProvenance>;
+  conflicts?: VisualProfileConflict[];
   revision: number;
   createdAt: string;
   updatedAt: string;
@@ -520,7 +524,7 @@ export async function generateStyleSheet(slug: string, entityId: string): Promis
   return post<{ styleSheetUrl: string; profile: VisualEntityProfile }>(`/stories/${encodeURIComponent(slug)}/visual-profiles/${encodeURIComponent(entityId)}/style-sheet`, {});
 }
 
-export async function inspectVisualProfile(slug: string, entityId: string): Promise<{ profile: VisualEntityProfile; eligibleFields: string[]; protectedFields: string[]; coreComplete: number; coreTotal: number }> {
+export async function inspectVisualProfile(slug: string, entityId: string): Promise<{ profile: VisualEntityProfile; eligibleFields: string[]; protectedFields: string[]; fields: VisualProfileFieldState[]; conflicts: VisualProfileConflict[]; coreComplete: number; coreTotal: number }> {
   return api(`/stories/${encodeURIComponent(slug)}/visual-profiles/${encodeURIComponent(entityId)}/inspect`);
 }
 export async function proposeVisualProfile(slug: string, entityId: string, input: { fields?: string[]; regenerate?: boolean } = {}): Promise<VisualProfileProposal> {
@@ -531,6 +535,9 @@ export async function applyVisualProfileProposal(slug: string, entityId: string,
 }
 export async function approveVisualReference(slug: string, entityId: string, refId: string, primary = false): Promise<VisualEntityProfile> {
   return post(`/stories/${encodeURIComponent(slug)}/visual-profiles/${encodeURIComponent(entityId)}/references/${encodeURIComponent(refId)}/approve`, { primary });
+}
+export async function resolveVisualProfileConflict(slug: string, entityId: string, conflictId: string, action: "accept_canonical" | "retain_manual_override"): Promise<VisualEntityProfile> {
+  return post(`/stories/${encodeURIComponent(slug)}/visual-profiles/${encodeURIComponent(entityId)}/conflicts/${encodeURIComponent(conflictId)}/resolve`, { action });
 }
 
 export async function getArtDirection(slug: string): Promise<StoryArtDirection> {

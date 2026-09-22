@@ -32,6 +32,9 @@ export const visualReferenceImageSchema = z.object({
   approved: z.boolean().default(false),
   prompt: z.string().max(10_000).optional(),
   provenance: z.record(z.string(), z.unknown()).optional(),
+  /** A candidate may supersede a previous primary reference without deleting
+   * it. This gives visual review an auditable reference lineage. */
+  replacesReferenceId: z.string().min(1).optional(),
 });
 export type VisualReferenceImage = z.infer<typeof visualReferenceImageSchema>;
 
@@ -44,6 +47,19 @@ export const visualFieldProvenanceSchema = z.object({
   contextFingerprint: z.string().min(1).optional(),
 });
 export type VisualFieldProvenance = z.infer<typeof visualFieldProvenanceSchema>;
+
+export const visualProfileConflictSchema = z.object({
+  id: z.string().min(1),
+  field: z.string().min(1),
+  canonicalValue: z.string().min(1),
+  visualValue: z.string().min(1),
+  visualProvenance: visualFieldProvenanceSchema.optional(),
+  detectedAt: z.string().datetime(),
+  status: z.enum(["needs_review", "resolved"]).default("needs_review"),
+  resolution: z.enum(["accept_canonical", "retain_manual_override"]).optional(),
+  resolvedAt: z.string().datetime().optional(),
+});
+export type VisualProfileConflict = z.infer<typeof visualProfileConflictSchema>;
 
 export const visualEntityTypeSchema = z.enum([
   "character",
@@ -149,6 +165,9 @@ export const visualProfileSchema = z.object({
    * story truth separate from visual interpretation while retaining why a
    * persistent design choice exists. */
   fieldProvenance: z.record(z.string(), visualFieldProvenanceSchema).optional(),
+  /** Conflicts preserve both source-backed canon and prior AI suggestions;
+   * resolving one is an editorial decision, never a silent overwrite. */
+  conflicts: z.array(visualProfileConflictSchema).optional(),
   variants: z.array(visualVariantSchema).default([]),
   references: z.array(visualReferenceImageSchema).default([]),
   revision: z.number().int().nonnegative().default(1),

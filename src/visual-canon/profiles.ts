@@ -42,10 +42,16 @@ function visualFieldEntries(profile: VisualEntityProfile): Array<[string, string
 /** UI saves represent deliberate editorial decisions.  Preserve that intent at
  * field granularity unless a domain service supplied richer provenance. */
 function preserveManualFieldDecisions(previous: VisualEntityProfile | undefined, next: VisualEntityProfile, patch: Partial<VisualEntityProfile>) {
-  if (patch.fieldProvenance !== undefined) return;
   const previousValues = new Map(previous ? visualFieldEntries(previous) : []);
   for (const [path, value] of visualFieldEntries(next)) {
     if (previousValues.get(path) === value) continue;
+    // A full UI save includes the old provenance map. If its entry is unchanged
+    // while its value changed, that was a human edit and must become a locked
+    // decision. Domain services supply a new provenance entry for AI/source
+    // writes, which we preserve instead.
+    const supplied = patch.fieldProvenance?.[path];
+    const prior = previous?.fieldProvenance?.[path];
+    if (supplied && JSON.stringify(supplied) !== JSON.stringify(prior)) continue;
     next.fieldProvenance ??= {};
     if (value) next.fieldProvenance[path] = { source: "user_edit", locked: true };
     else delete next.fieldProvenance[path];
@@ -233,6 +239,7 @@ export async function addVisualReferenceImage(
     source?: VisualReferenceSource;
     approved?: boolean;
     provenance?: Record<string, unknown>;
+    replacesReferenceId?: string;
   },
 ): Promise<{ profile: VisualEntityProfile; reference: VisualReferenceImage }> {
   await requireCanonicalStoryBibleEntity(root, slug, entityId);
@@ -263,6 +270,7 @@ export async function addVisualReferenceImage(
       approved: options.approved ?? false,
       prompt: options.prompt,
       provenance: options.provenance,
+      replacesReferenceId: options.replacesReferenceId,
     });
 
     profile.references.push(reference);
@@ -402,6 +410,7 @@ export async function generateStyleSheet(
   });
 
   const ext = "png";
+  const primaryReference = profile.references.find((reference) => reference.approved && reference.role === "primary_reference");
 
   return addVisualReferenceImage(root, slug, entityId, {
     role: options.role ?? "expression_sheet",
@@ -423,6 +432,9 @@ export async function generateStyleSheet(
       promptFingerprint,
       negativePrompt: combinedNegativePrompt,
     },
+    // Keep the earlier primary as retained history while a new candidate moves
+    // through review. Approval can then atomically make this the active one.
+    replacesReferenceId: primaryReference?.id,
   });
 }
 

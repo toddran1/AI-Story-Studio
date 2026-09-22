@@ -14,7 +14,7 @@ import {
   handleEntityMerge,
   handleEntityDemote,
 } from "../src/visual-canon/profiles.js";
-import { applyVisualProfileProposal, inspectVisualProfile, proposeMissingVisualDetails } from "../src/visual-canon/completion.js";
+import { applyVisualProfileProposal, inspectVisualProfile, proposeMissingVisualDetails, resolveVisualProfileConflict } from "../src/visual-canon/completion.js";
 import { VisualEntityProfile } from "../src/domain/visual-profile.js";
 import { storyPaths } from "../src/storage/paths.js";
 import { atomicWriteJson } from "../src/storage/atomic-write.js";
@@ -211,6 +211,38 @@ describe("Visual Entity Profiles", () => {
     expect(created.reference.approved).toBe(false);
     const approved = await approveVisualReference(root, slug, entityId, created.reference.id, true);
     expect(approved.references.find((item) => item.id === created.reference.id)).toMatchObject({ approved: true, role: "primary_reference" });
+  });
+
+  it("retains primary reference lineage when a replacement is generated", async () => {
+    await updateVisualProfile(root, slug, entityId, { visualPrompt: "distinct necromancer" });
+    const provider = { name: "fake-image-provider", validateConfiguration: async () => {}, generate: async () => ({ data: Buffer.from("image"), mimeType: "image/png", provider: "fake", model: "fake" }) };
+    const story: any = { slug, artwork: { provider: "openai", model: "dall-e-3", aspectRatio: "1:1", quality: "high", size: "1024x1024", outputFormat: "png" } };
+    const v1 = await generateStyleSheet(root, slug, entityId, provider as any, story);
+    await approveVisualReference(root, slug, entityId, v1.reference.id, true);
+    const v2 = await generateStyleSheet(root, slug, entityId, provider as any, story);
+    expect(v2.reference.replacesReferenceId).toBe(v1.reference.id);
+    const promoted = await approveVisualReference(root, slug, entityId, v2.reference.id, true);
+    expect(promoted.references.find((item) => item.id === v2.reference.id)?.role).toBe("primary_reference");
+    expect(promoted.references.find((item) => item.id === v1.reference.id)).toMatchObject({ approved: true, role: "general_reference" });
+  });
+
+  it("preserves an AI suggestion beside new source evidence until deliberately resolved", async () => {
+    const bible = { ...emptyStoryBible(), canonicalEntities: [canonicalEntitySchema.parse({ id: entityId, type: "character", canonicalName: "Test Character", aliases: [], description: "Hair: emerald green.", firstAppearance: 1, lastKnownAppearance: 1 })] };
+    await updateVisualProfile(root, slug, entityId, { character: { hairColor: "brown" }, fieldProvenance: { "character.hairColor": { source: "ai_generated", locked: false } } });
+    const inspection = await inspectVisualProfile(root, slug, bible, entityId);
+    expect(inspection.conflicts).toHaveLength(1);
+    expect(inspection.conflicts[0]).toMatchObject({ field: "character.hairColor", visualValue: "brown", status: "needs_review" });
+    const resolved = await resolveVisualProfileConflict(root, slug, bible, entityId, inspection.conflicts[0]!.id, "accept_canonical");
+    expect(resolved.character?.hairColor).toBe("emerald");
+    expect(resolved.conflicts?.[0]).toMatchObject({ status: "resolved", resolution: "accept_canonical" });
+  });
+
+  it("uses only entity-relevant summaries and requires explicit regeneration fields", async () => {
+    const bible = { ...emptyStoryBible(), chapterSummaries: { 1: "Test Character protects the guild.", 2: "An unrelated battle in another empire." }, canonicalEntities: [canonicalEntitySchema.parse({ id: entityId, type: "character", canonicalName: "Test Character", aliases: [], description: "", firstAppearance: 1, lastKnownAppearance: 2 })] };
+    const inspection = await inspectVisualProfile(root, slug, bible, entityId);
+    expect((inspection.context.relevantStorySummaries as Array<{ chapter: number }>).map((item) => item.chapter)).toEqual([1]);
+    const provider = { name: "fake", generateStructured: async () => ({ value: { values: {}, rationale: "" } }) };
+    await expect(proposeMissingVisualDetails(root, slug, bible, entityId, provider as any, { provider: "openai", model: "fake" }, { regenerate: true })).rejects.toThrow("Choose one or more");
   });
 
   it("uses a persistent environment reference prompt for locations", async () => {

@@ -68,7 +68,7 @@ import {
   commitVisualCanonDemote,
   rollbackPreparedVisualCanonDemote,
 } from "../../src/visual-canon/profiles.js";
-import { applyVisualProfileProposal, inspectVisualProfile, proposeMissingVisualDetails, visualProfileProposalSchema } from "../../src/visual-canon/completion.js";
+import { applyVisualProfileProposal, proposeMissingVisualDetails, resolveVisualProfileConflict, synchronizeVisualProfileConflicts, visualProfileProposalSchema } from "../../src/visual-canon/completion.js";
 import { loadStoryArtDirection, saveStoryArtDirection, createPreset, updatePreset, deletePreset, duplicatePreset, setDefaultPreset } from "../../src/visual-canon/art-direction.js";
 import { visualProfileSchema } from "../../src/domain/visual-profile.js";
 import { storyArtDirectionSchema, artDirectionPresetSchema } from "../../src/domain/art-direction.js";
@@ -1296,7 +1296,7 @@ export class StudioOperations {
   async inspectVisualProfile(slug: string, entityId: string) {
     slugSchema.parse(slug);
     canonicalEntitySchema.shape.id.parse(entityId);
-    return inspectVisualProfile(this.root, slug, await getStoryBible(this.root, slug), entityId);
+    return withStoryLock(this.root, slug, "inspect visual profile", async () => synchronizeVisualProfileConflicts(this.root, slug, await getStoryBible(this.root, slug), entityId));
   }
 
   async proposeVisualProfile(slug: string, entityId: string, input: unknown) {
@@ -1322,6 +1322,13 @@ export class StudioOperations {
     canonicalEntitySchema.shape.id.parse(entityId);
     const parsed = z.object({ primary: z.boolean().optional() }).strict().parse(input ?? {});
     return withStoryLock(this.root, slug, "approve visual reference", async () => approveVisualReference(this.root, slug, entityId, refId, parsed.primary));
+  }
+
+  async resolveVisualProfileConflict(slug: string, entityId: string, conflictId: string, input: unknown) {
+    slugSchema.parse(slug);
+    canonicalEntitySchema.shape.id.parse(entityId);
+    const parsed = z.object({ action: z.enum(["accept_canonical", "retain_manual_override"]) }).strict().parse(input);
+    return withStoryLock(this.root, slug, "resolve visual profile conflict", async () => resolveVisualProfileConflict(this.root, slug, await getStoryBible(this.root, slug), entityId, conflictId, parsed.action));
   }
 
   async getArtDirection(slug: string) {

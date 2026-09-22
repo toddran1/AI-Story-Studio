@@ -107,7 +107,8 @@
 .reference-meta { padding: 6px 8px; display: flex; justify-content: space-between; font-size: 9px; background: #14141a; }
 .reference-role { font-weight: 500; color: var(--violet-soft); text-transform: capitalize; }
 .reference-source { color: var(--muted); }
-.visual-completion-panel, .visual-proposal-panel { display: grid; gap: 10px; padding: 12px; border: 1px solid rgba(119,114,232,.45); border-radius: 6px; background: linear-gradient(120deg, rgba(119,114,232,.12), rgba(15,15,22,.7)); }
+.visual-completion-panel, .visual-proposal-panel, .visual-regeneration-panel, .visual-conflict-panel { display: grid; gap: 10px; padding: 12px; border: 1px solid rgba(119,114,232,.45); border-radius: 6px; background: linear-gradient(120deg, rgba(119,114,232,.12), rgba(15,15,22,.7)); }
+.visual-conflict-panel { border-color: rgba(232,173,74,.7); background: linear-gradient(120deg, rgba(232,173,74,.12), rgba(15,15,22,.7)); }
 .visual-completion-panel { grid-template-columns: minmax(0, 1fr) auto; align-items: center; }
 .visual-completion-panel p { margin: 4px 0 0; }
 .proposal-field { display: grid; grid-template-columns: auto 1fr; gap: 8px; align-items: start; padding: 8px; border-radius: 4px; background: rgba(0,0,0,.2); cursor: pointer; }

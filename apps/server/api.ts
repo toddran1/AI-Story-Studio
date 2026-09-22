@@ -331,6 +331,10 @@ export function createApiHandler(operations: StudioOperations) {
       if (visualProfileReferenceApproveMatch && request.method === "POST") {
         return send(response, 200, await operations.approveVisualReference(visualProfileReferenceApproveMatch[1]!, visualProfileReferenceApproveMatch[2]!, visualProfileReferenceApproveMatch[3]!, await jsonBody(request).catch(() => ({}))));
       }
+      const visualProfileConflictMatch = /^\/api\/stories\/([a-z0-9-]+)\/visual-profiles\/(ent_[a-f0-9]{24})\/conflicts\/(vconf_[a-z0-9]+)\/resolve$/.exec(url.pathname);
+      if (visualProfileConflictMatch && request.method === "POST") {
+        return send(response, 200, await operations.resolveVisualProfileConflict(visualProfileConflictMatch[1]!, visualProfileConflictMatch[2]!, visualProfileConflictMatch[3]!, await jsonBody(request)));
+      }
       const visualProfileInspectMatch = /^\/api\/stories\/([a-z0-9-]+)\/visual-profiles\/(ent_[a-f0-9]{24})\/inspect$/.exec(url.pathname);
       if (visualProfileInspectMatch && request.method === "GET") {
         return send(response, 200, await operations.inspectVisualProfile(visualProfileInspectMatch[1]!, visualProfileInspectMatch[2]!));

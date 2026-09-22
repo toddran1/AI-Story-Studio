@@ -12,6 +12,8 @@ import {
   applyVisualProfileProposal,
   inspectVisualProfile,
   proposeVisualProfile,
+  resolveVisualProfileConflict,
+  VisualProfileFieldState,
   VisualProfileProposal,
 } from "./api.js";
 
@@ -61,10 +63,11 @@ export function VisualProfileModal({
   const [saving, setSaving] = useState(false);
   const [generatingSheet, setGeneratingSheet] = useState(false);
   const [uploading, setUploading] = useState(false);
-  const [completeness, setCompleteness] = useState<{ eligibleFields: string[]; protectedFields: string[]; coreComplete: number; coreTotal: number } | null>(null);
+  const [completeness, setCompleteness] = useState<{ eligibleFields: string[]; protectedFields: string[]; fields: VisualProfileFieldState[]; coreComplete: number; coreTotal: number; conflicts: NonNullable<VisualEntityProfile["conflicts"]> } | null>(null);
   const [proposal, setProposal] = useState<VisualProfileProposal | null>(null);
   const [selectedProposalFields, setSelectedProposalFields] = useState<string[]>([]);
   const [proposing, setProposing] = useState(false);
+  const [selectedRegenerationFields, setSelectedRegenerationFields] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<"appearance" | "details" | "references">("appearance");
   const [uploadRole, setUploadRole] = useState<VisualRole>("general_reference");
@@ -91,7 +94,7 @@ export function VisualProfileModal({
               if (!active) return;
               setCompleteness(inspection);
               setProfile({
-                id: `vprof_draft_${entityId}`, entityId, visualType: inspection.profile.visualType, status: "draft", appearance: "", visualPrompt: "", negativePrompt: "", notes: "", variants: [], references: [], revision: 1, createdAt: now, updatedAt: now,
+                id: `vprof_draft_${entityId}`, entityId, visualType: inspection.profile.visualType, status: "draft", appearance: "", visualPrompt: "", negativePrompt: "", notes: "", variants: [], references: [], conflicts: [], revision: 1, createdAt: now, updatedAt: now,
               });
               setLoading(false);
             }).catch((inspectionError) => { if (active) { setError(inspectionError instanceof Error ? inspectionError.message : String(inspectionError)); setLoading(false); } });
@@ -195,7 +198,8 @@ export function VisualProfileModal({
     setProposing(true);
     setError(null);
     try {
-      const next = await proposeVisualProfile(slug, entityId, { regenerate });
+      const fields = regenerate ? selectedRegenerationFields : undefined;
+      const next = await proposeVisualProfile(slug, entityId, { fields, regenerate });
       setProposal(next);
       setSelectedProposalFields(Object.keys(next.values));
     } catch (err) {
@@ -203,6 +207,17 @@ export function VisualProfileModal({
     } finally {
       setProposing(false);
     }
+  };
+
+  const refreshInspection = async () => setCompleteness(await inspectVisualProfile(slug, entityId));
+
+  const handleResolveConflict = async (conflictId: string, action: "accept_canonical" | "retain_manual_override") => {
+    setSaving(true); setError(null);
+    try {
+      const updated = await resolveVisualProfileConflict(slug, entityId, conflictId, action);
+      setProfile(updated); onUpdated?.(updated); await refreshInspection();
+    } catch (err) { setError(err instanceof Error ? err.message : String(err)); }
+    finally { setSaving(false); }
   };
 
   const handleApplyProposal = async () => {
@@ -215,7 +230,7 @@ export function VisualProfileModal({
       setProposal(null);
       setSelectedProposalFields([]);
       onUpdated?.(updated);
-      setCompleteness(await inspectVisualProfile(slug, entityId));
+      await refreshInspection();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -396,6 +411,21 @@ export function VisualProfileModal({
                   <button type="button" className="btn btn-primary" disabled={proposing} onClick={() => handlePropose(false)}>{proposing ? "Preparing proposal…" : "Generate missing details with AI"}</button>
                 </section>
               )}
+              {completeness?.conflicts.filter((conflict) => conflict.status === "needs_review").map((conflict) => (
+                <section className="visual-conflict-panel" key={conflict.id}>
+                  <strong>Source conflict · {conflict.field.replace(/^character\.|^location\./, "")}</strong>
+                  <p className="hint-text">Source-backed value: <b>{conflict.canonicalValue}</b><br />Earlier AI suggestion: <b>{conflict.visualValue}</b></p>
+                  <div className="proposal-actions"><button type="button" className="btn btn-primary" disabled={saving} onClick={() => handleResolveConflict(conflict.id, "accept_canonical")}>Use source-backed value</button><button type="button" className="btn btn-outline" disabled={saving} onClick={() => handleResolveConflict(conflict.id, "retain_manual_override")}>Keep as manual override</button></div>
+                </section>
+              ))}
+              {completeness?.fields.some((field) => field.regenerable) && (
+                <section className="visual-regeneration-panel">
+                  <strong>Regenerate selected AI details</strong>
+                  <p className="hint-text">Only unlocked AI suggestions are eligible. Source-backed and manual fields stay protected.</p>
+                  {completeness.fields.filter((field) => field.regenerable).map((field) => <label className="proposal-field" key={field.path}><input type="checkbox" checked={selectedRegenerationFields.includes(field.path)} onChange={(event) => setSelectedRegenerationFields((items) => event.target.checked ? [...items, field.path] : items.filter((item) => item !== field.path))} /><span>{field.path.replace(/^character\.|^location\./, "")} <small>AI suggestion</small></span></label>)}
+                  <button type="button" className="btn btn-secondary" disabled={proposing || !selectedRegenerationFields.length} onClick={() => handlePropose(true)}>{proposing ? "Preparing proposal…" : "Regenerate selected details"}</button>
+                </section>
+              )}
               {proposal && (
                 <section className="visual-proposal-panel">
                   <strong>AI visual proposal</strong>
@@ -404,7 +434,7 @@ export function VisualProfileModal({
                     <label key={field} className="proposal-field"><input type="checkbox" checked={selectedProposalFields.includes(field)} onChange={(event) => setSelectedProposalFields((items) => event.target.checked ? [...items, field] : items.filter((item) => item !== field))} /><span><b>{field.replace(/^character\.|^location\./, "")}</b><br />{value}</span></label>
                   ))}
                   {!Object.keys(proposal.values).length && <p className="hint-text">No safe missing details were proposed.</p>}
-                  <div className="proposal-actions"><button type="button" className="btn btn-secondary" onClick={() => handlePropose(true)} disabled={proposing}>Regenerate proposal</button><button type="button" className="btn btn-primary" onClick={handleApplyProposal} disabled={saving || !selectedProposalFields.length}>Apply selected</button><button type="button" className="btn btn-outline" onClick={() => setProposal(null)}>Cancel</button></div>
+                  <div className="proposal-actions"><button type="button" className="btn btn-primary" onClick={handleApplyProposal} disabled={saving || !selectedProposalFields.length}>Apply selected</button><button type="button" className="btn btn-outline" onClick={() => setProposal(null)}>Cancel</button></div>
                 </section>
               )}
               {profile.visualType === "character" && (
@@ -896,12 +926,16 @@ export function VisualProfileModal({
                       <div className="reference-meta">
                         <span className="reference-role">{ref.role.replace(/_/g, " ")}</span>
                         <span className="reference-source">{ref.approved ? "Approved" : "Review required"} · {ref.source}</span>
+                        {ref.replacesReferenceId && <span className="reference-source">Revision of {ref.replacesReferenceId}</span>}
                       </div>
                       {!ref.approved && (
                         <div className="reference-actions">
                           <button type="button" className="btn btn-secondary" disabled={saving} onClick={() => handleApproveReference(ref.id, false)}>Approve</button>
                           <button type="button" className="btn btn-primary" disabled={saving} onClick={() => handleApproveReference(ref.id, true)}>Set primary</button>
                         </div>
+                      )}
+                      {ref.approved && ref.role !== "primary_reference" && (
+                        <div className="reference-actions"><button type="button" className="btn btn-outline" disabled={saving} onClick={() => handleApproveReference(ref.id, true)}>Make primary</button></div>
                       )}
                     </div>
                   ))}
