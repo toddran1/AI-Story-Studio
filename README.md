@@ -134,6 +134,8 @@ WEB_MAX_RETRIES=2
 WEB_CACHE_DIR=cache/web
 ```
 
+OpenAI model routing supports `gpt-6-sol` and `gpt-6-luna` for translation, narration, QA, Story Bible, and scene planning through the Responses API. Choose either model in a story's settings or set `OPENAI_DEFAULT_MODEL` for new stories. Existing story settings are unchanged. The settings fields also accept custom OpenAI model IDs; the suggested choices are not an allowlist.
+
 `STUDIO_DATA_ROOT` is the durable application-data location. Story imports, source chapters, intermediate files, audio, artwork, video, exports, backups, queue reconciliation manifests, and relative web caches are stored beneath it. `POSTGRES_DATA_DIR` is the matching Docker bind-mount location for the database; keep both on persistent storage. The source checkout can be moved or replaced without moving production data.
 
 ## Forced alignment and subtitles

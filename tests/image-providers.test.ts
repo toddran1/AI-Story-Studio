@@ -20,7 +20,7 @@ import { emptyStoryBible } from "../src/domain/story-bible.js";
 import { Story } from "../src/domain/story.js";
 import { LLMProvider } from "../src/llm/provider.js";
 import { planStoredScenes } from "../src/scenes/manifest.js";
-import { artworkSettingsSchema, sceneManifestSchema } from "../src/scenes/types.js";
+import { artworkSettingsSchema, sceneDirectionSchema, sceneManifestSchema } from "../src/scenes/types.js";
 import { atomicWrite, atomicWriteJson } from "../src/storage/atomic-write.js";
 import { storyPaths, visualProfileRefPath } from "../src/storage/paths.js";
 import { saveVisualProfiles } from "../src/visual-canon/profiles.js";
@@ -290,7 +290,7 @@ describe("artwork routing and provenance", () => {
   it("does not attach character profile references when the scene disables them", async () => {
     const { root, story, paths } = await fixture({ provider: "gemini", model: "gemini-3.1-flash-image" }, { withCanon: true });
     const manifest = sceneManifestSchema.parse(JSON.parse(await readFile(paths.scenesManifest, "utf8")));
-    manifest.scenes[0]!.direction = { ...manifest.scenes[0]!.direction, useCharacterReferences: false };
+    manifest.scenes[0]!.direction = { ...sceneDirectionSchema.parse(manifest.scenes[0]!.direction ?? {}), useCharacterReferences: false };
     await atomicWriteJson(paths.scenesManifest, manifest);
     const images = fakeImages("gemini");
     await generateStoredArtwork({ root, story, chapter: 1, provider: images, sceneId: "scene-001" });

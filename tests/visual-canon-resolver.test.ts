@@ -241,6 +241,123 @@ describe("Visual Canon Prompt Resolver", () => {
     expect(resolved.prompt).toContain("Default attire (overridable by current scene): black academy jacket and white shirt");
   });
 
+  it("uses structured physical identity without mixed free-text defaults when wardrobe/equipment preservation is off", () => {
+    const profile: VisualEntityProfile = {
+      id: "vp-no-defaults", entityId: entityId1, visualType: "character", status: "approved", revision: 1,
+      createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+      appearance: "A young man with black hair in an academy jacket, carrying an ebony staff.",
+      visualPrompt: "Young man, black hair, gray eyes, academy jacket, ebony staff",
+      notes: "", negativePrompt: "", variants: [], references: [{
+        id: "identity-ref", entityId: entityId1, role: "face_portrait", source: "uploaded", approved: true,
+        imagePath: "stories/demo/visual-profiles/identity-ref.png", createdAt: new Date().toISOString(),
+      }],
+      character: {
+        apparentAge: "young adult", gender: "man", height: "tall", build: "lean", skinTone: "warm tan",
+        faceShape: "angular", hairColor: "black", hairstyle: "long and tied back", eyeColor: "gray",
+        facialHair: "clean-shaven", distinguishingFeatures: "a small mole by the left eye",
+        additionalAppearanceNotes: "A calm, youthful face.",
+        defaultOutfit: "black academy jacket", shoes: "leather boots", accessories: "silver clasp",
+        weapons: "ebony staff", equipment: "travel pack",
+      },
+    };
+    const resolved = resolveVisualCanonPrompt({
+      scene: { ...baseScene, entityIds: [entityId1], direction: { preserveWardrobeEquipment: false } as any },
+      story, bible, artDirection, visualProfiles: { [entityId1]: profile },
+    });
+
+    expect(resolved.prompt).toContain("Gender: man");
+    expect(resolved.prompt).toContain("Height: tall");
+    expect(resolved.prompt).toContain("Skin tone: warm tan");
+    expect(resolved.prompt).toContain("Face shape: angular");
+    expect(resolved.prompt).toContain("Eyes: gray");
+    expect(resolved.prompt).toContain("Facial hair: clean-shaven");
+    expect(resolved.prompt).toContain("Persistent appearance notes: A calm, youthful face.");
+    expect(resolved.prompt).not.toContain("academy jacket");
+    expect(resolved.prompt).not.toContain("ebony staff");
+    expect(resolved.prompt).not.toContain("leather boots");
+    expect(resolved.prompt).not.toContain("silver clasp");
+    expect(resolved.prompt).not.toContain("travel pack");
+    // Disabling profile wardrobe defaults does not discard approved identity references.
+    expect(resolved.resolvedEntities.find((entity) => entity.entityId === entityId1)?.references)
+      .toEqual(profile.references);
+    expect(resolved.resolvedEntities.find((entity) => entity.entityId === entityId1)?.weapons).toBeUndefined();
+    expect(resolved.resolvedEntities.find((entity) => entity.entityId === entityId1)?.visualPrompt).toBeUndefined();
+  });
+
+  it("keeps explicit scene attire and current continuity when profile defaults are disabled", () => {
+    const profile: VisualEntityProfile = {
+      id: "vp-scene-override", entityId: entityId1, visualType: "character", status: "approved", revision: 1,
+      createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), appearance: "", visualPrompt: "", notes: "", negativePrompt: "", variants: [], references: [],
+      character: { hairColor: "black", defaultOutfit: "black academy jacket", weapons: "ebony staff" },
+    };
+    const resolved = resolveVisualCanonPrompt({
+      scene: {
+        ...baseScene, entityIds: [entityId1], direction: { preserveWardrobeEquipment: false } as any,
+        overrides: { wardrobeOverrides: { [entityId1]: "ceremony robe" } },
+      },
+      story, bible, artDirection, visualProfiles: { [entityId1]: profile },
+      visualContinuity: "A fresh bandage wraps his right forearm.",
+    });
+
+    expect(resolved.prompt).toContain("Scene override attire: ceremony robe");
+    expect(resolved.prompt).toContain("A fresh bandage wraps his right forearm.");
+    expect(resolved.prompt).not.toContain("black academy jacket");
+    expect(resolved.prompt).not.toContain("ebony staff");
+  });
+
+  it("omits mixed legacy character text when sparse structured identity cannot separate its wardrobe/gear", () => {
+    const profile: VisualEntityProfile = {
+      id: "vp-legacy-sparse", entityId: entityId1, visualType: "character", status: "approved", revision: 1,
+      createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), appearance: "A scarred veteran with a red coat and a long rifle.",
+      visualPrompt: "", notes: "", negativePrompt: "", variants: [], references: [], character: {},
+    };
+    const resolved = resolveVisualCanonPrompt({
+      scene: { ...baseScene, entityIds: [entityId1], direction: { preserveWardrobeEquipment: false } as any },
+      story, bible, artDirection, visualProfiles: { [entityId1]: profile },
+    });
+
+    expect(resolved.prompt).not.toContain("LEGACY VISUAL PROFILE");
+    expect(resolved.prompt).not.toContain("red coat");
+    expect(resolved.prompt).not.toContain("long rifle");
+  });
+
+  it("uses identity-only legacy text as a fallback when structured character identity is sparse", () => {
+    const profile: VisualEntityProfile = {
+      id: "vp-legacy-identity", entityId: entityId1, visualType: "character", status: "approved", revision: 1,
+      createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+      appearance: "A scarred veteran with silver eyes and a weathered face.",
+      visualPrompt: "", notes: "", negativePrompt: "", variants: [], references: [], character: {},
+    };
+    const resolved = resolveVisualCanonPrompt({
+      scene: { ...baseScene, entityIds: [entityId1], direction: { preserveWardrobeEquipment: false } as any },
+      story, bible, artDirection, visualProfiles: { [entityId1]: profile },
+    });
+
+    expect(resolved.prompt).toContain("LEGACY VISUAL PROFILE (sparse structured identity");
+    expect(resolved.prompt).toContain("A scarred veteran with silver eyes and a weathered face.");
+  });
+
+  it("leaves non-character visual profile prompts unchanged when wardrobe defaults are disabled", () => {
+    const itemProfile: VisualEntityProfile = {
+      id: "vp-item", entityId: entityId2, visualType: "item", status: "approved", revision: 1,
+      createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+      appearance: "Ancient polearm with a carved dragon motif.",
+      visualPrompt: "Ancient polearm, celestial steel, glowing runes", notes: "", negativePrompt: "", variants: [], references: [],
+      item: { shape: "long polearm", materials: "celestial steel", magicalEffects: "glowing runes" },
+    };
+    const resolved = resolveVisualCanonPrompt({
+      scene: {
+        ...baseScene, characters: [], entityIds: [entityId2],
+        direction: { preserveWardrobeEquipment: false } as any,
+      },
+      story, bible, artDirection, visualProfiles: { [entityId2]: itemProfile },
+    });
+
+    expect(resolved.prompt).toContain("Ancient polearm, celestial steel, glowing runes");
+    expect(resolved.prompt).toContain("Shape: long polearm");
+    expect(resolved.prompt).toContain("Materials: celestial steel");
+  });
+
   it("honors scene Visual Canon toggles without removing Story Bible fallback", () => {
     const profile: VisualEntityProfile = {
       id: "vp-toggle", entityId: entityId1, visualType: "character", status: "approved", revision: 1,

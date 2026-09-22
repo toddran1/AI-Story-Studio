@@ -76,6 +76,20 @@ export function shouldUseVisualProfileForEntity(scene: Scene, entity: CanonicalE
   return true;
 }
 
+/** Avoid passing obviously mixed identity/presentation prose when structured
+ * character identity is unavailable. We discard the whole legacy field rather
+ * than attempting brittle regex edits that might damage identity details. */
+function legacyCharacterTextLooksLikePresentation(text: string): boolean {
+  const tokens = new Set(text.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean));
+  return [
+    "outfit", "clothing", "clothes", "wear", "wears", "wearing", "dressed", "attire",
+    "robe", "coat", "jacket", "shirt", "dress", "pants", "trousers", "boots", "shoes",
+    "armor", "armour", "uniform", "cloak", "gloves", "hat", "helmet", "accessory", "accessories",
+    "weapon", "weapons", "sword", "staff", "rifle", "bow", "dagger", "spear", "shield",
+    "equipment", "gear", "pack", "satchel", "amulet", "necklace", "ring", "belt",
+  ].some((term) => tokens.has(term));
+}
+
 export function resolveVisualCanonPrompt(options: {
   scene: Scene;
   story: Story;
@@ -131,20 +145,39 @@ export function resolveVisualCanonPrompt(options: {
       const activeWardrobe = wardrobeOverride || (preserveWardrobeEquipment ? profile.character?.defaultOutfit : undefined);
 
       const traits: string[] = [];
-      if (profile.visualPrompt) traits.push(profile.visualPrompt);
-      else if (profile.appearance) traits.push(profile.appearance);
 
       if (profile.character) {
         const c = profile.character;
         const details = [
           c.apparentAge && `Age: ${c.apparentAge}`,
+          c.gender && `Gender: ${c.gender}`,
+          c.height && `Height: ${c.height}`,
           c.build && `Build: ${c.build}`,
+          c.skinTone && `Skin tone: ${c.skinTone}`,
+          c.faceShape && `Face shape: ${c.faceShape}`,
           c.hairColor && c.hairstyle ? `Hair: ${c.hairColor}, ${c.hairstyle}` : c.hairColor ? `Hair: ${c.hairColor}` : c.hairstyle ? `Hair: ${c.hairstyle}` : undefined,
           c.eyeColor && `Eyes: ${c.eyeColor}`,
+          c.facialHair && `Facial hair: ${c.facialHair}`,
           c.distinguishingFeatures && `Features: ${c.distinguishingFeatures}`,
           c.scars && `Scars: ${c.scars}`,
           c.tattoos && `Tattoos: ${c.tattoos}`,
+          c.additionalAppearanceNotes && `Persistent appearance notes: ${c.additionalAppearanceNotes}`,
         ].filter(Boolean).join(", ");
+
+        // visualPrompt/appearance are legacy free-text fields that often mix
+        // identity with an outfit and carried gear. When temporary scene
+        // presentation is requested, prefer the structured identity fields
+        // above. Only consult mixed text if no structured identity is present;
+        // do not try to regex-edit prose and risk corrupting identity details.
+        if (preserveWardrobeEquipment) {
+          if (profile.visualPrompt) traits.push(profile.visualPrompt);
+          else if (profile.appearance) traits.push(profile.appearance);
+        } else if (!details && (profile.visualPrompt || profile.appearance)) {
+          const legacyDescription = profile.visualPrompt || profile.appearance;
+          if (!legacyCharacterTextLooksLikePresentation(legacyDescription)) {
+            traits.push(`LEGACY VISUAL PROFILE (sparse structured identity; use only lasting physical identity details): ${legacyDescription}`);
+          }
+        }
         if (details) traits.push(details);
         if (wardrobeOverride) traits.push(`Scene override attire: ${wardrobeOverride}`);
         else if (preserveWardrobeEquipment && c.defaultOutfit) traits.push(`Default attire (overridable by current scene): ${c.defaultOutfit}`);
@@ -153,12 +186,16 @@ export function resolveVisualCanonPrompt(options: {
         if (preserveWardrobeEquipment && c.weapons) traits.push(`Default weapons (overridable by current scene): ${c.weapons}`);
         if (preserveWardrobeEquipment && c.equipment) traits.push(`Default equipment (overridable by current scene): ${c.equipment}`);
       } else if (profile.location) {
+        if (profile.visualPrompt) traits.push(profile.visualPrompt);
+        else if (profile.appearance) traits.push(profile.appearance);
         const l = profile.location;
         if (l.canonicalEnvironmentPrompt) traits.push(l.canonicalEnvironmentPrompt);
         if (l.architecture) traits.push(`Architecture: ${l.architecture}`);
         if (l.lighting) traits.push(`Lighting: ${l.lighting}`);
         if (l.colorPalette) traits.push(`Palette: ${l.colorPalette}`);
       } else if (profile.creature) {
+        if (profile.visualPrompt) traits.push(profile.visualPrompt);
+        else if (profile.appearance) traits.push(profile.appearance);
         const cr = profile.creature;
         if (cr.canonicalCreaturePrompt) traits.push(cr.canonicalCreaturePrompt);
         if (cr.species) traits.push(`Species: ${cr.species}`);
@@ -166,11 +203,16 @@ export function resolveVisualCanonPrompt(options: {
         if (cr.anatomy) traits.push(`Anatomy: ${cr.anatomy}`);
         if (cr.coloration) traits.push(`Coloration: ${cr.coloration}`);
       } else if (profile.item) {
+        if (profile.visualPrompt) traits.push(profile.visualPrompt);
+        else if (profile.appearance) traits.push(profile.appearance);
         const it = profile.item;
         if (it.canonicalObjectPrompt) traits.push(it.canonicalObjectPrompt);
         if (it.shape) traits.push(`Shape: ${it.shape}`);
         if (it.materials) traits.push(`Materials: ${it.materials}`);
         if (it.magicalEffects) traits.push(`Effects: ${it.magicalEffects}`);
+      } else if (!profile.character && (profile.visualPrompt || profile.appearance)) {
+        // Preserve legacy profiles that have no typed detail object.
+        traits.push(profile.visualPrompt || profile.appearance);
       }
 
       const description = traits.join(". ");
@@ -182,8 +224,8 @@ export function resolveVisualCanonPrompt(options: {
         profileRevision: profile.revision,
         description,
         wardrobe: activeWardrobe,
-        weapons: profile.character?.weapons,
-        visualPrompt: profile.visualPrompt,
+        weapons: preserveWardrobeEquipment ? profile.character?.weapons : undefined,
+        visualPrompt: preserveWardrobeEquipment ? profile.visualPrompt : undefined,
         references: profile.references,
         useVisualProfile,
       });
