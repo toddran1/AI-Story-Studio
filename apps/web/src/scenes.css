@@ -107,6 +107,13 @@
 .reference-meta { padding: 6px 8px; display: flex; justify-content: space-between; font-size: 9px; background: #14141a; }
 .reference-role { font-weight: 500; color: var(--violet-soft); text-transform: capitalize; }
 .reference-source { color: var(--muted); }
+.visual-completion-panel, .visual-proposal-panel { display: grid; gap: 10px; padding: 12px; border: 1px solid rgba(119,114,232,.45); border-radius: 6px; background: linear-gradient(120deg, rgba(119,114,232,.12), rgba(15,15,22,.7)); }
+.visual-completion-panel { grid-template-columns: minmax(0, 1fr) auto; align-items: center; }
+.visual-completion-panel p { margin: 4px 0 0; }
+.proposal-field { display: grid; grid-template-columns: auto 1fr; gap: 8px; align-items: start; padding: 8px; border-radius: 4px; background: rgba(0,0,0,.2); cursor: pointer; }
+.proposal-field b { text-transform: capitalize; color: var(--violet-soft); }
+.proposal-actions, .reference-actions { display: flex; gap: 7px; flex-wrap: wrap; }
+.reference-actions { padding: 0 8px 8px; }
 
 /* Scene Reel Filter Bar & Badges */
 .scene-filter-bar { display: flex; gap: 8px; align-items: center; margin: 16px 0 8px; padding-bottom: 10px; border-bottom: 1px solid var(--line); }
@@ -165,6 +172,7 @@
   .preset-sidebar { border-right: 0; border-bottom: 1px solid var(--line); max-height: 180px; }
   .preset-main { overflow: visible; }
   .form-grid-2col { grid-template-columns: 1fr; }
+  .visual-completion-panel { grid-template-columns: 1fr; }
   .modal-footer { flex-wrap: wrap; }
   .modal-footer-danger { width: 100%; margin-right: 0; }
 }

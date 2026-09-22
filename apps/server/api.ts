@@ -311,9 +311,9 @@ export function createApiHandler(operations: StudioOperations) {
         const contentType = request.headers["content-type"] ?? "";
         if (contentType.includes("application/json")) {
           const bodyData = (await jsonBody(request)) as any;
-          const buffer = Buffer.from(bodyData.base64, "base64");
+          const buffer = Buffer.from(bodyData.base64 ?? bodyData.dataBase64, "base64");
           const ext = bodyData.ext || "png";
-          return send(response, 201, await operations.addVisualReferenceImage(visualProfileRefsMatch[1]!, visualProfileRefsMatch[2]!, buffer, ext, bodyData.viewType, bodyData.notes));
+          return send(response, 201, await operations.addVisualReferenceImage(visualProfileRefsMatch[1]!, visualProfileRefsMatch[2]!, buffer, ext, bodyData.viewType ?? bodyData.role ?? "general_reference", bodyData.notes));
         } else {
           const filename = decodeURIComponent((request.headers["x-file-name"] as string) || "reference.png");
           const viewType = (request.headers["x-view-type"] as string) || "character_face";
@@ -326,6 +326,21 @@ export function createApiHandler(operations: StudioOperations) {
       const visualProfileSingleRefMatch = /^\/api\/stories\/([a-z0-9-]+)\/visual-profiles\/(ent_[a-f0-9]{24})\/references\/([a-zA-Z0-9_-]+)$/.exec(url.pathname);
       if (visualProfileSingleRefMatch && request.method === "DELETE") {
         return send(response, 200, await operations.deleteVisualReferenceImage(visualProfileSingleRefMatch[1]!, visualProfileSingleRefMatch[2]!, visualProfileSingleRefMatch[3]!));
+      }
+      const visualProfileReferenceApproveMatch = /^\/api\/stories\/([a-z0-9-]+)\/visual-profiles\/(ent_[a-f0-9]{24})\/references\/([a-zA-Z0-9_-]+)\/approve$/.exec(url.pathname);
+      if (visualProfileReferenceApproveMatch && request.method === "POST") {
+        return send(response, 200, await operations.approveVisualReference(visualProfileReferenceApproveMatch[1]!, visualProfileReferenceApproveMatch[2]!, visualProfileReferenceApproveMatch[3]!, await jsonBody(request).catch(() => ({}))));
+      }
+      const visualProfileInspectMatch = /^\/api\/stories\/([a-z0-9-]+)\/visual-profiles\/(ent_[a-f0-9]{24})\/inspect$/.exec(url.pathname);
+      if (visualProfileInspectMatch && request.method === "GET") {
+        return send(response, 200, await operations.inspectVisualProfile(visualProfileInspectMatch[1]!, visualProfileInspectMatch[2]!));
+      }
+      const visualProfileProposalMatch = /^\/api\/stories\/([a-z0-9-]+)\/visual-profiles\/(ent_[a-f0-9]{24})\/proposal$/.exec(url.pathname);
+      if (visualProfileProposalMatch && request.method === "POST") {
+        return send(response, 200, await operations.proposeVisualProfile(visualProfileProposalMatch[1]!, visualProfileProposalMatch[2]!, await jsonBody(request)));
+      }
+      if (visualProfileProposalMatch && request.method === "PUT") {
+        return send(response, 200, await operations.applyVisualProfileProposal(visualProfileProposalMatch[1]!, visualProfileProposalMatch[2]!, await jsonBody(request)));
       }
       const visualProfileStyleSheetMatch = /^\/api\/stories\/([a-z0-9-]+)\/visual-profiles\/(ent_[a-f0-9]{24})\/style-sheet$/.exec(url.pathname);
       if (visualProfileStyleSheetMatch && request.method === "POST") {

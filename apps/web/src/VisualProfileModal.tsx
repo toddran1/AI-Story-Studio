@@ -8,6 +8,11 @@ import {
   updateVisualProfile,
   uploadVisualReference,
   generateStyleSheet,
+  approveVisualReference,
+  applyVisualProfileProposal,
+  inspectVisualProfile,
+  proposeVisualProfile,
+  VisualProfileProposal,
 } from "./api.js";
 
 interface VisualProfileModalProps {
@@ -19,6 +24,7 @@ interface VisualProfileModalProps {
 }
 
 const VISUAL_ROLES: { value: VisualRole; label: string }[] = [
+  { value: "primary_reference", label: "Primary Reference" },
   { value: "front", label: "Front View" },
   { value: "three_quarter", label: "Three-Quarter View" },
   { value: "side", label: "Side Profile" },
@@ -55,6 +61,10 @@ export function VisualProfileModal({
   const [saving, setSaving] = useState(false);
   const [generatingSheet, setGeneratingSheet] = useState(false);
   const [uploading, setUploading] = useState(false);
+  const [completeness, setCompleteness] = useState<{ eligibleFields: string[]; protectedFields: string[]; coreComplete: number; coreTotal: number } | null>(null);
+  const [proposal, setProposal] = useState<VisualProfileProposal | null>(null);
+  const [selectedProposalFields, setSelectedProposalFields] = useState<string[]>([]);
+  const [proposing, setProposing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<"appearance" | "details" | "references">("appearance");
   const [uploadRole, setUploadRole] = useState<VisualRole>("general_reference");
@@ -68,6 +78,7 @@ export function VisualProfileModal({
       .then((res) => {
         if (active) {
           setProfile(res);
+          inspectVisualProfile(slug, entityId).then(setCompleteness).catch(() => undefined);
           setLoading(false);
         }
       })
@@ -76,22 +87,14 @@ export function VisualProfileModal({
           const msg = err instanceof Error ? err.message : String(err);
           if (msg.includes("404") || msg.toLowerCase().includes("not found")) {
             const now = new Date().toISOString();
-            setProfile({
-              id: `vprof_draft_${entityId}`,
-              entityId,
-              visualType: "character",
-              status: "draft",
-              appearance: "",
-              visualPrompt: "",
-              negativePrompt: "",
-              notes: "",
-              variants: [],
-              references: [],
-              revision: 1,
-              createdAt: now,
-              updatedAt: now,
-            });
-            setLoading(false);
+            inspectVisualProfile(slug, entityId).then((inspection) => {
+              if (!active) return;
+              setCompleteness(inspection);
+              setProfile({
+                id: `vprof_draft_${entityId}`, entityId, visualType: inspection.profile.visualType, status: "draft", appearance: "", visualPrompt: "", negativePrompt: "", notes: "", variants: [], references: [], revision: 1, createdAt: now, updatedAt: now,
+              });
+              setLoading(false);
+            }).catch((inspectionError) => { if (active) { setError(inspectionError instanceof Error ? inspectionError.message : String(inspectionError)); setLoading(false); } });
           } else {
             setError(msg);
             setLoading(false);
@@ -187,6 +190,53 @@ export function VisualProfileModal({
     }
   };
 
+  const handlePropose = async (regenerate = false) => {
+    if (!profile) return;
+    setProposing(true);
+    setError(null);
+    try {
+      const next = await proposeVisualProfile(slug, entityId, { regenerate });
+      setProposal(next);
+      setSelectedProposalFields(Object.keys(next.values));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setProposing(false);
+    }
+  };
+
+  const handleApplyProposal = async () => {
+    if (!proposal) return;
+    setSaving(true);
+    setError(null);
+    try {
+      const updated = await applyVisualProfileProposal(slug, entityId, proposal, selectedProposalFields);
+      setProfile(updated);
+      setProposal(null);
+      setSelectedProposalFields([]);
+      onUpdated?.(updated);
+      setCompleteness(await inspectVisualProfile(slug, entityId));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleApproveReference = async (refId: string, primary: boolean) => {
+    setSaving(true);
+    setError(null);
+    try {
+      const updated = await approveVisualReference(slug, entityId, refId, primary);
+      setProfile(updated);
+      onUpdated?.(updated);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSaving(false);
+    }
+  };
+
   if (loading) {
     return (
       <div className="modal-backdrop" onClick={onClose}>
@@ -253,7 +303,7 @@ export function VisualProfileModal({
             className={`tab-btn ${activeTab === "details" ? "active" : ""}`}
             onClick={() => setActiveTab("details")}
           >
-            Specific Visual Traits
+            Specific Visual Traits{completeness ? ` · ${completeness.coreComplete}/${completeness.coreTotal}` : ""}
           </button>
           <button
             className={`tab-btn ${activeTab === "references" ? "active" : ""}`}
@@ -337,6 +387,26 @@ export function VisualProfileModal({
 
           {activeTab === "details" && (
             <div className="form-group-stack">
+              {(profile.visualType === "character" || profile.visualType === "location") && (
+                <section className="visual-completion-panel">
+                  <div>
+                    <strong>Persistent visual identity</strong>
+                    <p className="hint-text">{completeness ? `${completeness.coreComplete} / ${completeness.coreTotal} core details established.` : "Checking missing details…"} Existing and locked details stay protected until you explicitly apply a proposal.</p>
+                  </div>
+                  <button type="button" className="btn btn-primary" disabled={proposing} onClick={() => handlePropose(false)}>{proposing ? "Preparing proposal…" : "Generate missing details with AI"}</button>
+                </section>
+              )}
+              {proposal && (
+                <section className="visual-proposal-panel">
+                  <strong>AI visual proposal</strong>
+                  {proposal.rationale && <p className="hint-text">{proposal.rationale}</p>}
+                  {Object.entries(proposal.values).map(([field, value]) => (
+                    <label key={field} className="proposal-field"><input type="checkbox" checked={selectedProposalFields.includes(field)} onChange={(event) => setSelectedProposalFields((items) => event.target.checked ? [...items, field] : items.filter((item) => item !== field))} /><span><b>{field.replace(/^character\.|^location\./, "")}</b><br />{value}</span></label>
+                  ))}
+                  {!Object.keys(proposal.values).length && <p className="hint-text">No safe missing details were proposed.</p>}
+                  <div className="proposal-actions"><button type="button" className="btn btn-secondary" onClick={() => handlePropose(true)} disabled={proposing}>Regenerate proposal</button><button type="button" className="btn btn-primary" onClick={handleApplyProposal} disabled={saving || !selectedProposalFields.length}>Apply selected</button><button type="button" className="btn btn-outline" onClick={() => setProposal(null)}>Cancel</button></div>
+                </section>
+              )}
               {profile.visualType === "character" && (
                 <>
                   <div className="form-grid-2col">
@@ -825,8 +895,14 @@ export function VisualProfileModal({
                       </div>
                       <div className="reference-meta">
                         <span className="reference-role">{ref.role.replace(/_/g, " ")}</span>
-                        <span className="reference-source">{ref.source}</span>
+                        <span className="reference-source">{ref.approved ? "Approved" : "Review required"} · {ref.source}</span>
                       </div>
+                      {!ref.approved && (
+                        <div className="reference-actions">
+                          <button type="button" className="btn btn-secondary" disabled={saving} onClick={() => handleApproveReference(ref.id, false)}>Approve</button>
+                          <button type="button" className="btn btn-primary" disabled={saving} onClick={() => handleApproveReference(ref.id, true)}>Set primary</button>
+                        </div>
+                      )}
                     </div>
                   ))}
                 </div>
@@ -852,4 +928,3 @@ export function VisualProfileModal({
     </div>
   );
 }
-

@@ -65,6 +65,7 @@ export const ARTWORK_PROVIDERS: ArtworkRouting["availableProviders"] = [
   { name: "gemini", models: ["gemini-3.1-flash-image"], defaultModel: "gemini-3.1-flash-image" },
 ];
 export type VisualRole =
+  | "primary_reference"
   | "front"
   | "three_quarter"
   | "side"
@@ -89,6 +90,8 @@ export type VisualReferenceImage = {
   provenance?: Record<string, unknown>;
   imageUrl?: string;
 };
+export type VisualFieldProvenance = { source: "source_text" | "story_bible" | "continuity" | "approved_artwork" | "ai_generated" | "user_edit" | "manual_override"; locked: boolean; provider?: string; model?: string; generatedAt?: string; contextFingerprint?: string };
+export type VisualProfileProposal = { entityId: string; visualType: VisualEntityType; values: Record<string, string>; rationale: string; eligibleFields: string[]; protectedFields: string[]; contextFingerprint: string; provider: string; model: string };
 
 export type VisualEntityType =
   | "character"
@@ -184,6 +187,7 @@ export type VisualEntityProfile = {
   item?: ItemVisualDetails;
   variants: VisualVariant[];
   references: VisualReferenceImage[];
+  fieldProvenance?: Record<string, VisualFieldProvenance>;
   revision: number;
   createdAt: string;
   updatedAt: string;
@@ -514,6 +518,19 @@ export async function uploadVisualReference(slug: string, entityId: string, payl
 
 export async function generateStyleSheet(slug: string, entityId: string): Promise<{ styleSheetUrl: string; profile: VisualEntityProfile }> {
   return post<{ styleSheetUrl: string; profile: VisualEntityProfile }>(`/stories/${encodeURIComponent(slug)}/visual-profiles/${encodeURIComponent(entityId)}/style-sheet`, {});
+}
+
+export async function inspectVisualProfile(slug: string, entityId: string): Promise<{ profile: VisualEntityProfile; eligibleFields: string[]; protectedFields: string[]; coreComplete: number; coreTotal: number }> {
+  return api(`/stories/${encodeURIComponent(slug)}/visual-profiles/${encodeURIComponent(entityId)}/inspect`);
+}
+export async function proposeVisualProfile(slug: string, entityId: string, input: { fields?: string[]; regenerate?: boolean } = {}): Promise<VisualProfileProposal> {
+  return post(`/stories/${encodeURIComponent(slug)}/visual-profiles/${encodeURIComponent(entityId)}/proposal`, input);
+}
+export async function applyVisualProfileProposal(slug: string, entityId: string, proposal: VisualProfileProposal, selectedFields: string[]): Promise<VisualEntityProfile> {
+  return put(`/stories/${encodeURIComponent(slug)}/visual-profiles/${encodeURIComponent(entityId)}/proposal`, { proposal, selectedFields });
+}
+export async function approveVisualReference(slug: string, entityId: string, refId: string, primary = false): Promise<VisualEntityProfile> {
+  return post(`/stories/${encodeURIComponent(slug)}/visual-profiles/${encodeURIComponent(entityId)}/references/${encodeURIComponent(refId)}/approve`, { primary });
 }
 
 export async function getArtDirection(slug: string): Promise<StoryArtDirection> {

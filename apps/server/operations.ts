@@ -57,6 +57,7 @@ import {
   deleteVisualReferenceImage,
   addVisualReferenceImage,
   generateStyleSheet,
+  approveVisualReference,
   handleEntityMerge,
   handleEntityDemote,
   prepareVisualCanonMerge,
@@ -67,6 +68,7 @@ import {
   commitVisualCanonDemote,
   rollbackPreparedVisualCanonDemote,
 } from "../../src/visual-canon/profiles.js";
+import { applyVisualProfileProposal, inspectVisualProfile, proposeMissingVisualDetails, visualProfileProposalSchema } from "../../src/visual-canon/completion.js";
 import { loadStoryArtDirection, saveStoryArtDirection, createPreset, updatePreset, deletePreset, duplicatePreset, setDefaultPreset } from "../../src/visual-canon/art-direction.js";
 import { visualProfileSchema } from "../../src/domain/visual-profile.js";
 import { storyArtDirectionSchema, artDirectionPresetSchema } from "../../src/domain/art-direction.js";
@@ -1287,8 +1289,39 @@ export class StudioOperations {
     return withStoryLock(this.root, slug, "generate style sheet", async () => {
       const story = await loadStory(storyPaths(this.root, slug, 1).storyConfig);
       const provider = resolveImageProvider(this.image, story);
-      return generateStyleSheet(this.root, slug, entityId, provider, story, options);
+      return withUsageScope({ story: slug, stage: "visual-reference" }, () => generateStyleSheet(this.root, slug, entityId, provider, story, options));
     });
+  }
+
+  async inspectVisualProfile(slug: string, entityId: string) {
+    slugSchema.parse(slug);
+    canonicalEntitySchema.shape.id.parse(entityId);
+    return inspectVisualProfile(this.root, slug, await getStoryBible(this.root, slug), entityId);
+  }
+
+  async proposeVisualProfile(slug: string, entityId: string, input: unknown) {
+    slugSchema.parse(slug);
+    canonicalEntitySchema.shape.id.parse(entityId);
+    const parsed = z.object({ fields: z.array(z.string().min(1)).max(20).optional(), regenerate: z.boolean().optional() }).strict().parse(input ?? {});
+    return withStoryLock(this.root, slug, "propose visual profile details", async () => {
+      const story = await loadStory(storyPaths(this.root, slug, 1).storyConfig);
+      return withUsageScope({ story: slug, stage: "visual-profile" }, async () => proposeMissingVisualDetails(this.root, slug, await getStoryBible(this.root, slug), entityId, this.llm.forStage(story.pipeline.storyBible), story.pipeline.storyBible, parsed));
+    });
+  }
+
+  async applyVisualProfileProposal(slug: string, entityId: string, input: unknown) {
+    slugSchema.parse(slug);
+    canonicalEntitySchema.shape.id.parse(entityId);
+    const parsed = z.object({ proposal: visualProfileProposalSchema.extend({ entityId: z.string(), visualType: visualProfileSchema.shape.visualType, eligibleFields: z.array(z.string()), protectedFields: z.array(z.string()), contextFingerprint: z.string(), provider: z.string(), model: z.string() }), selectedFields: z.array(z.string()).max(20) }).strict().parse(input);
+    if (parsed.proposal.entityId !== entityId) throw new Error("Visual profile proposal belongs to a different entity");
+    return withStoryLock(this.root, slug, "apply visual profile proposal", async () => applyVisualProfileProposal(this.root, slug, await getStoryBible(this.root, slug), parsed.proposal, parsed.selectedFields));
+  }
+
+  async approveVisualReference(slug: string, entityId: string, refId: string, input: unknown) {
+    slugSchema.parse(slug);
+    canonicalEntitySchema.shape.id.parse(entityId);
+    const parsed = z.object({ primary: z.boolean().optional() }).strict().parse(input ?? {});
+    return withStoryLock(this.root, slug, "approve visual reference", async () => approveVisualReference(this.root, slug, entityId, refId, parsed.primary));
   }
 
   async getArtDirection(slug: string) {

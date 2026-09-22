@@ -32,6 +32,26 @@ import {
 
 const visualProfilesFileSchema = z.record(z.string(), visualProfileSchema);
 
+function visualFieldEntries(profile: VisualEntityProfile): Array<[string, string | undefined]> {
+  const sections: Array<["character" | "location" | "creature" | "item", Record<string, string | undefined> | undefined]> = [
+    ["character", profile.character], ["location", profile.location], ["creature", profile.creature], ["item", profile.item],
+  ];
+  return sections.flatMap(([section, values]) => Object.entries(values ?? {}).map(([field, value]): [string, string | undefined] => [`${section}.${field}`, value?.trim() || undefined]));
+}
+
+/** UI saves represent deliberate editorial decisions.  Preserve that intent at
+ * field granularity unless a domain service supplied richer provenance. */
+function preserveManualFieldDecisions(previous: VisualEntityProfile | undefined, next: VisualEntityProfile, patch: Partial<VisualEntityProfile>) {
+  if (patch.fieldProvenance !== undefined) return;
+  const previousValues = new Map(previous ? visualFieldEntries(previous) : []);
+  for (const [path, value] of visualFieldEntries(next)) {
+    if (previousValues.get(path) === value) continue;
+    next.fieldProvenance ??= {};
+    if (value) next.fieldProvenance[path] = { source: "user_edit", locked: true };
+    else delete next.fieldProvenance[path];
+  }
+}
+
 export async function loadVisualProfiles(root: string, slug: string): Promise<Record<string, VisualEntityProfile>> {
   const path = storyPaths(root, slug, 1).visualProfiles;
   const raw = await readJsonIfExists<unknown>(path);
@@ -102,6 +122,7 @@ export async function updateVisualProfile(
       item: patch.item,
       variants: patch.variants ?? [],
       references: patch.references ?? [],
+      fieldProvenance: patch.fieldProvenance ?? {},
       revision: 1,
       createdAt: now,
       updatedAt: now,
@@ -109,9 +130,39 @@ export async function updateVisualProfile(
     });
   }
 
+  preserveManualFieldDecisions(existing, next, patch);
+
   profiles[entityId] = next;
   await saveVisualProfiles(root, slug, profiles);
   return next;
+}
+
+/** Mark a generated/uploaded reference as usable canon.  References are
+ * versioned entries; approval never deletes earlier visual identity evidence. */
+export async function approveVisualReference(
+  root: string,
+  slug: string,
+  entityId: string,
+  refId: string,
+  primary = false,
+): Promise<VisualEntityProfile> {
+  canonicalEntitySchema.shape.id.parse(entityId);
+  if (!/^[a-zA-Z0-9_-]+$/.test(refId)) throw new Error("Invalid reference image ID");
+  const profiles = await loadVisualProfiles(root, slug);
+  const profile = profiles[entityId];
+  if (!profile) throw new Error(`Visual profile for entity '${entityId}' was not found`);
+  const reference = profile.references.find((item) => item.id === refId);
+  if (!reference) throw new Error(`Visual reference '${refId}' was not found`);
+  for (const item of profile.references) {
+    if (primary && item.id !== refId && item.role === "primary_reference") item.role = "general_reference";
+  }
+  reference.approved = true;
+  if (primary) reference.role = "primary_reference";
+  profile.revision += 1;
+  profile.updatedAt = new Date().toISOString();
+  profiles[entityId] = visualProfileSchema.parse(profile);
+  await saveVisualProfiles(root, slug, profiles);
+  return profiles[entityId]!;
 }
 
 export async function deleteVisualProfile(root: string, slug: string, entityId: string): Promise<boolean> {
@@ -265,10 +316,10 @@ export async function generateStyleSheet(
     activePreset.additionalVisualInstructions ? `ADDITIONAL INSTRUCTIONS: ${activePreset.additionalVisualInstructions}` : "",
   ].filter(Boolean);
 
-  // Layer 2: Character Visual Canon
-  const characterPrompt = profile.visualPrompt || profile.appearance;
-  const characterDetails: string[] = [
-    characterPrompt ? `SUBJECT VISUAL TRAITS: ${characterPrompt}` : "",
+  // Layer 2: persistent entity visual canon (never scene-specific state).
+  const entityPrompt = profile.visualPrompt || profile.appearance;
+  const entityDetails: string[] = [
+    entityPrompt ? `SUBJECT VISUAL TRAITS: ${entityPrompt}` : "",
     profile.character?.apparentAge ? `APPARENT AGE: ${profile.character.apparentAge}` : "",
     profile.character?.gender ? `GENDER: ${profile.character.gender}` : "",
     profile.character?.build ? `BUILD / PHYSIQUE: ${profile.character.build}` : "",
@@ -279,19 +330,30 @@ export async function generateStyleSheet(
     profile.character?.defaultOutfit ? `DEFAULT COSTUME / WARDROBE: ${profile.character.defaultOutfit}` : "",
     profile.character?.weapons ? `SIGNATURE WEAPONS / GEAR: ${profile.character.weapons}` : "",
     profile.character?.distinguishingFeatures ? `DISTINGUISHING FEATURES: ${profile.character.distinguishingFeatures}` : "",
+    profile.location?.architecture ? `ARCHITECTURE: ${profile.location.architecture}` : "",
+    profile.location?.terrain ? `TERRAIN: ${profile.location.terrain}` : "",
+    profile.location?.lighting ? `LIGHTING IDENTITY: ${profile.location.lighting}` : "",
+    profile.location?.colorPalette ? `COLOR PALETTE: ${profile.location.colorPalette}` : "",
+    profile.location?.recurringLandmarks ? `LANDMARKS: ${profile.location.recurringLandmarks}` : "",
   ].filter(Boolean);
 
-  // Layer 3: Style Sheet Requirements
-  const styleSheetRequirements: string[] = [
-    `CHARACTER MODEL SHEET / CONCEPT ART TURNAROUND: Multiple full-length views and expressions of the same subject on a clean neutral white background.`,
-    `REQUIRED VIEWS: full-body front view, three-quarter angle, side profile, rear view, and close-up facial expression sheet (neutral, intense, emotional).`,
-    `Crisp line work, consistent anatomical scale and costume details across all angles, professional animation model sheet layout, no text, no labels, no watermarks.`,
-  ];
+  // Layer 3: reference requirements follow entity type; locations must never
+  // receive a character turnaround prompt.
+  const referenceRequirements = profile.visualType === "location"
+    ? [
+        `LOCATION REFERENCE / ENVIRONMENT CONCEPT ART: a clear, reusable establishing view of this location's stable architecture, terrain, palette, landmarks, and atmosphere.`,
+        `Do not include transient weather, combat damage, temporary visitors, scene action, text, labels, or watermarks.`,
+      ]
+    : [
+        `CHARACTER MODEL SHEET / CONCEPT ART TURNAROUND: Multiple full-length views and expressions of the same subject on a clean neutral white background.`,
+        `REQUIRED VIEWS: full-body front view, three-quarter angle, side profile, rear view, and close-up facial expression sheet (neutral, intense, emotional).`,
+        `Crisp line work, consistent anatomical scale and costume details across all angles, professional animation model sheet layout, no text, no labels, no watermarks.`,
+      ];
 
   const sheetPrompt = options.promptOverride ?? [
     artDirectionParts.join("\n"),
-    characterDetails.join("\n"),
-    styleSheetRequirements.join("\n"),
+    entityDetails.join("\n"),
+    referenceRequirements.join("\n"),
   ].filter(Boolean).join("\n\n");
 
   // Combined negative prompt
@@ -347,7 +409,8 @@ export async function generateStyleSheet(
     ext,
     prompt: sheetPrompt,
     source: "style_sheet",
-    approved: true,
+    // Generated references require review before they become visual canon.
+    approved: false,
     provenance: {
       provider: provider.name,
       model: story.artwork.model,

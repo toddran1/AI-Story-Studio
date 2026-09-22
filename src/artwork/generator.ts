@@ -660,7 +660,9 @@ async function loadSceneReferenceImages(root: string, story: Story, resolved: Re
   const wanted: VisualReferenceImage[] = [];
   for (const entity of resolved.resolvedEntities) {
     const refs = entity.references ?? [];
-    wanted.push(...refs.filter((ref) => ref.approved), ...refs.filter((ref) => !ref.approved));
+    // Draft uploads and generated candidates are visible to the editor but do
+    // not steer paid scene artwork until a person explicitly approves them.
+    wanted.push(...refs.filter((ref) => ref.approved).sort((left, right) => Number(right.role === "primary_reference") - Number(left.role === "primary_reference")));
   }
   const continuityReference: ContinuityReferenceProvenance = continuityDecision
     ? { kind: continuityDecision.kind, used: false, reason: continuityDecision.reason }

@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 export const visualRoleSchema = z.enum([
+  "primary_reference",
   "front",
   "three_quarter",
   "side",
@@ -33,6 +34,16 @@ export const visualReferenceImageSchema = z.object({
   provenance: z.record(z.string(), z.unknown()).optional(),
 });
 export type VisualReferenceImage = z.infer<typeof visualReferenceImageSchema>;
+
+export const visualFieldProvenanceSchema = z.object({
+  source: z.enum(["source_text", "story_bible", "continuity", "approved_artwork", "ai_generated", "user_edit", "manual_override"]),
+  locked: z.boolean().default(false),
+  provider: z.string().min(1).optional(),
+  model: z.string().min(1).optional(),
+  generatedAt: z.string().datetime().optional(),
+  contextFingerprint: z.string().min(1).optional(),
+});
+export type VisualFieldProvenance = z.infer<typeof visualFieldProvenanceSchema>;
 
 export const visualEntityTypeSchema = z.enum([
   "character",
@@ -134,6 +145,10 @@ export const visualProfileSchema = z.object({
   location: locationVisualDetailsSchema.optional(),
   creature: creatureVisualDetailsSchema.optional(),
   item: itemVisualDetailsSchema.optional(),
+  /** Keys are stable field paths such as `character.hairColor`.  This keeps
+   * story truth separate from visual interpretation while retaining why a
+   * persistent design choice exists. */
+  fieldProvenance: z.record(z.string(), visualFieldProvenanceSchema).optional(),
   variants: z.array(visualVariantSchema).default([]),
   references: z.array(visualReferenceImageSchema).default([]),
   revision: z.number().int().nonnegative().default(1),
@@ -142,4 +157,3 @@ export const visualProfileSchema = z.object({
   approvedAt: z.string().datetime().optional(),
 });
 export type VisualEntityProfile = z.infer<typeof visualProfileSchema>;
-
