@@ -43,10 +43,10 @@ export function parseSummaryArgs(values: string[]): SummaryCommand {
     const allowed = action === "scenes"
       ? new Set(["--force", "--pacing", "--scene-count", "--seconds-per-scene"])
       : action === "artwork"
-        ? new Set(["--force", "--missing-only", "--dry-run", "--scene"])
+        ? new Set(["--force", "--missing-only", "--dry-run", "--scene", "--allow-unprofiled"])
         : action === "video"
           ? new Set(["--force"])
-          : new Set(["--force", "--missing-only", "--dry-run", "--pacing", "--scene-count", "--seconds-per-scene"]);
+          : new Set(["--force", "--missing-only", "--dry-run", "--pacing", "--scene-count", "--seconds-per-scene", "--allow-unprofiled"]);
     for (let index = 0; index < rest.length; index++) {
       const key = rest[index];
       if (!allowed.has(key!)) usage(`Unknown ${action} option: ${key}`);
@@ -58,6 +58,7 @@ export function parseSummaryArgs(values: string[]): SummaryCommand {
       else if (key === "--scene-count") input.sceneCount = Number(value);
       else if (key === "--seconds-per-scene") input.secondsPerScene = Number(value);
       else if (key === "--scene") input.scenes = value.split(",");
+      else if (key === "--allow-unprofiled") input.allowUnprofiledEntityIds = value.split(",").filter(Boolean);
       else usage(`Unknown ${action} option: ${key}`);
     }
     return { action, story, id: summaryIdSchema.parse(positionalId), input: action === "scenes" ? summaryScenesInputSchema.parse(input) : action === "produce" ? summaryProduceInputSchema.parse(input) : summaryVisualInputSchema.parse(input) };
@@ -165,6 +166,6 @@ function parseOptions(values: string[], selectionAllowed: boolean) {
 
 function integer(value: string, min: number, max: number, label: string) { const number = Number(value); if (!Number.isSafeInteger(number) || number < min || number > max) usage(`${label} must be an integer from ${min} to ${max}`); return number; }
 function validateStory(story: string) { if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(story)) usage("Invalid story slug"); }
-function usage(message = "Invalid summary command"): never { throw new Error(`${message}\nUsage:\n  npm run story:summary -- generate <story> (--from N --to N | --chapters N,N) [--title text] [--type brief|detailed|mini-chapter|arc|character-focused|custom] [--source original|translated|chapter-summaries] [--target-length words] [--model provider:model] [--context]\n  npm run story:summary -- list <story>\n  npm run story:summary -- show <story> <summary-id>\n  npm run story:summary -- regenerate <story> <summary-id> [generation options]\n  npm run story:summary -- delete <story> <summary-id>\n  npm run story:summary -- narration <story> <summary-id> [--force]\n  npm run story:summary -- audio <story> <summary-id> [--force]\n  npm run story:summary -- export <story> <summary-id> --type summary|narration|audio|video\n  npm run story:summary -- scenes <story> <summary-id> [--pacing automatic|slow|balanced|fast|custom] [--scene-count N | --seconds-per-scene N] [--force]\n  npm run story:summary -- artwork <story> <summary-id> [--missing-only] [--scene scene-001,scene-002] [--force] [--dry-run]\n  npm run story:summary -- reupscale <story> <summary-id> [--scene scene-NNN] [--version N]\n  npm run story:summary -- video <story> <summary-id> [--force]\n  npm run story:summary -- produce <story> <summary-id> [pacing options] [--missing-only] [--dry-run]\n  Generation also accepts --target-minutes N (150 words/minute).`); }
+function usage(message = "Invalid summary command"): never { throw new Error(`${message}\nUsage:\n  npm run story:summary -- generate <story> (--from N --to N | --chapters N,N) [--title text] [--type brief|detailed|mini-chapter|arc|character-focused|custom] [--source original|translated|chapter-summaries] [--target-length words] [--model provider:model] [--context]\n  npm run story:summary -- list <story>\n  npm run story:summary -- show <story> <summary-id>\n  npm run story:summary -- regenerate <story> <summary-id> [generation options]\n  npm run story:summary -- delete <story> <summary-id>\n  npm run story:summary -- narration <story> <summary-id> [--force]\n  npm run story:summary -- audio <story> <summary-id> [--force]\n  npm run story:summary -- export <story> <summary-id> --type summary|narration|audio|video\n  npm run story:summary -- scenes <story> <summary-id> [--pacing automatic|slow|balanced|fast|custom] [--scene-count N | --seconds-per-scene N] [--force]\n  npm run story:summary -- artwork <story> <summary-id> [--missing-only] [--scene scene-001,scene-002] [--allow-unprofiled entity-id,...] [--force] [--dry-run]\n  npm run story:summary -- reupscale <story> <summary-id> [--scene scene-NNN] [--version N]\n  npm run story:summary -- video <story> <summary-id> [--force]\n  npm run story:summary -- produce <story> <summary-id> [pacing options] [--missing-only] [--allow-unprofiled entity-id,...] [--dry-run]\n  --allow-unprofiled explicitly permits Story Bible fallback for listed entities in this request only.\n  Generation also accepts --target-minutes N (150 words/minute).`); }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) main().catch((error: unknown) => { process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`); process.exitCode = 1; });

@@ -678,34 +678,30 @@ export async function generateSceneImage(
 type ContinuityReferenceProvenance = { kind: "previous-scene" | "previous-chapter" | "none"; used: boolean; reason?: string };
 type SceneReferencePayload = { images: ImageReferenceImage[]; available: number; mode: "images" | "text-only" | "none"; continuityReference: ContinuityReferenceProvenance };
 
-/** Collect Visual Canon reference images for a scene, then the resolved visual
- * continuity reference (previous scene / previous chapter approved artwork)
- * after canonical refs within the same budget. Bytes are resolved only through
- * controlled scene/version paths — always the ORIGINAL provider images, never
- * 4K production derivatives, so the reference budget stays bounded. When the
- * effective provider/model cannot consume image input, the textual canon stays
- * in the prompt and provenance records the text-only fallback. A missing or
- * unreadable continuity image is skipped — generation never fails on it. */
-async function loadSceneReferenceImages(root: string, story: Story, resolved: ResolvedSceneVisualPrompt, continuityDecision?: VisualContinuityReferenceDecision, chapter?: number): Promise<SceneReferencePayload> {
+export type VisualProfileReferencePayload = {
+  images: ImageReferenceImage[];
+  available: number;
+  mode: "images" | "text-only" | "none";
+  loadedEntityIds: string[];
+  loadedReferenceIds: string[];
+  referenceFingerprints: string[];
+};
+
+/** Shared, approved-only Visual Profile reference loader. Summary artwork uses
+ * the same reference eligibility and byte limits as chapter artwork. */
+export async function loadApprovedVisualProfileReferences(root: string, story: Story, resolved: ResolvedSceneVisualPrompt): Promise<VisualProfileReferencePayload> {
   const wanted: VisualReferenceImage[] = [];
   for (const entity of resolved.resolvedEntities) {
     if (!entity.useVisualProfile) continue;
-    const refs = entity.references ?? [];
-    // Draft uploads and generated candidates are visible to the editor but do
-    // not steer paid scene artwork until a person explicitly approves them.
-    wanted.push(...refs.filter((ref) => ref.approved).sort((left, right) => Number(right.role === "primary_reference") - Number(left.role === "primary_reference")));
+    wanted.push(...(entity.references ?? []).filter((ref) => ref.approved).sort((left, right) => Number(right.role === "primary_reference") - Number(left.role === "primary_reference")));
   }
-  const continuityReference: ContinuityReferenceProvenance = continuityDecision
-    ? { kind: continuityDecision.kind, used: false, reason: continuityDecision.reason }
-    : { kind: "none", used: false };
-  const supportsImages = providerSupportsReferenceImages(story.artwork.provider, story.artwork.model);
-  const available = wanted.length + (continuityDecision?.used ? 1 : 0);
-  if (!available) return { images: [], available: 0, mode: "none", continuityReference };
-  if (!supportsImages) {
-    if (continuityDecision?.used) continuityReference.reason = continuityReference.reason ? `${continuityReference.reason}; provider cannot consume reference images, textual continuity retained` : "provider cannot consume reference images, textual continuity retained";
-    return { images: [], available, mode: "text-only", continuityReference };
-  }
+  const available = wanted.length;
+  if (!available) return { images: [], available: 0, mode: "none", loadedEntityIds: [], loadedReferenceIds: [], referenceFingerprints: [] };
+  if (!providerSupportsReferenceImages(story.artwork.provider, story.artwork.model)) return { images: [], available, mode: "text-only", loadedEntityIds: [], loadedReferenceIds: [], referenceFingerprints: [] };
   const images: ImageReferenceImage[] = [];
+  const loadedEntityIds = new Set<string>();
+  const loadedReferenceIds: string[] = [];
+  const referenceFingerprints: string[] = [];
   let totalBytes = 0;
   for (const ref of wanted) {
     if (images.length >= MAX_REFERENCE_IMAGES) break;
@@ -716,7 +712,35 @@ async function loadSceneReferenceImages(root: string, story: Story, resolved: Re
     if (!data.length || data.length > MAX_REFERENCE_IMAGE_BYTES || totalBytes + data.length > MAX_REFERENCE_TOTAL_BYTES) continue;
     totalBytes += data.length;
     images.push({ data, mimeType: mimeForVisualReferenceExtension(file.ext), role: ref.role });
+    loadedEntityIds.add(ref.entityId);
+    loadedReferenceIds.push(ref.id);
+    referenceFingerprints.push(fingerprint(data.toString("base64")));
   }
+  return { images, available, mode: images.length ? "images" : "text-only", loadedEntityIds: [...loadedEntityIds], loadedReferenceIds, referenceFingerprints };
+}
+
+/** Collect Visual Canon reference images for a scene, then the resolved visual
+ * continuity reference (previous scene / previous chapter approved artwork)
+ * after canonical refs within the same budget. Bytes are resolved only through
+ * controlled scene/version paths — always the ORIGINAL provider images, never
+ * 4K production derivatives, so the reference budget stays bounded. When the
+ * effective provider/model cannot consume image input, the textual canon stays
+ * in the prompt and provenance records the text-only fallback. A missing or
+ * unreadable continuity image is skipped — generation never fails on it. */
+async function loadSceneReferenceImages(root: string, story: Story, resolved: ResolvedSceneVisualPrompt, continuityDecision?: VisualContinuityReferenceDecision, chapter?: number): Promise<SceneReferencePayload> {
+  const canonicalReferences = await loadApprovedVisualProfileReferences(root, story, resolved);
+  const continuityReference: ContinuityReferenceProvenance = continuityDecision
+    ? { kind: continuityDecision.kind, used: false, reason: continuityDecision.reason }
+    : { kind: "none", used: false };
+  const supportsImages = providerSupportsReferenceImages(story.artwork.provider, story.artwork.model);
+  const available = canonicalReferences.available + (continuityDecision?.used ? 1 : 0);
+  if (!available) return { images: [], available: 0, mode: "none", continuityReference };
+  if (!supportsImages) {
+    if (continuityDecision?.used) continuityReference.reason = continuityReference.reason ? `${continuityReference.reason}; provider cannot consume reference images, textual continuity retained` : "provider cannot consume reference images, textual continuity retained";
+    return { images: [], available, mode: "text-only", continuityReference };
+  }
+  const images: ImageReferenceImage[] = [...canonicalReferences.images];
+  let totalBytes = images.reduce((sum, image) => sum + image.data.length, 0);
   if (continuityDecision?.used && continuityDecision.sourceSceneId && continuityDecision.versionNumber && chapter !== undefined && images.length < MAX_REFERENCE_IMAGES) {
     const sourceChapter = continuityDecision.kind === "previous-chapter" ? continuityDecision.sourceChapter : chapter;
     try {

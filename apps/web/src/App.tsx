@@ -16,6 +16,7 @@ import { AudioDeck } from "./AudioDeck.js";
 import { VocalizationList } from "./VocalizationList.js";
 import { getEntityStatusOptions, isStandardEntityStatus, statusKey } from "../../../src/story-bible/entity-status.js";
 import { VisualProfileModal } from "./VisualProfileModal.js";
+import { VisualProfileCheckDialog } from "./VisualProfileCheckDialog.js";
 import { ArtDirectionModal } from "./ArtDirectionModal.js";
 import { reviewArtworkVersion, reupscaleArtwork, updateSceneContinuity, resetSceneContinuity, ShotType, CameraAngle, CompositionTendency, ARTWORK_PROVIDERS } from "./api.js";
 import type { ArtworkSettings, ArtworkVersion, PreviousVisualHandoff, ResolvedArtworkBehavior, SceneContinuity, VideoResolution, VideoSettings, VisualCharacterState, VisualContinuityChange, VisualContinuityOverrideEntryInput, VisualContinuityReferenceDecision, VisualContinuityState, VisualEnvironmentState, VisualObjectState } from "./api.js";
@@ -1965,7 +1966,6 @@ export function ScenesPage({ slug, onJob, navigate, initialData }: { slug: strin
   const [saving, setSaving] = useState(false);
   const [sceneFilter, setSceneFilter] = useState<"all" | "needs-review" | "approved" | "video-ready">("all");
   const [selectedVersionByScene, setSelectedVersionByScene] = useState<Record<string, string>>({});
-  const [activeVisualProfile, setActiveVisualProfile] = useState<{ id: string; name?: string } | null>(null);
   const [showArtDirectionModal, setShowArtDirectionModal] = useState(false);
   const [visualPreflight, setVisualPreflight] = useState<any | null>(null);
   const [pendingArtworkExtra, setPendingArtworkExtra] = useState<Record<string, unknown> | null>(null);
@@ -2070,17 +2070,6 @@ export function ScenesPage({ slug, onJob, navigate, initialData }: { slug: strin
       // must explicitly choose Continue before any paid generation starts.
       setVisualPreflight(preflight);
       setOneTimeUnprofiled([]);
-    } catch (value) { setError(message(value)); }
-  };
-
-  const persistSkipPolicy = async (entityId: string) => {
-    try {
-      await put(`/stories/${slug}/visual-profiles/${entityId}/policy`, { mode: "skip" });
-      setVisualPreflight((current: any) => current ? {
-        ...current,
-        entities: current.entities.map((entity: any) => entity.entityId === entityId ? { ...entity, state: "skip_profile", policy: "skip" } : entity),
-        requiresDecision: current.requiresDecision.filter((entity: any) => entity.entityId !== entityId),
-      } : current);
     } catch (value) { setError(message(value)); }
   };
 
@@ -2844,31 +2833,8 @@ export function ScenesPage({ slug, onJob, navigate, initialData }: { slug: strin
         />
       )}
 
-      {visualPreflight && (
-        <div className="visual-preflight-backdrop" role="presentation">
-          <section className="visual-preflight-modal" role="dialog" aria-modal="true" aria-labelledby="visual-profile-check-title">
-            <header><div><span className="eyebrow">Artwork gate · no provider calls yet</span><h3 id="visual-profile-check-title">Visual Profile Check</h3></div><button type="button" className="button" onClick={() => { setVisualPreflight(null); setPendingArtworkExtra(null); }}>Cancel</button></header>
-            <p>These on-screen entities do not have approved Visual Profiles. A profile improves continuity, but you can deliberately use the Story Bible fallback instead.</p>
-            <div className="visual-preflight-list">
-              {visualPreflight.requiresDecision.map((entity: any) => {
-                const oneTime = oneTimeUnprofiled.includes(entity.entityId);
-                return <article key={entity.entityId} className="visual-preflight-entity"><div><span className="visual-preflight-type">{entity.type}</span><h4>{entity.name}</h4><small>{entity.state === "draft_profile" ? "Draft Visual Profile" : "No Visual Profile"} · {entity.affectedSceneIds.length} selected scene{entity.affectedSceneIds.length === 1 ? "" : "s"}</small></div><div className="visual-preflight-actions"><button type="button" className="button" onClick={() => { setVisualPreflight(null); setActiveVisualProfile({ id: entity.entityId, name: entity.name }); }}>{entity.state === "draft_profile" ? "Review / finish profile" : "Create Visual Profile"}</button><button type="button" className={oneTime ? "button active" : "button"} onClick={() => setOneTimeUnprofiled((current) => current.includes(entity.entityId) ? current.filter((id) => id !== entity.entityId) : [...current, entity.entityId])}>{oneTime ? "Will use fallback" : "Generate without profile"}</button><button type="button" className="button subtle-warning" onClick={() => void persistSkipPolicy(entity.entityId)}>Always use fallback</button></div></article>;
-              })}
-            </div>
-            <footer><small>“Generate without profile” applies only to this request. “Always use fallback” can be reset in the entity’s Visual Profile.</small><button type="button" className="button primary" disabled={visualPreflight.requiresDecision.some((entity: any) => !oneTimeUnprofiled.includes(entity.entityId))} onClick={continueArtworkAfterPreflight}>Continue generation</button></footer>
-          </section>
-        </div>
-      )}
-
-      {activeVisualProfile && (
-        <VisualProfileModal
-          slug={slug}
-          entityId={activeVisualProfile.id}
-          entityName={activeVisualProfile.name}
-          onClose={() => { setActiveVisualProfile(null); void reopenArtworkPreflight(); }}
-          onUpdated={() => { void load(data?.selectedChapter); void reopenArtworkPreflight(); }}
-        />
-      )}
+      {visualPreflight && <VisualProfileCheckDialog slug={slug} report={visualPreflight} oneTimeEntityIds={oneTimeUnprofiled} onOneTimeEntityIds={setOneTimeUnprofiled}
+        onCancel={() => { setVisualPreflight(null); setPendingArtworkExtra(null); setOneTimeUnprofiled([]); }} onContinue={continueArtworkAfterPreflight} onRefresh={() => void reopenArtworkPreflight()} onError={(value) => setError(message(value))} />}
     </section>
   );
 }

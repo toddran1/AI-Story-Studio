@@ -9,6 +9,7 @@ import { LLMRouter } from "../src/llm/router.js";
 import { TTSProviderRouter } from "../src/tts/router.js";
 import { atomicWrite, atomicWriteJson } from "../src/storage/atomic-write.js";
 import { storyPaths } from "../src/storage/paths.js";
+import { saveVisualProfiles } from "../src/visual-canon/profiles.js";
 import { emptyStoryBible, storyBibleUpdateSchema } from "../src/domain/story-bible.js";
 import { mergeStoryBible } from "../src/story-bible/updater.js";
 import { tokenizeNarration } from "../src/alignment/quality.js";
@@ -158,6 +159,8 @@ describe("summary visual production M23 parity", () => {
       usageMode: "ai_contextual",
     };
     await atomicWriteJson(storyPaths(root, "demo-story", 1).bible, bible);
+    const entityId = bible.canonicalEntities[0]!.id; const now = new Date().toISOString();
+    await saveVisualProfiles(root, "demo-story", { [entityId]: { id: "vp-su-ming", entityId, visualType: "character", status: "approved", revision: 1, createdAt: now, updatedAt: now, appearance: "A young necromancer", visualPrompt: "young necromancer with dark hair", notes: "", negativePrompt: "", character: {}, references: [], variants: [] } });
 
     id = (await summaries.generate("demo-story", { chapters: [1], title: "Dungeon recap" })).id;
     vi.spyOn(llm, "generateStructured").mockImplementation(async (request) => ({

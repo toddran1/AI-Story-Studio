@@ -5,8 +5,9 @@ import { summaryAudioAvailable, summaryNarrationTextAvailable, summaryScenePlanA
 import type { SummarySceneRegenerationProposal } from "../../../src/summaries/media.js";
 import type { Scene } from "../../../src/scenes/types.js";
 import { dirtySceneIds, reconcileSceneDrafts, sceneEditableValues, scenePlanStructureDirty } from "./summary-scene-draft.js";
+import { VisualProfileCheckDialog, type VisualPreflightReport } from "./VisualProfileCheckDialog.js";
 
-export type SummaryVisualProps = { summary: StorySummary; base: string; disabled: boolean; onChange: (summary: StorySummary) => void;
+export type SummaryVisualProps = { slug?: string; summary: StorySummary; base: string; disabled: boolean; onChange: (summary: StorySummary) => void;
   onGenerate: (job: Job) => void; onError: (error: unknown) => void; onEditScene?: (sceneId: string) => void; focusSceneId?: string };
 function useActions(props: SummaryVisualProps) {
   const [pending, setPending] = useState(false); const mounted = useRef(true);
@@ -130,24 +131,61 @@ export function SummaryScenePanel(props: SummaryVisualProps) {
 
 export function SummaryArtworkPanel(props: SummaryVisualProps) {
   const { summary } = props; const { run, disabled } = useActions(props); const [selected, setSelected] = useState<string[]>([]);
-  const [grounding, setGrounding] = useState<Array<{ sceneId: string; status: "current" | "stale" | "missing"; grounding: Array<{ name: string; source: string; reference: boolean }>; approvedHistoricalVersion: boolean }>>([]);
+  const [grounding, setGrounding] = useState<Array<{ sceneId: string; status: "current" | "stale" | "missing"; grounding: Array<{ entityId?: string; name: string; source: string; reference: boolean; primaryReference?: boolean }>; approvedHistoricalVersion: boolean }>>([]);
+  const [preflight, setPreflight] = useState<VisualPreflightReport>();
+  const [pendingArtworkRequest, setPendingArtworkRequest] = useState<Record<string, unknown>>();
+  const [oneTimeFallbackIds, setOneTimeFallbackIds] = useState<string[]>([]);
+  const [checkingProfiles, setCheckingProfiles] = useState(false);
   useEffect(() => {
     let active = true;
     void api<{ scenes: typeof grounding }>(`${props.base}/scenes/grounding`).then((result) => { if (active) setGrounding(result.scenes); }).catch((error) => { if (active) props.onError(error); });
     return () => { active = false; };
   }, [props.base, summary.scenePlan, summary.artwork]);
   const scenes = summary.scenePlan?.scenes.filter((scene) => !scene.disabled) ?? [];
-  const regenerate = (ids?: string[]) => { if (confirm("Regenerate artwork? Selected approved/manual images will be replaced.")) void run("artwork", { force: true, ...(ids ? { scenes: ids } : {}) }); };
+  const requestArtwork = async (request: Record<string, unknown>) => {
+    setCheckingProfiles(true);
+    try {
+      const report = await post<VisualPreflightReport>(`${props.base}/artwork/visual-preflight`, request);
+      if (report.ready) { void run("artwork", request); return; }
+      setPendingArtworkRequest(request); setPreflight(report); setOneTimeFallbackIds([]);
+    } catch (error) { props.onError(error); }
+    finally { setCheckingProfiles(false); }
+  };
+  const regenerate = (ids?: string[]) => { if (confirm("Regenerate artwork? Selected approved/manual images will be preserved as earlier versions.")) void requestArtwork({ force: true, ...(ids ? { scenes: ids } : {}) }); };
+  const refreshPreflight = async () => {
+    if (!pendingArtworkRequest) return;
+    setCheckingProfiles(true);
+    try { setPreflight(await post<VisualPreflightReport>(`${props.base}/artwork/visual-preflight`, pendingArtworkRequest)); }
+    catch (error) { props.onError(error); }
+    finally { setCheckingProfiles(false); }
+  };
+  const continueArtwork = async () => {
+    if (!pendingArtworkRequest) return;
+    setCheckingProfiles(true);
+    try {
+      const report = await post<VisualPreflightReport>(`${props.base}/artwork/visual-preflight`, { ...pendingArtworkRequest, allowUnprofiledEntityIds: oneTimeFallbackIds });
+      setPreflight(report);
+      if (!report.ready) return;
+      const request = { ...pendingArtworkRequest, allowUnprofiledEntityIds: oneTimeFallbackIds };
+      setPreflight(undefined); setPendingArtworkRequest(undefined); setOneTimeFallbackIds([]);
+      void run("artwork", request);
+    } catch (error) { props.onError(error); }
+    finally { setCheckingProfiles(false); }
+  };
+  const cancelArtwork = () => { setPreflight(undefined); setPendingArtworkRequest(undefined); setOneTimeFallbackIds([]); };
+  const artworkDisabled = disabled || checkingProfiles;
   return <section className="summary-media-editor"><header><span className="eyebrow">Canonical visual continuity</span><h3>Scene artwork</h3><p>Uses this book’s image provider, style, and canonical visual references. Approved work is protected unless you explicitly regenerate it.</p></header>
     <div className="summary-meta"><span>{summary.artwork?.status ?? "Not generated"}</span><span>{scenes.length} enabled scenes</span></div>{summary.artwork?.error && <div className="error-box">{summary.artwork.error}</div>}
     {summary.scenes?.status === "stale" && scenes.length > 0 && <p className="summary-media-warning">The scene plan is stale — artwork will use the existing plan; regenerate scenes first only if you want artwork based on the latest narration.</p>}
-    <div className="summary-visual-actions"><button className="button primary" disabled={disabled || !scenes.length} onClick={() => void run("artwork", { missingOnly: true })}>Generate missing artwork</button><button className="button" disabled={disabled || !selected.length || !scenes.length} onClick={() => regenerate(selected)}>Regenerate selected</button><button className="button" disabled={disabled || !scenes.length} onClick={() => regenerate()}>Regenerate all</button><button className="button" onClick={() => setSelected(selected.length === scenes.length ? [] : scenes.map((scene) => scene.id))}>Select all</button></div>
+    <div className="summary-visual-actions"><button className="button primary" disabled={artworkDisabled || !scenes.length} onClick={() => void requestArtwork({ missingOnly: true })}>Generate missing artwork</button><button className="button" disabled={artworkDisabled || !selected.length || !scenes.length} onClick={() => regenerate(selected)}>Regenerate selected</button><button className="button" disabled={artworkDisabled || !scenes.length} onClick={() => regenerate()}>Regenerate all</button><button className="button" onClick={() => setSelected(selected.length === scenes.length ? [] : scenes.map((scene) => scene.id))}>Select all</button></div>
     {!scenes.length && <p>Generate scenes first.</p>}
     <p className="summary-media-note">Artwork uses the currently saved visual beat, image prompt, canonical identities, and available references. It does not regenerate the scene plan.</p>
     <div className="summary-artwork-grid">{scenes.map((scene) => { const url = `/api${props.base}/artwork/${scene.id}?v=${scene.artwork.imageFingerprint ?? ""}`; const state = grounding.find((item) => item.sceneId === scene.id); return <article className="summary-scene-card" key={scene.id}><header><label><input type="checkbox" checked={selected.includes(scene.id)} onChange={(event) => setSelected(event.target.checked ? [...selected, scene.id] : selected.filter((id) => id !== scene.id))} /> {scene.id}</label><span>{state?.status === "stale" ? "Scene changed — artwork is stale" : state?.status === "missing" ? "Artwork missing" : state?.status === "current" ? "Artwork current" : scene.artwork.status} · {scene.artwork.review}</span></header>
       {scene.artwork.imageFingerprint ? <a href={url} target="_blank" rel="noreferrer"><img src={url} alt={scene.summary} loading="lazy" /></a> : <p>No artwork yet.</p>}<h4>{scene.summary}</h4>{scene.artwork.error && <div className="error-box">{scene.artwork.error}</div>}<div className="summary-meta"><span>{scene.artwork.provider} {scene.artwork.model}</span>{scene.artwork.manuallyEdited && <span>Manually accepted</span>}</div>
-      {state && <div className="summary-grounding"><small>Visual grounding</small>{state.grounding.length ? state.grounding.map((item) => <span key={item.name}>{item.name} — {item.source}{item.reference ? " · character reference" : ""}</span>) : <span>No resolved canonical entities for this scene</span>}{state.approvedHistoricalVersion && <span>Approved historical version retained</span>}</div>}
-      <div className="summary-visual-actions"><button className="button" disabled={disabled || !scenes.length} onClick={() => scene.artwork.imageFingerprint ? regenerate([scene.id]) : void run("artwork", { scenes: [scene.id] })}>{scene.artwork.imageFingerprint ? "Regenerate artwork from current saved scene" : "Generate artwork from current saved scene"}</button><button className="button" onClick={() => props.onEditScene?.(scene.id)}>Edit scene</button>{scene.artwork.imageFingerprint && <><button className="button" disabled={disabled} onClick={() => { if (confirm("Approve this image for the current scene and visual settings?")) void run(`artwork/${scene.id}`, { review: "approved" }, true); }}>Approve / retain</button><button className="button" disabled={disabled} onClick={() => void run(`artwork/${scene.id}`, { review: "rejected" }, true)}>Reject</button><a className="button" download href={`${url}&download=1`}>Download PNG</a></>}</div></article>; })}</div>
+      {state && <div className="summary-grounding"><small>Visual grounding</small>{state.grounding.length ? state.grounding.map((item) => <span key={item.entityId ?? item.name}>{item.name} — {item.source}{item.primaryReference ? " · primary reference" : item.reference ? " · approved reference" : ""}</span>) : <span>No resolved canonical entities for this scene</span>}{state.approvedHistoricalVersion && <span>Approved historical version retained</span>}</div>}
+      <div className="summary-visual-actions"><button className="button" disabled={artworkDisabled || !scenes.length} onClick={() => scene.artwork.imageFingerprint ? regenerate([scene.id]) : void requestArtwork({ scenes: [scene.id] })}>{scene.artwork.imageFingerprint ? "Regenerate artwork from current saved scene" : "Generate artwork from current saved scene"}</button><button className="button" onClick={() => props.onEditScene?.(scene.id)}>Edit scene</button>{scene.artwork.imageFingerprint && <><button className="button" disabled={disabled} onClick={() => { if (confirm("Approve this image for the current scene and visual settings?")) void run(`artwork/${scene.id}`, { review: "approved" }, true); }}>Approve / retain</button><button className="button" disabled={disabled} onClick={() => void run(`artwork/${scene.id}`, { review: "rejected" }, true)}>Reject</button><a className="button" download href={`${url}&download=1`}>Download PNG</a></>}</div></article>; })}</div>
+    {checkingProfiles && <p className="summary-media-working" role="status">Checking Visual Profiles for scenes that need new artwork…</p>}
+    {preflight && <VisualProfileCheckDialog slug={props.slug ?? props.base.split("/")[2] ?? ""} report={preflight} oneTimeEntityIds={oneTimeFallbackIds} onOneTimeEntityIds={setOneTimeFallbackIds} onCancel={cancelArtwork} onContinue={() => void continueArtwork()} onRefresh={() => void refreshPreflight()} onError={props.onError} />}
   </section>;
 }
 

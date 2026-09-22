@@ -8,15 +8,13 @@ import { atomicWrite, atomicWriteJson } from "../storage/atomic-write.js";
 import { exists } from "../storage/story-files.js";
 import { fileFingerprint } from "../utils/file-fingerprint.js";
 import { fingerprint } from "../utils/hash.js";
-import { loadNarrationNamingEntities } from "../story-bible/narration-names.js";
-import { resolveVisualEntities } from "../scenes/identity.js";
 import { productionSceneFingerprint } from "../scenes/manifest.js";
 import { sceneSchema, sceneDirectionSchema, sceneOverridesSchema, artworkReviewSchema, type Scene, type ArtworkVersion } from "../scenes/types.js";
 import { bindNarrationSpans, timeNarrationScenes } from "../scenes/narration-spans.js";
-import { loadCharacterVisualReferences } from "../scenes/visual-references.js";
 import {
-  artworkPrompt,
   generateSceneImage,
+  loadApprovedVisualProfileReferences,
+  REFERENCE_USAGE_INSTRUCTION,
   validPngFingerprint,
   backingArtworkVersion,
   resolveBestProductionAssetForPaths,
@@ -41,6 +39,12 @@ import { summarySchema, summaryAudioAvailable, summaryNarrationTextAvailable, su
 import { summaryPath } from "./service.js";
 import { validateSceneCoverage } from "../scenes/timing.js";
 import { withUsageScope } from "../cost/context.js";
+import { loadStoryBibleWithCanonicalOverlay } from "../story-bible/canonical.js";
+import { loadVisualProfiles } from "../visual-canon/profiles.js";
+import { loadStoryArtDirection, resolveActiveArtDirection } from "../visual-canon/art-direction.js";
+import { resolveVisualCanonPrompt } from "../visual-canon/resolver.js";
+import { inspectArtworkVisualPreflightForScenes } from "../visual-canon/preflight.js";
+import { renderSceneContinuity, resolveVisualContinuity } from "../visual-canon/continuity.js";
 
 export class SummaryArtifactNotFoundError extends Error {}
 
@@ -49,6 +53,7 @@ export const summaryVisualInputSchema = z.object({
   missingOnly: z.boolean().default(false),
   dryRun: z.boolean().default(false),
   scenes: z.array(z.string().regex(/^scene-\d{3}$/)).min(1).max(100).optional(),
+  allowUnprofiledEntityIds: z.array(z.string().regex(/^ent_[a-f0-9]{24}$/)).max(100).default([]),
 }).strict();
 export const summaryReupscaleInputSchema = z.object({
   sceneId: z.string().regex(/^scene-\d{3}$/).optional(),
@@ -57,6 +62,7 @@ export const summaryReupscaleInputSchema = z.object({
 export const summaryProduceInputSchema = summaryScenesInputSchema.safeExtend({
   missingOnly: z.boolean().default(false),
   dryRun: z.boolean().default(false),
+  allowUnprofiledEntityIds: z.array(z.string().regex(/^ent_[a-f0-9]{24}$/)).max(100).default([]),
 });
 export const summarySceneEditSchema = z.union([
   z.object({ scenes: z.array(sceneSchema).min(1).max(100) }).strict(),
@@ -112,26 +118,48 @@ export class SummaryVisualService {
     };
   }
   private save(slug: string, summary: StorySummary) { summary.updatedAt = new Date().toISOString(); return atomicWriteJson(summaryPath(this.root, slug, summary.id), summarySchema.parse(summary)).then(() => summary); }
-  private async context(slug: string) { const story = await loadStory(storyPaths(this.root, slug, 1).storyConfig); const entities = await loadNarrationNamingEntities(this.root, slug); const provider = "forName" in this.images ? this.images.forName(story.artwork.provider) : this.images; if (provider.name !== story.artwork.provider) throw new Error("Configured artwork provider does not match the available provider"); return { story, entities, provider }; }
-  private async imageInput(slug: string, scene: Scene) {
+  private async context(slug: string) {
+    const story = await loadStory(storyPaths(this.root, slug, 1).storyConfig);
+    const [bible, visualProfiles, artDirection] = await Promise.all([
+      loadStoryBibleWithCanonicalOverlay(this.root, slug), loadVisualProfiles(this.root, slug), loadStoryArtDirection(this.root, slug),
+    ]);
+    const provider = "forName" in this.images ? this.images.forName(story.artwork.provider) : this.images;
+    if (provider.name !== story.artwork.provider) throw new Error("Configured artwork provider does not match the available provider");
+    return { story, bible, visualProfiles, artDirection, provider };
+  }
+  private sceneContinuity(scenes: readonly Scene[]) {
+    const resolved = resolveVisualContinuity({ scenes: scenes.filter((scene) => !scene.disabled).map((scene) => ({ id: scene.id, location: scene.location, visualChanges: scene.visualChanges })) });
+    return new Map(resolved.perScene.map((entry) => [entry.sceneId, renderSceneContinuity(entry)]));
+  }
+  private async imageInput(slug: string, scene: Scene, visualContinuity?: string) {
     const context = await this.context(slug);
-    const entities = context.entities.filter((entity) => scene.entityIds?.includes(entity.id));
-    for (const entity of resolveVisualEntities([...scene.characters, ...(scene.location ? [scene.location] : [])], context.entities)) if (!entities.some((item) => item.id === entity.id)) entities.push(entity);
-    const refs = await loadCharacterVisualReferences(this.root, slug, [...scene.characters, ...entities.map((entity) => entity.canonicalName)]);
-    const canonical = entities.map((entity) => ({ name: entity.canonicalName, description: [entity.description, entity.notes].filter(Boolean).join(". ") }));
-    const visualScene = { ...scene, characters: entities.length ? entities.map((entity) => entity.canonicalName) : scene.characters };
-    const prompt = artworkPrompt(visualScene, [...canonical, ...refs], context.story.artwork.stylePrompt, context.story.artwork.size, context.story.artwork.aspectRatio);
+    const artDirection = resolveActiveArtDirection(context.artDirection, scene.overrides?.artDirectionPresetId);
+    const resolved = resolveVisualCanonPrompt({ scene, story: context.story, bible: context.bible, artDirection, visualProfiles: context.visualProfiles, visualContinuity });
+    const references = await loadApprovedVisualProfileReferences(this.root, context.story, resolved);
+    const prompt = [resolved.prompt, context.story.artwork.stylePrompt?.trim() ? `BOOK ART STYLE: ${context.story.artwork.stylePrompt.trim()}` : "", references.images.length ? REFERENCE_USAGE_INSTRUCTION : ""].filter(Boolean).join("\n\n");
     const { provider: pName, model, quality, aspectRatio, size, stylePrompt, outputFormat } = context.story.artwork;
     return {
       ...context,
       prompt,
-      entityIds: entities.map((entity) => entity.id),
-      grounding: entities.map((entity) => ({ name: entity.canonicalName, source: "Story Bible canon" as const,
-        reference: refs.some((ref) => ref.name.toLocaleLowerCase() === entity.canonicalName.toLocaleLowerCase()) })),
+      resolved,
+      references,
+      entityIds: resolved.resolvedEntities.map((entity) => entity.entityId),
+      grounding: resolved.resolvedEntities.map((entity) => ({
+        entityId: entity.entityId,
+        name: entity.name,
+        source: entity.hasApprovedProfile ? "approved Visual Profile" : context.bible.canonicalEntities.find((item) => item.id === entity.entityId)?.visualProfilePolicy?.mode === "skip" ? "Story Bible fallback (skip policy)" : "Story Bible fallback",
+        reference: references.loadedEntityIds.includes(entity.entityId),
+        primaryReference: references.loadedEntityIds.includes(entity.entityId) && (entity.references ?? []).some((reference) => reference.approved && reference.role === "primary_reference" && references.loadedReferenceIds.includes(reference.id)),
+        profileRevision: entity.profileRevision,
+      })),
       inputFingerprint: fingerprint({
-        version: "source-artwork-v1",
+        version: "summary-visual-canon-v1",
         prompt,
-        refs: refs.map((ref) => ref.fingerprint),
+        references: references.loadedReferenceIds.map((id, index) => ({ id, fingerprint: references.referenceFingerprints[index] })),
+        artDirection: resolved.artDirectionFingerprint,
+        entityVisual: resolved.entityVisualFingerprints,
+        sceneDirection: resolved.sceneDirectionFingerprint,
+        resolvedPrompt: resolved.resolvedPromptFingerprint,
         settings: { provider: pName, model, quality, aspectRatio, size, stylePrompt, outputFormat },
         providerVersion: context.provider.version,
       }),
@@ -140,9 +168,10 @@ export class SummaryVisualService {
   private videoFingerprint(summary: StorySummary, settings: unknown) { return fingerprint({ version: "summary-video-v1", audio: summary.audio?.outputFingerprint, scenes: summary.scenePlan?.scenes.filter((scene) => !scene.disabled).map((scene) => ({ id: scene.id, start: scene.startSeconds, end: scene.endSeconds, image: scene.artwork.imageFingerprint, review: scene.artwork.review })), settings, alignment: summary.alignment?.inputFingerprint, renderer: this.renderer.version }); }
   async get(slug: string, id: string) {
     const summary = await this.media.get(slug, id); const paths = this.paths(slug, id);
+    const continuity = this.sceneContinuity(summary.scenePlan?.scenes ?? []);
     let intact = true;
     for (const scene of summary.scenePlan?.scenes.filter((scene) => !scene.disabled) ?? []) {
-      const input = await this.imageInput(slug, scene); const actual = await validPngFingerprint(paths.image(scene.id));
+      const input = await this.imageInput(slug, scene, continuity.get(scene.id)); const actual = await validPngFingerprint(paths.image(scene.id));
       if (scene.artwork.status !== "complete" || actual !== scene.artwork.imageFingerprint || !actual || scene.artwork.fingerprint !== input.inputFingerprint || ["rejected", "needs-regeneration"].includes(scene.artwork.review)) intact = false;
     }
     if (summary.artwork?.status === "current" && !intact) summary.artwork.status = "stale";
@@ -171,7 +200,10 @@ export class SummaryVisualService {
     // A reviewed manual timeline is authoritative while its narration and audio remain current.
     if (onlyTiming && before.scenes?.status === "current" && before.scenePlan?.manuallyEdited && before.audio?.status === "current" && before.scenePlan.durationSeconds === before.audio.durationSeconds) return before;
     let summary = onlyTiming ? before : await this.media.scenes(slug, id, options);
-    if (before.scenePlan && summary.scenePlan && !onlyTiming) for (const scene of summary.scenePlan.scenes) { const previous = before.scenePlan.scenes.find((item) => item.id === scene.id); if (previous) { const oldInput = await this.imageInput(slug, previous); const nextInput = await this.imageInput(slug, scene); if (oldInput.inputFingerprint === nextInput.inputFingerprint || previous.artwork.review === "approved" || previous.artwork.manuallyEdited) scene.artwork = previous.artwork; } }
+    if (before.scenePlan && summary.scenePlan && !onlyTiming) {
+      const oldContinuity = this.sceneContinuity(before.scenePlan.scenes), nextContinuity = this.sceneContinuity(summary.scenePlan.scenes);
+      for (const scene of summary.scenePlan.scenes) { const previous = before.scenePlan.scenes.find((item) => item.id === scene.id); if (previous) { const oldInput = await this.imageInput(slug, previous, oldContinuity.get(previous.id)); const nextInput = await this.imageInput(slug, scene, nextContinuity.get(scene.id)); if (oldInput.inputFingerprint === nextInput.inputFingerprint || previous.artwork.review === "approved" || previous.artwork.manuallyEdited) scene.artwork = previous.artwork; } }
+    }
     if (summary.audio?.status === "current") summary = await this.alignWithPlan(slug, summary, progress);
     if (!summary.scenePlan || !summary.narration?.text) throw new Error("Summary scene plan is missing");
     summary.scenePlan.scenes = bindNarrationSpans(summary.scenePlan.scenes, summary.narration.text);
@@ -241,13 +273,17 @@ export class SummaryVisualService {
   async sceneArtworkGrounding(slug: string, id: string) {
     const summary = await this.media.get(slug, id);
     const paths = this.paths(slug, id);
+    const continuity = this.sceneContinuity(summary.scenePlan?.scenes ?? []);
     return Promise.all((summary.scenePlan?.scenes ?? []).map(async (scene) => {
-      const input = await this.imageInput(slug, scene);
+      const input = await this.imageInput(slug, scene, continuity.get(scene.id));
       const actual = await validPngFingerprint(paths.image(scene.id));
       const hasImage = Boolean(actual && scene.artwork.imageFingerprint === actual);
       const current = hasImage && scene.artwork.status === "complete" && scene.artwork.fingerprint === input.inputFingerprint;
+      const backing = backingArtworkVersion(scene);
+      const recordedGrounding = backing?.provenance?.visualCanon;
+      const visualGrounding = Array.isArray(recordedGrounding) ? recordedGrounding as typeof input.grounding : input.grounding;
       return { sceneId: scene.id, status: !hasImage ? "missing" as const : current ? "current" as const : "stale" as const,
-        grounding: input.grounding, approvedHistoricalVersion: Boolean(!current && (scene.artwork.review === "approved" || scene.artwork.versions?.some((version) => version.review === "approved"))) };
+        grounding: visualGrounding, approvedHistoricalVersion: Boolean(!current && (scene.artwork.review === "approved" || scene.artwork.versions?.some((version) => version.review === "approved"))) };
     }));
   }
   async artwork(slug: string, id: string, raw: unknown = {}, progress?: SummaryVisualProgress, paused?: () => boolean, upscalerOverride?: ImageUpscaler) {
@@ -260,6 +296,7 @@ export class SummaryVisualService {
 
     const { story } = await this.context(slug);
     const paths = this.paths(slug, id);
+    const continuity = this.sceneContinuity(summary.scenePlan.scenes);
     const upscaler = needsProductionDerivative(story) ? resolveUpscaler(upscalerOverride ?? this.upscaler) : undefined;
 
     let imagesToGenerate = 0;
@@ -275,7 +312,7 @@ export class SummaryVisualService {
     const planItems: PlanItem[] = [];
 
     for (const scene of selected) {
-      const input = await this.imageInput(slug, scene);
+      const input = await this.imageInput(slug, scene, continuity.get(scene.id));
       const backing = backingArtworkVersion(scene);
       let intactOriginal = false;
       if (backing) {
@@ -315,13 +352,25 @@ export class SummaryVisualService {
       }
     }
 
+    const preflight = await inspectArtworkVisualPreflightForScenes({
+      root: this.root,
+      slug,
+      candidates: planItems.filter((item) => item.needsGeneration).map((item) => ({ id: item.scene.id, scene: item.scene })),
+      allowUnprofiledEntityIds: options.allowUnprofiledEntityIds,
+    });
+    if (!preflight.ready && !options.dryRun) {
+      throw new Error(`Visual Profile Check required before generating summary artwork: ${preflight.requiresDecision.map((entity) => entity.name).join(", ")}`);
+    }
+
     if (options.dryRun) {
       return {
         summary,
         dryRun: true,
         imagesToGenerate,
+        sceneIds: planItems.filter((item) => item.needsGeneration).map((item) => item.scene.id),
         reusable,
         derivativesToBuild,
+        preflight,
       };
     }
 
@@ -392,7 +441,10 @@ export class SummaryVisualService {
         await this.save(slug, summary);
 
         try {
-          const result = await withUsageScope({ story: slug, stage: "artwork" }, () => generateSceneImage(input.provider, input.story, input.prompt));
+          const result = await withUsageScope({ story: slug, stage: "artwork" }, () => generateSceneImage(input.provider, input.story, input.prompt, {
+            negativePrompt: input.resolved.negativePrompt || undefined,
+            referenceImages: input.references.images,
+          }));
           const versionNumber = (scene.artwork.versions?.length ?? 0) + 1;
           const versionId = `v${versionNumber}`;
           const originalPath = paths.sceneVersionImage(scene.id, versionNumber);
@@ -412,8 +464,8 @@ export class SummaryVisualService {
             model: input.story.artwork.model,
             prompt: input.prompt,
             promptFingerprint: input.inputFingerprint,
-            resolvedVisualProfileReferences: [],
-            artDirectionFingerprint: "",
+            resolvedVisualProfileReferences: input.resolved.resolvedEntities.filter((entity) => entity.hasApprovedProfile).map((entity) => ({ entityId: entity.entityId, name: entity.name, role: entity.type })),
+            artDirectionFingerprint: input.resolved.artDirectionFingerprint,
             settings: {
               quality: input.story.artwork.quality,
               size: input.story.artwork.size,
@@ -421,6 +473,17 @@ export class SummaryVisualService {
               outputFormat: input.story.artwork.outputFormat,
             },
             original: dims ? { width: dims.width, height: dims.height, fingerprint: fingerprint(result.data.toString("base64")), provider: input.provider.name, model: input.story.artwork.model } : undefined,
+            provenance: {
+              referencesUsed: input.references.mode,
+              referenceImageCount: input.references.images.length,
+              availableReferenceCount: input.references.available,
+              visualCanon: input.grounding.map((entity) => ({
+                ...entity,
+                source: entity.source === "Story Bible fallback" && options.allowUnprofiledEntityIds.includes(entity.entityId)
+                  ? "Story Bible fallback (one-time)"
+                  : entity.source,
+              })),
+            },
             review: "unreviewed",
           };
 
@@ -576,17 +639,18 @@ export class SummaryVisualService {
   }
   async reviewArtwork(slug: string, id: string, sceneId: string, raw: unknown) {
     const review = artworkReviewSchema.parse(raw); const summary = await this.get(slug, id); const scene = summary.scenePlan?.scenes.find((item) => item.id === sceneId); if (!scene) throw new Error("Scene was not found");
-    if (review === "approved") { const actual = await validPngFingerprint(this.paths(slug, id).image(sceneId)); if (!actual || scene.artwork.status !== "complete" || actual !== scene.artwork.imageFingerprint) throw new Error("Only intact artwork can be approved"); const input = await this.imageInput(slug, scene); if (scene.artwork.fingerprint !== input.inputFingerprint) { scene.artwork.originalFingerprint ??= scene.artwork.fingerprint; scene.artwork.fingerprint = input.inputFingerprint; scene.artwork.manuallyEdited = true; scene.artwork.acceptedAt = new Date().toISOString(); } }
+    if (review === "approved") { const actual = await validPngFingerprint(this.paths(slug, id).image(sceneId)); if (!actual || scene.artwork.status !== "complete" || actual !== scene.artwork.imageFingerprint) throw new Error("Only intact artwork can be approved"); const input = await this.imageInput(slug, scene, this.sceneContinuity(summary.scenePlan?.scenes ?? []).get(scene.id)); if (scene.artwork.fingerprint !== input.inputFingerprint) { scene.artwork.originalFingerprint ??= scene.artwork.fingerprint; scene.artwork.fingerprint = input.inputFingerprint; scene.artwork.manuallyEdited = true; scene.artwork.acceptedAt = new Date().toISOString(); } }
     scene.artwork.review = review; if (summary.video) summary.video.status = "stale"; await this.save(slug, summary); return this.get(slug, id);
   }
   async video(slug: string, id: string, raw: unknown = {}, progress?: SummaryVisualProgress) {
     const { force } = summaryVisualInputSchema.parse(raw); const summary = await this.get(slug, id); const { story } = await this.context(slug);
     const paths = this.paths(slug, id);
+    const continuity = this.sceneContinuity(summary.scenePlan?.scenes ?? []);
     // Availability + integrity, not freshness: stale-but-valid audio/scenes render with a warning upstream in the UI.
     if (!summary.scenePlan || !summaryScenePlanAvailable(summary) || !summary.audio?.outputFingerprint || !summary.audio.durationSeconds || (await fileFingerprint(paths.audio)) !== summary.audio.outputFingerprint) throw new Error("Usable mastered audio and a scene plan are required for summary video");
     const scenes = summary.scenePlan.scenes.filter((scene) => !scene.disabled);
     for (const scene of scenes) {
-      const input = await this.imageInput(slug, scene);
+      const input = await this.imageInput(slug, scene, continuity.get(scene.id));
       const actual = await validPngFingerprint(paths.image(scene.id));
       if (!actual || actual !== scene.artwork.imageFingerprint || scene.artwork.status !== "complete" || scene.artwork.fingerprint !== input.inputFingerprint || ["rejected", "needs-regeneration"].includes(scene.artwork.review)) {
         throw new Error(`${scene.id} needs current artwork; review protected artwork or regenerate it explicitly`);
@@ -666,11 +730,11 @@ export class SummaryVisualService {
     progress?.({ type: "summary.narration.preparing" });
     if (paused?.()) return this.get(slug, id); await withUsageScope({ story: slug, stage: "narration" }, () => this.media.narration(slug, id, { force: options.force }));
     if (paused?.()) return this.get(slug, id); progress?.({ type: "summary.audio.preparing" }); await withUsageScope({ story: slug, stage: "tts" }, () => this.media.audio(slug, id, { force: options.force }));
-    if (paused?.()) return this.get(slug, id); const { missingOnly, dryRun, ...pacing } = options;
+    if (paused?.()) return this.get(slug, id); const { missingOnly, dryRun, allowUnprofiledEntityIds, ...pacing } = options;
     const recorded = (await this.media.get(slug, id)).scenePacing;
     const sceneOptions = options.pacing === "automatic" && options.sceneCount === undefined && options.secondsPerScene === undefined && recorded ? { ...recorded, force: options.force } : pacing;
     await withUsageScope({ story: slug, stage: "scenePlanning" }, () => this.scenes(slug, id, sceneOptions, progress));
-    if (paused?.()) return this.get(slug, id); await this.artwork(slug, id, { force: options.force, missingOnly, dryRun }, progress, paused);
+    if (paused?.()) return this.get(slug, id); await this.artwork(slug, id, { force: options.force, missingOnly, dryRun, allowUnprofiledEntityIds }, progress, paused);
     if (paused?.()) return this.get(slug, id); return this.video(slug, id, { force: options.force }, progress);
   }
   private async planProduce(slug: string, id: string, options: z.infer<typeof summaryProduceInputSchema>) {
@@ -687,7 +751,7 @@ export class SummaryVisualService {
       ? { action: "reuse", status: summary.scenes.status }
       : { action: "generate", status: summary.scenes?.status ?? "missing" };
     const artwork = summaryScenePlanAvailable(summary)
-      ? await this.artwork(slug, id, { missingOnly: options.missingOnly, dryRun: true })
+      ? await this.artwork(slug, id, { missingOnly: options.missingOnly, dryRun: true, allowUnprofiledEntityIds: options.allowUnprofiledEntityIds })
       : { blocked: true, reason: "A scene plan will be generated before artwork can be planned" };
     const canRenderVideo = summaryAudioAvailable(summary) && summaryNarrationTextAvailable(summary) && summaryScenePlanAvailable(summary);
     const video = summary.video?.status === "current" && canRenderVideo

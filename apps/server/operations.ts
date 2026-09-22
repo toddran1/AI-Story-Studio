@@ -444,6 +444,13 @@ export class StudioOperations {
   previewSummarySceneRegeneration(slug: string, id: string, scene: string, raw: unknown) { slugSchema.parse(slug); z.string().regex(/^scene-\d{3}$/).parse(scene); return withUsageScope({ story: slug, stage: "scenePlanning" }, () => this.summaryMedia().previewSceneRegeneration(slug, id, scene, raw)); }
   applySummarySceneRegeneration(slug: string, id: string, scene: string, raw: unknown) { slugSchema.parse(slug); z.string().regex(/^scene-\d{3}$/).parse(scene); return withStoryLock(this.root, slug, "summary scene regeneration apply", () => this.summaryVisuals().applySceneRegeneration(slug, id, scene, raw)); }
   summarySceneArtworkGrounding(slug: string, id: string) { slugSchema.parse(slug); return this.summaryVisuals().sceneArtworkGrounding(slug, id); }
+  async inspectSummaryArtworkVisualPreflight(slug: string, id: string, raw: unknown) {
+    slugSchema.parse(slug);
+    const input = summaryVisualInputSchema.parse(raw);
+    const report = await this.summaryVisuals().artwork(slug, id, { ...input, dryRun: true });
+    if (!("preflight" in report)) throw new Error("Summary artwork inspection did not produce a Visual Profile report");
+    return { ...report.preflight, imageCountEstimate: report.imagesToGenerate, sceneIds: report.sceneIds };
+  }
   reviewSummaryArtwork(slug: string, id: string, scene: string, review: unknown) { slugSchema.parse(slug); return withStoryLock(this.root, slug, "summary artwork review", () => this.summaryVisuals().reviewArtwork(slug, id, scene, review)); }
   reupscaleSummaryArtwork(slug: string, id: string, raw: unknown) {
     slugSchema.parse(slug);

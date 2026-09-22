@@ -9,7 +9,7 @@ import { SummaryService } from "../src/summaries/service.js";
 import { LLMRouter } from "../src/llm/router.js";
 import { TTSProviderRouter } from "../src/tts/router.js";
 import { atomicWrite, atomicWriteJson } from "../src/storage/atomic-write.js";
-import { storyPaths } from "../src/storage/paths.js";
+import { storyPaths, visualProfileRefPath } from "../src/storage/paths.js";
 import { fileFingerprint } from "../src/utils/file-fingerprint.js";
 import { summaryPath } from "../src/summaries/service.js";
 import { emptyStoryBible, storyBibleUpdateSchema } from "../src/domain/story-bible.js";
@@ -24,6 +24,8 @@ import { runCommand } from "../src/audio/ffmpeg.js";
 import { JobManager } from "../apps/server/job-manager.js";
 import { StudioOperations } from "../apps/server/operations.js";
 import { loadEnvironment } from "../src/config/env.js";
+import { saveVisualProfiles } from "../src/visual-canon/profiles.js";
+import { loadStoryBibleWithCanonicalOverlay } from "../src/story-bible/canonical.js";
 
 const PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64");
 const narration = "Malakai enters the dungeon. Malakai faces the monsters.";
@@ -42,6 +44,8 @@ describe("summary visual production", () => {
     await atomicWriteJson(storyPaths(root, "demo-story", 1).storyConfig, testStory()); await atomicWrite(storyPaths(root, "demo-story", 1).english, "Su Ming enters a dungeon.");
     const bible = mergeStoryBible(emptyStoryBible(), storyBibleUpdateSchema.parse({ chapterSummary: "Dungeon", characters: [{ canonicalEnglishName: "Su Ming", originalName: "苏铭", firstSeenChapter: 1, lastSeenChapter: 1, description: "A young necromancer in black robes" }] }), 1);
     bible.canonicalEntities[0]!.localizedNaming = { locale: "en-US", fullName: "Malakai Sterling", shortName: "Malakai", usageMode: "ai_contextual" }; await atomicWriteJson(storyPaths(root, "demo-story", 1).bible, bible);
+    const entityId = bible.canonicalEntities[0]!.id; const now = new Date().toISOString();
+    await saveVisualProfiles(root, "demo-story", { [entityId]: { id: "vp-su-ming", entityId, visualType: "character", status: "approved", revision: 1, createdAt: now, updatedAt: now, appearance: "A young necromancer", visualPrompt: "young necromancer with dark hair", notes: "", character: {}, references: [], variants: [] } });
     id = (await summaries.generate("demo-story", { chapters: [1], title: "Dungeon recap" })).id;
     vi.spyOn(llm, "generateStructured").mockImplementation(async (request) => ({ value: request.schema.parse({ scenes: [
       { summary: "Su Ming arrives", startSeconds: 0, endSeconds: 5, characters: ["Malakai"], visualPrompt: "Su Ming in black robes at the dungeon entrance", importance: "standard", narrationStartWord: 0, narrationEndWord: 4 },
@@ -77,11 +81,59 @@ describe("summary visual production", () => {
     const result = await produce(); expect(result.video).toMatchObject({ status: "current", durationSeconds: 12, sceneCount: 2 });
     expect(result.scenePlan?.timingMethod).toBe("aligned"); expect(result.scenePlan?.scenes[1]?.startSeconds).toBe(8);
     expect(images.generate.mock.calls[0]![0]).toMatchObject({ model: testStory().artwork.model });
-    expect(JSON.stringify(images.generate.mock.calls)).toContain("Su Ming"); expect(JSON.stringify(images.generate.mock.calls)).toContain("CANONICAL VISUAL REFERENCE");
+    expect(JSON.stringify(images.generate.mock.calls)).toContain("Su Ming"); expect(JSON.stringify(images.generate.mock.calls)).toContain("ENTITY VISUAL CANON"); expect(JSON.stringify(images.generate.mock.calls)).toContain("SCENE-STATE PRIORITY");
+    expect(JSON.stringify(images.generate.mock.calls)).toContain("young necromancer with dark hair");
     expect(result.scenePlan?.scenes[0]?.artwork.entityIds).toHaveLength(1);
     expect(render.mock.calls[0]![0].sceneArtwork.map((scene: any) => scene.durationSeconds)).toEqual([8, 4]); expect(render.mock.calls[0]![2].introDurationSeconds).toBe(0);
     await produce(); expect(images.generate).toHaveBeenCalledTimes(2); expect(render).toHaveBeenCalledTimes(1); expect(engine.align).toHaveBeenCalledTimes(1); expect(tts.calls).toBe(1);
     expect(await visuals.export("demo-story", id, "video")).toMatchObject({ contentType: "video/mp4" });
+  });
+  it("preflights missing and draft profiles against only scenes that need generation before calling the image provider", async () => {
+    const planned = await produce(); const entityId = planned.scenePlan!.scenes[0]!.entityIds![0]!; images.generate.mockClear();
+    await saveVisualProfiles(root, "demo-story", {});
+    const reusableOnly = await visuals.artwork("demo-story", id, { missingOnly: true, dryRun: true });
+    expect(reusableOnly).toMatchObject({ imagesToGenerate: 0, sceneIds: [], preflight: { ready: true, requiresDecision: [] } });
+    const missing = await visuals.artwork("demo-story", id, { force: true, dryRun: true });
+    expect(missing).toMatchObject({ dryRun: true, imagesToGenerate: 2, preflight: { ready: false, requiresDecision: [{ entityId, state: "missing_profile" }] } });
+    await expect(visuals.artwork("demo-story", id, { force: true })).rejects.toThrow("Visual Profile Check required");
+    expect(images.generate).not.toHaveBeenCalled();
+
+    const now = new Date().toISOString();
+    await saveVisualProfiles(root, "demo-story", { [entityId]: { id: "vp-draft", entityId, status: "draft", revision: 1, createdAt: now, updatedAt: now } });
+    const draft = await visuals.artwork("demo-story", id, { force: true, dryRun: true, scenes: ["scene-001"] });
+    expect(draft).toMatchObject({ imagesToGenerate: 1, sceneIds: ["scene-001"], preflight: { ready: false, requiresDecision: [{ entityId, state: "draft_profile" }] } });
+    expect(images.generate).not.toHaveBeenCalled();
+  });
+  it("uses the shared Visual Canon preflight decision, persistent skip policy and one-time fallback for summary images", async () => {
+    const planned = await produce(); const entityId = planned.scenePlan!.scenes[0]!.entityIds![0]!; images.generate.mockClear();
+    await saveVisualProfiles(root, "demo-story", {});
+    const bible = await loadStoryBibleWithCanonicalOverlay(root, "demo-story");
+    const entity = bible.canonicalEntities.find((item) => item.id === entityId)!; entity.visualProfilePolicy = { mode: "skip" };
+    await atomicWriteJson(storyPaths(root, "demo-story", 1).bible, bible);
+    const skipped = await visuals.artwork("demo-story", id, { force: true, dryRun: true });
+    expect(skipped).toMatchObject({ preflight: { ready: true, entities: [{ entityId, state: "skip_profile", policy: "skip" }] } });
+    const skippedGeneration = await visuals.artwork("demo-story", id, { force: true });
+    expect(skippedGeneration.scenePlan?.scenes[0]?.artwork.versions?.at(-1)?.provenance?.visualCanon).toMatchObject([{ entityId, source: "Story Bible fallback (skip policy)" }]);
+    entity.visualProfilePolicy = { mode: "prompt" }; await atomicWriteJson(storyPaths(root, "demo-story", 1).bible, bible);
+    const oneTime = await visuals.artwork("demo-story", id, { force: true, allowUnprofiledEntityIds: [entityId] });
+    expect(oneTime.scenePlan?.scenes[0]?.artwork.versions?.at(-1)?.provenance?.visualCanon).toMatchObject([{ entityId, source: "Story Bible fallback (one-time)" }]);
+    expect(images.generate).toHaveBeenCalledTimes(4);
+  });
+  it("sends approved Visual Profile references while excluding unapproved candidates and records grounding provenance", async () => {
+    const planned = await produce(); const entityId = planned.scenePlan!.scenes[0]!.entityIds![0]!; images.generate.mockClear();
+    const story = testStory(); story.artwork.model = "gpt-image-2.5-flare"; await atomicWriteJson(storyPaths(root, "demo-story", 1).storyConfig, story);
+    const now = new Date().toISOString();
+    await saveVisualProfiles(root, "demo-story", { [entityId]: { id: "vp-su-ming", entityId, visualType: "character", status: "approved", revision: 2, createdAt: now, updatedAt: now,
+      appearance: "Same young necromancer", visualPrompt: "young necromancer with dark hair", notes: "", character: {}, variants: [], references: [
+        { id: "approved-primary", entityId, imagePath: "approved-primary.png", role: "primary_reference", source: "uploaded", approved: true, createdAt: now },
+        { id: "draft-face", entityId, imagePath: "draft-face.png", role: "face_portrait", source: "generated", approved: false, createdAt: now },
+      ] } });
+    await atomicWrite(visualProfileRefPath(root, "demo-story", entityId, "approved-primary", "png"), PNG);
+    await atomicWrite(visualProfileRefPath(root, "demo-story", entityId, "draft-face", "png"), PNG);
+    const result = await visuals.artwork("demo-story", id, { force: true, scenes: ["scene-001"] });
+    const request = images.generate.mock.calls[0]![0];
+    expect(request.referenceImages).toHaveLength(1); expect(request.referenceImages[0]).toMatchObject({ role: "primary_reference" });
+    expect(result.scenePlan!.scenes[0]!.artwork.versions!.at(-1)!.provenance).toMatchObject({ referencesUsed: "images", referenceImageCount: 1, visualCanon: [{ entityId, source: "approved Visual Profile", reference: true, primaryReference: true, profileRevision: 2 }] });
   });
   it("falls back to deterministic timing when local alignment is unavailable", async () => {
     const fallback = new SummaryVisualService(root, media, images, { version: "fake-video", render }, config);
@@ -181,6 +233,9 @@ describe("summary visual production", () => {
   });
   it("supports CLI production/export and all six UI layers with actionable controls", async () => {
     expect(parseSummaryArgs(["artwork", "demo-story", id, "--scene", "scene-001", "--force"])).toMatchObject({ action: "artwork", input: { scenes: ["scene-001"], force: true } });
+    const entityId = (await produce()).scenePlan!.scenes[0]!.entityIds![0]!;
+    expect(parseSummaryArgs(["artwork", "demo-story", id, "--dry-run", "--allow-unprofiled", entityId])).toMatchObject({ action: "artwork", input: { dryRun: true, allowUnprofiledEntityIds: [entityId] } });
+    expect(parseSummaryArgs(["produce", "demo-story", id, "--dry-run", "--allow-unprofiled", entityId])).toMatchObject({ action: "produce", input: { dryRun: true, allowUnprofiledEntityIds: [entityId] } });
     const command = parseSummaryArgs(["produce", "demo-story", id, "--scene-count", "2"]); let output = "";
     await runSummaryCommand(command, { root, service: summaries, media, visuals, stdout: (text) => { output += text; }, stderr: () => {} }); const summary = JSON.parse(output);
     expect(summary.video.status).toBe("current"); output = "";
