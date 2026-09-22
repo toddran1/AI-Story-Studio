@@ -2,6 +2,7 @@ import { StageState } from "../domain/chapter.js";
 import { QaException } from "../domain/qa.js";
 import { Story } from "../domain/story.js";
 import { CanonicalEntity, emptyStoryBible, hasActivePronunciation } from "../domain/story-bible.js";
+import { CanonicalEntity, emptyStoryBible, hasActivePronunciation, StoryBible, storyBibleSchema } from "../domain/story-bible.js";
 import { loadNarrationNamingEntities } from "../story-bible/narration-names.js";
 import { loadPronunciationEntities } from "../story-bible/pronunciation.js";
 import { storyPaths } from "../storage/paths.js";
@@ -144,6 +145,28 @@ export function deriveQaFreshness(recordedFingerprint: string | undefined, curre
 
 export type DeterministicQaDependencies = Pick<QaDependencies, "naming" | "pronunciation" | "exceptions" | "acceptedContinuity">;
 
+export type ResolvedQaContext = {
+  raw: unknown;
+  parsed: StoryBible;
+};
+
+/**
+ * Resolves the authoritative chapter context consumed by QA.
+ * Reads the stored context artifact from disk when present, falling back to an
+ * empty Story Bible if absent or unparseable.
+ */
+export async function resolveStoredQaContext(target: string | { storyContext: string }): Promise<ResolvedQaContext> {
+  const path = typeof target === "string" ? target : target.storyContext;
+  const raw = (await readJsonIfExists(path)) ?? emptyStoryBible();
+  let parsed: StoryBible;
+  try {
+    parsed = storyBibleSchema.parse(raw);
+  } catch {
+    parsed = emptyStoryBible();
+  }
+  return { raw, parsed };
+}
+
 /**
  * Rebuild the exact dependency set the pipeline/recheck records for a stored
  * chapter, from the artifacts on disk. Returns undefined when the chapter lacks
@@ -157,8 +180,10 @@ export async function loadStoredQaDependencies(
 ): Promise<QaDependencies | undefined> {
   const paths = storyPaths(root, story.slug, chapter);
   const [source, translation, narration, contextRaw, deterministicDeps] = await Promise.all([
+  const [source, translation, narration, qaContext, deterministicDeps] = await Promise.all([
     readTextIfExists(paths.original), readTextIfExists(paths.english), readTextIfExists(paths.narration),
     readJsonIfExists(paths.storyContext), deterministic ? Promise.resolve(deterministic) : loadQaDeterministicDependencies(root, story.slug),
+    resolveStoredQaContext(paths), deterministic ? Promise.resolve(deterministic) : loadQaDeterministicDependencies(root, story.slug),
   ]);
   if (!source?.trim() || !translation?.trim() || !narration?.trim()) return undefined;
   return {
@@ -166,6 +191,7 @@ export async function loadStoredQaDependencies(
     translation: fingerprint(translation),
     narration: fingerprint(narration),
     context: contextRaw ?? emptyStoryBible(),
+    context: qaContext.raw,
     config: story.pipeline.qa,
     narrationSettings: { profanityMode: story.narrationSettings.profanityMode, includeChapterTitle: story.narrationSettings.includeChapterTitle },
     prompt: QA_PROMPT_VERSION,

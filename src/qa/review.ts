@@ -3,6 +3,7 @@ import { chapterSchema } from "../domain/chapter.js";
 import { QaCategory, QaFinding, QaState, qaStateSchema, QaStatus } from "../domain/qa.js";
 import { Story } from "../domain/story.js";
 import { emptyStoryBible, StoryBible, storyBibleSchema } from "../domain/story-bible.js";
+import { StoryBible } from "../domain/story-bible.js";
 import { LLMProvider } from "../llm/provider.js";
 import { atomicWriteJson } from "../storage/atomic-write.js";
 import { readJsonIfExists } from "../storage/story-files.js";
@@ -14,6 +15,7 @@ import {
   migrateQaState, normalizeExcerptKey, normalizeQaText, openFindings, qaCounts, recomputeQaSummary,
 } from "./findings.js";
 import { computeQaDependencyFingerprint, loadQaDeterministicDependencies } from "./freshness.js";
+import { computeQaDependencyFingerprint, loadQaDeterministicDependencies, resolveStoredQaContext } from "./freshness.js";
 import { QA_PROMPT_VERSION } from "./prompts.js";
 import { validateChapterQuality } from "./validator.js";
 import { runDeterministicQaChecks, type AcceptedContinuity } from "./deterministic.js";
@@ -544,14 +546,17 @@ export async function recheckChapterQa(deps: {
   const { root, story, chapter, provider } = deps;
   const paths = storyPaths(root, story.slug, chapter);
   const [qaRaw, chapterRaw, source, translation, narration, contextRaw] = await Promise.all([
+  const [qaRaw, chapterRaw, source, translation, narration, qaContext] = await Promise.all([
     readJsonIfExists(paths.qa), readJsonIfExists(paths.chapterMeta), readFile(paths.original, "utf8"),
     readFile(paths.english, "utf8"), readFile(paths.narration, "utf8"), readJsonIfExists(paths.storyContext),
+    readFile(paths.english, "utf8"), readFile(paths.narration, "utf8"), resolveStoredQaContext(paths),
   ]);
   if (!chapterRaw) throw new Error(`Chapter ${chapter} has no production metadata`);
   if (!translation.trim() || !narration.trim()) throw new Error(`Chapter ${chapter} needs a retained translation and narration before it can be rechecked`);
   const metadata = chapterSchema.parse(chapterRaw);
   // A prior context snapshot is an optimization, not a prerequisite for QA.
   const context = contextRaw ? storyBibleSchema.parse(contextRaw) : emptyStoryBible();
+  const context = qaContext.parsed;
   const previous = qaRaw ? migrateQaState(qaRaw, { chapter }) : undefined;
 
   const requestedMode = deps.mode ?? "full";
@@ -592,6 +597,7 @@ export async function recheckChapterQa(deps: {
     translation: fingerprint(translation),
     narration: fingerprint(narration),
     context: contextRaw ?? emptyStoryBible(),
+    context: qaContext.raw,
     config,
     narrationSettings: { profanityMode: story.narrationSettings.profanityMode, includeChapterTitle: story.narrationSettings.includeChapterTitle },
     prompt: QA_PROMPT_VERSION,

@@ -10,15 +10,21 @@ import {
 } from "../src/qa/findings.js";
 import {
   computeQaDependencyFingerprint, computeQaDependencyFingerprints, deriveQaFreshness, loadQaDeterministicDependencies,
+  computeQaDependencyFingerprint, computeQaDependencyFingerprints, deriveChapterQaFreshness, deriveQaFreshness, loadQaDeterministicDependencies,
   projectNamingForQa, projectPronunciationForQa, type QaDependencies,
 } from "../src/qa/freshness.js";
 import { QA_PROMPT_VERSION } from "../src/qa/prompts.js";
 import { buildQaState, recheckChapterQa, transitionQaFinding } from "../src/qa/review.js";
+import { addQaException } from "../src/qa/exceptions.js";
+import { ChapterPipeline } from "../src/pipeline/chapter-pipeline.js";
+import { CopyingAudioProcessor } from "../src/audio/chapter-audio.js";
+import { LLMRouter } from "../src/llm/router.js";
 import { atomicWrite, atomicWriteJson } from "../src/storage/atomic-write.js";
 import { readJsonIfExists } from "../src/storage/story-files.js";
 import { storyPaths } from "../src/storage/paths.js";
 import { fingerprint } from "../src/utils/hash.js";
 import { MockLLM, testStory } from "./helpers.js";
+import { MockLLM, MockTTS, testStory } from "./helpers.js";
 
 const checks = { completeness: "pass", names: "pass", numbers: "pass", terminology: "pass", dialogue: "pass", storyConsistency: "pass", narrationFidelity: "pass" } as const;
 const NOW = "2026-09-18T12:00:00.000Z";
@@ -324,5 +330,134 @@ describe("migration", () => {
     expect(migrated.findings[0]!.verifiedAgainstFingerprint).toBeUndefined();
     expect(findingVerification(migrated.findings[0]!, "fp-1")).toBe("needs_recheck");
     expect(qaFindingSchema.parse(JSON.parse(JSON.stringify(migrated.findings[0])))).toBeTruthy();
+  });
+});
+
+describe("pipeline and selected-stage QA freshness integration", () => {
+  it("keeps QA immediately current after selected-only QA execution with existing stored context", async () => {
+    const ctx = await setupChapter();
+    const storedContextBefore = await readJsonIfExists(ctx.paths.storyContext);
+    expect(storedContextBefore).toBeTruthy();
+
+    // Now update the global Story Bible with a completely different entity, so if context were
+    // reconstructed from Story Bible it would be different from Context A.
+    const modifiedBible = storyBibleSchema.parse({
+      ...emptyStoryBible(),
+      canonicalEntities: [{
+        id: "ent_bbbbbbbbbbbbbbbbbbbbbbbb", type: "character", canonicalName: "NewCharacter", originalName: "新人物", aliases: [],
+        firstAppearance: 1, lastKnownAppearance: 1, status: "alive",
+      }],
+    });
+    await atomicWriteJson(ctx.paths.bible, modifiedBible);
+
+    // Selected-only QA execution: executionStages: ["qa"]
+    const gemini = new MockLLM("gemini", ["English translation"]);
+    const openai = new MockLLM("openai", ["Polished narration"], { status: "pass", score: 1.0, issues: [], checks });
+    const pipeline = new ChapterPipeline(new LLMRouter(new Map([["gemini", gemini], ["openai", openai]])), new MockTTS(), new CopyingAudioProcessor());
+
+    const resultChapter = await pipeline.run({
+      root: ctx.root,
+      story: ctx.story,
+      chapter: 1,
+      inputPath: ctx.paths.original,
+      executionStages: ["qa"],
+      stopAfter: "qa",
+    });
+
+    // 1. Context file on disk must NOT have been overwritten or updated with modifiedBible
+    const storedContextAfter = await readJsonIfExists(ctx.paths.storyContext);
+    expect(storedContextAfter).toEqual(storedContextBefore);
+
+    // 2. The recorded QA stage fingerprint must match the effective stored dependency fingerprint immediately
+    const recordedFp = resultChapter.stages.qa.fingerprint;
+    expect(recordedFp).toBeDefined();
+
+    const freshnessResult = await deriveChapterQaFreshness(ctx.root, ctx.story, 1, resultChapter.stages.qa);
+    expect(freshnessResult.freshness).toBe("current");
+    expect(freshnessResult.currentFingerprint).toBe(recordedFp);
+
+    // 3. QA input must evaluate against stored Context A ("Feixue"), not modifiedBible ("NewCharacter")
+    expect(openai.calls[0]?.input).toContain("Feixue");
+    expect(openai.calls[0]?.input).not.toContain("NewCharacter");
+  });
+
+  it("persists new context and keeps QA current when context is executed as a prerequisite or selected stage", async () => {
+    const ctx = await setupChapter();
+    const newBible = storyBibleSchema.parse({
+      ...emptyStoryBible(),
+      canonicalEntities: [{
+        id: "ent_cccccccccccccccccccccccc", type: "character", canonicalName: "UpdatedHero", originalName: "飞雪", aliases: [],
+        preferredNarrationName: "UpdatedHero", firstAppearance: 1, lastKnownAppearance: 1, status: "alive",
+      }],
+    });
+    await atomicWriteJson(ctx.paths.bible, newBible);
+
+    // Run with executionStages: ["context", "qa"]
+    const gemini = new MockLLM("gemini", ["English translation"]);
+    const openai = new MockLLM("openai", ["Polished narration"], { status: "pass", score: 1.0, issues: [], checks });
+    const pipeline = new ChapterPipeline(new LLMRouter(new Map([["gemini", gemini], ["openai", openai]])), new MockTTS(), new CopyingAudioProcessor());
+
+    const resultChapter = await pipeline.run({
+      root: ctx.root,
+      story: ctx.story,
+      chapter: 1,
+      inputPath: ctx.paths.original,
+      executionStages: ["context", "qa"],
+      stopAfter: "qa",
+    });
+
+    // Context file on disk must have been written with the new context
+    const storedContextAfter = await readJsonIfExists<any>(ctx.paths.storyContext);
+    expect(storedContextAfter.canonicalEntities).toEqual(expect.arrayContaining([
+      expect.objectContaining({ canonicalName: "UpdatedHero" }),
+    ]));
+
+    // QA stage must be immediately current
+    const recordedFp = resultChapter.stages.qa.fingerprint;
+    const freshnessResult = await deriveChapterQaFreshness(ctx.root, ctx.story, 1, resultChapter.stages.qa);
+    expect(freshnessResult.freshness).toBe("current");
+    expect(freshnessResult.currentFingerprint).toBe(recordedFp);
+  });
+
+  it("invalidates QA to needs_recheck only when effective dependencies change after execution", async () => {
+    const ctx = await setupChapter();
+    const gemini = new MockLLM("gemini", ["English translation"]);
+    const openai = new MockLLM("openai", ["Polished narration"], { status: "pass", score: 1.0, issues: [], checks });
+    const pipeline = new ChapterPipeline(new LLMRouter(new Map([["gemini", gemini], ["openai", openai]])), new MockTTS(), new CopyingAudioProcessor());
+
+    const resultChapter = await pipeline.run({
+      root: ctx.root,
+      story: ctx.story,
+      chapter: 1,
+      inputPath: ctx.paths.original,
+      executionStages: ["qa"],
+      stopAfter: "qa",
+    });
+
+    let freshness = await deriveChapterQaFreshness(ctx.root, ctx.story, 1, resultChapter.stages.qa);
+    expect(freshness.freshness).toBe("current");
+
+    // Add a QA exception
+    await addQaException(ctx.root, ctx.story.slug, {
+      category: "names",
+      matchKind: "terminology",
+      value: "Feixue",
+    });
+
+    // Now it should immediately report needs_recheck
+    freshness = await deriveChapterQaFreshness(ctx.root, ctx.story, 1, resultChapter.stages.qa);
+    expect(freshness.freshness).toBe("needs_recheck");
+
+    // Recheck QA
+    await recheckChapterQa({
+      root: ctx.root,
+      story: ctx.story,
+      chapter: 1,
+      provider: openai,
+      now: NOW,
+    });
+    const updatedMeta = JSON.parse(await readFile(ctx.paths.chapterMeta, "utf8"));
+    const postRecheckFreshness = await deriveChapterQaFreshness(ctx.root, ctx.story, 1, updatedMeta.stages.qa);
+    expect(postRecheckFreshness.freshness).toBe("current");
   });
 });
