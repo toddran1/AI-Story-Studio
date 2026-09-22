@@ -129,6 +129,17 @@ export class SummaryVisualService {
     if (provider.name !== story.artwork.provider) throw new Error("Configured artwork provider does not match the available provider");
     return { story, bible, visualProfiles, artDirection, provider };
   }
+  /** Keep Produce's early Visual Profile gate aligned with the exact fast path
+   * used by scenes(). A plan qualifies only when scenes() itself will skip the
+   * scene planner and retain that plan (retiming it locally if needed). */
+  private willReuseScenePlan(summary: StorySummary, story: Awaited<ReturnType<typeof loadStory>>, options: z.infer<typeof summaryScenesInputSchema>) {
+    const { force, ...pacing } = options;
+    return Boolean(summary.scenePlan && summary.narration?.status === "current" &&
+      summary.scenes?.sourceFingerprint === fingerprint(summary.narration.text) &&
+      summary.scenes.configurationFingerprint === fingerprint({ config: story.pipeline.scenePlanner, settings: story.scenes }) &&
+      summary.scenes.outputFingerprint === productionSceneFingerprint(summary.scenePlan) &&
+      !force && fingerprint(summary.scenePacing ?? pacing) === fingerprint(pacing));
+  }
   private async sceneContinuity(slug: string, id: string, scenes: readonly Scene[]) {
     const paths = this.paths(slug, id);
     const continuityScenes = await Promise.all(scenes.filter((scene) => !scene.disabled).map(async (scene) => {
@@ -136,8 +147,12 @@ export class SummaryVisualService {
       const approved = scene.artwork.versions?.find((version) => version.id === approvedId && version.review === "approved");
       if (!approved) return { id: scene.id, location: scene.location, visualChanges: scene.visualChanges };
       const imagePath = paths.sceneVersionImage(scene.id, approved.versionNumber);
-      const actual = await validPngFingerprint(imagePath);
-      if (!actual || actual !== approved.imageFingerprint) return { id: scene.id, location: scene.location, visualChanges: scene.visualChanges };
+      const actual = await validPngFingerprint(imagePath).catch(() => undefined);
+      if (!actual || actual !== approved.imageFingerprint) return { id: scene.id, location: scene.location, visualChanges: scene.visualChanges,
+        // Preserve the attempted identity for diagnostic provenance. imageInput
+        // will verify it again before sending and will fingerprint text-only if
+        // the file is missing, damaged, or unreadable.
+        approvedArtwork: { versionId: approved.id, versionNumber: approved.versionNumber, imageFingerprint: approved.imageFingerprint } };
       return { id: scene.id, location: scene.location, visualChanges: scene.visualChanges,
         approvedArtwork: { versionId: approved.id, versionNumber: approved.versionNumber, imageFingerprint: actual } };
     }));
@@ -164,8 +179,17 @@ export class SummaryVisualService {
         continuityReference.reason = "reference image count budget is full; textual continuity retained";
       } else {
         const sourcePath = this.paths(slug, id).sceneVersionImage(continuityDecision.sourceSceneId, continuityDecision.versionNumber);
-        const actual = await validPngFingerprint(sourcePath);
-        const data = actual === continuityDecision.imageFingerprint ? await readFile(sourcePath) : undefined;
+        let actual: string | undefined;
+        let data: Buffer | undefined;
+        try {
+          actual = await validPngFingerprint(sourcePath);
+          if (actual === continuityDecision.imageFingerprint) data = await readFile(sourcePath);
+        } catch {
+          // Reference loading is best-effort. The textual continuity prompt is
+          // still valid if the immutable image cannot be read at generation time.
+          actual = undefined;
+          data = undefined;
+        }
         const totalBytes = references.images.reduce((sum, image) => sum + image.data.length, 0);
         if (data?.length && data.length <= MAX_REFERENCE_IMAGE_BYTES && totalBytes + data.length <= MAX_REFERENCE_TOTAL_BYTES) {
           references.images.push({ data, mimeType: "image/png", role: "previous-scene" });
@@ -176,6 +200,17 @@ export class SummaryVisualService {
     }
     const prompt = [resolved.prompt, context.story.artwork.stylePrompt?.trim() ? `BOOK ART STYLE: ${context.story.artwork.stylePrompt.trim()}` : "", references.images.length ? REFERENCE_USAGE_INSTRUCTION : ""].filter(Boolean).join("\n\n");
     const { provider: pName, model, quality, aspectRatio, size, stylePrompt, outputFormat } = context.story.artwork;
+    // Provenance keeps the attempted source and diagnostic reason. Fingerprints
+    // include only the image actually sent; a text-only fallback has a stable
+    // representation independent of unused source version/hash/error wording.
+    const effectiveContinuityReference = continuityReference.used ? {
+      kind: continuityReference.kind,
+      used: true,
+      sourceSceneId: continuityReference.sourceSceneId,
+      versionId: continuityReference.versionId,
+      versionNumber: continuityReference.versionNumber,
+      imageFingerprint: continuityReference.imageFingerprint,
+    } : { kind: continuityReference.kind, used: false, mode: "text-only" as const };
     return {
       ...context,
       prompt,
@@ -195,7 +230,7 @@ export class SummaryVisualService {
         version: "summary-visual-canon-v1",
         prompt,
         references: references.loadedReferenceIds.map((id, index) => ({ id, fingerprint: references.referenceFingerprints[index] })),
-        continuityReference,
+        continuityReference: effectiveContinuityReference,
         artDirection: resolved.artDirectionFingerprint,
         entityVisual: resolved.entityVisualFingerprints,
         sceneDirection: resolved.sceneDirectionFingerprint,
@@ -235,8 +270,8 @@ export class SummaryVisualService {
   async scenes(slug: string, id: string, raw: unknown = {}, progress?: SummaryVisualProgress) {
     const options = summaryScenesInputSchema.parse(raw); const before = await this.media.get(slug, id);
     // Retiming is local: do not call the scene model merely because audio duration changed.
-    const { story } = await this.context(slug); const { force, ...pacing } = options;
-    const onlyTiming = before.scenePlan && before.narration?.status === "current" && before.scenes?.sourceFingerprint === fingerprint(before.narration.text) && before.scenes.configurationFingerprint === fingerprint({ config: story.pipeline.scenePlanner, settings: story.scenes }) && before.scenes.outputFingerprint === productionSceneFingerprint(before.scenePlan) && !force && fingerprint(before.scenePacing ?? pacing) === fingerprint(pacing);
+    const { story } = await this.context(slug);
+    const onlyTiming = this.willReuseScenePlan(before, story, options);
     // A reviewed manual timeline is authoritative while its narration and audio remain current.
     if (onlyTiming && before.scenes?.status === "current" && before.scenePlan?.manuallyEdited && before.audio?.status === "current" && before.scenePlan.durationSeconds === before.audio.durationSeconds) return before;
     let summary = onlyTiming ? before : await this.media.scenes(slug, id, options);
@@ -780,10 +815,16 @@ export class SummaryVisualService {
     const options = summaryProduceInputSchema.parse(raw);
     if (options.dryRun) return this.planProduce(slug, id, options);
     const initial = await this.media.get(slug, id);
+    const { missingOnly, dryRun, allowUnprofiledEntityIds, ...pacing } = options;
+    const recorded = initial.scenePacing;
+    const sceneOptions = options.pacing === "automatic" && options.sceneCount === undefined && options.secondsPerScene === undefined && recorded
+      ? { ...recorded, force: options.force }
+      : pacing;
+    const parsedSceneOptions = summaryScenesInputSchema.parse(sceneOptions);
+    const { story } = await this.context(slug);
     // If Produce can reuse the existing scene plan, its artwork candidates are
     // already knowable. Check the gate before narration/TTS can incur spend.
-    const canPreflightBeforeUpstream = !options.force && summaryScenePlanAvailable(initial) &&
-      (initial.scenes?.status === "current" || Boolean(initial.scenePlan?.manuallyEdited && initial.scenes?.outputFingerprint === productionSceneFingerprint(initial.scenePlan)));
+    const canPreflightBeforeUpstream = summaryScenePlanAvailable(initial) && this.willReuseScenePlan(initial, story, parsedSceneOptions);
     if (canPreflightBeforeUpstream) {
       const report = await this.artwork(slug, id, { missingOnly: options.missingOnly, dryRun: true, allowUnprofiledEntityIds: options.allowUnprofiledEntityIds });
       if ("preflight" in report && !report.preflight.ready) return this.produceBlocked(id, report.preflight, true);
@@ -791,9 +832,7 @@ export class SummaryVisualService {
     progress?.({ type: "summary.narration.preparing" });
     if (paused?.()) return this.get(slug, id); await withUsageScope({ story: slug, stage: "narration" }, () => this.media.narration(slug, id, { force: options.force }));
     if (paused?.()) return this.get(slug, id); progress?.({ type: "summary.audio.preparing" }); await withUsageScope({ story: slug, stage: "tts" }, () => this.media.audio(slug, id, { force: options.force }));
-    if (paused?.()) return this.get(slug, id); const { missingOnly, dryRun, allowUnprofiledEntityIds, ...pacing } = options;
-    const recorded = (await this.media.get(slug, id)).scenePacing;
-    const sceneOptions = options.pacing === "automatic" && options.sceneCount === undefined && options.secondsPerScene === undefined && recorded ? { ...recorded, force: options.force } : pacing;
+    if (paused?.()) return this.get(slug, id);
     await withUsageScope({ story: slug, stage: "scenePlanning" }, () => this.scenes(slug, id, sceneOptions, progress));
     if (paused?.()) return this.get(slug, id);
     const artworkPlan = await this.artwork(slug, id, { force: options.force, missingOnly, dryRun: true, allowUnprofiledEntityIds }, progress, paused);
