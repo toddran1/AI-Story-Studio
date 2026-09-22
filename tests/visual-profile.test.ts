@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -17,7 +17,7 @@ import {
 import { applyVisualProfileProposal, inspectVisualProfile, proposeMissingVisualDetails, resolveVisualProfileConflict } from "../src/visual-canon/completion.js";
 import { VisualEntityProfile } from "../src/domain/visual-profile.js";
 import { storyPaths } from "../src/storage/paths.js";
-import { atomicWriteJson } from "../src/storage/atomic-write.js";
+import { atomicWrite, atomicWriteJson } from "../src/storage/atomic-write.js";
 import { emptyStoryBible, canonicalEntitySchema } from "../src/domain/story-bible.js";
 
 describe("Visual Entity Profiles", () => {
@@ -63,9 +63,10 @@ describe("Visual Entity Profiles", () => {
       ],
     };
     await atomicWriteJson(storyPaths(root, slug, 1).bible, testBible);
-    return async () => {
-      await rm(root, { recursive: true, force: true });
-    };
+  });
+
+  afterEach(async () => {
+    await rm(root, { recursive: true, force: true });
   });
 
   it("loads empty profiles if visual-profiles.json does not exist", async () => {
@@ -235,6 +236,32 @@ describe("Visual Entity Profiles", () => {
     const resolved = await resolveVisualProfileConflict(root, slug, bible, entityId, inspection.conflicts[0]!.id, "accept_canonical");
     expect(resolved.character?.hairColor).toBe("emerald");
     expect(resolved.conflicts?.[0]).toMatchObject({ status: "resolved", resolution: "accept_canonical" });
+    const repeated = await inspectVisualProfile(root, slug, bible, entityId);
+    expect(repeated.conflicts.filter((item) => item.status === "needs_review")).toEqual([]);
+    expect(repeated.conflicts).toHaveLength(1);
+  });
+
+  it("keeps a retained manual override resolved across repeated inspections", async () => {
+    const bible = { ...emptyStoryBible(), canonicalEntities: [canonicalEntitySchema.parse({ id: entityId, type: "character", canonicalName: "Test Character", aliases: [], description: "Hair Color: silver.", firstAppearance: 1, lastKnownAppearance: 1 })] };
+    await updateVisualProfile(root, slug, entityId, { character: { hairColor: "brown" }, fieldProvenance: { "character.hairColor": { source: "ai_generated", locked: false } } });
+    const conflict = (await inspectVisualProfile(root, slug, bible, entityId)).conflicts[0]!;
+    await resolveVisualProfileConflict(root, slug, bible, entityId, conflict.id, "retain_manual_override");
+    const firstRepeat = await inspectVisualProfile(root, slug, bible, entityId);
+    const secondRepeat = await inspectVisualProfile(root, slug, bible, entityId);
+    expect(firstRepeat.conflicts).toMatchObject([{ id: conflict.id, status: "resolved", resolution: "retain_manual_override" }]);
+    expect(secondRepeat.conflicts.filter((item) => item.status === "needs_review")).toEqual([]);
+  });
+
+  it("finds later visual evidence without promoting temporary prose to canon", async () => {
+    const bible = { ...emptyStoryBible(), canonicalEntities: [canonicalEntitySchema.parse({ id: entityId, type: "character", canonicalName: "Test Character", aliases: ["Tester"], description: "", firstAppearance: 1, lastKnownAppearance: 1, provenance: [{ chapter: 1, kind: "extraction" }] })] };
+    await atomicWrite(storyPaths(root, slug, 1).english, `Test Character entered the room. ${"The corridor was quiet. ".repeat(70)}The guards put a battered suit of armor beside him. Much later, Tester looked up, his pale silver eyes glowed beneath his long black hair.`);
+    const inspection = await inspectVisualProfile(root, slug, bible, entityId);
+    const evidence = inspection.context.sourceEvidence as Array<{ text: string; visualSignalScore: number }>;
+    expect(evidence.length).toBeGreaterThan(0);
+    expect(evidence.some((item) => item.text.includes("pale silver eyes"))).toBe(true);
+    expect(evidence.length).toBeLessThanOrEqual(8);
+    expect(inspection.protectedFields).not.toContain("character.defaultOutfit");
+    expect(inspection.protectedFields).not.toContain("character.weapons");
   });
 
   it("uses only entity-relevant summaries and requires explicit regeneration fields", async () => {

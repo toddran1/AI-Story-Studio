@@ -32,17 +32,42 @@ const visualMatchers: Array<[string, RegExp]> = [
 function compact(value: string) { return value.trim().replace(/\s+/g, " "); }
 function canonicalValue(value: string) { return compact(value).toLowerCase().replace(/[.,;:]/g, ""); }
 function entityAnchors(entity: CanonicalEntity) { return [entity.canonicalName, entity.originalName, ...entity.aliases].filter((value): value is string => Boolean(value?.trim())).sort((a, b) => b.length - a.length).slice(0, 12); }
-function explicitFacts(entity: CanonicalEntity, profile: VisualEntityProfile, sourceEvidence: Array<{ chapter: number; text: string }>): Record<string, string> {
+type SourceEvidence = { chapter: number; text: string; visualSignalScore: number };
+
+/** Raw prose is valuable context, but it is not automatically story canon.
+ * Only explicit structured fields or labelled Story Bible descriptions lock a
+ * profile field; source excerpts remain candidate evidence for the proposal. */
+function explicitFacts(entity: CanonicalEntity, profile: VisualEntityProfile): Record<string, string> {
   const result: Record<string, string> = {};
   for (const [path, provenance] of Object.entries(profile.fieldProvenance ?? {})) { const value = fieldValue(profile, path); if (value && ["source_text", "story_bible", "continuity", "manual_override"].includes(provenance.source)) result[path] = value; }
-  const text = [entity.description, entity.notes, ...sourceEvidence.map((item) => item.text)].filter(Boolean).join("\n");
-  for (const [path, pattern] of visualMatchers) { if (result[path]) continue; const value = pattern.exec(text)?.slice(1).find(Boolean); if (value) result[path] = compact(value); }
+  const text = [entity.description, entity.notes].filter(Boolean).join("\n");
+  // Labelled Story Bible facts are an explicit editorial statement, unlike a
+  // loose match in narrative prose (for example, temporary battle armor).
+  for (const [path, pattern] of visualMatchers) {
+    if (result[path]) continue;
+    const key = path.split(".")[1]!.replace(/[A-Z]/g, (letter) => ` ${letter.toLowerCase()}`).trim();
+    const labelled = new RegExp(`(?:^|\\n)\\s*${key.replace(/ /g, "\\s+")}\\s*[:=-]\\s*([^\\n.;]{1,500})`, "i").exec(text)?.[1];
+    if (labelled) result[path] = compact(labelled);
+    else if (path === "character.hairColor" || path === "character.eyeColor") {
+      const value = pattern.exec(text)?.slice(1).find(Boolean);
+      if (value && /(?:hair|eyes?)\s*[:=-]/i.test(text)) result[path] = compact(value);
+    }
+  }
   return result;
 }
-async function sourceEvidence(root: string, slug: string, entity: CanonicalEntity): Promise<Array<{ chapter: number; text: string }>> {
-  const anchors = entityAnchors(entity); const chapters = [...new Set(entity.provenance.map((item) => item.chapter))].sort((a, b) => b - a).slice(0, 8); const evidence: Array<{ chapter: number; text: string }> = [];
-  for (const chapter of chapters) { const paths = storyPaths(root, slug, chapter); const text = await readFile(paths.english, "utf8").catch(() => readFile(paths.original, "utf8").catch(() => "")); const lower = text.toLowerCase(); const index = anchors.map((anchor) => lower.indexOf(anchor.toLowerCase())).find((item) => item >= 0) ?? -1; if (index >= 0) evidence.push({ chapter, text: compact(text.slice(Math.max(0, index - 500), index + 1_000)) }); }
-  return evidence;
+const visualSignals = /\b(?:hair|eyes?|face|skin|complexion|height|build|body|scar|tattoo|clothing|robe|coat|armor|weapon|accessor(?:y|ies)|appearance|looked|wore|dressed|physique)\b|头发|眼睛|面容|皮肤|身高|体格|伤疤|纹身|衣|袍|甲|武器|佩戴|容貌/gi;
+function escapeRegex(value: string) { return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); }
+function signalScore(text: string) { return [...text.matchAll(visualSignals)].length; }
+async function sourceEvidence(root: string, slug: string, entity: CanonicalEntity): Promise<SourceEvidence[]> {
+  const anchors = entityAnchors(entity); const chapters = [...new Set(entity.provenance.map((item) => item.chapter))].sort((a, b) => b - a).slice(0, 8); const evidence: SourceEvidence[] = [];
+  for (const chapter of chapters) {
+    const paths = storyPaths(root, slug, chapter); const text = await readFile(paths.english, "utf8").catch(() => readFile(paths.original, "utf8").catch(() => ""));
+    const starts = anchors.flatMap((anchor) => [...text.matchAll(new RegExp(escapeRegex(anchor), "gi"))].map((match) => match.index ?? 0));
+    const windows = starts.sort((a, b) => a - b).map((start) => ({ start: Math.max(0, start - 400), end: Math.min(text.length, start + 900) })).filter((window, index, all) => index === 0 || window.start > all[index - 1]!.end);
+    const ranked = windows.map((window) => ({ chapter, text: compact(text.slice(window.start, window.end)), visualSignalScore: signalScore(text.slice(window.start, window.end)) })).sort((left, right) => right.visualSignalScore - left.visualSignalScore || left.text.length - right.text.length).slice(0, 3);
+    evidence.push(...ranked);
+  }
+  return evidence.sort((left, right) => right.visualSignalScore - left.visualSignalScore || right.chapter - left.chapter).slice(0, 8);
 }
 function relevantSummaries(bible: StoryBible, entity: CanonicalEntity, relationships: Array<{ otherEntityId: string }>) {
   const anchors = entityAnchors(entity).map((item) => item.toLowerCase()); const relatedNames = relationships.map((r) => bible.canonicalEntities.find((item) => item.id === r.otherEntityId)?.canonicalName.toLowerCase()).filter((item): item is string => Boolean(item));
@@ -50,7 +75,7 @@ function relevantSummaries(bible: StoryBible, entity: CanonicalEntity, relations
 }
 function detectConflicts(profile: VisualEntityProfile, facts: Record<string, string>): VisualProfileConflict[] {
   const open = profile.conflicts ?? []; const detected: VisualProfileConflict[] = [];
-  for (const [field, canonical] of Object.entries(facts)) { const visual = fieldValue(profile, field); const provenance = profile.fieldProvenance?.[field]; if (!visual || provenance?.source !== "ai_generated" || canonicalValue(visual) === canonicalValue(canonical)) continue; const existing = open.find((item) => item.field === field && item.canonicalValue === canonical && item.visualValue === visual); detected.push(existing ?? { id: `vconf_${fingerprint({ field, canonical, visual }).slice(0, 24)}`, field, canonicalValue: canonical, visualValue: visual, visualProvenance: provenance, detectedAt: new Date().toISOString(), status: "needs_review" }); }
+  for (const [field, canonical] of Object.entries(facts)) { const visual = fieldValue(profile, field); const provenance = profile.fieldProvenance?.[field]; if (!visual || canonicalValue(visual) === canonicalValue(canonical)) continue; const existing = open.find((item) => item.field === field && canonicalValue(item.canonicalValue) === canonicalValue(canonical) && canonicalValue(item.visualValue) === canonicalValue(visual)); if (existing?.status === "resolved") continue; if (provenance?.source !== "ai_generated") continue; detected.push(existing ?? { id: `vconf_${fingerprint({ field, canonical, visual }).slice(0, 24)}`, field, canonicalValue: canonical, visualValue: visual, visualProvenance: provenance, detectedAt: new Date().toISOString(), status: "needs_review" }); }
   return [...open.filter((item) => item.status === "resolved"), ...detected];
 }
 
@@ -58,7 +83,7 @@ export async function inspectVisualProfile(root: string, slug: string, bible: St
   const entity = bible.canonicalEntities.find((item) => item.id === entityId); if (!entity) throw new Error(`Canonical entity '${entityId}' was not found`);
   const profile = (await getVisualProfile(root, slug, entityId)) ?? blankProfile(entity); const fields = [...(fieldsByType[profile.visualType] ?? [])];
   const relationships = bible.canonicalRelationships.filter((item) => item.sourceEntityId === entityId || item.targetEntityId === entityId).slice(0, 12).map((item) => ({ type: item.type, otherEntityId: item.sourceEntityId === entityId ? item.targetEntityId : item.sourceEntityId }));
-  const sources = await sourceEvidence(root, slug, entity); const facts = explicitFacts(entity, profile, sources); const conflicts = detectConflicts(profile, facts);
+  const sources = await sourceEvidence(root, slug, entity); const facts = explicitFacts(entity, profile); const conflicts = detectConflicts(profile, facts);
   const protectedFields = fields.filter((field) => Boolean(fieldValue(profile, field)) || Boolean(profile.fieldProvenance?.[field]?.locked) || Boolean(facts[field])); const eligibleFields = fields.filter((field) => !protectedFields.includes(field));
   const fieldStates = fields.map((path) => { const provenance = profile.fieldProvenance?.[path]; const value = fieldValue(profile, path); const canonical = Boolean(facts[path]); const conflict = conflicts.find((item) => item.status === "needs_review" && item.field === path); return { path, value, source: canonical ? "source-backed" : provenance?.source, locked: Boolean(provenance?.locked), missing: !value && !canonical, canonical, regenerable: Boolean(value && provenance?.source === "ai_generated" && !provenance.locked && !canonical), conflict }; });
   const activeReferences = [...profile.references].filter((ref) => ref.approved).sort((left, right) => Number(right.role === "primary_reference") - Number(left.role === "primary_reference"));
