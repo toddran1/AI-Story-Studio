@@ -21,7 +21,7 @@ import { atomicWrite, atomicWriteJson } from "../src/storage/atomic-write.js";
 import { storyPaths } from "../src/storage/paths.js";
 import { exists, readJsonIfExists } from "../src/storage/story-files.js";
 import { fingerprint } from "../src/utils/hash.js";
-import { saveVisualProfiles } from "../src/visual-canon/profiles.js";
+import { addVisualReferenceImage, saveVisualProfiles } from "../src/visual-canon/profiles.js";
 import { fileFingerprint } from "../src/utils/file-fingerprint.js";
 import { MockLLM, MockTTS } from "./helpers.js";
 import { AudioMasteringProcessor } from "../src/audio/mastering.js";
@@ -56,6 +56,29 @@ async function storyFixture() {
 }
 
 describe("web service layer", () => {
+  it("serves controlled visual references for viewing and original-resolution download", async () => {
+    const { root, story, paths } = await storyFixture();
+    const entityId = "ent_0123456789abcdef01234567";
+    await atomicWriteJson(paths.bible, { ...emptyStoryBible(), canonicalEntities: [canonicalEntitySchema.parse({ id: entityId, type: "character", canonicalName: "Su Ming", aliases: [], description: "", firstAppearance: 1, lastKnownAppearance: 1 })] });
+    const created = await addVisualReferenceImage(root, story.slug, entityId, { data: Buffer.from("original-reference-image"), ext: "png", source: "style_sheet", approved: false });
+    const operations = { root, getVisualProfile: async () => created.profile } as unknown as StudioOperations;
+    const handler = createApiHandler(operations);
+    const request = async (suffix = "") => {
+      const req = Object.assign(Readable.from([]), { method: "GET", url: `/api/stories/${story.slug}/visual-profiles/${entityId}/references/${created.reference.id}${suffix}`, headers: { host: "localhost:3000" } });
+      const headers: Record<string, unknown> = {}; const chunks: Buffer[] = [];
+      const res = Object.assign(new PassThrough(), { writeHead: (status: number, values?: Record<string, unknown>) => { headers.status = status; Object.assign(headers, values); } });
+      res.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+      const done = new Promise<void>((resolve) => res.on("finish", resolve));
+      await handler(req as unknown as IncomingMessage, res as unknown as ServerResponse); await done;
+      return { headers, body: Buffer.concat(chunks) };
+    };
+    const view = await request();
+    expect(view.headers).toMatchObject({ status: 200, "content-type": "image/png" });
+    expect(view.body).toEqual(Buffer.from("original-reference-image"));
+    const download = await request("?download=1");
+    expect(download.headers).toMatchObject({ status: 200, "content-type": "image/png", "content-disposition": 'attachment; filename="su-ming-style-sheet.png"' });
+    expect(download.body).toEqual(view.body);
+  });
   it("classifies malformed pagination as an HTTP 400 client error", () => { expect(() => integerParam("abc", 1)).toThrow(expect.objectContaining({ status: 400 })); expect(() => integerParam("0", 1)).toThrow(expect.objectContaining({ status: 400 })); expect(integerParam(null, 7)).toBe(7); });
   it("rejects zero chapter routes and unknown Story Bible filters as client errors", () => {
     expect(() => chapterParam("0")).toThrow(expect.objectContaining({ status: 400 })); expect(chapterParam("1501")).toBe(1501);

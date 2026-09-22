@@ -68,10 +68,14 @@ export function VisualProfileModal({
   const [selectedProposalFields, setSelectedProposalFields] = useState<string[]>([]);
   const [proposing, setProposing] = useState(false);
   const [selectedRegenerationFields, setSelectedRegenerationFields] = useState<string[]>([]);
+  const [viewingReference, setViewingReference] = useState<VisualEntityProfile["references"][number] | null>(null);
+  const [referenceZoom, setReferenceZoom] = useState(1);
   const [error, setError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<"appearance" | "details" | "references">("appearance");
   const [uploadRole, setUploadRole] = useState<VisualRole>("general_reference");
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+
+  const referenceUrl = (refId: string, download = false) => `/api/stories/${encodeURIComponent(slug)}/visual-profiles/${encodeURIComponent(entityId)}/references/${encodeURIComponent(refId)}${download ? "?download=1" : ""}`;
 
   useEffect(() => {
     let active = true;
@@ -108,6 +112,13 @@ export function VisualProfileModal({
       active = false;
     };
   }, [slug, entityId]);
+
+  useEffect(() => {
+    if (!viewingReference) return;
+    const onKeyDown = (event: KeyboardEvent) => { if (event.key === "Escape") setViewingReference(null); };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [viewingReference]);
 
   const handleSave = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
@@ -191,6 +202,25 @@ export function VisualProfileModal({
     } finally {
       setGeneratingSheet(false);
     }
+  };
+
+  const openReference = (reference: VisualEntityProfile["references"][number]) => { setReferenceZoom(1); setViewingReference(reference); };
+  const handleDownloadReference = async (reference: VisualEntityProfile["references"][number]) => {
+    setError(null);
+    try {
+      const response = await fetch(referenceUrl(reference.id, true));
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({}));
+        throw new Error(typeof payload.error === "string" ? payload.error : "Reference image could not be downloaded");
+      }
+      const blob = await response.blob();
+      const header = response.headers.get("content-disposition") ?? "";
+      const filename = /filename="?([^";]+)"?/i.exec(header)?.[1] ?? `${entityName || "reference"}-${reference.role.replaceAll("_", "-")}.png`;
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url; link.download = filename; link.click();
+      URL.revokeObjectURL(url);
+    } catch (err) { setError(err instanceof Error ? err.message : String(err)); }
   };
 
   const handlePropose = async (regenerate = false) => {
@@ -916,13 +946,14 @@ export function VisualProfileModal({
                 <div className="reference-grid">
                   {profile.references.map((ref) => (
                     <div key={ref.id} className="reference-card">
-                      <div className="reference-image-wrapper">
+                      <button type="button" className="reference-image-wrapper" onClick={() => openReference(ref)} title="View full-size reference image" aria-label={`View ${ref.role.replace(/_/g, " ")} reference`}>
                         <img
-                          src={`/api/stories/${encodeURIComponent(slug)}/visual-profiles/${encodeURIComponent(entityId)}/references/${encodeURIComponent(ref.id)}`}
+                          src={referenceUrl(ref.id)}
                           alt={ref.role}
                           loading="lazy"
+                          onError={() => setError("The stored reference image could not be loaded. It may have been removed.")}
                         />
-                      </div>
+                      </button>
                       <div className="reference-meta">
                         <span className="reference-role">{ref.role.replace(/_/g, " ")}</span>
                         <span className="reference-source">{ref.approved ? "Approved" : "Review required"} · {ref.source}</span>
@@ -930,13 +961,16 @@ export function VisualProfileModal({
                       </div>
                       {!ref.approved && (
                         <div className="reference-actions">
+                          <button type="button" className="btn btn-outline" onClick={() => openReference(ref)}>View</button>
+                          <button type="button" className="btn btn-outline" onClick={() => handleDownloadReference(ref)}>Download</button>
                           <button type="button" className="btn btn-secondary" disabled={saving} onClick={() => handleApproveReference(ref.id, false)}>Approve</button>
                           <button type="button" className="btn btn-primary" disabled={saving} onClick={() => handleApproveReference(ref.id, true)}>Set primary</button>
                         </div>
                       )}
                       {ref.approved && ref.role !== "primary_reference" && (
-                        <div className="reference-actions"><button type="button" className="btn btn-outline" disabled={saving} onClick={() => handleApproveReference(ref.id, true)}>Make primary</button></div>
+                        <div className="reference-actions"><button type="button" className="btn btn-outline" onClick={() => openReference(ref)}>View</button><button type="button" className="btn btn-outline" onClick={() => handleDownloadReference(ref)}>Download</button><button type="button" className="btn btn-outline" disabled={saving} onClick={() => handleApproveReference(ref.id, true)}>Make primary</button></div>
                       )}
+                      {ref.approved && ref.role === "primary_reference" && <div className="reference-actions"><button type="button" className="btn btn-outline" onClick={() => openReference(ref)}>View</button><button type="button" className="btn btn-outline" onClick={() => handleDownloadReference(ref)}>Download</button></div>}
                     </div>
                   ))}
                 </div>
@@ -959,6 +993,15 @@ export function VisualProfileModal({
           </button>
         </div>
       </div>
+      {viewingReference && (
+        <div className="reference-viewer-backdrop" onClick={(event) => { event.stopPropagation(); setViewingReference(null); }} role="presentation">
+          <section className="reference-viewer" role="dialog" aria-modal="true" aria-label="Full-size reference image" onClick={(event) => event.stopPropagation()}>
+            <header><div><span className="reference-viewer-kicker">Visual reference · {viewingReference.role.replace(/_/g, " ")}</span><h4>{entityName || profile.entityId}</h4></div><button type="button" className="btn-close" onClick={() => setViewingReference(null)} aria-label="Close image viewer">×</button></header>
+            <div className="reference-viewer-canvas"><img src={referenceUrl(viewingReference.id)} alt={viewingReference.role} style={{ transform: `scale(${referenceZoom})` }} onError={() => setError("The stored reference image could not be loaded. It may have been removed.")} /></div>
+            <footer><div className="reference-viewer-zoom"><button type="button" className="btn btn-outline" onClick={() => setReferenceZoom((zoom) => Math.max(.5, Number((zoom - .25).toFixed(2))))}>−</button><button type="button" className="btn btn-outline" onClick={() => setReferenceZoom(1)}>Fit</button><button type="button" className="btn btn-outline" onClick={() => setReferenceZoom((zoom) => Math.min(3, Number((zoom + .25).toFixed(2))))}>+</button></div><button type="button" className="btn btn-primary" onClick={() => handleDownloadReference(viewingReference)}>Download original</button></footer>
+          </section>
+        </div>
+      )}
     </div>
   );
 }

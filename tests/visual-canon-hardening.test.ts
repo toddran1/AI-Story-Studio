@@ -501,8 +501,10 @@ describe("Milestone 21: Visual Canon & Scene Identity Hardening", () => {
     expect(sentPrompt).toContain("SIGNATURE WEAPONS / GEAR: Bone dagger strapped to right thigh");
 
     // Layer 3: Style Sheet Requirements
-    expect(sentPrompt).toContain("CHARACTER MODEL SHEET / CONCEPT ART TURNAROUND");
-    expect(sentPrompt).toContain("REQUIRED VIEWS: full-body front view, three-quarter angle");
+    expect(sentPrompt).toContain("CHARACTER REFERENCE / MODEL SHEET FOR PERSISTENT IDENTITY");
+    expect(sentPrompt).toContain("full-body front, full-body three-quarter, full-body side/profile, full-body back");
+    expect(sentPrompt).toContain("head/face front, head/face three-quarter, and head/face side/profile");
+    expect(sentPrompt).toContain("IDENTITY CONSISTENCY IS THE PURPOSE");
 
     // Legacy prompt must NOT override or appear
     expect(sentPrompt).not.toContain("LEGACY_SHOULD_NOT_BE_USED");

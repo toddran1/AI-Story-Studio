@@ -102,8 +102,9 @@
 .upload-controls { display: flex; align-items: center; gap: 8px; }
 .reference-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 12px; }
 .reference-card { border: 1px solid var(--line); border-radius: 6px; overflow: hidden; background: #0c0c10; }
-.reference-image-wrapper { height: 160px; position: relative; overflow: hidden; display: grid; place-items: center; background: #050508; }
+.reference-image-wrapper { height: 160px; position: relative; overflow: hidden; display: grid; place-items: center; background: #050508; width: 100%; padding: 0; border: 0; cursor: zoom-in; }
 .reference-image-wrapper img { width: 100%; height: 100%; object-fit: cover; }
+.reference-image-wrapper:hover img { opacity: .82; transform: scale(1.025); }.reference-image-wrapper img { transition: transform .18s ease, opacity .18s ease; }
 .reference-meta { padding: 6px 8px; display: flex; justify-content: space-between; font-size: 9px; background: #14141a; }
 .reference-role { font-weight: 500; color: var(--violet-soft); text-transform: capitalize; }
 .reference-source { color: var(--muted); }
@@ -115,6 +116,14 @@
 .proposal-field b { text-transform: capitalize; color: var(--violet-soft); }
 .proposal-actions, .reference-actions { display: flex; gap: 7px; flex-wrap: wrap; }
 .reference-actions { padding: 0 8px 8px; }
+.reference-viewer-backdrop { position: fixed; inset: 0; z-index: 220; display: grid; place-items: center; padding: 24px; background: rgba(3,3,6,.91); backdrop-filter: blur(7px); }
+.reference-viewer { width: min(1180px, 96vw); max-height: calc(100vh - 48px); display: grid; grid-template-rows: auto minmax(0,1fr) auto; overflow: hidden; border: 1px solid rgba(185,151,91,.58); border-radius: 8px; background: #0b0b0f; box-shadow: 0 32px 100px rgba(0,0,0,.85); }
+.reference-viewer header,.reference-viewer footer { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 12px 16px; background: linear-gradient(90deg,#15151b,#0e0e13); }
+.reference-viewer header { border-bottom: 1px solid var(--line); }.reference-viewer footer { border-top: 1px solid var(--line); }
+.reference-viewer-kicker { display: block; color: var(--frame-gold); font: 8px var(--mono); text-transform: uppercase; letter-spacing: .13em; }.reference-viewer h4 { margin: 3px 0 0; font: 500 20px var(--serif); }
+.reference-viewer-canvas { min-height: 280px; overflow: auto; display: grid; place-items: center; padding: 22px; background: radial-gradient(circle at 50% 25%,rgba(119,114,232,.14),transparent 42%),#050506; }
+.reference-viewer-canvas img { display: block; max-width: min(100%, 1080px); max-height: calc(100vh - 210px); width: auto; height: auto; object-fit: contain; transform-origin: center; transition: transform .16s ease; }
+.reference-viewer-zoom { display: flex; gap: 6px; }
 
 /* Scene Reel Filter Bar & Badges */
 .scene-filter-bar { display: flex; gap: 8px; align-items: center; margin: 16px 0 8px; padding-bottom: 10px; border-bottom: 1px solid var(--line); }

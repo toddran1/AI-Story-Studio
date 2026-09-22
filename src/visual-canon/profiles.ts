@@ -352,10 +352,14 @@ export async function generateStyleSheet(
         `LOCATION REFERENCE / ENVIRONMENT CONCEPT ART: a clear, reusable establishing view of this location's stable architecture, terrain, palette, landmarks, and atmosphere.`,
         `Do not include transient weather, combat damage, temporary visitors, scene action, text, labels, or watermarks.`,
       ]
-    : [
-        `CHARACTER MODEL SHEET / CONCEPT ART TURNAROUND: Multiple full-length views and expressions of the same subject on a clean neutral white background.`,
-        `REQUIRED VIEWS: full-body front view, three-quarter angle, side profile, rear view, and close-up facial expression sheet (neutral, intense, emotional).`,
-        `Crisp line work, consistent anatomical scale and costume details across all angles, professional animation model sheet layout, no text, no labels, no watermarks.`,
+    : profile.visualType === "character" ? [
+        `CHARACTER REFERENCE / MODEL SHEET FOR PERSISTENT IDENTITY: render one and only one consistent person across every panel, on a neutral simple background with generous separation between views.`,
+        `REQUESTED VIEWS WHEN FEASIBLE: full-body front, full-body three-quarter, full-body side/profile, full-body back, head/face front, head/face three-quarter, and head/face side/profile. Full-body views must show head-to-feet with no cropped feet; use neutral relaxed reference poses and consistent scale.`,
+        `IDENTITY CONSISTENCY IS THE PURPOSE: keep facial structure, apparent age, proportions, height/build, skin tone, hair color and style, eye appearance, scars/marks, accessories, persistent default outfit, and established signature equipment identical across every view.`,
+        `Professional usable reference sheet, clear identifying lighting and face-detail panels. Avoid dramatic perspective, scene action, battle effects, cinematic backgrounds, temporary wounds, blood, torn clothing, weather, transient weapons, decorative typography, captions, labels, fake UI, watermarks, borders, overlapping figures, or cropped bodies.`,
+      ] : [
+        `PERSISTENT ENTITY REFERENCE: create a clean reusable reference image for this entity's stable visual identity, with neutral presentation and no transient scene action.`,
+        `Avoid text, labels, watermarks, cinematic backgrounds, temporary damage, current emotion, weather, or chapter-specific state.`,
       ];
 
   const sheetPrompt = options.promptOverride ?? [

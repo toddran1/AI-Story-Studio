@@ -140,15 +140,19 @@ describe("Visual Entity Profiles", () => {
       character: { hairColor: "raven", accessories: "gold spectacles" },
     });
 
+    let prompt = "";
     const fakeProvider = {
       name: "fake-image-provider",
       validateConfiguration: async () => {},
-      generate: async () => ({
+      generate: async (input: { prompt: string }) => {
+        prompt = input.prompt;
+        return ({
         data: Buffer.from("fake-style-sheet-bytes"),
         mimeType: "image/png",
         provider: "fake",
         model: "fake-v1",
-      }),
+        });
+      },
     };
 
     const fakeStory: any = {
@@ -167,6 +171,15 @@ describe("Visual Entity Profiles", () => {
     expect(result.reference.imagePath).toContain(entityId);
     expect(result.profile.references.some((r) => r.source === "style_sheet")).toBe(true);
     expect(result.reference.approved).toBe(false);
+    expect(prompt).toContain("full-body front");
+    expect(prompt).toContain("full-body three-quarter");
+    expect(prompt).toContain("full-body side/profile");
+    expect(prompt).toContain("full-body back");
+    expect(prompt).toContain("head/face front");
+    expect(prompt).toContain("IDENTITY CONSISTENCY");
+    expect(prompt).toContain("cropped feet");
+    expect(prompt).toContain("overlapping figures");
+    expect(prompt).toContain("cinematic backgrounds");
   });
 
   it("proposes only missing visual details and persists only selected acceptance", async () => {

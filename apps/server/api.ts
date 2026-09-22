@@ -273,6 +273,17 @@ export function createApiHandler(operations: StudioOperations) {
         if (!match) {
           return send(response, 404, { error: "Reference image not found" });
         }
+        if (url.searchParams.get("download") === "1") {
+          const [bible, profile] = await Promise.all([
+            getStoryBible(operations.root, storySlug),
+            operations.getVisualProfile(storySlug, entityId),
+          ]);
+          const entityName = bible.canonicalEntities.find((entity) => entity.id === entityId)?.canonicalName ?? entityId;
+          const reference = profile?.references.find((item) => item.id === refId);
+          const descriptor = reference?.source === "style_sheet" ? "style-sheet" : `${reference?.role?.replaceAll("_", "-") ?? "reference"}-reference`;
+          const downloadName = `${sanitizeFilenamePart(entityName).toLowerCase().replace(/\s+/g, "-")}-${sanitizeFilenamePart(descriptor).toLowerCase().replace(/\s+/g, "-")}.${match.ext}`;
+          return sendFile(request, response, match.path, mimeForVisualReferenceExtension(match.ext), { downloadName });
+        }
         return sendFile(request, response, match.path, mimeForVisualReferenceExtension(match.ext));
       }
       const qaResetMatch = /^\/api\/stories\/([a-z0-9-]+)\/qa\/reset$/.exec(url.pathname);
