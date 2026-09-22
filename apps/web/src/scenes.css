@@ -116,6 +116,9 @@
 .proposal-field b { text-transform: capitalize; color: var(--violet-soft); }
 .proposal-actions, .reference-actions { display: flex; gap: 7px; flex-wrap: wrap; }
 .reference-actions { padding: 0 8px 8px; }
+.reference-primary { align-self: center; color: var(--frame-gold); font: 8px var(--mono); letter-spacing: .08em; text-transform: uppercase; }
+.reference-actions .btn-danger { color: #f29a9a; border-color: rgba(216,93,93,.62); background: rgba(145,42,42,.14); }
+.reference-actions .btn-danger:hover:not(:disabled) { color: #ffe0e0; border-color: #d85d5d; background: rgba(173,49,49,.28); }
 .reference-viewer-backdrop { position: fixed; inset: 0; z-index: 220; display: grid; place-items: center; padding: 24px; background: rgba(3,3,6,.91); backdrop-filter: blur(7px); }
 .reference-viewer { width: min(1180px, 96vw); max-height: calc(100vh - 48px); display: grid; grid-template-rows: auto minmax(0,1fr) auto; overflow: hidden; border: 1px solid rgba(185,151,91,.58); border-radius: 8px; background: #0b0b0f; box-shadow: 0 32px 100px rgba(0,0,0,.85); }
 .reference-viewer header,.reference-viewer footer { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 12px 16px; background: linear-gradient(90deg,#15151b,#0e0e13); }

@@ -79,6 +79,21 @@ describe("web service layer", () => {
     expect(download.headers).toMatchObject({ status: 200, "content-type": "image/png", "content-disposition": 'attachment; filename="su-ming-style-sheet.png"' });
     expect(download.body).toEqual(view.body);
   });
+  it("deletes a visual reference only through its validated story, entity, and reference IDs", async () => {
+    const { root, story } = await storyFixture();
+    const entityId = "ent_0123456789abcdef01234567";
+    const refId = "ref_controlledasset";
+    const profile = { entityId, references: [] };
+    const deleteReference = vi.fn().mockResolvedValue({ profile, deleted: true });
+    const handler = createApiHandler({ root, deleteVisualReferenceImage: deleteReference } as unknown as StudioOperations);
+    const req = Object.assign(Readable.from([]), { method: "DELETE", url: `/api/stories/${story.slug}/visual-profiles/${entityId}/references/${refId}`, headers: { host: "localhost:3000", "content-type": "application/json" } });
+    const chunks: Buffer[] = []; const res = Object.assign(new PassThrough(), { writeHead: vi.fn() });
+    res.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+    const done = new Promise<void>((resolve) => res.on("finish", resolve));
+    await handler(req as unknown as IncomingMessage, res as unknown as ServerResponse); await done;
+    expect(deleteReference).toHaveBeenCalledWith(story.slug, entityId, refId);
+    expect(JSON.parse(Buffer.concat(chunks).toString("utf8"))).toMatchObject({ deleted: true, profile: { entityId } });
+  });
   it("classifies malformed pagination as an HTTP 400 client error", () => { expect(() => integerParam("abc", 1)).toThrow(expect.objectContaining({ status: 400 })); expect(() => integerParam("0", 1)).toThrow(expect.objectContaining({ status: 400 })); expect(integerParam(null, 7)).toBe(7); });
   it("rejects zero chapter routes and unknown Story Bible filters as client errors", () => {
     expect(() => chapterParam("0")).toThrow(expect.objectContaining({ status: 400 })); expect(chapterParam("1501")).toBe(1501);

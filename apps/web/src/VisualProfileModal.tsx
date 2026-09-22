@@ -9,6 +9,7 @@ import {
   uploadVisualReference,
   generateStyleSheet,
   approveVisualReference,
+  deleteVisualReference,
   applyVisualProfileProposal,
   inspectVisualProfile,
   proposeVisualProfile,
@@ -221,6 +222,26 @@ export function VisualProfileModal({
       link.href = url; link.download = filename; link.click();
       URL.revokeObjectURL(url);
     } catch (err) { setError(err instanceof Error ? err.message : String(err)); }
+  };
+  const handleDeleteReference = async (reference: VisualEntityProfile["references"][number]) => {
+    const confirmation = reference.role === "primary_reference"
+      ? "This is the current Primary Reference for this character. Deleting it may reduce visual consistency in future artwork. Delete it anyway?"
+      : "Delete this reference image? This will remove it from the Visual Profile and delete its stored image file.";
+    if (!window.confirm(confirmation)) return;
+    setSaving(true);
+    setError(null);
+    try {
+      const result = await deleteVisualReference(slug, entityId, reference.id);
+      if (!result.deleted) throw new Error("This reference image was already removed. Refresh the profile and try again.");
+      setProfile(result.profile);
+      onUpdated?.(result.profile);
+      if (viewingReference?.id === reference.id) setViewingReference(null);
+      if (result.cleanupWarnings?.length) setError(result.cleanupWarnings.join(" "));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSaving(false);
+    }
   };
 
   const handlePropose = async (regenerate = false) => {
@@ -965,12 +986,13 @@ export function VisualProfileModal({
                           <button type="button" className="btn btn-outline" onClick={() => handleDownloadReference(ref)}>Download</button>
                           <button type="button" className="btn btn-secondary" disabled={saving} onClick={() => handleApproveReference(ref.id, false)}>Approve</button>
                           <button type="button" className="btn btn-primary" disabled={saving} onClick={() => handleApproveReference(ref.id, true)}>Set primary</button>
+                          <button type="button" className="btn btn-danger" disabled={saving} onClick={() => void handleDeleteReference(ref)}>Delete</button>
                         </div>
                       )}
                       {ref.approved && ref.role !== "primary_reference" && (
-                        <div className="reference-actions"><button type="button" className="btn btn-outline" onClick={() => openReference(ref)}>View</button><button type="button" className="btn btn-outline" onClick={() => handleDownloadReference(ref)}>Download</button><button type="button" className="btn btn-outline" disabled={saving} onClick={() => handleApproveReference(ref.id, true)}>Make primary</button></div>
+                        <div className="reference-actions"><button type="button" className="btn btn-outline" onClick={() => openReference(ref)}>View</button><button type="button" className="btn btn-outline" onClick={() => handleDownloadReference(ref)}>Download</button><button type="button" className="btn btn-outline" disabled={saving} onClick={() => handleApproveReference(ref.id, true)}>Make primary</button><button type="button" className="btn btn-danger" disabled={saving} onClick={() => void handleDeleteReference(ref)}>Delete</button></div>
                       )}
-                      {ref.approved && ref.role === "primary_reference" && <div className="reference-actions"><button type="button" className="btn btn-outline" onClick={() => openReference(ref)}>View</button><button type="button" className="btn btn-outline" onClick={() => handleDownloadReference(ref)}>Download</button></div>}
+                      {ref.approved && ref.role === "primary_reference" && <div className="reference-actions"><button type="button" className="btn btn-outline" onClick={() => openReference(ref)}>View</button><button type="button" className="btn btn-outline" onClick={() => handleDownloadReference(ref)}>Download</button><span className="reference-primary">Primary</span><button type="button" className="btn btn-danger" disabled={saving} onClick={() => void handleDeleteReference(ref)}>Delete</button></div>}
                     </div>
                   ))}
                 </div>

@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtemp, rm } from "node:fs/promises";
+import { access, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -8,6 +8,7 @@ import {
   getVisualProfile,
   updateVisualProfile,
   deleteVisualProfile,
+  deleteVisualReferenceImage,
   addVisualReferenceImage,
   generateStyleSheet,
   approveVisualReference,
@@ -137,7 +138,16 @@ describe("Visual Entity Profiles", () => {
   it("generates a multi-view style sheet and attaches it to references", async () => {
     await updateVisualProfile(root, slug, entityId, {
       visualPrompt: "young sorcerer with raven hair and gold spectacles",
-      character: { hairColor: "raven", accessories: "gold spectacles" },
+      appearance: "A lean young sorcerer with a composed expression.",
+      character: {
+        apparentAge: "18 years old", gender: "male", height: "5'11\"", build: "lean athletic",
+        skinTone: "warm olive", faceShape: "angular", eyeColor: "smoky gray with a cold teal ring",
+        hairColor: "ink-black with ash-gray tips", hairstyle: "short swept-back undercut", facialHair: "none",
+        distinguishingFeatures: "a small mole beneath the left eye", scars: "a thin permanent scar on the right eyebrow",
+        tattoos: "black warding sigil on the left forearm", defaultOutfit: "dark academy jacket and fitted trousers",
+        shoes: "black leather combat boots", accessories: "gold spectacles and silver signet ring",
+        weapons: "ebony necromancer staff", equipment: "etched bone talisman", additionalAppearanceNotes: "Always carries himself with precise posture.",
+      },
     });
 
     let prompt = "";
@@ -180,6 +190,16 @@ describe("Visual Entity Profiles", () => {
     expect(prompt).toContain("cropped feet");
     expect(prompt).toContain("overlapping figures");
     expect(prompt).toContain("cinematic backgrounds");
+    expect(prompt).toContain("HEIGHT: 5'11\"");
+    expect(prompt).toContain("SKIN TONE: warm olive");
+    expect(prompt).toContain("EYES: smoky gray with a cold teal ring");
+    expect(prompt).toContain("HAIR: ink-black with ash-gray tips, short swept-back undercut");
+    expect(prompt).toContain("SCARS / PERMANENT MARKS: a thin permanent scar on the right eyebrow");
+    expect(prompt).toContain("TATTOOS: black warding sigil on the left forearm");
+    expect(prompt).toContain("FOOTWEAR: black leather combat boots");
+    expect(prompt).toContain("ACCESSORIES: gold spectacles and silver signet ring");
+    expect(prompt).toContain("PERSISTENT EQUIPMENT: etched bone talisman");
+    expect(prompt).toContain("DEFAULT COSTUME / WARDROBE: dark academy jacket and fitted trousers");
   });
 
   it("proposes only missing visual details and persists only selected acceptance", async () => {
@@ -240,6 +260,33 @@ describe("Visual Entity Profiles", () => {
     expect(promoted.references.find((item) => item.id === v1.reference.id)).toMatchObject({ approved: true, role: "general_reference" });
   });
 
+  it("deletes a reference and its controlled asset without promoting a descendant", async () => {
+    const unapproved = await addVisualReferenceImage(root, slug, entityId, {
+      role: "general_reference", source: "uploaded", buffer: Buffer.from("review-image"), approved: false,
+    });
+    const removedReviewReference = await deleteVisualReferenceImage(root, slug, entityId, unapproved.reference.id);
+    expect(removedReviewReference.deleted).toBe(true);
+    expect(removedReviewReference.profile.references).toEqual([]);
+    await expect(access(unapproved.reference.imagePath)).rejects.toThrow();
+
+    const first = await addVisualReferenceImage(root, slug, entityId, {
+      role: "primary_reference", source: "uploaded", buffer: Buffer.from("primary-image"), approved: true,
+    });
+    const descendant = await addVisualReferenceImage(root, slug, entityId, {
+      role: "front", source: "uploaded", buffer: Buffer.from("newer-image"), approved: true,
+      replacesReferenceId: first.reference.id,
+    });
+
+    const deleted = await deleteVisualReferenceImage(root, slug, entityId, first.reference.id);
+    expect(deleted.deleted).toBe(true);
+    expect(deleted.profile.references).toHaveLength(1);
+    expect(deleted.profile.references[0]).toMatchObject({ id: descendant.reference.id, replacesReferenceId: first.reference.id, role: "front" });
+    expect(deleted.profile.references.some((reference) => reference.role === "primary_reference")).toBe(false);
+    await expect(access(first.reference.imagePath)).rejects.toThrow();
+    await expect(access(descendant.reference.imagePath)).resolves.toBeUndefined();
+    expect((await deleteVisualReferenceImage(root, slug, entityId, first.reference.id)).deleted).toBe(false);
+  });
+
   it("preserves an AI suggestion beside new source evidence until deliberately resolved", async () => {
     const bible = { ...emptyStoryBible(), canonicalEntities: [canonicalEntitySchema.parse({ id: entityId, type: "character", canonicalName: "Test Character", aliases: [], description: "Hair: emerald green.", firstAppearance: 1, lastKnownAppearance: 1 })] };
     await updateVisualProfile(root, slug, entityId, { character: { hairColor: "brown" }, fieldProvenance: { "character.hairColor": { source: "ai_generated", locked: false } } });
@@ -287,7 +334,7 @@ describe("Visual Entity Profiles", () => {
 
   it("uses a persistent environment reference prompt for locations", async () => {
     const locationId = "ent_cccccccccccccccccccccccc";
-    await updateVisualProfile(root, slug, locationId, { visualType: "location", location: { architecture: "black stone spires", recurringLandmarks: "a bone gate" } });
+    await updateVisualProfile(root, slug, locationId, { visualType: "location", character: { height: "9 feet", eyeColor: "red" }, location: { architecture: "black stone spires", recurringLandmarks: "a bone gate" } });
     let prompt = "";
     const provider = { name: "fake-image-provider", validateConfiguration: async () => {}, generate: async (input: { prompt: string }) => { prompt = input.prompt; return { data: Buffer.from("image"), mimeType: "image/png", provider: "fake", model: "fake" }; } };
     const story: any = { slug, artwork: { provider: "openai", model: "dall-e-3", aspectRatio: "1:1", quality: "high", size: "1024x1024", outputFormat: "png" } };
@@ -295,6 +342,8 @@ describe("Visual Entity Profiles", () => {
     expect(result.reference.approved).toBe(false);
     expect(prompt).toContain("LOCATION REFERENCE");
     expect(prompt).not.toContain("CHARACTER MODEL SHEET");
+    expect(prompt).not.toContain("HEIGHT: 9 feet");
+    expect(prompt).not.toContain("EYES: red");
   });
 
   it("merges visual profiles when entities are merged", async () => {

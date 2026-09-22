@@ -536,6 +536,9 @@ export async function applyVisualProfileProposal(slug: string, entityId: string,
 export async function approveVisualReference(slug: string, entityId: string, refId: string, primary = false): Promise<VisualEntityProfile> {
   return post(`/stories/${encodeURIComponent(slug)}/visual-profiles/${encodeURIComponent(entityId)}/references/${encodeURIComponent(refId)}/approve`, { primary });
 }
+export async function deleteVisualReference(slug: string, entityId: string, refId: string): Promise<{ profile: VisualEntityProfile; deleted: boolean; cleanupWarnings?: string[] }> {
+  return del(`/stories/${encodeURIComponent(slug)}/visual-profiles/${encodeURIComponent(entityId)}/references/${encodeURIComponent(refId)}`);
+}
 export async function resolveVisualProfileConflict(slug: string, entityId: string, conflictId: string, action: "accept_canonical" | "retain_manual_override"): Promise<VisualEntityProfile> {
   return post(`/stories/${encodeURIComponent(slug)}/visual-profiles/${encodeURIComponent(entityId)}/conflicts/${encodeURIComponent(conflictId)}/resolve`, { action });
 }

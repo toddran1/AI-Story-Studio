@@ -325,19 +325,30 @@ export async function generateStyleSheet(
   ].filter(Boolean);
 
   // Layer 2: persistent entity visual canon (never scene-specific state).
-  const entityPrompt = profile.visualPrompt || profile.appearance;
+  const character = profile.visualType === "character" ? profile.character : undefined;
   const entityDetails: string[] = [
-    entityPrompt ? `SUBJECT VISUAL TRAITS: ${entityPrompt}` : "",
-    profile.character?.apparentAge ? `APPARENT AGE: ${profile.character.apparentAge}` : "",
-    profile.character?.gender ? `GENDER: ${profile.character.gender}` : "",
-    profile.character?.build ? `BUILD / PHYSIQUE: ${profile.character.build}` : "",
-    profile.character?.hairColor || profile.character?.hairstyle
-      ? `HAIR: ${[profile.character.hairColor, profile.character.hairstyle].filter(Boolean).join(", ")}`
+    profile.visualPrompt ? `SUBJECT VISUAL PROMPT: ${profile.visualPrompt}` : "",
+    profile.appearance ? `GENERAL APPEARANCE: ${profile.appearance}` : "",
+    character?.apparentAge ? `APPARENT AGE: ${character.apparentAge}` : "",
+    character?.gender ? `GENDER: ${character.gender}` : "",
+    character?.height ? `HEIGHT: ${character.height}` : "",
+    character?.build ? `BUILD / PHYSIQUE: ${character.build}` : "",
+    character?.skinTone ? `SKIN TONE: ${character.skinTone}` : "",
+    character?.faceShape ? `FACE SHAPE: ${character.faceShape}` : "",
+    character?.eyeColor ? `EYES: ${character.eyeColor}` : "",
+    character?.hairColor || character?.hairstyle
+      ? `HAIR: ${[character.hairColor, character.hairstyle].filter(Boolean).join(", ")}`
       : "",
-    profile.character?.faceShape ? `FACE SHAPE: ${profile.character.faceShape}` : "",
-    profile.character?.defaultOutfit ? `DEFAULT COSTUME / WARDROBE: ${profile.character.defaultOutfit}` : "",
-    profile.character?.weapons ? `SIGNATURE WEAPONS / GEAR: ${profile.character.weapons}` : "",
-    profile.character?.distinguishingFeatures ? `DISTINGUISHING FEATURES: ${profile.character.distinguishingFeatures}` : "",
+    character?.facialHair ? `FACIAL HAIR: ${character.facialHair}` : "",
+    character?.distinguishingFeatures ? `DISTINGUISHING FEATURES: ${character.distinguishingFeatures}` : "",
+    character?.scars ? `SCARS / PERMANENT MARKS: ${character.scars}` : "",
+    character?.tattoos ? `TATTOOS: ${character.tattoos}` : "",
+    character?.defaultOutfit ? `DEFAULT COSTUME / WARDROBE: ${character.defaultOutfit}` : "",
+    character?.shoes ? `FOOTWEAR: ${character.shoes}` : "",
+    character?.accessories ? `ACCESSORIES: ${character.accessories}` : "",
+    character?.weapons ? `SIGNATURE WEAPONS: ${character.weapons}` : "",
+    character?.equipment ? `PERSISTENT EQUIPMENT: ${character.equipment}` : "",
+    character?.additionalAppearanceNotes ? `ADDITIONAL PERSISTENT APPEARANCE NOTES: ${character.additionalAppearanceNotes}` : "",
     profile.location?.architecture ? `ARCHITECTURE: ${profile.location.architecture}` : "",
     profile.location?.terrain ? `TERRAIN: ${profile.location.terrain}` : "",
     profile.location?.lighting ? `LIGHTING IDENTITY: ${profile.location.lighting}` : "",

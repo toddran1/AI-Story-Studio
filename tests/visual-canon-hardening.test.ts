@@ -494,11 +494,11 @@ describe("Milestone 21: Visual Canon & Scene Identity Hardening", () => {
     expect(sentPrompt).toContain("Extreme angular rim lighting");
 
     // Layer 2: Character Details
-    expect(sentPrompt).toContain("SUBJECT VISUAL TRAITS: Young cultivator in torn purple robes with bone mask");
+    expect(sentPrompt).toContain("GENERAL APPEARANCE: Young cultivator in torn purple robes with bone mask");
     expect(sentPrompt).toContain("HAIR: raven black, long unbound hair reaching lower back");
     expect(sentPrompt).toContain("FACE SHAPE: sharp and angular");
     expect(sentPrompt).toContain("DEFAULT COSTUME / WARDROBE: Nine Peaks disciple robe with torn hem");
-    expect(sentPrompt).toContain("SIGNATURE WEAPONS / GEAR: Bone dagger strapped to right thigh");
+    expect(sentPrompt).toContain("SIGNATURE WEAPONS: Bone dagger strapped to right thigh");
 
     // Layer 3: Style Sheet Requirements
     expect(sentPrompt).toContain("CHARACTER REFERENCE / MODEL SHEET FOR PERSISTENT IDENTITY");
