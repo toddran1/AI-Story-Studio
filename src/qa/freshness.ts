@@ -1,7 +1,6 @@
 import { StageState } from "../domain/chapter.js";
 import { QaException } from "../domain/qa.js";
 import { Story } from "../domain/story.js";
-import { CanonicalEntity, emptyStoryBible, hasActivePronunciation } from "../domain/story-bible.js";
 import { CanonicalEntity, emptyStoryBible, hasActivePronunciation, StoryBible, storyBibleSchema } from "../domain/story-bible.js";
 import { loadNarrationNamingEntities } from "../story-bible/narration-names.js";
 import { loadPronunciationEntities } from "../story-bible/pronunciation.js";
@@ -179,10 +178,8 @@ export async function loadStoredQaDependencies(
   deterministic?: DeterministicQaDependencies,
 ): Promise<QaDependencies | undefined> {
   const paths = storyPaths(root, story.slug, chapter);
-  const [source, translation, narration, contextRaw, deterministicDeps] = await Promise.all([
   const [source, translation, narration, qaContext, deterministicDeps] = await Promise.all([
     readTextIfExists(paths.original), readTextIfExists(paths.english), readTextIfExists(paths.narration),
-    readJsonIfExists(paths.storyContext), deterministic ? Promise.resolve(deterministic) : loadQaDeterministicDependencies(root, story.slug),
     resolveStoredQaContext(paths), deterministic ? Promise.resolve(deterministic) : loadQaDeterministicDependencies(root, story.slug),
   ]);
   if (!source?.trim() || !translation?.trim() || !narration?.trim()) return undefined;
@@ -190,7 +187,6 @@ export async function loadStoredQaDependencies(
     source: fingerprint({ source, sourceLanguage: story.sourceLanguage, outputLanguage: story.outputLanguage }),
     translation: fingerprint(translation),
     narration: fingerprint(narration),
-    context: contextRaw ?? emptyStoryBible(),
     context: qaContext.raw,
     config: story.pipeline.qa,
     narrationSettings: { profanityMode: story.narrationSettings.profanityMode, includeChapterTitle: story.narrationSettings.includeChapterTitle },

@@ -24,7 +24,6 @@ import { narrationDeliveryProfile, stripDeliveryCues } from "../narration/tts-di
 import { STORY_BIBLE_PROMPT_VERSION } from "../story-bible/prompts.js";
 import { extractStoryBible } from "../story-bible/extractor.js";
 import { QA_PROMPT_VERSION } from "../qa/prompts.js";
-import { computeQaDependencyFingerprint, loadQaDeterministicDependencies } from "../qa/freshness.js";
 import { computeQaDependencyFingerprint, loadQaDeterministicDependencies, resolveStoredQaContext } from "../qa/freshness.js";
 import { validateChapterQuality } from "../qa/validator.js";
 import { buildQaState } from "../qa/review.js";
@@ -199,7 +198,6 @@ export class ChapterPipeline {
     const qaContext = await resolveStoredQaContext(paths);
     const qaFp = computeQaDependencyFingerprint({
       source: ingestionFp, translation: fingerprint(english), narration: fingerprint(narration),
-      context: priorContext, config: qaConfig, narrationSettings: narrationBehavior, prompt: QA_PROMPT_VERSION, mode: options.story.qaMode,
       context: qaContext.raw, config: qaConfig, narrationSettings: narrationBehavior, prompt: QA_PROMPT_VERSION, mode: options.story.qaMode,
       ...qaDeterministicDeps,
     });
@@ -212,7 +210,6 @@ export class ChapterPipeline {
       ]);
       const result = await validateChapterQuality(this.llms.forStage(qaConfig), qaConfig, {
         chapter: options.chapter, sourceLanguage: options.story.sourceLanguage, outputLanguage: options.story.outputLanguage,
-        source, translation: english, narration, context: priorContext, profanityMode: options.story.narrationSettings.profanityMode, includeChapterTitle: options.story.narrationSettings.includeChapterTitle !== false,
         source, translation: english, narration, context: qaContext.parsed, profanityMode: options.story.narrationSettings.profanityMode, includeChapterTitle: options.story.narrationSettings.includeChapterTitle !== false,
         exceptionsContext: exceptionsPromptSection(exceptions), mode: options.story.qaMode,
       });
@@ -221,7 +218,6 @@ export class ChapterPipeline {
       const priorQaRaw = await readJsonIfExists(paths.qa);
       const previous = priorQaRaw ? migrateQaState(priorQaRaw, { chapter: options.chapter }) : undefined;
       const { state } = buildQaState(previous, filterExceptedFindings([...deterministic.detections, ...result.value.issues], exceptions), {
-        chapter: options.chapter, canonicalEntities: priorContext.canonicalEntities, translation: english, narration,
         chapter: options.chapter, canonicalEntities: qaContext.parsed.canonicalEntities, translation: english, narration,
         baseScore: { score: result.value.score, originalScore: result.value.originalScore, status: result.value.status, originalStatus: result.value.originalStatus },
         mode: options.story.qaMode,

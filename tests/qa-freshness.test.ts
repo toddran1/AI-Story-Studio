@@ -9,7 +9,6 @@ import {
   anchorFromIssue, computeFindingId, findingVerification, migrateQaState, openFindings, qaFindingStats, recomputeQaSummary,
 } from "../src/qa/findings.js";
 import {
-  computeQaDependencyFingerprint, computeQaDependencyFingerprints, deriveQaFreshness, loadQaDeterministicDependencies,
   computeQaDependencyFingerprint, computeQaDependencyFingerprints, deriveChapterQaFreshness, deriveQaFreshness, loadQaDeterministicDependencies,
   projectNamingForQa, projectPronunciationForQa, type QaDependencies,
 } from "../src/qa/freshness.js";
@@ -23,7 +22,6 @@ import { atomicWrite, atomicWriteJson } from "../src/storage/atomic-write.js";
 import { readJsonIfExists } from "../src/storage/story-files.js";
 import { storyPaths } from "../src/storage/paths.js";
 import { fingerprint } from "../src/utils/hash.js";
-import { MockLLM, testStory } from "./helpers.js";
 import { MockLLM, MockTTS, testStory } from "./helpers.js";
 
 const checks = { completeness: "pass", names: "pass", numbers: "pass", terminology: "pass", dialogue: "pass", storyConsistency: "pass", narrationFidelity: "pass" } as const;
