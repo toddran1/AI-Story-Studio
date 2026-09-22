@@ -175,7 +175,6 @@ export function createApiHandler(operations: StudioOperations) {
       }
       const chapterQaStateMatch = /^\/api\/stories\/([a-z0-9-]+)\/chapters\/(\d+)\/qa$/.exec(url.pathname);
       if (chapterQaStateMatch && request.method === "GET") return send(response, 200, await operations.getChapterQa(chapterQaStateMatch[1]!, chapterParam(chapterQaStateMatch[2]!)));
-      if (chapterQaStateMatch && request.method === "DELETE") return send(response, 200, await operations.resetChapterQa(chapterQaStateMatch[1]!, chapterParam(chapterQaStateMatch[2]!)));
       const qaSafeFixesMatch = /^\/api\/stories\/([a-z0-9-]+)\/chapters\/(\d+)\/qa\/safe-fixes$/.exec(url.pathname);
       if (qaSafeFixesMatch && request.method === "POST") return send(response, 202, operations.startQaSafeFixes(qaSafeFixesMatch[1]!, chapterParam(qaSafeFixesMatch[2]!)));
       const qaFindingMatch = /^\/api\/stories\/([a-z0-9-]+)\/chapters\/(\d+)\/qa\/findings\/(qaf_[a-f0-9]{24})\/(fix-ai|resolve-manual|dismiss|reopen)$/.exec(url.pathname);

@@ -331,7 +331,7 @@ describe("dashboard and legacy compatibility", () => {
     const { root, story, paths } = await fixture({ detections: [detection()] });
     const { operations } = operationsWith(root, openaiQa());
 
-    const result = await operations.resetQaBatch(story.slug, { chapters: [1] });
+    const result = await operations.resetQaBatch(story.slug, { type: "chapter", chapterNumber: 1 });
     expect(result.requested).toBe(1);
     expect(result.reset).toBe(1);
     expect(result.chapters).toEqual([1]);

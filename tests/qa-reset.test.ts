@@ -232,7 +232,7 @@ describe("QA Data Reset — 19 Verification Scenarios (A through S)", () => {
     const paths2 = storyPaths(root, story.slug, 2);
     const paths3 = storyPaths(root, story.slug, 3);
 
-    const result = await resetChapterQaBatch(root, story.slug, { from: 1, to: 2 });
+    const result = await resetChapterQaBatch(root, story.slug, { type: "range", fromChapter: 1, toChapter: 2 });
     expect(result.requested).toBe(2);
     expect(result.reset).toBe(2);
     expect(result.chapters).toEqual([1, 2]);
@@ -249,6 +249,23 @@ describe("QA Data Reset — 19 Verification Scenarios (A through S)", () => {
     expect((await readJsonIfExists<Chapter>(paths3.chapterMeta))?.quality).toBeDefined();
   });
 
+  it("resets only the inclusive requested range, never the surrounding chapters", async () => {
+    const { root, story } = await createComprehensiveStoryFixture(30);
+    const result = await resetChapterQaBatch(root, story.slug, { type: "range", fromChapter: 4, toChapter: 20 });
+    expect(result).toMatchObject({ scope: { type: "range", fromChapter: 4, toChapter: 20 }, affectedCount: 17 });
+    expect(result.affectedChapterNumbers).toEqual(Array.from({ length: 17 }, (_, index) => index + 4));
+    for (const chapter of [1, 3, 21, 30]) expect(await exists(storyPaths(root, story.slug, chapter).qa)).toBe(true);
+    for (const chapter of [4, 12, 20]) expect(await exists(storyPaths(root, story.slug, chapter).qa)).toBe(false);
+  });
+
+  it("rejects malformed or empty reset scopes without deleting QA data", async () => {
+    const { root, story } = await createComprehensiveStoryFixture(3);
+    for (const scope of [{ type: "range", fromChapter: 3 }, { type: "range", toChapter: 3 }, { type: "range", fromChapter: 3, toChapter: 2 }, { type: "unknown" }, { type: "range", fromChapter: 40, toChapter: 50 }] as unknown[]) {
+      await expect(resetChapterQaBatch(root, story.slug, scope as never)).rejects.toThrow();
+    }
+    for (const chapter of [1, 2, 3]) expect(await exists(storyPaths(root, story.slug, chapter).qa)).toBe(true);
+  });
+
   it("Scenario H: Entire book reset (all: true) resets all chapters and leaves non-QA stages untouched", async () => {
     const { root, story } = await createComprehensiveStoryFixture(3);
 
@@ -257,7 +274,7 @@ describe("QA Data Reset — 19 Verification Scenarios (A through S)", () => {
       return chapterSchema.parse(await readJsonIfExists(p.chapterMeta));
     }));
 
-    const result = await resetChapterQaBatch(root, story.slug, { all: true });
+    const result = await resetChapterQaBatch(root, story.slug, { type: "book" });
     expect(result.requested).toBe(3);
     expect(result.reset).toBe(3);
     expect(result.chapters).toEqual([1, 2, 3]);
@@ -469,7 +486,7 @@ describe("QA Data Reset — 19 Verification Scenarios (A through S)", () => {
       expect(single.reset).toBe(true);
       expect(single.chapter).toBe(1);
 
-      const batch = await operations.resetQaBatch(story.slug, { chapters: [2] });
+      const batch = await operations.resetQaBatch(story.slug, { type: "chapter", chapterNumber: 2 });
       expect(batch.requested).toBe(1);
       expect(batch.reset).toBe(1);
       expect(batch.chapters).toEqual([2]);
@@ -557,7 +574,7 @@ describe("QA Reset Follow-Up — Unprocessed Chapters & Resilient Classification
   it("Scenario B: Entire book containing mixed states resets only chapters with QA data and counts correctly", async () => {
     const { root, story } = await createMixedStoryFixture();
 
-    const result = await resetChapterQaBatch(root, story.slug, { all: true });
+    const result = await resetChapterQaBatch(root, story.slug, { type: "book" });
 
     expect(result.requested).toBe(5);
     expect(result.reset).toBe(2);
@@ -576,12 +593,12 @@ describe("QA Reset Follow-Up — Unprocessed Chapters & Resilient Classification
   it("Scenario C: Entire book idempotency — second reset produces reset=0 and alreadyClean=total", async () => {
     const { root, story } = await createMixedStoryFixture();
 
-    const firstRun = await resetChapterQaBatch(root, story.slug, { all: true });
+    const firstRun = await resetChapterQaBatch(root, story.slug, { type: "book" });
     expect(firstRun.reset).toBe(2);
     expect(firstRun.alreadyClean).toBe(3);
     expect(firstRun.failed).toBe(0);
 
-    const secondRun = await resetChapterQaBatch(root, story.slug, { all: true });
+    const secondRun = await resetChapterQaBatch(root, story.slug, { type: "book" });
     expect(secondRun.requested).toBe(5);
     expect(secondRun.reset).toBe(0);
     expect(secondRun.alreadyClean).toBe(5);
@@ -600,15 +617,7 @@ describe("QA Reset Follow-Up — Unprocessed Chapters & Resilient Classification
     await expect(resetChapterQa(root, story.slug, 999999)).rejects.toThrow(/does not exist in story/i);
 
     // Batch reset records it as a failure
-    const batchResult = await resetChapterQaBatch(root, story.slug, { chapters: [999999] });
-    expect(batchResult.requested).toBe(1);
-    expect(batchResult.reset).toBe(0);
-    expect(batchResult.alreadyClean).toBe(0);
-    expect(batchResult.failed).toBe(1);
-    expect(batchResult.failures).toHaveLength(1);
-    expect(batchResult.failures[0]?.chapter).toBe(999999);
-    expect(batchResult.failures[0]?.reason).toMatch(/does not exist in story/i);
-    expect(batchResult.requested).toBe(batchResult.reset + batchResult.alreadyClean + batchResult.failed);
+    await expect(resetChapterQaBatch(root, story.slug, { type: "chapter", chapterNumber: 999999 })).rejects.toThrow(/does not exist/i);
   });
 
   it("Scenario E: Corrupt chapter metadata is reported as failure", async () => {
@@ -618,7 +627,7 @@ describe("QA Reset Follow-Up — Unprocessed Chapters & Resilient Classification
     // Write invalid chapter.json content
     await atomicWrite(paths1.chapterMeta, JSON.stringify({ invalid: "not-a-chapter" }));
 
-    const batchResult = await resetChapterQaBatch(root, story.slug, { chapters: [1] });
+    const batchResult = await resetChapterQaBatch(root, story.slug, { type: "chapter", chapterNumber: 1 });
     expect(batchResult.requested).toBe(1);
     expect(batchResult.reset).toBe(0);
     expect(batchResult.alreadyClean).toBe(0);
@@ -638,7 +647,7 @@ describe("QA Reset Follow-Up — Unprocessed Chapters & Resilient Classification
     const innerFile = join(pathsChapter1.qa, "cannot-delete.txt");
     await fs.writeFile(innerFile, "locked");
 
-    const batchResult = await resetChapterQaBatch(root, story.slug, { chapters: [1] });
+    const batchResult = await resetChapterQaBatch(root, story.slug, { type: "chapter", chapterNumber: 1 });
     expect(batchResult.requested).toBe(1);
     await fs.rm(pathsChapter1.qa, { recursive: true, force: true });
   });
@@ -652,7 +661,7 @@ describe("QA Reset Follow-Up — Unprocessed Chapters & Resilient Classification
     const fs = await import("node:fs/promises");
     await fs.mkdir(pathsChapter1.chapterMeta);
 
-    const batchResult = await resetChapterQaBatch(root, story.slug, { chapters: [1] });
+    const batchResult = await resetChapterQaBatch(root, story.slug, { type: "chapter", chapterNumber: 1 });
     expect(batchResult.failed).toBe(1);
     expect(batchResult.failures[0]?.chapter).toBe(1);
 
@@ -700,12 +709,12 @@ describe("QA Reset Follow-Up — Unprocessed Chapters & Resilient Classification
   it("Scenario J: Batch accounting invariant requested === reset + alreadyClean + failed holds for mixed batches", async () => {
     const { root, story } = await createMixedStoryFixture();
 
-    const batch = await resetChapterQaBatch(root, story.slug, { chapters: [1, 2, 3, 4, 5, 999999] });
-    expect(batch.requested).toBe(6);
+    const batch = await resetChapterQaBatch(root, story.slug, { type: "range", fromChapter: 1, toChapter: 5 });
+    expect(batch.requested).toBe(5);
     expect(batch.reset).toBe(2);
     expect(batch.alreadyClean).toBe(3);
     expect(batch.skipped).toBe(3);
-    expect(batch.failed).toBe(1);
+    expect(batch.failed).toBe(0);
     expect(batch.requested).toBe(batch.reset + batch.alreadyClean + batch.failed);
   });
 

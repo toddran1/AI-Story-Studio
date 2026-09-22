@@ -1084,8 +1084,7 @@ function ResetQaDialog({ slug, chapterNumbers, onClose, onDone }: { slug: string
           </div>
         )}
 
-        {
-          <div className="naming-notice" style={{ marginTop: "12px", marginBottom: "12px" }}>
+        <div className="naming-notice" style={{ marginTop: "12px", marginBottom: "12px" }}>
             <p>
               This will permanently delete QA data for <b>{affectedChapterNumbers.length} existing chapter{affectedChapterNumbers.length === 1 ? "" : "s"}</b>{scope === "range" && rangeValid ? <>: Chapters {from}–{to}</> : ""}. Other production data will not be changed.
             </p>
@@ -1099,8 +1098,7 @@ function ResetQaDialog({ slug, chapterNumbers, onClose, onDone }: { slug: string
                 disabled={working}
               />
             </label>
-          </div>
-        )}
+        </div>
 
         <footer>
           <small>

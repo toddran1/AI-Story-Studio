@@ -137,7 +137,7 @@ async function main() {
 export async function runQaCommand(command: QaCommand, d: { root: string; operations: QaOperations; llm: LLMRouter; stdout: (text: string) => unknown }) {
   if (command.action === "reset") {
     if (command.chapter !== undefined) {
-      const result = await d.operations.resetChapterQa(command.story, command.chapter);
+      const result = await d.operations.resetQaBatch(command.story, { type: "chapter", chapterNumber: command.chapter });
       if (result.reset) {
         d.stdout(`Reset QA data for Chapter ${command.chapter}. Other stages were not changed.\n`);
       } else {
@@ -146,10 +146,10 @@ export async function runQaCommand(command: QaCommand, d: { root: string; operat
       return;
     }
     const batchOptions = command.all
-      ? { all: true as const }
+      ? { type: "book" as const }
       : command.from !== undefined && command.to !== undefined
-        ? { from: command.from, to: command.to }
-        : { all: true as const };
+        ? { type: "range" as const, fromChapter: command.from, toChapter: command.to }
+        : (() => { throw new Error("Reset requires an explicit --chapter, --from/--to, or --all scope"); })();
     const result = await d.operations.resetQaBatch(command.story, batchOptions);
     if (result.failed === 0) {
       if (result.reset === 0) {
