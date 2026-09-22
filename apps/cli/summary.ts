@@ -115,7 +115,13 @@ export async function runSummaryCommand(command: SummaryCommand, dependencies: {
   if (command.action === "artwork" || command.action === "video" || command.action === "produce" || (command.action === "export" && command.type === "video")) {
     const visuals = dependencies.visuals; if (!visuals) throw new Error("Summary visual services are not configured");
     const result = await withStoryLock<unknown>(root, command.story, `summary ${command.action}`, () => command.action === "export" ? visuals.export(command.story, command.id, "video") : visuals[command.action](command.story, command.id, command.input, (event) => { stderr(`${event.type}${event.scene ? ` ${event.scene}` : ""}\n`); }));
-    stdout(`${JSON.stringify(result, null, 2)}\n`); return;
+    stdout(`${JSON.stringify(result, null, 2)}\n`);
+    if (command.action === "produce" && result && typeof result === "object" && "status" in result && result.status === "blocked") {
+      const blocked = result as { preflight?: { requiresDecision?: Array<{ name: string; entityId: string }> }; beforeUpstream?: boolean };
+      const entities = blocked.preflight?.requiresDecision?.map((entity) => `${entity.name} (${entity.entityId})`).join(", ") ?? "unknown entities";
+      throw new Error(`Summary Produce is blocked by unresolved Visual Profiles: ${entities}. Review/create profiles or rerun with --allow-unprofiled <entity-id,...>.${blocked.beforeUpstream ? " No production stages were started." : " Completed narration, audio, and scenes were preserved; image generation and video rendering did not run."}`);
+    }
+    return;
   }
   if (command.action === "scenes") {
     if (!dependencies.media) throw new Error("Summary media services are not configured");

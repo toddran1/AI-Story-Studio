@@ -8,7 +8,7 @@ import { dirtySceneIds, reconcileSceneDrafts, sceneEditableValues, scenePlanStru
 import { VisualProfileCheckDialog, type VisualPreflightReport } from "./VisualProfileCheckDialog.js";
 
 export type SummaryVisualProps = { slug?: string; summary: StorySummary; base: string; disabled: boolean; onChange: (summary: StorySummary) => void;
-  onGenerate: (job: Job) => void; onError: (error: unknown) => void; onEditScene?: (sceneId: string) => void; focusSceneId?: string };
+  onGenerate: (job: Job) => void; onError: (error: unknown) => void; onEditScene?: (sceneId: string) => void; focusSceneId?: string; produceBlocked?: { id: string; preflight: VisualPreflightReport } };
 function useActions(props: SummaryVisualProps) {
   const [pending, setPending] = useState(false); const mounted = useRef(true);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
@@ -131,7 +131,7 @@ export function SummaryScenePanel(props: SummaryVisualProps) {
 
 export function SummaryArtworkPanel(props: SummaryVisualProps) {
   const { summary } = props; const { run, disabled } = useActions(props); const [selected, setSelected] = useState<string[]>([]);
-  const [grounding, setGrounding] = useState<Array<{ sceneId: string; status: "current" | "stale" | "missing"; grounding: Array<{ entityId?: string; name: string; source: string; reference: boolean; primaryReference?: boolean }>; approvedHistoricalVersion: boolean }>>([]);
+  const [grounding, setGrounding] = useState<Array<{ sceneId: string; status: "current" | "stale" | "missing"; grounding: Array<{ entityId?: string; name: string; source: string; reference: boolean; primaryReference?: boolean }>; groundingRecorded?: boolean; legacyGroundingUnknown?: boolean; approvedHistoricalVersion: boolean }>>([]);
   const [preflight, setPreflight] = useState<VisualPreflightReport>();
   const [pendingArtworkRequest, setPendingArtworkRequest] = useState<Record<string, unknown>>();
   const [oneTimeFallbackIds, setOneTimeFallbackIds] = useState<string[]>([]);
@@ -182,7 +182,7 @@ export function SummaryArtworkPanel(props: SummaryVisualProps) {
     <p className="summary-media-note">Artwork uses the currently saved visual beat, image prompt, canonical identities, and available references. It does not regenerate the scene plan.</p>
     <div className="summary-artwork-grid">{scenes.map((scene) => { const url = `/api${props.base}/artwork/${scene.id}?v=${scene.artwork.imageFingerprint ?? ""}`; const state = grounding.find((item) => item.sceneId === scene.id); return <article className="summary-scene-card" key={scene.id}><header><label><input type="checkbox" checked={selected.includes(scene.id)} onChange={(event) => setSelected(event.target.checked ? [...selected, scene.id] : selected.filter((id) => id !== scene.id))} /> {scene.id}</label><span>{state?.status === "stale" ? "Scene changed — artwork is stale" : state?.status === "missing" ? "Artwork missing" : state?.status === "current" ? "Artwork current" : scene.artwork.status} · {scene.artwork.review}</span></header>
       {scene.artwork.imageFingerprint ? <a href={url} target="_blank" rel="noreferrer"><img src={url} alt={scene.summary} loading="lazy" /></a> : <p>No artwork yet.</p>}<h4>{scene.summary}</h4>{scene.artwork.error && <div className="error-box">{scene.artwork.error}</div>}<div className="summary-meta"><span>{scene.artwork.provider} {scene.artwork.model}</span>{scene.artwork.manuallyEdited && <span>Manually accepted</span>}</div>
-      {state && <div className="summary-grounding"><small>Visual grounding</small>{state.grounding.length ? state.grounding.map((item) => <span key={item.entityId ?? item.name}>{item.name} — {item.source}{item.primaryReference ? " · primary reference" : item.reference ? " · approved reference" : ""}</span>) : <span>No resolved canonical entities for this scene</span>}{state.approvedHistoricalVersion && <span>Approved historical version retained</span>}</div>}
+      {state && <div className="summary-grounding"><small>Visual grounding</small>{state.legacyGroundingUnknown ? <span>Legacy artwork — visual grounding not recorded</span> : state.grounding.length ? state.grounding.map((item) => <span key={item.entityId ?? item.name}>{item.name} — {item.source}{item.primaryReference ? " · primary reference" : item.reference ? " · approved reference" : ""}</span>) : <span>No resolved canonical entities for this scene</span>}{state.approvedHistoricalVersion && <span>Approved historical version retained</span>}</div>}
       <div className="summary-visual-actions"><button className="button" disabled={artworkDisabled || !scenes.length} onClick={() => scene.artwork.imageFingerprint ? regenerate([scene.id]) : void requestArtwork({ scenes: [scene.id] })}>{scene.artwork.imageFingerprint ? "Regenerate artwork from current saved scene" : "Generate artwork from current saved scene"}</button><button className="button" onClick={() => props.onEditScene?.(scene.id)}>Edit scene</button>{scene.artwork.imageFingerprint && <><button className="button" disabled={disabled} onClick={() => { if (confirm("Approve this image for the current scene and visual settings?")) void run(`artwork/${scene.id}`, { review: "approved" }, true); }}>Approve / retain</button><button className="button" disabled={disabled} onClick={() => void run(`artwork/${scene.id}`, { review: "rejected" }, true)}>Reject</button><a className="button" download href={`${url}&download=1`}>Download PNG</a></>}</div></article>; })}</div>
     {checkingProfiles && <p className="summary-media-working" role="status">Checking Visual Profiles for scenes that need new artwork…</p>}
     {preflight && <VisualProfileCheckDialog slug={props.slug ?? props.base.split("/")[2] ?? ""} report={preflight} oneTimeEntityIds={oneTimeFallbackIds} onOneTimeEntityIds={setOneTimeFallbackIds} onCancel={cancelArtwork} onContinue={() => void continueArtwork()} onRefresh={() => void refreshPreflight()} onError={props.onError} />}
@@ -191,11 +191,43 @@ export function SummaryArtworkPanel(props: SummaryVisualProps) {
 
 export function SummaryVideoPanel(props: SummaryVisualProps) {
   const { summary } = props; const { run, disabled } = useActions(props);
+  const [preflight, setPreflight] = useState<VisualPreflightReport>();
+  const [pendingProduceRequest, setPendingProduceRequest] = useState<Record<string, unknown>>();
+  const [oneTimeFallbackIds, setOneTimeFallbackIds] = useState<string[]>([]);
+  const [checkingProfiles, setCheckingProfiles] = useState(false);
+  useEffect(() => {
+    if (props.produceBlocked?.id !== summary.id) return;
+    setPendingProduceRequest({}); setPreflight(props.produceBlocked.preflight); setOneTimeFallbackIds([]);
+  }, [props.produceBlocked, summary.id]);
+  const produce = (request: Record<string, unknown>) => void run("produce", request);
+  const refreshPreflight = async () => {
+    if (!pendingProduceRequest) return;
+    setCheckingProfiles(true);
+    try { setPreflight(await post<VisualPreflightReport>(`${props.base}/artwork/visual-preflight`, pendingProduceRequest)); }
+    catch (error) { props.onError(error); }
+    finally { setCheckingProfiles(false); }
+  };
+  const continueProduce = async () => {
+    if (!pendingProduceRequest) return;
+    setCheckingProfiles(true);
+    try {
+      const request = { ...pendingProduceRequest, allowUnprofiledEntityIds: oneTimeFallbackIds };
+      const report = await post<VisualPreflightReport>(`${props.base}/artwork/visual-preflight`, request);
+      setPreflight(report);
+      if (!report.ready) return;
+      setPreflight(undefined); setPendingProduceRequest(undefined); setOneTimeFallbackIds([]);
+      produce(request);
+    } catch (error) { props.onError(error); }
+    finally { setCheckingProfiles(false); }
+  };
+  const cancelProduce = () => { setPreflight(undefined); setPendingProduceRequest(undefined); setOneTimeFallbackIds([]); };
   return <section className="summary-media-editor"><header><span className="eyebrow">Recap screening room</span><h3>Summary video</h3><p>Uses mastered recap audio, scene artwork, and this book’s video settings. The recap has no silent intro; video length matches its audio.</p></header>
     <div className="summary-meta"><span>{summary.video?.status ?? "Not generated"}</span>{summary.video?.durationSeconds && <span>{clock(summary.video.durationSeconds)}</span>}{summary.video?.width && <span>{summary.video.width} × {summary.video.height}</span>}{summary.video?.sceneCount && <span>{summary.video.sceneCount} scenes</span>}{summary.video?.generatedAt && <span>{new Date(summary.video.generatedAt).toLocaleString()}</span>}<span>Audio: mastered summary narration</span></div>
     {summary.video?.status === "stale" && <p className="summary-media-warning">This video uses older inputs. Produce again to update only missing/stale stages.</p>}{summary.video?.error && <div className="error-box">{summary.video.error}</div>}
     {(summary.audio?.status === "stale" || summary.scenes?.status === "stale") && summaryAudioAvailable(summary) && summaryScenePlanAvailable(summary) && <p className="summary-media-warning">Video will render from the existing stale audio/scene inputs without regenerating them; regenerate those stages first only if you want the video based on the latest changes.</p>}
     {summary.video?.outputFingerprint && <video controls preload="metadata" aria-label="Summary video preview" src={`/api${props.base}/export/video?v=${summary.video.outputFingerprint}`} />}
-    <div className="summary-visual-actions"><button className="button primary" disabled={disabled || summary.status !== "complete"} onClick={() => void run("produce", {})}>Produce summary video</button><button className="button" disabled={disabled || !summaryAudioAvailable(summary) || !summaryScenePlanAvailable(summary)} onClick={() => void run("video", { force: false })}>Generate / update video</button><button className="button" disabled={disabled || !summary.video} onClick={() => { if (confirm("Re-render the video using the existing audio and artwork?")) void run("video", { force: true }); }}>Regenerate video</button>{summary.video?.outputFingerprint && <a className="button" download href={`/api${props.base}/export/video?download=1`}>Download MP4</a>}</div>
+    <div className="summary-visual-actions"><button className="button primary" disabled={disabled || checkingProfiles || summary.status !== "complete"} onClick={() => produce({})}>Produce summary video</button><button className="button" disabled={disabled || !summaryAudioAvailable(summary) || !summaryScenePlanAvailable(summary)} onClick={() => void run("video", { force: false })}>Generate / update video</button><button className="button" disabled={disabled || !summary.video} onClick={() => { if (confirm("Re-render the video using the existing audio and artwork?")) void run("video", { force: true }); }}>Regenerate video</button>{summary.video?.outputFingerprint && <a className="button" download href={`/api${props.base}/export/video?download=1`}>Download MP4</a>}</div>
+    {checkingProfiles && <p className="summary-media-working" role="status">Checking Visual Profiles for summary scenes…</p>}
+    {preflight && <VisualProfileCheckDialog slug={props.slug ?? props.base.split("/")[2] ?? ""} report={preflight} oneTimeEntityIds={oneTimeFallbackIds} onOneTimeEntityIds={setOneTimeFallbackIds} onCancel={cancelProduce} onContinue={() => void continueProduce()} onRefresh={() => void refreshPreflight()} onError={props.onError} />}
   </section>;
 }

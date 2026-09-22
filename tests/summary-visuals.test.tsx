@@ -104,6 +104,62 @@ describe("summary visual production", () => {
     expect(draft).toMatchObject({ imagesToGenerate: 1, sceneIds: ["scene-001"], preflight: { ready: false, requiresDecision: [{ entityId, state: "draft_profile" }] } });
     expect(images.generate).not.toHaveBeenCalled();
   });
+  it("blocks Produce before upstream provider stages when a reusable scene plan has unresolved profiles", async () => {
+    await media.narration("demo-story", id); await media.audio("demo-story", id); await visuals.scenes("demo-story", id, { sceneCount: 2 });
+    await saveVisualProfiles(root, "demo-story", {});
+    const llmCalls = llm.calls.length, ttsCalls = tts.calls;
+    const result = await visuals.produce("demo-story", id, { sceneCount: 2 });
+    expect(result).toMatchObject({ status: "blocked", reason: "visual-profile-decisions-required", beforeUpstream: true, preflight: { ready: false, requiresDecision: [{ name: "Su Ming" }] } });
+    expect(llm.calls.length).toBe(llmCalls); expect(tts.calls).toBe(ttsCalls); expect(images.generate).not.toHaveBeenCalled(); expect(render).not.toHaveBeenCalled();
+  });
+  it("preserves newly generated narration, audio and scenes when post-planning preflight blocks Produce", async () => {
+    await saveVisualProfiles(root, "demo-story", {});
+    const result = await visuals.produce("demo-story", id, { pacing: "custom", sceneCount: 2 });
+    expect(result).toMatchObject({ status: "blocked", reason: "visual-profile-decisions-required", beforeUpstream: false });
+    const saved = await media.get("demo-story", id);
+    expect(saved.narration?.text).toBeTruthy(); expect(saved.audio?.outputFingerprint).toBeTruthy(); expect(saved.scenePlan?.scenes).toHaveLength(2);
+    expect(images.generate).not.toHaveBeenCalled(); expect(render).not.toHaveBeenCalled();
+  });
+  it("does not invent historical grounding for legacy summary artwork", async () => {
+    const produced = await produce();
+    const stored = await media.get("demo-story", id) as any;
+    delete stored.scenePlan.scenes[0].artwork.versions[0].provenance;
+    await atomicWriteJson(summaryPath(root, "demo-story", id), stored);
+    const grounding = await visuals.sceneArtworkGrounding("demo-story", id);
+    expect(grounding[0]).toMatchObject({ legacyGroundingUnknown: true, groundingRecorded: false, grounding: [] });
+    expect(produced.scenePlan?.scenes[0]?.artwork.imageFingerprint).toBeTruthy();
+  });
+  it("uses an intact approved previous summary-scene image as a bounded continuity reference", async () => {
+    await produce();
+    const story = testStory(); story.artwork.model = "gpt-image-2.5-flare"; await atomicWriteJson(storyPaths(root, "demo-story", 1).storyConfig, story);
+    await visuals.reviewArtwork("demo-story", id, "scene-001", "approved");
+    images.generate.mockClear();
+    const result = await visuals.artwork("demo-story", id, { force: true, scenes: ["scene-002"] });
+    expect(images.generate.mock.calls[0]![0].referenceImages).toHaveLength(1);
+    expect(images.generate.mock.calls[0]![0].referenceImages[0]).toMatchObject({ role: "previous-scene" });
+    expect(result.scenePlan?.scenes[1]?.artwork.versions?.at(-1)?.provenance).toMatchObject({
+      continuityReference: { kind: "previous-scene", used: true, sourceSceneId: "scene-001", versionNumber: 1 },
+    });
+  });
+  it("allocates the shared reference budget primary-first across visible entities", async () => {
+    await media.narration("demo-story", id); await media.audio("demo-story", id); let planned = await visuals.scenes("demo-story", id, { sceneCount: 2 });
+    const story = testStory(); story.artwork.model = "gpt-image-2.5-flare"; await atomicWriteJson(storyPaths(root, "demo-story", 1).storyConfig, story);
+    const bible = await loadStoryBibleWithCanonicalOverlay(root, "demo-story");
+    const updated = mergeStoryBible(bible, storyBibleUpdateSchema.parse({ chapterSummary: "Dungeon", characters: [{ canonicalEnglishName: "Other", originalName: "其他", firstSeenChapter: 1, lastSeenChapter: 1, description: "A companion" }] }), 1);
+    const secondId = updated.canonicalEntities.find((entity) => entity.canonicalName === "Other")!.id;
+    await atomicWriteJson(storyPaths(root, "demo-story", 1).bible, updated);
+    await media.narration("demo-story", id, { force: true }); await media.audio("demo-story", id, { force: true }); planned = await visuals.scenes("demo-story", id, { sceneCount: 2, force: true });
+    const now = new Date().toISOString(); const firstId = planned.scenePlan!.scenes[0]!.entityIds![0]!;
+    const profile = (entityId: string, referenceIds: string[]) => ({ id: `vp-${entityId}`, entityId, visualType: "character" as const, status: "approved" as const, revision: 1, createdAt: now, updatedAt: now, appearance: "A person", visualPrompt: "person", notes: "", character: {}, variants: [], references: referenceIds.map((refId, index) => ({ id: refId, entityId, imagePath: `${refId}.png`, role: index === 0 ? "primary_reference" as const : "face_portrait" as const, source: "uploaded" as const, approved: true, createdAt: now })) });
+    await saveVisualProfiles(root, "demo-story", { [firstId]: profile(firstId, ["first-primary", "first-extra"]), [secondId]: profile(secondId, ["second-primary", "second-extra"]) });
+    for (const refId of ["first-primary", "first-extra", "second-primary", "second-extra"]) await atomicWrite(visualProfileRefPath(root, "demo-story", refId.startsWith("first") ? firstId : secondId, refId, "png"), PNG);
+    const scenes = structuredClone(planned.scenePlan!.scenes); scenes[0]!.characters = ["Su Ming", "Other"]; scenes[0]!.entityIds = [firstId, secondId];
+    await visuals.editScenes("demo-story", id, { scenes }); images.generate.mockClear();
+    await visuals.artwork("demo-story", id, { force: true, scenes: ["scene-001"] });
+    const refs = images.generate.mock.calls[0]![0].referenceImages;
+    expect(refs).toHaveLength(4);
+    expect(refs.map((reference: { role: string }) => reference.role)).toEqual(["primary_reference", "primary_reference", "face_portrait", "face_portrait"]);
+  });
   it("uses the shared Visual Canon preflight decision, persistent skip policy and one-time fallback for summary images", async () => {
     const planned = await produce(); const entityId = planned.scenePlan!.scenes[0]!.entityIds![0]!; images.generate.mockClear();
     await saveVisualProfiles(root, "demo-story", {});
@@ -160,9 +216,9 @@ describe("summary visual production", () => {
   });
   it("protects approved artwork and supports explicit regeneration and damaged cache detection", async () => {
     const result = await produce(); await visuals.reviewArtwork("demo-story", id, "scene-001", "approved"); const scenes = structuredClone(result.scenePlan!.scenes); scenes[0]!.visualPrompt = "A new visual direction";
-    await visuals.editScenes("demo-story", id, { scenes }); await visuals.artwork("demo-story", id); expect(images.generate).toHaveBeenCalledTimes(2); expect((await visuals.get("demo-story", id)).artwork?.status).toBe("stale");
+    await visuals.editScenes("demo-story", id, { scenes }); await visuals.artwork("demo-story", id); expect(images.generate).toHaveBeenCalledTimes(3); expect((await visuals.get("demo-story", id)).artwork?.status).toBe("stale");
     await expect(visuals.video("demo-story", id)).rejects.toThrow("review protected artwork");
-    await visuals.artwork("demo-story", id, { force: true, scenes: ["scene-001"] }); expect(images.generate).toHaveBeenCalledTimes(3);
+    await visuals.artwork("demo-story", id, { force: true, scenes: ["scene-001"] }); expect(images.generate).toHaveBeenCalledTimes(4);
     await atomicWrite(visuals.paths("demo-story", id).image("scene-001"), "damaged"); expect((await visuals.get("demo-story", id)).artwork?.status).toBe("stale"); await expect(visuals.reviewArtwork("demo-story", id, "scene-001", "approved")).rejects.toThrow("intact");
   });
   it("recovers from an interrupted image operation without repeating completed provider calls", async () => {
@@ -230,6 +286,15 @@ describe("summary visual production", () => {
     await visuals.artwork("demo-story", id); render.mockRejectedValueOnce(new Error("FFmpeg failed")); await expect(visuals.video("demo-story", id)).rejects.toThrow("FFmpeg failed"); expect((await visuals.get("demo-story", id)).video?.status).toBe("failed");
     await visuals.video("demo-story", id); render.mockImplementationOnce(async (input: any, output: string, settings: any) => { await atomicWrite(output, "bad-duration"); return { durationSeconds: input.audioDurationSeconds + 2, width: settings.width, height: settings.height, videoCodec: "h264", audioCodec: "aac", container: "mp4" }; });
     await expect(visuals.video("demo-story", id, { force: true })).rejects.toThrow("duration does not match"); expect(await visuals.export("demo-story", id, "video")).toMatchObject({ contentType: "video/mp4" });
+  });
+  it("returns actionable nonzero CLI failure for unresolved Produce profiles without image or video calls", async () => {
+    const planned = await produce(); const entityId = planned.scenePlan!.scenes[0]!.entityIds![0]!;
+    await saveVisualProfiles(root, "demo-story", {}); images.generate.mockClear(); render.mockClear();
+    let output = "";
+    await expect(runSummaryCommand(parseSummaryArgs(["produce", "demo-story", id]), { root, service: summaries, media, visuals,
+      stdout: (text) => { output += text; }, stderr: () => {} })).rejects.toThrow(`Su Ming (${entityId})`);
+    expect(JSON.parse(output)).toMatchObject({ status: "blocked", reason: "visual-profile-decisions-required" });
+    expect(images.generate).not.toHaveBeenCalled(); expect(render).not.toHaveBeenCalled();
   });
   it("supports CLI production/export and all six UI layers with actionable controls", async () => {
     expect(parseSummaryArgs(["artwork", "demo-story", id, "--scene", "scene-001", "--force"])).toMatchObject({ action: "artwork", input: { scenes: ["scene-001"], force: true } });

@@ -690,11 +690,17 @@ export type VisualProfileReferencePayload = {
 /** Shared, approved-only Visual Profile reference loader. Summary artwork uses
  * the same reference eligibility and byte limits as chapter artwork. */
 export async function loadApprovedVisualProfileReferences(root: string, story: Story, resolved: ResolvedSceneVisualPrompt): Promise<VisualProfileReferencePayload> {
-  const wanted: VisualReferenceImage[] = [];
+  const byEntity: VisualReferenceImage[][] = [];
   for (const entity of resolved.resolvedEntities) {
     if (!entity.useVisualProfile) continue;
-    wanted.push(...(entity.references ?? []).filter((ref) => ref.approved).sort((left, right) => Number(right.role === "primary_reference") - Number(left.role === "primary_reference")));
+    const refs = (entity.references ?? []).filter((ref) => ref.approved).sort((left, right) => Number(right.role === "primary_reference") - Number(left.role === "primary_reference"));
+    if (refs.length) byEntity.push(refs);
   }
+  // Give each visible entity a chance to contribute its primary reference
+  // before spending the shared provider budget on additional references.
+  const wanted: VisualReferenceImage[] = [];
+  const maxRefs = Math.max(0, ...byEntity.map((refs) => refs.length));
+  for (let index = 0; index < maxRefs; index++) for (const refs of byEntity) if (refs[index]) wanted.push(refs[index]!);
   const available = wanted.length;
   if (!available) return { images: [], available: 0, mode: "none", loadedEntityIds: [], loadedReferenceIds: [], referenceFingerprints: [] };
   if (!providerSupportsReferenceImages(story.artwork.provider, story.artwork.model)) return { images: [], available, mode: "text-only", loadedEntityIds: [], loadedReferenceIds: [], referenceFingerprints: [] };
