@@ -544,7 +544,7 @@ export async function inspectQaRecheck(deps: {
   let changedCount = 0; let totalCount = 0; let selectedLabels: string[] = [];
   if (requestedMode === "changed") {
     const selection = selectChangedParagraphs(previous?.contentSpans, translation, narration);
-    if (!selection || selection.ratio > 0.5) {
+    if (!selection || selection.changedCount === 0 || selection.ratio > 0.5) {
       mode = "full";
     } else {
       changedCount = selection.changedCount;
@@ -590,12 +590,16 @@ export async function recheckChapterQa(deps: {
   let changedContent: string | undefined;
   if (requestedMode === "changed") {
     const selection = selectChangedParagraphs(previous?.contentSpans, translation, narration);
-    if (!selection || selection.ratio > 0.5) {
+    if (!selection || selection.changedCount === 0 || selection.ratio > 0.5) {
       // Missing/unmappable spans or a wholesale rewrite: a changed-only view
       // cannot verify previous findings, so recheck the full chapter.
       mode = "full";
     } else {
       changedContent = selection.paragraphs.map((paragraph) => `[${paragraph.label}] ${paragraph.text}`).join("\n\n");
+      if (!changedContent.trim()) {
+        mode = "full";
+        changedContent = undefined;
+      }
     }
   }
   const previousFindingsContext = previous && previous.findings.length ? compactFindingsContext(previous) : undefined;

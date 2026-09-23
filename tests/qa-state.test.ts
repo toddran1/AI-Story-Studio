@@ -12,7 +12,7 @@ import {
   anchorFromIssue, computeFindingId, deriveIssues, matchEntityIds, migrateQaState, openFindings, qaCounts, recomputeQaSummary,
 } from "../src/qa/findings.js";
 import {
-  buildQaState, compactFindingsContext, computeContentSpans, recheckChapterQa, reconcileQaState, resolveQaFindingsByIndex, selectChangedParagraphs,
+  buildQaState, compactFindingsContext, computeContentSpans, inspectQaRecheck, recheckChapterQa, reconcileQaState, resolveQaFindingsByIndex, selectChangedParagraphs,
 } from "../src/qa/review.js";
 import { CopyingAudioProcessor } from "../src/audio/chapter-audio.js";
 import { atomicWrite, atomicWriteJson } from "../src/storage/atomic-write.js";
@@ -376,6 +376,32 @@ describe("recheckChapterQa", () => {
     expect(input).not.toContain("Closing beat stays.");
     expect(input).not.toContain(`NARRATION:\n${narration}`);
     expect(String(llm.calls[0]?.instructions)).toContain("CHANGED-CONTENT RECHECK");
+  });
+
+  it("falls back to a full recheck when text is unchanged but current naming authority changed", async () => {
+    const translation = "Hundred Treasures Pavilion stood beyond the gate.";
+    const narration = "Vega Treasures Pavilion stood beyond the gate.";
+    const ctx = await setupChapter({ translation, narration });
+    const historical = storyBibleSchema.parse({ ...emptyStoryBible(), canonicalEntities: [{ id: "ent_aaaaaaaaaaaaaaaaaaaaaaaa", type: "location", canonicalName: "Hundred Treasures Pavilion", originalName: "百宝阁", aliases: [], firstAppearance: 1, lastKnownAppearance: 1 }] });
+    const authorized = storyBibleSchema.parse({ ...historical, canonicalEntities: [{ ...historical.canonicalEntities[0], preferredNarrationName: "Vega Treasures Pavilion" }] });
+    await atomicWriteJson(ctx.paths.bible, authorized);
+    const issue = { category: "names" as const, severity: "warn" as const, message: "The narration improperly renames Hundred Treasures Pavilion as Vega Treasures Pavilion.", evidence: 'Translation says "Hundred Treasures Pavilion"; narration says "Vega Treasures Pavilion".' };
+    const previous = buildQaState(undefined, [issue], { chapter: 1, canonicalEntities: historical.canonicalEntities, translation, narration, dependencyFingerprint: "before-naming-edit", now: NOW }).state;
+    await atomicWriteJson(ctx.paths.qa, previous);
+    expect(selectChangedParagraphs(previous.contentSpans, translation, narration)?.changedCount).toBe(0);
+    expect(await inspectQaRecheck({ root: ctx.root, story: ctx.story, chapter: 1, mode: "changed" })).toMatchObject({ requestedMode: "changed", mode: "full", fellBackToFull: true, changedCount: 0 });
+    const llm = new MockLLM("openai");
+    const result = await recheckChapterQa({ root: ctx.root, story: ctx.story, chapter: 1, provider: llm, mode: "changed", now: NOW });
+    expect(result.summary).toMatchObject({ mode: "full", fellBackToFull: true });
+    expect(String(llm.calls[0]?.input)).toContain(`TRANSLATION:\n${translation}`);
+    expect(String(llm.calls[0]?.input)).toContain(`NARRATION:\n${narration}`);
+    expect(String(llm.calls[0]?.input)).not.toContain("CHANGED CONTENT");
+    expect(result.state.findings[0]).toMatchObject({ status: "obsolete" });
+    expect(result.state.findings[0]?.resolution?.reason).toContain("explicitly authorizes");
+    expect(result.state.findings.filter((finding) => finding.category === "names" && finding.status === "open")).toHaveLength(0);
+    const metadata = chapterSchema.parse(JSON.parse(await readFile(ctx.paths.chapterMeta, "utf8")));
+    expect(metadata.stages.qa.status).toBe("complete");
+    expect(metadata.stages.qa.fingerprint).toBeTruthy();
   });
 
   it("falls back to full when more than half the paragraphs changed", async () => {
