@@ -71,7 +71,7 @@ import {
 import { applyVisualProfileProposal, proposeMissingVisualDetails, resolveVisualProfileConflict, synchronizeVisualProfileConflicts, visualProfileProposalSchema } from "../../src/visual-canon/completion.js";
 import { loadStoryArtDirection, saveStoryArtDirection, createPreset, updatePreset, deletePreset, duplicatePreset, setDefaultPreset } from "../../src/visual-canon/art-direction.js";
 import { visualProfileSchema } from "../../src/domain/visual-profile.js";
-import { storyArtDirectionSchema, artDirectionPresetSchema } from "../../src/domain/art-direction.js";
+import { storyArtDirectionSchema, artDirectionPresetEditSchema, createArtDirectionPresetSchema } from "../../src/domain/art-direction.js";
 import { artworkReviewSchema } from "../../src/scenes/types.js";
 import { planProduction, runProduction } from "../../src/production/orchestrator.js";
 import { productionForceSchema, productionOutputSchema } from "../../src/production/types.js";
@@ -1464,37 +1464,42 @@ export class StudioOperations {
   async createArtDirectionPreset(slug: string, input: unknown) {
     slugSchema.parse(slug);
     return withStoryLock(this.root, slug, "create art direction preset", async () => {
-      const parsed = z.object({ name: z.string().trim().min(1) }).and(artDirectionPresetSchema.partial()).parse(input);
-      return createPreset(this.root, slug, parsed);
+      const parsed = createArtDirectionPresetSchema.parse(input);
+      const preset = await createPreset(this.root, slug, parsed);
+      return { preset, artDirection: await loadStoryArtDirection(this.root, slug) };
     });
   }
 
   async updateArtDirectionPreset(slug: string, presetId: string, input: unknown) {
     slugSchema.parse(slug);
     return withStoryLock(this.root, slug, "update art direction preset", async () => {
-      const parsed = artDirectionPresetSchema.partial().parse(input);
-      return updatePreset(this.root, slug, presetId, parsed);
+      const parsed = artDirectionPresetEditSchema.parse(input);
+      await updatePreset(this.root, slug, presetId, parsed);
+      return loadStoryArtDirection(this.root, slug);
     });
   }
 
   async deleteArtDirectionPreset(slug: string, presetId: string) {
     slugSchema.parse(slug);
     return withStoryLock(this.root, slug, "delete art direction preset", async () => {
-      return deletePreset(this.root, slug, presetId);
+      await deletePreset(this.root, slug, presetId);
+      return loadStoryArtDirection(this.root, slug);
     });
   }
 
   async duplicateArtDirectionPreset(slug: string, presetId: string, newName?: string) {
     slugSchema.parse(slug);
     return withStoryLock(this.root, slug, "duplicate art direction preset", async () => {
-      return duplicatePreset(this.root, slug, presetId, newName);
+      const preset = await duplicatePreset(this.root, slug, presetId, newName);
+      return { preset, artDirection: await loadStoryArtDirection(this.root, slug) };
     });
   }
 
   async setDefaultArtDirectionPreset(slug: string, presetId: string) {
     slugSchema.parse(slug);
     return withStoryLock(this.root, slug, "set default art direction preset", async () => {
-      return setDefaultPreset(this.root, slug, presetId);
+      await setDefaultPreset(this.root, slug, presetId);
+      return loadStoryArtDirection(this.root, slug);
     });
   }
 

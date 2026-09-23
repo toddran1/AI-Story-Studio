@@ -37,6 +37,15 @@ export const artDirectionPresetSchema = z.object({
 });
 export type ArtDirectionPreset = z.infer<typeof artDirectionPresetSchema>;
 
+// Preset IDs, default status, and timestamps are assigned by the server.
+export const artDirectionPresetEditSchema = artDirectionPresetSchema
+  .omit({ id: true, isDefault: true, createdAt: true, updatedAt: true })
+  .partial()
+  .strict();
+export const createArtDirectionPresetSchema = artDirectionPresetEditSchema.required({ name: true });
+export type CreateArtDirectionPresetInput = z.infer<typeof createArtDirectionPresetSchema>;
+export type UpdateArtDirectionPresetInput = z.infer<typeof artDirectionPresetEditSchema>;
+
 export const storyArtDirectionSchema = z.object({
   activePresetId: z.string().min(1).default("preset_main_style"),
   presets: z.array(artDirectionPresetSchema).min(1).default([

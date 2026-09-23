@@ -10,6 +10,10 @@ import { atomicWriteJson } from "../storage/atomic-write.js";
 import { storyPaths } from "../storage/paths.js";
 import { readJsonIfExists } from "../storage/story-files.js";
 
+function nextUpdatedAt(previous: string): string {
+  return new Date(Math.max(Date.now(), Date.parse(previous) + 1)).toISOString();
+}
+
 export async function loadStoryArtDirection(root: string, slug: string): Promise<StoryArtDirection> {
   const path = storyPaths(root, slug, 1).artDirection;
   const raw = await readJsonIfExists<unknown>(path);
@@ -50,7 +54,7 @@ export async function createPreset(
   input: Partial<ArtDirectionPreset> & { name: string },
 ): Promise<ArtDirectionPreset> {
   const artDirection = await loadStoryArtDirection(root, slug);
-  const now = new Date().toISOString();
+  const now = nextUpdatedAt(artDirection.updatedAt);
   const preset = artDirectionPresetSchema.parse({
     id: `preset_${randomUUID()}`,
     name: input.name,
@@ -90,7 +94,7 @@ export async function updatePreset(
   if (index < 0) throw new Error(`Art direction preset '${presetId}' was not found`);
 
   const existing = artDirection.presets[index]!;
-  const now = new Date().toISOString();
+  const now = nextUpdatedAt(artDirection.updatedAt);
   const updated = artDirectionPresetSchema.parse({
     ...existing,
     ...patch,
@@ -117,7 +121,7 @@ export async function deletePreset(root: string, slug: string, presetId: string)
     const fallback = artDirection.presets.find((p) => p.isDefault) ?? artDirection.presets[0]!;
     artDirection.activePresetId = fallback.id;
   }
-  artDirection.updatedAt = new Date().toISOString();
+  artDirection.updatedAt = nextUpdatedAt(artDirection.updatedAt);
   await saveStoryArtDirection(root, slug, artDirection);
 }
 
@@ -131,7 +135,7 @@ export async function duplicatePreset(
   const source = artDirection.presets.find((p) => p.id === presetId);
   if (!source) throw new Error(`Art direction preset '${presetId}' was not found`);
 
-  const now = new Date().toISOString();
+  const now = nextUpdatedAt(artDirection.updatedAt);
   const duplicated = artDirectionPresetSchema.parse({
     ...source,
     id: `preset_${randomUUID()}`,
@@ -160,7 +164,6 @@ export async function setDefaultPreset(root: string, slug: string, presetId: str
   }
   if (!found) throw new Error(`Art direction preset '${presetId}' was not found`);
   artDirection.activePresetId = presetId;
-  artDirection.updatedAt = new Date().toISOString();
+  artDirection.updatedAt = nextUpdatedAt(artDirection.updatedAt);
   await saveStoryArtDirection(root, slug, artDirection);
 }
-

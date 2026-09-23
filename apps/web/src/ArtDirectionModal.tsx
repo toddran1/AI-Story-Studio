@@ -3,6 +3,8 @@ import {
   StoryArtDirection,
   ArtDirectionPreset,
   ArtStyleOption,
+  CreateArtDirectionPresetInput,
+  ApiError,
   getArtDirection,
   updateArtDirection,
   createArtDirectionPreset,
@@ -34,6 +36,13 @@ const ASPECT_RATIOS: Array<"16:9" | "1:1" | "9:16" | "4:3" | "21:9"> = [
   "4:3",
   "21:9",
 ];
+
+function presetError(error: unknown, action: string): string {
+  if (error instanceof ApiError && error.validation?.length) {
+    return `Could not ${action} preset.\nPlease correct:\n${error.validation.map((issue) => `• ${issue.path.replace(/^preset\./, "")}: ${issue.message}`).join("\n")}`;
+  }
+  return error instanceof Error ? error.message : String(error);
+}
 
 export function ArtDirectionModal({
   slug,
@@ -90,7 +99,7 @@ export function ArtDirectionModal({
       setArtDirection(updated);
       onUpdated?.(updated);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(presetError(err, "save"));
     } finally {
       setSaving(false);
     }
@@ -101,34 +110,15 @@ export function ArtDirectionModal({
     setSaving(true);
     setError(null);
     try {
-      const newId = `preset_${Date.now()}`;
-      const newPreset: ArtDirectionPreset = {
-        id: newId,
+      const newPreset: CreateArtDirectionPresetInput = {
         name: `Preset ${artDirection.presets.length + 1}`,
-        isDefault: false,
-        artStyle: "Manhwa",
-        customStylePrompt: "cinematic digital manhwa art, high quality webtoon illustration",
-        visualTone: "Dark fantasy, progression fantasy",
-        colorDirection: "Rich atmospheric palette, high contrast",
-        lightingDirection: "Low-key cinematic lighting",
-        cameraStyle: "Dynamic framing, cinematic depth",
-        compositionTendencies: "Action-oriented, clear character focus",
-        environmentStyle: "Atmospheric and detailed",
-        characterRenderingGuidance: "Crisp line work, consistent proportions",
-        aspectRatio: "16:9",
-        characterConsistencyStrength: 0.8,
-        environmentConsistencyStrength: 0.8,
-        globalNegativePrompt: "text, watermark, signature, logo, blurry",
-        additionalVisualInstructions: "",
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
       };
-      const updated = await createArtDirectionPreset(slug, newPreset);
-      setArtDirection(updated);
-      setSelectedPresetId(newId);
-      onUpdated?.(updated);
+      const result = await createArtDirectionPreset(slug, newPreset);
+      setArtDirection(result.artDirection);
+      setSelectedPresetId(result.preset.id);
+      onUpdated?.(result.artDirection);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(presetError(err, "create"));
     } finally {
       setSaving(false);
     }
@@ -144,7 +134,7 @@ export function ArtDirectionModal({
       setSelectedPresetId(res.preset.id);
       onUpdated?.(res.artDirection);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(presetError(err, "duplicate"));
     } finally {
       setSaving(false);
     }
@@ -165,7 +155,7 @@ export function ArtDirectionModal({
       setSelectedPresetId(updated.activePresetId || updated.presets[0]?.id || "");
       onUpdated?.(updated);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(presetError(err, "delete"));
     } finally {
       setSaving(false);
     }
@@ -180,7 +170,7 @@ export function ArtDirectionModal({
       setArtDirection(updated);
       onUpdated?.(updated);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(presetError(err, "set default"));
     } finally {
       setSaving(false);
     }
@@ -493,4 +483,3 @@ export function ArtDirectionModal({
     </div>
   );
 }
-

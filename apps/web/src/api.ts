@@ -234,6 +234,8 @@ export type StoryArtDirection = {
   presets: ArtDirectionPreset[];
   updatedAt: string;
 };
+export type ArtDirectionPresetEdit = Partial<Omit<ArtDirectionPreset, "id" | "isDefault" | "createdAt" | "updatedAt">>;
+export type CreateArtDirectionPresetInput = ArtDirectionPresetEdit & Pick<ArtDirectionPreset, "name">;
 
 export type ShotType =
   | "extreme_wide"
@@ -561,11 +563,11 @@ export async function updateArtDirection(slug: string, artDirection: StoryArtDir
   return put<StoryArtDirection>(`/stories/${encodeURIComponent(slug)}/art-direction`, { artDirection });
 }
 
-export async function createArtDirectionPreset(slug: string, preset: ArtDirectionPreset): Promise<StoryArtDirection> {
-  return post<StoryArtDirection>(`/stories/${encodeURIComponent(slug)}/art-direction/presets`, { preset });
+export async function createArtDirectionPreset(slug: string, preset: CreateArtDirectionPresetInput): Promise<{ preset: ArtDirectionPreset; artDirection: StoryArtDirection }> {
+  return post<{ preset: ArtDirectionPreset; artDirection: StoryArtDirection }>(`/stories/${encodeURIComponent(slug)}/art-direction/presets`, { preset });
 }
 
-export async function updateArtDirectionPreset(slug: string, id: string, preset: Partial<ArtDirectionPreset>): Promise<StoryArtDirection> {
+export async function updateArtDirectionPreset(slug: string, id: string, preset: ArtDirectionPresetEdit): Promise<StoryArtDirection> {
   return put<StoryArtDirection>(`/stories/${encodeURIComponent(slug)}/art-direction/presets/${encodeURIComponent(id)}`, { preset });
 }
 

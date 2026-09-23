@@ -27,6 +27,7 @@ import { productionForceSchema } from "../../src/production/types.js";
 import { createErrorDiagnostic } from "../../src/errors/diagnostic.js";
 import { QaFindingLifecycleConflictError } from "../../src/qa/review.js";
 import { findVisualReferenceFile, mimeForVisualReferenceExtension } from "../../src/visual-canon/assets.js";
+import { artDirectionPresetEditSchema, createArtDirectionPresetSchema } from "../../src/domain/art-direction.js";
 
 const MAX_BODY_BYTES = 50_000_000;
 const MAX_JSON_BYTES = 1_000_000;
@@ -394,12 +395,13 @@ export function createApiHandler(operations: StudioOperations) {
       }
       const artDirectionPresetsMatch = /^\/api\/stories\/([a-z0-9-]+)\/art-direction\/presets$/.exec(url.pathname);
       if (artDirectionPresetsMatch && request.method === "POST") {
-        return send(response, 201, await operations.createArtDirectionPreset(artDirectionPresetsMatch[1]!, await jsonBody(request)));
+        const { preset } = z.object({ preset: createArtDirectionPresetSchema }).strict().parse(await jsonBody(request));
+        return send(response, 201, await operations.createArtDirectionPreset(artDirectionPresetsMatch[1]!, preset));
       }
       const artDirectionPresetDuplicateMatch = /^\/api\/stories\/([a-z0-9-]+)\/art-direction\/presets\/(preset_[A-Za-z0-9_-]+)\/duplicate$/.exec(url.pathname);
       if (artDirectionPresetDuplicateMatch && request.method === "POST") {
-        const bodyData = (await jsonBody(request).catch(() => ({}))) as any;
-        return send(response, 200, await operations.duplicateArtDirectionPreset(artDirectionPresetDuplicateMatch[1]!, artDirectionPresetDuplicateMatch[2]!, bodyData?.name));
+        const { name } = z.object({ name: z.string().trim().min(1).max(200).optional() }).strict().parse(await jsonBody(request));
+        return send(response, 200, await operations.duplicateArtDirectionPreset(artDirectionPresetDuplicateMatch[1]!, artDirectionPresetDuplicateMatch[2]!, name));
       }
       const artDirectionPresetDefaultMatch = /^\/api\/stories\/([a-z0-9-]+)\/art-direction\/presets\/(preset_[A-Za-z0-9_-]+)\/default$/.exec(url.pathname);
       if (artDirectionPresetDefaultMatch && request.method === "POST") {
@@ -407,7 +409,8 @@ export function createApiHandler(operations: StudioOperations) {
       }
       const artDirectionPresetMatch = /^\/api\/stories\/([a-z0-9-]+)\/art-direction\/presets\/(preset_[A-Za-z0-9_-]+)$/.exec(url.pathname);
       if (artDirectionPresetMatch && request.method === "PUT") {
-        return send(response, 200, await operations.updateArtDirectionPreset(artDirectionPresetMatch[1]!, artDirectionPresetMatch[2]!, await jsonBody(request)));
+        const { preset } = z.object({ preset: artDirectionPresetEditSchema }).strict().parse(await jsonBody(request));
+        return send(response, 200, await operations.updateArtDirectionPreset(artDirectionPresetMatch[1]!, artDirectionPresetMatch[2]!, preset));
       }
       if (artDirectionPresetMatch && request.method === "DELETE") {
         return send(response, 200, await operations.deleteArtDirectionPreset(artDirectionPresetMatch[1]!, artDirectionPresetMatch[2]!));
