@@ -6,6 +6,7 @@ import { resolveVisuallyRelevantCanonicalEntities, shouldUseVisualProfileForEnti
 import { sceneManifestSchema } from "../scenes/types.js";
 import type { Scene } from "../scenes/types.js";
 import { fingerprint } from "../utils/hash.js";
+import { enabledProductionScenes } from "../scenes/production.js";
 
 export type ArtworkVisualProfileState = "approved_profile" | "draft_profile" | "missing_profile" | "skip_profile";
 
@@ -91,8 +92,9 @@ export async function inspectArtworkVisualPreflight(options: {
     if (!raw) continue;
     const manifest = sceneManifestSchema.parse(raw);
     const requestedIds = options.sceneIds ? new Set(options.sceneIds) : undefined;
-    const scenes = options.sceneId ? manifest.scenes.filter((scene) => scene.id === options.sceneId) : requestedIds ? manifest.scenes.filter((scene) => requestedIds.has(scene.id)) : manifest.scenes;
-    if (options.sceneId && !scenes.length) throw new Error(`Scene '${options.sceneId}' was not found in chapter ${chapter}`);
+    const requested = options.sceneId ? manifest.scenes.filter((scene) => scene.id === options.sceneId) : requestedIds ? manifest.scenes.filter((scene) => requestedIds.has(scene.id)) : manifest.scenes;
+    if (options.sceneId && !requested.length) throw new Error(`Scene '${options.sceneId}' was not found in chapter ${chapter}`);
+    const scenes = enabledProductionScenes(requested);
     for (const scene of scenes) {
       candidates.push({ id: `${chapter}:${scene.id}`, scene });
     }

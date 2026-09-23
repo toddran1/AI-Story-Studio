@@ -10,6 +10,7 @@ import { fingerprint } from "../utils/hash.js";
 import { fileFingerprint, filesFingerprint } from "../utils/file-fingerprint.js";
 import { recordActivity } from "./projects.js";
 import { sceneManifestSchema } from "../scenes/types.js";
+import { enabledProductionScenes } from "../scenes/production.js";
 import { qaResultSchema } from "../domain/qa.js";
 import { storyBibleUpdateSchema } from "../domain/story-bible.js";
 import { alignmentArtifactSchema } from "../alignment/types.js";
@@ -85,7 +86,7 @@ async function artifactFingerprint(paths: ReturnType<typeof storyPaths>, stage: 
   if (stage === "artwork") {
     const raw = await readJsonIfExists(paths.scenesManifest); const parsed = raw ? sceneManifestSchema.safeParse(raw) : undefined;
     if (!parsed?.success) return undefined;
-    return fingerprint(parsed.data.scenes.map((scene) => ({ id: scene.id, fingerprint: scene.artwork.fingerprint, imageFingerprint: scene.artwork.imageFingerprint, review: scene.artwork.review })));
+    return fingerprint(enabledProductionScenes(parsed.data.scenes).map((scene) => ({ id: scene.id, fingerprint: scene.artwork.fingerprint, imageFingerprint: scene.artwork.imageFingerprint, review: scene.artwork.review })));
   }
   const path: Record<Exclude<MarkCurrentStage, "subtitles" | "artwork">, string> = { translation: paths.english, narration: paths.narration, qa: paths.qa, storyBible: paths.bibleUpdate, continuity: paths.continuityAnalysis, tts: paths.audioRaw, audioMastering: paths.audio, alignment: paths.alignment, scenePlanning: paths.scenesManifest, video: paths.video };
   return fileFingerprint(path[stage as Exclude<MarkCurrentStage, "subtitles" | "artwork">]);
@@ -98,7 +99,11 @@ async function artifactIsReadable(paths: ReturnType<typeof storyPaths>, stage: M
   if (stage === "alignment") return parse(paths.alignment, alignmentArtifactSchema);
   if (stage === "subtitles") return parse(paths.subtitlesDocument, subtitleDocumentSchema);
   if (stage === "continuity") return parse(paths.continuityAnalysis, z.object({ version: z.number(), chapter: z.number().int().positive(), inputFingerprint: z.string(), analyzedAt: z.string() }));
-  if (stage === "scenePlanning" || stage === "artwork") return parse(paths.scenesManifest, sceneManifestSchema);
+  if (stage === "scenePlanning") return parse(paths.scenesManifest, sceneManifestSchema);
+  if (stage === "artwork") {
+    const raw = await readJsonIfExists(paths.scenesManifest); const parsed = raw ? sceneManifestSchema.safeParse(raw) : undefined;
+    return Boolean(parsed?.success && enabledProductionScenes(parsed.data.scenes).length);
+  }
   return true;
 }
 

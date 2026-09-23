@@ -8,6 +8,7 @@ import { sceneManifestSchema } from "../scenes/types.js";
 import { readJsonIfExists, readTextIfExists } from "../storage/story-files.js";
 import { sceneImagePath, storyPaths } from "../storage/paths.js";
 import { fileFingerprint } from "../utils/file-fingerprint.js";
+import { enabledProductionScenes } from "../scenes/production.js";
 
 /** `context` is a local, derived artifact visible to planning even though it is
  * not a user-selectable Chapter stage. */
@@ -234,8 +235,10 @@ export async function inspectSceneArtwork(
 async function artifactExists(stage: ArtifactStage, paths: ReturnType<typeof storyPaths>, root?: string, story?: string, chapter?: number): Promise<boolean> {
   if (stage === "artwork" && root && story && chapter) {
     const parsed = sceneManifestSchema.safeParse(await readJsonIfExists(paths.scenesManifest));
-    if (!parsed.success || !parsed.data.scenes.length) return false;
-    for (const scene of parsed.data.scenes) {
+    if (!parsed.success) return false;
+    const enabled = enabledProductionScenes(parsed.data.scenes);
+    if (!enabled.length) return false;
+    for (const scene of enabled) {
       if (!(await fileIsNonEmpty(sceneImagePath(root, story, chapter, scene.id)))) return false;
     }
     return true;
@@ -279,7 +282,9 @@ async function artifactIsValid(stage: ArtifactStage, paths: ReturnType<typeof st
     const parsed = sceneManifestSchema.safeParse(await readJsonIfExists(paths.scenesManifest));
     if (!parsed.success || !parsed.data.scenes.length) return false;
     if (stage === "scenePlanning") return true;
-    for (const scene of parsed.data.scenes) {
+    const enabled = enabledProductionScenes(parsed.data.scenes);
+    if (!enabled.length) return false;
+    for (const scene of enabled) {
       if (scene.artwork.status !== "complete") return false;
       const inspected = await inspectSceneArtwork(root, story, chapter, scene.id, scene.artwork.imageFingerprint);
       if (inspected.availability !== "available") return false;

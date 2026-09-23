@@ -24,6 +24,8 @@ import { Pagination } from "./Pagination.js";
 import { BatchProcessingPanel } from "./BatchProcessingPanel.js";
 import { OPENAI_TEXT_MODELS } from "../../../src/llm/openai/models.js";
 import type { SceneRegenerationProposal } from "../../../src/scenes/regeneration.js";
+import { enabledProductionScenes, retimeScenesToDuration } from "../../../src/scenes/production.js";
+import type { SceneSettings } from "../../../src/scenes/types.js";
 import { SceneFilmstrip } from "./SceneFilmstrip.js";
 import { AdvancedVisualDirection } from "./AdvancedVisualDirection.js";
 import { VisualGroundingPanel } from "./VisualGroundingPanel.js";
@@ -1581,6 +1583,7 @@ function newBibleValue(category: string) { const chapters = { firstSeenChapter: 
 function bibleEntryTitle(value: any) { return value.canonicalEnglishName ?? value.canonicalEnglish ?? `${value.subject} → ${value.object}`; }
 
 function getSceneProductionState(scene: Scene, artworkCurrent = false): { label: string; cls: string } {
+  if (scene.disabled) return { label: "Disabled", cls: "state-disabled" };
   if (artworkCurrent && scene.artwork?.review === "approved" && scene.imageUrl && scene.artwork?.status === "complete") {
     return { label: "Video Ready", cls: "state-video-ready" };
   }
@@ -1998,13 +2001,13 @@ export function moveChapterSceneDraft(scenes: Scene[], sceneId: string, offset: 
 export function toggleChapterSceneEnabledDraft(scenes: Scene[], sceneId: string) {
   const scene = scenes.find((item) => item.id === sceneId);
   if (!scene) return scenes;
-  if (!scene.disabled && scenes.filter((item) => !item.disabled).length <= 1) return scenes;
+  if (!scene.disabled && enabledProductionScenes(scenes).length <= 1) return scenes;
   return scenes.map((item) => item.id === sceneId ? { ...item, disabled: !item.disabled } : item);
 }
 
-export function deleteChapterSceneDraft(scenes: Scene[], sceneId: string, confirmed: boolean) {
+export function deleteChapterSceneDraft(scenes: Scene[], sceneId: string, confirmed: boolean, durationSeconds: number, settings: SceneSettings) {
   if (!confirmed || scenes.length <= 1 || !scenes.some((item) => item.id === sceneId)) return scenes;
-  return scenes.filter((item) => item.id !== sceneId);
+  return retimeScenesToDuration(scenes.filter((item) => item.id !== sceneId), durationSeconds, settings);
 }
 
 export function chapterVideoReadinessChecks(chapter: ScenesDashboard["chapters"][number] | undefined, manifest: Array<Scene & { imageUrl?: string }> | undefined, manifestStale: boolean | undefined, subtitleMode: VideoSettings["subtitleMode"]): ReadinessCheck[] {
@@ -2021,7 +2024,7 @@ export function chapterVideoReadinessChecks(chapter: ScenesDashboard["chapters"]
   checks.push(manifest
     ? { label: "Scene plan", state: manifestStale ? "warning" : "ready", detail: manifestStale ? "A retained scene plan is available; artwork and video can use it with a stale-input warning." : "A current scene plan is available." }
     : { label: "Scene plan", state: "warning", detail: "No scene plan is available; the chapter renderer can use its configured background fallback." });
-  const active = manifest?.filter((scene) => !scene.disabled) ?? [];
+  const active = enabledProductionScenes(manifest ?? []);
   const unresolved = active.flatMap((scene) => scene.resolvedCharacters ?? []).filter((item) => !item.entityId || item.profileStatus !== "approved").length;
   checks.push(!active.length
     ? { label: "Visual Profiles", state: "warning", detail: "No enabled scene identities are available for artwork." }
@@ -2661,8 +2664,8 @@ export function ScenesPage({ slug, onJob, navigate, initialData }: { slug: strin
                       <button type="button" className="button small" disabled={saving || Boolean(regeneratingSceneId) || structuralChanges || chapterSceneDirty(scene, saved)} onClick={() => void previewSceneRegeneration(scene)}>{regeneratingSceneId === scene.id ? "Regenerating…" : "Regenerate scene preview"}</button>
                       <button type="button" className="button small" disabled={saving || Boolean(savingSceneId) || Boolean(regeneratingSceneId) || draftIndex === 0} onClick={() => { setChapterProductionPlan(undefined); setDraft((current) => moveChapterSceneDraft(current, scene.id, -1)); }}>Move up</button>
                       <button type="button" className="button small" disabled={saving || Boolean(savingSceneId) || Boolean(regeneratingSceneId) || draftIndex === draft.length - 1} onClick={() => { setChapterProductionPlan(undefined); setDraft((current) => moveChapterSceneDraft(current, scene.id, 1)); }}>Move down</button>
-                      <button type="button" className="button small" disabled={saving || Boolean(savingSceneId) || Boolean(regeneratingSceneId) || (!scene.disabled && draft.filter((item) => !item.disabled).length <= 1)} onClick={() => { setChapterProductionPlan(undefined); setDraft((current) => toggleChapterSceneEnabledDraft(current, scene.id)); }}>{scene.disabled ? "Enable" : "Disable"}</button>
-                      <button type="button" className="button small" disabled={saving || Boolean(savingSceneId) || Boolean(regeneratingSceneId) || draft.length <= 1} onClick={() => { const confirmed = confirm("Delete this visual beat from the chapter scene plan? Existing immutable artwork files are not automatically destroyed."); if (!confirmed) return; setChapterProductionPlan(undefined); setDraft((current) => deleteChapterSceneDraft(current, scene.id, confirmed)); setSelectedSceneIds((current) => current.filter((id) => id !== scene.id)); }}>Delete scene</button>
+                      <button type="button" className="button small" disabled={saving || Boolean(savingSceneId) || Boolean(regeneratingSceneId) || (!scene.disabled && enabledProductionScenes(draft).length <= 1)} onClick={() => { setChapterProductionPlan(undefined); setDraft((current) => toggleChapterSceneEnabledDraft(current, scene.id)); }}>{scene.disabled ? "Enable" : "Disable"}</button>
+                      <button type="button" className="button small" disabled={saving || Boolean(savingSceneId) || Boolean(regeneratingSceneId) || draft.length <= 1} onClick={() => { const confirmed = confirm("Delete this visual beat from the chapter scene plan? Existing immutable artwork files are not automatically destroyed."); if (!confirmed || !data.manifest) return; try { const next = deleteChapterSceneDraft(draft, scene.id, confirmed, data.manifest.durationSeconds, data.settings); setChapterProductionPlan(undefined); setDraft(next); setSelectedSceneIds((current) => current.filter((id) => id !== scene.id)); setError(""); } catch (cause) { setError(message(cause)); } }}>Delete scene</button>
                     </div>
                     {sceneErrors[scene.id] && <div className="error-box" role="alert">{sceneErrors[scene.id]}</div>}
                     {sceneProposal?.sceneId === scene.id && <div className="summary-scene-proposal"><strong>Regeneration proposal · {sceneProposal.mode === "image_prompt" ? "Image prompt only" : "Full visual direction"}</strong><small>{sceneProposal.provider} · {sceneProposal.model} · Preview only; saved scene unchanged.</small>

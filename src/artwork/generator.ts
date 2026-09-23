@@ -28,6 +28,7 @@ import { ImageUpscaler, upscaleFingerprint } from "./upscaler.js";
 import { createLocalUpscaler } from "./local-realesrgan.upscaler.js";
 import { loadEnvironment } from "../config/env.js";
 import { inspectArtworkVisualPreflight } from "../visual-canon/preflight.js";
+import { enabledProductionScenes } from "../scenes/production.js";
 
 /** Reference images establish recognizable identity only. They must never
  * silently override temporary state described by the current scene. */
@@ -68,6 +69,8 @@ export async function generateStoredArtwork(options: {
   const raw = await readJsonIfExists<SceneManifest>(paths.scenesManifest);
   if (!raw) throw new ArtworkError(`Chapter ${options.chapter} has no scene plan`);
   const manifest = sceneManifestSchema.parse(raw);
+  const enabledScenes = enabledProductionScenes(manifest.scenes);
+  if (!enabledScenes.length) throw new ArtworkError(`Chapter ${options.chapter} has no enabled scenes for artwork production`);
 
   if (options.provider.name !== options.story.artwork.provider) {
     throw new ArtworkError(
@@ -103,7 +106,7 @@ export async function generateStoredArtwork(options: {
   const continuityByScene = new Map(continuity.resolved.perScene.map((entry) => [entry.sceneId, entry]));
 
   // Migrate any legacy scenes without versions array
-  for (const scene of manifest.scenes) {
+  for (const scene of enabledScenes) {
     if (scene.artwork.status === "complete" && (!scene.artwork.versions || scene.artwork.versions.length === 0)) {
       const v1: ArtworkVersion = {
         id: "v1",
@@ -135,9 +138,12 @@ export async function generateStoredArtwork(options: {
 
   if (options.sceneId && options.sceneIds) throw new ArtworkError("Choose either one scene or a scene selection");
   const requested = options.sceneIds ? new Set(options.sceneIds) : undefined;
-  let selected = options.sceneId ? manifest.scenes.filter((scene) => scene.id === options.sceneId) : requested ? manifest.scenes.filter((scene) => requested.has(scene.id)) : manifest.scenes;
-  if (options.sceneId && !selected.length) throw new ArtworkError(`Scene '${options.sceneId}' was not found`);
-  if (requested && selected.length !== requested.size) throw new ArtworkError("One or more selected scenes were not found");
+  const requestedScenes = options.sceneId ? manifest.scenes.filter((scene) => scene.id === options.sceneId) : requested ? manifest.scenes.filter((scene) => requested.has(scene.id)) : manifest.scenes;
+  if (options.sceneId && !requestedScenes.length) throw new ArtworkError(`Scene '${options.sceneId}' was not found`);
+  if (requested && requestedScenes.length !== requested.size) throw new ArtworkError("One or more selected scenes were not found");
+  const skippedDisabledSceneIds = requestedScenes.filter((scene) => scene.disabled).map((scene) => scene.id);
+  const selected = enabledProductionScenes(requestedScenes);
+  if (skippedDisabledSceneIds.length) warnings.push(`Skipped disabled scene${skippedDisabledSceneIds.length === 1 ? "" : "s"}: ${skippedDisabledSceneIds.join(", ")}`);
 
   const candidates: Array<{
     scene: Scene;
@@ -213,9 +219,11 @@ export async function generateStoredArtwork(options: {
       provider: options.story.artwork.provider,
       model: options.story.artwork.model,
       planned: manifest.scenes.length,
+      enabled: enabledScenes.length,
       selected: selected.length,
       imagesToGenerate: candidates.length,
       sceneIds: candidates.map((item) => item.scene.id),
+      skippedDisabledSceneIds,
       warnings,
       preflight,
     };
@@ -247,16 +255,18 @@ export async function generateStoredArtwork(options: {
   }
 
   if (!candidates.length) {
-    return {
-      dryRun: false,
-      chapter: options.chapter,
-      planned: manifest.scenes.length,
-      selected: selected.length,
-      imagesToGenerate: 0,
-      generated: 0,
-      reused: selected.length,
-      warnings,
+    const remaining = options.sceneId || options.sceneIds ? await generateStoredArtwork({ ...options, sceneId: undefined, sceneIds: undefined, force: false, dryRun: true, onProgress: undefined }) : undefined;
+    const allGenerated = enabledScenes.every((scene) => scene.artwork.status === "complete");
+    if (options.dryRun) return { dryRun: true as const, chapter: options.chapter, provider: options.story.artwork.provider, model: options.story.artwork.model, planned: manifest.scenes.length, enabled: enabledScenes.length, selected: selected.length, imagesToGenerate: 0, sceneIds: [], skippedDisabledSceneIds, warnings, preflight };
+    chapter.stages.artwork = {
+      ...chapter.stages.artwork,
+      status: allGenerated && (!remaining || remaining.imagesToGenerate === 0) ? "complete" : "pending",
+      outputFingerprint: fingerprint(enabledScenes.map((scene) => ({ id: scene.id, fingerprint: scene.artwork.fingerprint, imageFingerprint: scene.artwork.imageFingerprint, review: scene.artwork.review, approvedVersionId: scene.artwork.approvedVersionId }))),
+      completedAt: new Date().toISOString(),
     };
+    chapter.scenes = { total: manifest.scenes.length, generated: manifest.scenes.filter((scene) => scene.artwork.status === "complete").length, approved: manifest.scenes.filter((scene) => scene.artwork.review === "approved").length };
+    await persistChapter(paths.chapterMeta, chapter);
+    return { dryRun: false as const, chapter: options.chapter, planned: manifest.scenes.length, enabled: enabledScenes.length, selected: selected.length, imagesToGenerate: 0, generated: 0, reused: selected.length, skippedDisabledSceneIds, warnings };
   }
 
   await options.provider.validateConfiguration();
@@ -417,7 +427,7 @@ export async function generateStoredArtwork(options: {
   }
 
   const outputFingerprint = fingerprint(
-    manifest.scenes.map((scene) => ({
+    enabledScenes.map((scene) => ({
       id: scene.id,
       fingerprint: scene.artwork.fingerprint,
       imageFingerprint: scene.artwork.imageFingerprint,
@@ -425,7 +435,7 @@ export async function generateStoredArtwork(options: {
       approvedVersionId: scene.artwork.approvedVersionId,
     }))
   );
-  const allGenerated = manifest.scenes.every((scene) => scene.artwork.status === "complete");
+  const allGenerated = enabledScenes.every((scene) => scene.artwork.status === "complete");
   // A selected-scene job must not mark the whole chapter current while other
   // scenes still have changed inputs. Reuse the same provider-free candidate
   // calculation used by Estimate Images, after the selected images are saved.
@@ -452,10 +462,12 @@ export async function generateStoredArtwork(options: {
     dryRun: false,
     chapter: options.chapter,
     planned: manifest.scenes.length,
+    enabled: enabledScenes.length,
     selected: selected.length,
     imagesToGenerate: candidates.length,
     generated,
     reused,
+    skippedDisabledSceneIds,
     warnings,
   };
 }
@@ -1049,10 +1061,13 @@ export async function reupscaleStoredArtwork(options: {
   const raw = await readJsonIfExists<SceneManifest>(paths.scenesManifest);
   if (!raw) throw new ArtworkError(`Chapter ${options.chapter} has no scene plan`);
   const manifest = sceneManifestSchema.parse(raw);
-  const scenes = options.sceneId ? manifest.scenes.filter((scene) => scene.id === options.sceneId) : manifest.scenes;
-  if (options.sceneId && !scenes.length) throw new ArtworkError(`Scene '${options.sceneId}' was not found`);
-
+  const requestedScenes = options.sceneId ? manifest.scenes.filter((scene) => scene.id === options.sceneId) : manifest.scenes;
+  const scenes = enabledProductionScenes(requestedScenes);
   const warnings: string[] = [];
+  if (options.sceneId && !requestedScenes.length) throw new ArtworkError(`Scene '${options.sceneId}' was not found`);
+  const skippedDisabledSceneIds = requestedScenes.filter((scene) => scene.disabled).map((scene) => scene.id);
+  if (skippedDisabledSceneIds.length) warnings.push(`Skipped disabled scene${skippedDisabledSceneIds.length === 1 ? "" : "s"}: ${skippedDisabledSceneIds.join(", ")}`);
+  if (!scenes.length) return { chapter: options.chapter, rederived: [], warnings, skippedDisabledSceneIds };
   const upscaler = needsProductionDerivative(options.story) ? resolveUpscaler(options.upscaler) : undefined;
   const rederived: Array<{ sceneId: string; versionId: string; status: string }> = [];
   let changed = false;
@@ -1088,7 +1103,7 @@ export async function reupscaleStoredArtwork(options: {
       await persistChapter(paths.chapterMeta, chapter);
     }
   }
-  return { chapter: options.chapter, rederived, warnings };
+  return { chapter: options.chapter, rederived, warnings, skippedDisabledSceneIds };
 }
 
 async function persistChapter(path: string, chapter: Chapter) {

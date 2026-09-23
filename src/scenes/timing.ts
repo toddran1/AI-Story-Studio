@@ -41,7 +41,7 @@ export function validateSceneCoverage(scenes: Scene[], durationSeconds: number, 
   if (Math.abs(scenes.at(-1)!.endSeconds - durationSeconds) > tolerance) throw new SceneError("The final scene must end at the mastered chapter duration");
 }
 
-function boundedDurations(weights: number[], totalDuration: number, minimum: number, maximum: number): number[] {
+export function boundedDurations(weights: number[], totalDuration: number, minimum: number, maximum: number): number[] {
   if (weights.length === 1) return [totalDuration];
   if (weights.length * minimum > totalDuration + .001 || weights.length * maximum < totalDuration - .001) throw new SceneError("Scene count cannot satisfy the configured duration bounds");
   const durations = new Array<number>(weights.length).fill(0); const active = new Set(weights.map((_, index) => index)); let remaining = totalDuration;

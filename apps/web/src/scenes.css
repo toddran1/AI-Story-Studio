@@ -148,6 +148,7 @@
 .state-badge.state-needs-review { background: rgba(219,93,104,.18); color: var(--fail); }
 .state-badge.state-approved { background: rgba(54,184,138,.18); color: var(--pass); border: 1px solid rgba(54,184,138,.4); }
 .state-badge.state-video-ready { background: rgba(54,184,138,.28); color: var(--pass); border: 1px solid var(--pass); }
+.state-badge.state-disabled { background: rgba(255,255,255,.06); color: var(--muted); border: 1px dashed var(--line); }
 @keyframes scene-pulse { 50% { opacity: .55; } }
 
 .entity-chip-list { display: flex; flex-wrap: wrap; gap: 6px; margin: 4px 0; }

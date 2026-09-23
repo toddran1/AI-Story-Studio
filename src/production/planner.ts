@@ -9,6 +9,7 @@ import { fingerprint } from "../utils/hash.js";
 import { fileFingerprint, filesFingerprint } from "../utils/file-fingerprint.js";
 import { ProductionForce, ProductionOutput, ProductionPlan, ProductionProfile, ProductionStage, defaultProductionProfiles, productionProfileSchema } from "./types.js";
 import { inspectStageArtifact } from "../studio/artifact-state.js";
+import { enabledProductionScenes } from "../scenes/production.js";
 
 const core: StageName[] = ["ingestion", "translation", "narration", "qa", "storyBible", "continuity", "tts", "audioMastering"];
 
@@ -39,7 +40,7 @@ export async function buildProductionPlan(options: { root: string; story: Story;
     const paths = storyPaths(options.root, options.story.slug, number); const raw = await readJsonIfExists<Chapter>(paths.chapterMeta); const chapter = raw ? chapterSchema.safeParse(raw) : undefined;
     let chapterRequired = false; const requiredStages: ProductionStage[] = []; const states: NonNullable<ProductionPlan["stageStates"]>[string] = {};
     for (const stage of stages.filter((value): value is StageName => !["audiobook", "videoExport", "refresh"].includes(value))) {
-      const reusable = !isProductionStageForced(options.force, stage) && chapter?.success === true && await stageLooksReusable(chapter.data, stage, paths, stage === "qa" ? () => currentQaFingerprint(number) : undefined);
+      const reusable = !isProductionStageForced(options.force, stage) && chapter?.success === true && await stageLooksReusable(chapter.data, stage, paths, stage === "qa" ? () => currentQaFingerprint(number) : undefined, options.root, options.story.slug, number);
       counts[stage]![reusable ? "reusable" : "required"]++;
       if (!reusable) { chapterRequired = true; requiredStages.push(stage); }
       const artifact = await inspectStageArtifact(options.root, options.story.slug, number, stage);
@@ -49,7 +50,7 @@ export async function buildProductionPlan(options: { root: string; story: Story;
     if (stages.includes("artwork")) {
       const manifestRaw = await readJsonIfExists(paths.scenesManifest); const manifest = manifestRaw ? sceneManifestSchema.safeParse(manifestRaw) : undefined;
       if (!manifest?.success) { imagesPendingPlanning++; chapterRequired = true; if (!requiredStages.includes("artwork")) requiredStages.push("artwork"); }
-      else for (const scene of manifest.data.scenes) { const path = sceneImagePath(options.root, options.story.slug, number, scene.id); const actual = await fileFingerprint(path); if (isProductionStageForced(options.force, "artwork") || scene.artwork.status !== "complete" || !scene.artwork.imageFingerprint || actual !== scene.artwork.imageFingerprint) { imageOperations++; chapterRequired = true; if (!requiredStages.includes("artwork")) requiredStages.push("artwork"); } }
+      else for (const scene of enabledProductionScenes(manifest.data.scenes)) { const path = sceneImagePath(options.root, options.story.slug, number, scene.id); const actual = await fileFingerprint(path); if (isProductionStageForced(options.force, "artwork") || scene.artwork.status !== "complete" || !scene.artwork.imageFingerprint || actual !== scene.artwork.imageFingerprint) { imageOperations++; chapterRequired = true; if (!requiredStages.includes("artwork")) requiredStages.push("artwork"); } }
     }
     if (chapterRequired) { requiredChapters.push(number); chapterRequirements[String(number)] = requiredStages; }
   }
@@ -68,10 +69,20 @@ export function isProductionStageForced(force: ProductionForce | undefined, stag
   return dependents[normalized]?.includes(stage) ?? false;
 }
 
-async function stageLooksReusable(chapter: Chapter, stage: StageName, paths: ReturnType<typeof storyPaths>, currentQaFingerprint?: () => Promise<string | undefined>) {
-  const state = chapter.stages[stage]; if (state.status !== "complete") return false;
+async function stageLooksReusable(chapter: Chapter, stage: StageName, paths: ReturnType<typeof storyPaths>, currentQaFingerprint?: () => Promise<string | undefined>, root?: string, slug?: string, chapterNumber?: number) {
+  const state = chapter.stages[stage];
+  if (stage === "artwork") {
+    const parsed = sceneManifestSchema.safeParse(await readJsonIfExists(paths.scenesManifest));
+    if (!parsed.success) return false;
+    const enabled = enabledProductionScenes(parsed.data.scenes);
+    if (!enabled.length) return false;
+    for (const scene of enabled) {
+      if (scene.artwork.status !== "complete" || !scene.artwork.imageFingerprint || !root || !slug || chapterNumber === undefined || await fileFingerprint(sceneImagePath(root, slug, chapterNumber, scene.id)) !== scene.artwork.imageFingerprint) return false;
+    }
+    return true;
+  }
+  if (state.status !== "complete") return false;
   const files: Partial<Record<StageName, string[]>> = { ingestion: [paths.original], translation: [paths.english], narration: [paths.narration], qa: [paths.qa], storyBible: [paths.bibleUpdate], continuity: [paths.continuityAnalysis], tts: [paths.audioRaw], audioMastering: [paths.audio], alignment: [paths.alignment], subtitles: [paths.subtitlesSrt, paths.subtitlesVtt, paths.subtitlesDocument], scenePlanning: [paths.scenesManifest], video: [paths.video] };
-  if (stage === "artwork") return chapter.scenes?.generated === chapter.scenes?.total;
   const selected = files[stage] ?? []; if (!(await Promise.all(selected.map(nonEmpty))).every(Boolean)) return false;
   if (state.outputFingerprint) {
     const actual = selected.length === 1 ? await fileFingerprint(selected[0]!) : await filesFingerprint(selected);

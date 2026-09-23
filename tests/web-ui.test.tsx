@@ -484,11 +484,28 @@ describe("web UI", () => {
     expect(cannotDisableLast).toBe(disabled);
     expect(toggleChapterSceneEnabledDraft(disabled, "scene-001")[0]!.disabled).toBe(false);
 
-    expect(deleteChapterSceneDraft(scenes, "scene-001", false)).toBe(scenes);
-    expect(deleteChapterSceneDraft(scenes.slice(0, 1), "scene-001", true)).toHaveLength(1);
-    const deleted = deleteChapterSceneDraft(scenes, "scene-002", true);
+    const sceneSettings = { targetDurationSeconds: 20, minimumDurationSeconds: 10, maximumDurationSeconds: 30, maximumScenesPerChapter: 50 };
+    expect(deleteChapterSceneDraft(scenes, "scene-001", false, 30, sceneSettings)).toBe(scenes);
+    expect(deleteChapterSceneDraft(scenes.slice(0, 1), "scene-001", true, 30, sceneSettings)).toHaveLength(1);
+    const deleted = deleteChapterSceneDraft(scenes, "scene-002", true, 30, sceneSettings);
     expect(deleted.map((scene) => scene.id)).toEqual(["scene-001"]);
+    expect(deleted[0]).toMatchObject({ startSeconds: 0, endSeconds: 30, artwork: scenes[0]!.artwork });
     expect(chapterScenesDirty(deleted, scenes)).toBe(true);
+    const weightedScenes: Scene[] = [
+      { ...scenes[0]!, startSeconds: 0, endSeconds: 10 },
+      { ...scenes[1]!, startSeconds: 10, endSeconds: 20, id: "scene-003" },
+      { ...scenes[1]!, startSeconds: 20, endSeconds: 40, id: "scene-004" },
+    ];
+    for (const deletedId of ["scene-001", "scene-003", "scene-004"]) {
+      const survivors = deleteChapterSceneDraft(weightedScenes, deletedId, true, 40, sceneSettings);
+      expect(survivors[0]!.startSeconds).toBe(0);
+      expect(survivors.at(-1)!.endSeconds).toBe(40);
+      expect(survivors.slice(1).every((scene, index) => scene.startSeconds === survivors[index]!.endSeconds)).toBe(true);
+      expect(survivors.map((scene) => scene.id)).not.toContain(deletedId);
+      expect(survivors.every((scene) => scene.artwork.versions.length === 1)).toBe(true);
+    }
+    expect(deleteChapterSceneDraft(weightedScenes, "scene-003", true, 40, sceneSettings).map((scene) => scene.endSeconds - scene.startSeconds)).toEqual([13.333, 26.667]);
+    expect(() => deleteChapterSceneDraft(weightedScenes, "scene-003", true, 60, { ...sceneSettings, maximumDurationSeconds: 20 })).toThrow("Scene count cannot satisfy the configured duration bounds");
     const markupScenes = [scenes[0]!, { ...scenes[1]!, disabled: true }];
     const markup = renderToStaticMarkup(<ScenesPage slug="demo-story" onJob={() => undefined} initialData={{ settings: { targetDurationSeconds: 20, minimumDurationSeconds: 10, maximumDurationSeconds: 30, maximumScenesPerChapter: 50 }, artwork: { provider: "openai", model: "fake", stylePrompt: "style", aspectRatio: "16:9", quality: "medium", size: "1536x1024", outputFormat: "png", outputResolution: "native", upscaling: "off", upscaler: "local-realesrgan" }, planner: { provider: "openai", model: "fake" }, videoSubtitleMode: "burn", selectedChapter: 1, chapters: [], counts: { chapters: 1, planned: 1, artworkReady: 1 }, manifest: { version: 1, chapter: 1, durationSeconds: 30, planningFingerprint: "x", manualRevision: 0, manuallyEdited: false, updatedAt: new Date().toISOString(), scenes: markupScenes } } as any} />);
     expect(markup).toContain("Move up"); expect(markup).toContain("Move down"); expect(markup).toContain("Enable"); expect(markup).toContain("Delete scene"); expect(markup).toContain("Save all scene edits"); expect(markup).toContain("Produce this chapter");
@@ -504,6 +521,7 @@ describe("web UI", () => {
     expect(chapterVideoReadinessChecks({ ...row, audioStale: true, videoStale: true }, [scene], false, "burn").filter((check) => check.state === "warning")).toHaveLength(2);
     expect(chapterVideoReadinessChecks(row, [{ ...scene, artwork: { status: "complete", review: "rejected", versions: [] } }], false, "burn").find((check) => check.label === "Artwork")?.state).toBe("warning");
     expect(chapterVideoReadinessChecks(row, [{ ...scene, artwork: { status: "pending", review: "unreviewed", versions: [] }, imageUrl: undefined }], false, "burn").find((check) => check.label === "Artwork")?.state).toBe("warning");
+    expect(chapterVideoReadinessChecks(row, [scene, { ...scene, id: "scene-disabled", disabled: true, artwork: { status: "failed", review: "rejected", versions: [] }, imageUrl: undefined }], false, "burn").find((check) => check.label === "Artwork")?.state).toBe("ready");
     expect(chapterVideoReadinessChecks(row, [scene], false, "none").find((check) => check.label === "Subtitle timing")?.detail).toBe("Subtitles are disabled for this video.");
   });
 

@@ -13,6 +13,8 @@ import { planProduction, ProductionDependencies, runProduction } from "../src/pr
 import { productionManifestSchema } from "../src/production/types.js";
 import { atomicWrite, atomicWriteJson } from "../src/storage/atomic-write.js";
 import { storyPaths } from "../src/storage/paths.js";
+import { sceneImagePath } from "../src/storage/paths.js";
+import { sceneManifestSchema } from "../src/scenes/types.js";
 import { readJsonIfExists } from "../src/storage/story-files.js";
 import { fileFingerprint } from "../src/utils/file-fingerprint.js";
 import { fingerprint } from "../src/utils/hash.js";
@@ -36,6 +38,24 @@ describe("production planning", () => {
   it("resolves reusable profiles and explicit overrides", () => { const story = testStory(); expect(resolveProductionOptions(story, { profile: "story-video" })).toMatchObject({ outputs: ["video"], artwork: true, repairQa: true }); expect(resolveProductionOptions(story, { profile: "story-video", artwork: false })).toMatchObject({ artwork: false }); });
   it("forces dependency descendants without treating sibling exports as dependents", () => { expect(isProductionStageForced("audio", "audiobook")).toBe(true); expect(isProductionStageForced("video", "videoExport")).toBe(true); expect(isProductionStageForced("video", "audiobook")).toBe(false); expect(isProductionStageForced("audiobook", "videoExport")).toBe(false); expect(isProductionStageForced("continuity", "continuity")).toBe(true); expect(isProductionStageForced("continuity", "tts")).toBe(false); });
   it("reports actual reusable stage files without provider calls", async () => { const { root, story } = await fixture(1); await writeCompleteChapter(root, 1); const first = await buildProductionPlan({ root, story, chapters: [1], outputs: ["audio"], artwork: false }); expect(first.counts.audioMastering).toEqual({ required: 0, reusable: 1 }); await atomicWrite(storyPaths(root, story.slug, 1).audio, Buffer.alloc(0)); const changed = await buildProductionPlan({ root, story, chapters: [1], outputs: ["audio"], artwork: false }); expect(changed.counts.audioMastering.required).toBe(1); });
+  it("estimates only enabled Chapter scenes for image production", async () => {
+    const { root, story } = await fixture(1);
+    await writeCompleteChapter(root, 1);
+    const paths = storyPaths(root, story.slug, 1);
+    const image = Buffer.from("enabled-image");
+    const imagePath = sceneImagePath(root, story.slug, 1, "scene-001");
+    await atomicWrite(imagePath, image);
+    const imageFingerprint = await fileFingerprint(imagePath);
+    const manifest = sceneManifestSchema.parse({ version: 1, chapter: 1, durationSeconds: 30, planningFingerprint: "plan", planner: { provider: "openai", model: "test", promptVersion: "1" }, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), scenes: [
+      { id: "scene-001", summary: "Enabled beat", startSeconds: 0, endSeconds: 15, characters: [], visualPrompt: "Enabled art", artwork: { status: "complete", review: "approved", imageFingerprint, fingerprint: "artwork-input", versions: [] } },
+      { id: "scene-002", summary: "Disabled beat", startSeconds: 15, endSeconds: 30, characters: [], visualPrompt: "Disabled art", disabled: true, artwork: { status: "pending", review: "unreviewed", versions: [] } },
+    ] });
+    await atomicWriteJson(paths.scenesManifest, manifest);
+    const plan = await buildProductionPlan({ root, story, chapters: [1], outputs: ["video"], artwork: true });
+    expect(plan.estimates.imageOperations).toBe(0);
+    expect(plan.estimates.imagesPendingPlanning).toBe(0);
+    expect(plan.counts.artwork).toEqual({ required: 0, reusable: 1 });
+  });
   it("keeps dry-run free of pipeline and refresh calls", async () => { const { root, story, chapters } = await fixture(1); let refreshes = 0; const pipeline = new ProductionPipeline(); const result = await runProduction({ root, story, from: 1, to: 1, outputs: ["audio"], dryRun: true, refresh: true }, { ...dependencies(pipeline, chapters), refresh: async () => { refreshes++; } }); expect(result.manifest.status).toBe("planned"); expect(pipeline.calls).toHaveLength(0); expect(refreshes).toBe(0); });
   it("reuses the QA stage only when the recorded dependency fingerprint matches the current one", async () => {
     const { root, story } = await fixture(1); await writeCompleteChapter(root, 1); const paths = storyPaths(root, story.slug, 1);

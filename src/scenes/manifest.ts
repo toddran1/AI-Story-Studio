@@ -95,7 +95,7 @@ export async function updateStoredSceneManifest(options: { root: string; story: 
     const next = { ...scene, entityIds, artwork: fingerprint(sceneArtworkContentState(before)) === fingerprint(sceneArtworkContentState({ ...scene, entityIds })) ? before.artwork : { ...before.artwork, status: "pending" as const, review: "unreviewed" as const } };
     return next;
   });
-  validateSceneCoverage(scenes, manifest.durationSeconds, options.story.scenes); const updated = sceneManifestSchema.parse({ ...manifest, scenes, manuallyEdited: true, manualRevision: manifest.manualRevision + 1, updatedAt: new Date().toISOString() }); await atomicWriteJson(paths.scenesManifest, updated); await invalidateAfterSceneEdit(paths.chapterMeta, updated); await persistChapterVisualContinuity({ root: options.root, slug: options.story.slug, chapter: options.chapter, manifest: updated }); return updated;
+  validateSceneCoverage(scenes, manifest.durationSeconds, options.story.scenes); const updated = sceneManifestSchema.parse({ ...manifest, scenes, manuallyEdited: true, manualRevision: manifest.manualRevision + 1, updatedAt: new Date().toISOString() }); await atomicWriteJson(paths.scenesManifest, updated); await invalidateAfterSceneEdit(options.root, options.story.slug, options.chapter, paths.chapterMeta, updated); await persistChapterVisualContinuity({ root: options.root, slug: options.story.slug, chapter: options.chapter, manifest: updated }); return updated;
 }
 
 /** Persist one visual beat without accepting unrelated drafts or structural edits. */
@@ -185,6 +185,15 @@ export function productionSceneFingerprint(plan: { scenes: Scene[]; [key: string
   return fingerprint({ ...plan, updatedAt: undefined, scenes: plan.scenes.map(({ artwork, ...scene }) => scene) });
 }
 export function sceneContentFingerprint(scene: Scene) { return fingerprint(sceneEditableState(scene)); }
-async function invalidateAfterSceneEdit(path: string, manifest: SceneManifest) { const raw = await readJsonIfExists<Chapter>(path); if (!raw) return; const chapter = chapterSchema.parse(raw); chapter.scenes = { total: manifest.scenes.length, generated: manifest.scenes.filter((scene) => scene.artwork.status === "complete").length, approved: manifest.scenes.filter((scene) => scene.artwork.review === "approved").length }; chapter.stages.artwork = { status: "pending" }; chapter.stages.video = { status: "pending" }; chapter.video = undefined; await persistChapter(path, chapter); }
+async function invalidateAfterSceneEdit(root: string, slug: string, chapterNumber: number, path: string, manifest: SceneManifest) {
+  const raw = await readJsonIfExists<Chapter>(path); if (!raw) return;
+  const chapter = chapterSchema.parse(raw);
+  chapter.scenes = { total: manifest.scenes.length, generated: manifest.scenes.filter((scene) => scene.artwork.status === "complete").length, approved: manifest.scenes.filter((scene) => scene.artwork.review === "approved").length };
+  const artwork = await inspectStageArtifact(root, slug, chapterNumber, "artwork");
+  if (artwork.availability === "available") {
+    chapter.stages.artwork = { ...chapter.stages.artwork, status: "complete", error: undefined, staleReason: undefined, completedAt: chapter.stages.artwork.completedAt ?? new Date().toISOString() };
+  } else chapter.stages.artwork = { status: "pending" };
+  chapter.stages.video = { status: "pending" }; chapter.video = undefined; await persistChapter(path, chapter);
+}
 async function fileFingerprint(path: string) { const data = await readFile(path); return fingerprint(data.toString("base64")); }
 async function persistChapter(path: string, chapter: Chapter) { chapter.updatedAt = new Date().toISOString(); await atomicWriteJson(path, chapterSchema.parse(chapter)); }
