@@ -435,7 +435,8 @@ export type ScenesDashboard = {
   planner: Model;
   scenePlannerRouting?: ResolvedModelRouting;
   selectedChapter?: number;
-  chapters: Array<{ chapter: number; title?: string; durationSeconds?: number; sceneStatus: string; artworkStatus: string }>;
+  videoSubtitleMode: VideoSettings["subtitleMode"];
+  chapters: Array<{ chapter: number; title?: string; durationSeconds?: number; audioMastering: string; audioAvailable: boolean; audioStale: boolean; subtitleStatus: string; subtitlesAvailable: boolean; subtitlesStale: boolean; videoStatus: string; videoAvailable: boolean; videoStale: boolean; sceneStatus: string; artworkStatus: string }>;
   counts: { chapters: number; planned: number; artworkReady: number };
   manifest?: SceneManifest;
   manifestStale?: boolean;

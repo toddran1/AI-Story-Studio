@@ -8,6 +8,7 @@ import { ImageProvider } from "../src/artwork/provider.js";
 import { chapterSchema } from "../src/domain/chapter.js";
 import { LLMProvider } from "../src/llm/provider.js";
 import { applyStoredSceneRegeneration, planStoredScenes, previewStoredSceneRegeneration, sceneContentFingerprint, scenePlanningFingerprint, updateStoredScene, updateStoredSceneManifest } from "../src/scenes/manifest.js";
+import { sceneProposalSourceFingerprint } from "../src/scenes/regeneration.js";
 import { SCENE_PLANNER_PROMPT_VERSION, scenePlannerInstructions } from "../src/scenes/prompts.js";
 import { normalizeSceneTiming, validateSceneCoverage } from "../src/scenes/timing.js";
 import { SceneManifest, sceneManifestSchema } from "../src/scenes/types.js";
@@ -42,6 +43,73 @@ describe("scene planning", () => {
     expect(updated.scenes[1]).toEqual(planned.manifest.scenes[1]);
     await expect(updateStoredScene({ root, story, chapter: 1, sceneId: original.id, scene: edited, expectedFingerprint: sceneContentFingerprint(original) })).rejects.toThrow("changed since it was opened");
   });
+  it("re-resolves Chapter scene entity IDs from edited character names and removes stale identities", async () => {
+    const { root, story, paths } = await fixture();
+    await atomicWriteJson(paths.bibleUpdate, { chapterSummary: "Two canonical characters.", characters: [
+      { canonicalEnglishName: "Mara", originalName: "瑪拉", description: "", firstSeenChapter: 1, lastSeenChapter: 1, aliases: ["Mara Vale"] },
+      { canonicalEnglishName: "Zhang Yongxing", originalName: "张永兴", description: "", firstSeenChapter: 1, lastSeenChapter: 1, aliases: [] },
+    ] });
+    const planned = await planStoredScenes({ root, story, chapter: 1, provider: new SceneLLM() });
+    let scene = planned.manifest.scenes[0]!;
+    const maraId = scene.entityIds![0]!;
+    const saveCharacters = async (characters: string[]) => {
+      const result = await updateStoredScene({ root, story, chapter: 1, sceneId: scene.id, scene: { ...scene, characters, entityIds: scene.entityIds }, expectedFingerprint: sceneContentFingerprint(scene) });
+      scene = result.scenes[0]!;
+      return scene.entityIds ?? [];
+    };
+    const zhangIds = await saveCharacters(["Zhang Yongxing"]);
+    expect(zhangIds).toHaveLength(1); expect(zhangIds[0]).not.toBe(maraId);
+    expect(await saveCharacters([])).toEqual([]);
+    const both = await saveCharacters(["Mara", "Zhang Yongxing"]);
+    expect(both).toHaveLength(2);
+    const reordered = await saveCharacters(["Zhang Yongxing", "Mara"]);
+    expect(reordered).toEqual([...both].reverse());
+    expect(await saveCharacters(["Unresolved name"])).toEqual([]);
+    expect(await saveCharacters(["Mara Vale"])).toEqual([maraId]);
+    const currentManifest = sceneManifestSchema.parse(JSON.parse(await readFile(paths.scenesManifest, "utf8")));
+    const bulkSaved = await updateStoredSceneManifest({ root, story, chapter: 1, scenes: currentManifest.scenes.map((item, index) => index === 0 ? { ...item, characters: ["Zhang Yongxing"], entityIds: [maraId] } : item) });
+    expect(bulkSaved.scenes[0]!.entityIds).toHaveLength(1);
+    expect(bulkSaved.scenes[0]!.entityIds[0]).not.toBe(maraId);
+  });
+  it("rejects stale single-scene saves when any editable field changed, but ignores artwork-only changes", async () => {
+    const { root, story, paths } = await fixture();
+    const planned = await planStoredScenes({ root, story, chapter: 1, provider: new SceneLLM() });
+    const original = planned.manifest.scenes[0]!;
+    const variants: Array<[string, Partial<typeof original>]> = [
+      ["disabled", { disabled: true }],
+      ["entityIds", { entityIds: ["ent_000000000000000000000001"] }],
+      ["direction", { direction: { lighting: "blue" } as NonNullable<typeof original.direction> }],
+      ["overrides", { overrides: { customVisualPrompt: "hand-set" } as NonNullable<typeof original.overrides> }],
+      ["visualChanges", { visualChanges: { characters: [{ name: "Mara", op: "update", set: { wardrobe: "red coat" } }] } }],
+      ["characters", { characters: ["Someone else"] }],
+      ["timing", { startSeconds: 0.25, endSeconds: 12.25 }],
+    ];
+    for (const [field, patch] of variants) {
+      await atomicWriteJson(paths.scenesManifest, { ...planned.manifest, scenes: [{ ...original, ...patch }, planned.manifest.scenes[1]] });
+      await expect(updateStoredScene({ root, story, chapter: 1, sceneId: original.id, scene: original, expectedFingerprint: sceneContentFingerprint(original) }), field).rejects.toThrow("changed since it was opened");
+    }
+    await atomicWriteJson(paths.scenesManifest, { ...planned.manifest, scenes: [{ ...original, artwork: { ...original.artwork, status: "complete", review: "approved", imageFingerprint: "image-only-change" } }, planned.manifest.scenes[1]] });
+    const saved = await updateStoredScene({ root, story, chapter: 1, sceneId: original.id, scene: { ...original, visualPrompt: "Edited after image review" }, expectedFingerprint: sceneContentFingerprint(original) });
+    expect(saved.scenes[0]!.visualPrompt).toBe("Edited after image review");
+    expect(saved.scenes[0]!.artwork.imageFingerprint).toBe("image-only-change");
+  });
+  it("proposal fingerprints track all editable scene and narration-linked inputs", async () => {
+    const { root, story } = await fixture();
+    const scene = (await planStoredScenes({ root, story, chapter: 1, provider: new SceneLLM() })).manifest.scenes[0]!;
+    const original = sceneProposalSourceFingerprint(scene);
+    const variants: Array<Partial<typeof scene>> = [
+      { characters: ["Zhang Yongxing"], entityIds: ["ent_000000000000000000000001"] },
+      { entityIds: ["ent_000000000000000000000001"] },
+      { disabled: true },
+      { direction: { lighting: "blue" } as NonNullable<typeof scene.direction> },
+      { overrides: { customVisualPrompt: "new" } as NonNullable<typeof scene.overrides> },
+      { visualChanges: { environment: { set: { weather: "rain" } } } },
+      { startSeconds: scene.startSeconds + 0.1 },
+      { narrationText: "A different linked narration span" },
+    ];
+    for (const patch of variants) expect(sceneProposalSourceFingerprint({ ...scene, ...patch })).not.toBe(original);
+    expect(sceneProposalSourceFingerprint({ ...scene, artwork: { ...scene.artwork, review: "approved" } })).toBe(original);
+  });
   it("limits a selected Chapter artwork dry run to the requested scenes without image calls", async () => {
     const { root, story } = await fixture();
     await planStoredScenes({ root, story, chapter: 1, provider: new SceneLLM() });
@@ -73,6 +141,10 @@ describe("scene planning", () => {
     expect(applied.scenes[0]!.visualPrompt).toBe(proposal.proposed.visualPrompt);
     expect(applied.scenes[0]!.summary).toBe(proposal.current.summary);
     await expect(applyStoredSceneRegeneration({ root, story, chapter: 1, sceneId: "scene-001", proposal })).rejects.toThrow("changed since the proposal");
+    const currentScene = applied.scenes[0]!;
+    const nextProposal = await previewStoredSceneRegeneration({ root, story, chapter: 1, sceneId: currentScene.id, mode: "image_prompt", provider });
+    await updateStoredScene({ root, story, chapter: 1, sceneId: currentScene.id, scene: { ...currentScene, direction: { lighting: "blue" } }, expectedFingerprint: sceneContentFingerprint(currentScene) });
+    await expect(applyStoredSceneRegeneration({ root, story, chapter: 1, sceneId: currentScene.id, proposal: nextProposal })).rejects.toThrow("changed since the proposal");
   });
   it("documents per-scene fields, the importance rubric, and subtitle timing usage", () => {
     // Bumped to v3: the planner schema gained visualChanges and the

@@ -1,6 +1,6 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
-import { App, applyVideoResolutionPreset, ArtworkEstimateSummary, ArtworkVersionMetadata, artworkModelOptionsFor, CanonicalEntitySheet, chapterPageSize, ChapterPage, chapterQaStatusView, chunkPresetFor, clearJobDismissal, clearJobMinimized, continuityReferenceTriState, describeContinuityReference, dismissJob, EntityStatusField, ErrorBoundary, EXECUTABLE_CHAPTER_STAGES, getStageActionDetails, humanizeContinuityChanges, isJobConsoleMinimized, isJobDismissed, isTerminalJob, JobConsole, paginateRows, Pagination, PreviousHandoffBadge, QaDetail, QaFindingCard, QaResolvedFindings, resolvedBehaviorSummary, ResolvedBehaviorHint, reupscaleAvailable, SceneContinuityPanel, ScenesPage, setJobConsoleMinimized, SettingsPage, shouldRefreshAfterJob, Status, TtsQualityBadge, TtsSegmentRow, VIDEO_RESOLUTION_PRESETS, videoResolutionFor } from "../apps/web/src/App.js";
+import { App, applyVideoResolutionPreset, ArtworkEstimateSummary, ArtworkVersionMetadata, artworkModelOptionsFor, CanonicalEntitySheet, chapterPageSize, chapterSceneStructureDirty, chapterScenesDirty, chapterVideoReadinessChecks, deleteChapterSceneDraft, moveChapterSceneDraft, toggleChapterSceneEnabledDraft, ChapterPage, chapterQaStatusView, chunkPresetFor, clearJobDismissal, clearJobMinimized, continuityReferenceTriState, describeContinuityReference, dismissJob, EntityStatusField, ErrorBoundary, EXECUTABLE_CHAPTER_STAGES, getStageActionDetails, humanizeContinuityChanges, isJobConsoleMinimized, isJobDismissed, isTerminalJob, JobConsole, paginateRows, Pagination, PreviousHandoffBadge, QaDetail, QaFindingCard, QaResolvedFindings, resolvedBehaviorSummary, ResolvedBehaviorHint, reupscaleAvailable, SceneContinuityPanel, ScenesPage, setJobConsoleMinimized, SettingsPage, shouldRefreshAfterJob, Status, TtsQualityBadge, TtsSegmentRow, VIDEO_RESOLUTION_PRESETS, videoResolutionFor } from "../apps/web/src/App.js";
 import { api, ApiError } from "../apps/web/src/api.js";
 import type { ArtworkVersion, ChapterDetail, Job, QaFinding, Scene, TtsQualityArtifact, TtsSegmentQuality, VideoSettings, VisualContinuityChange } from "../apps/web/src/api.js";
 import { pretty } from "../apps/web/src/format.js";
@@ -8,6 +8,7 @@ import { ChapterImportPage, savedStorySourceUrl } from "../apps/web/src/ChapterI
 import { SummariesPage } from "../apps/web/src/SummariesPage.js";
 import { NamesLocalizationPage } from "../apps/web/src/NamesLocalizationPage.js";
 import { defaultLocale, LanguageSelect } from "../apps/web/src/languages.js";
+import { SelectedArtworkProvenance } from "../apps/web/src/SummaryVisualPanels.js";
 import { PronunciationFields, PronunciationPanel } from "../apps/web/src/PronunciationPanel.js";
 import { applyStagePreset, BatchProcessingPanel, ExecutionPreview, toggleStageSelection } from "../apps/web/src/BatchProcessingPanel.js";
 import { formatChapterSelection, parseChapterSelection } from "../src/batch/range.js";
@@ -459,6 +460,51 @@ describe("web UI", () => {
     expect(html).toContain("Database connection timed out");
     expect(html).toContain("Reload Page");
     expect(html).toContain("Return to Library");
+  });
+
+  it("keeps Chapter scene structural edits draft-only and enforces a valid enabled scene set", () => {
+    const art = { status: "complete" as const, review: "approved" as const, imageFingerprint: "image-1", versions: [{ id: "v1", versionNumber: 1 }] } as any;
+    const scenes: Scene[] = [
+      { id: "scene-001", summary: "First", startSeconds: 0, endSeconds: 12, characters: [], visualPrompt: "First image", importance: "major", artwork: art },
+      { id: "scene-002", summary: "Second", startSeconds: 12, endSeconds: 30, characters: [], visualPrompt: "Second image", importance: "standard", artwork: { ...art, versions: [...art.versions] } },
+    ];
+    const moved = moveChapterSceneDraft(scenes, "scene-002", -1);
+    expect(moved.map((scene) => scene.id)).toEqual(["scene-002", "scene-001"]);
+    expect(moved.map((scene) => [scene.startSeconds, scene.endSeconds])).toEqual([[0, 18], [18, 30]]);
+    expect(moved[0]!.artwork.versions).toBe(scenes[1]!.artwork.versions);
+    expect(chapterSceneStructureDirty(moved, scenes)).toBe(true);
+    expect(chapterScenesDirty(moved, scenes)).toBe(true);
+    expect(moveChapterSceneDraft(scenes, "scene-001", -1)).toBe(scenes);
+
+    const disabled = toggleChapterSceneEnabledDraft(scenes, "scene-001");
+    expect(disabled[0]!.disabled).toBe(true);
+    expect(disabled[0]!.artwork).toBe(scenes[0]!.artwork);
+    expect(chapterSceneStructureDirty(disabled, scenes)).toBe(true);
+    const cannotDisableLast = toggleChapterSceneEnabledDraft(disabled, "scene-002");
+    expect(cannotDisableLast).toBe(disabled);
+    expect(toggleChapterSceneEnabledDraft(disabled, "scene-001")[0]!.disabled).toBe(false);
+
+    expect(deleteChapterSceneDraft(scenes, "scene-001", false)).toBe(scenes);
+    expect(deleteChapterSceneDraft(scenes.slice(0, 1), "scene-001", true)).toHaveLength(1);
+    const deleted = deleteChapterSceneDraft(scenes, "scene-002", true);
+    expect(deleted.map((scene) => scene.id)).toEqual(["scene-001"]);
+    expect(chapterScenesDirty(deleted, scenes)).toBe(true);
+    const markupScenes = [scenes[0]!, { ...scenes[1]!, disabled: true }];
+    const markup = renderToStaticMarkup(<ScenesPage slug="demo-story" onJob={() => undefined} initialData={{ settings: { targetDurationSeconds: 20, minimumDurationSeconds: 10, maximumDurationSeconds: 30, maximumScenesPerChapter: 50 }, artwork: { provider: "openai", model: "fake", stylePrompt: "style", aspectRatio: "16:9", quality: "medium", size: "1536x1024", outputFormat: "png", outputResolution: "native", upscaling: "off", upscaler: "local-realesrgan" }, planner: { provider: "openai", model: "fake" }, videoSubtitleMode: "burn", selectedChapter: 1, chapters: [], counts: { chapters: 1, planned: 1, artworkReady: 1 }, manifest: { version: 1, chapter: 1, durationSeconds: 30, planningFingerprint: "x", manualRevision: 0, manuallyEdited: false, updatedAt: new Date().toISOString(), scenes: markupScenes } } as any} />);
+    expect(markup).toContain("Move up"); expect(markup).toContain("Move down"); expect(markup).toContain("Enable"); expect(markup).toContain("Delete scene"); expect(markup).toContain("Save all scene edits"); expect(markup).toContain("Produce this chapter");
+  });
+
+  it("shows Chapter video readiness from existing availability and freshness without providers", () => {
+    const row = { chapter: 1, audioAvailable: true, audioStale: false, audioMastering: "complete", subtitlesAvailable: true, subtitlesStale: false, subtitleStatus: "complete", videoAvailable: true, videoStale: false, videoStatus: "complete", sceneStatus: "complete", artworkStatus: "complete" } as any;
+    const scene: Scene = { id: "scene-001", summary: "A", startSeconds: 0, endSeconds: 30, characters: ["Mara"], resolvedCharacters: [{ name: "Mara", entityId: "ent_mara", profileStatus: "approved", resolution: "canonical_name" }], visualPrompt: "A", importance: "standard", imageUrl: "/scene.png", artwork: { status: "complete", review: "approved", versions: [] } };
+    const current = chapterVideoReadinessChecks(row, [scene], false, "burn");
+    expect(current.every((check) => check.state === "ready")).toBe(true);
+    expect(chapterVideoReadinessChecks({ ...row, audioAvailable: false }, [scene], false, "burn").find((check) => check.label === "Audio")?.state).toBe("blocker");
+    expect(chapterVideoReadinessChecks(row, [scene], true, "burn").find((check) => check.label === "Scene plan")?.state).toBe("warning");
+    expect(chapterVideoReadinessChecks({ ...row, audioStale: true, videoStale: true }, [scene], false, "burn").filter((check) => check.state === "warning")).toHaveLength(2);
+    expect(chapterVideoReadinessChecks(row, [{ ...scene, artwork: { status: "complete", review: "rejected", versions: [] } }], false, "burn").find((check) => check.label === "Artwork")?.state).toBe("warning");
+    expect(chapterVideoReadinessChecks(row, [{ ...scene, artwork: { status: "pending", review: "unreviewed", versions: [] }, imageUrl: undefined }], false, "burn").find((check) => check.label === "Artwork")?.state).toBe("warning");
+    expect(chapterVideoReadinessChecks(row, [scene], false, "none").find((check) => check.label === "Subtitle timing")?.detail).toBe("Subtitles are disabled for this video.");
   });
 
   it("renders ScenesPage safely whether visualProfiles is an array, an object, or undefined", () => {
@@ -1999,6 +2045,19 @@ describe("Milestone 23 — image output quality UI", () => {
     }} />);
     expect(unavailable).toContain("Upscaler unavailable — using original");
     expect(unavailable).toContain('class="version-metadata-warning"');
+  });
+
+  it("shows only the selected artwork version provenance and keeps the approved version separate", () => {
+    const v1: ArtworkVersion = { ...baseVersion, provenance: { artDirection: { source: "scene-override", presetName: "Moonlit ruin" }, visualCanon: [{ entityId: "ent_mara", name: "Mara", source: "approved Visual Profile", reference: true, primaryReference: true }], referencesUsed: "visual-profile+previous-scene", referenceImageCount: 2, continuityReference: { used: true, sourceSceneId: "scene-001", versionNumber: 3 } } };
+    const v2: ArtworkVersion = { ...baseVersion, id: "v2", versionNumber: 2, provenance: { artDirection: { source: "story-default", presetName: "Daylight" }, visualCanon: [{ entityId: "ent_zhang", name: "Zhang", source: "Story Bible fallback" }], referencesUsed: "text-only", referenceImageCount: 0, continuityReference: { used: false, reason: "no prior scene" } } };
+    const first = renderToStaticMarkup(<SelectedArtworkProvenance version={v1} approvedVersionNumber={2} />);
+    expect(first).toContain("Selected version · v1"); expect(first).toContain("Approved production version · v2");
+    expect(first).toContain("Moonlit ruin"); expect(first).toContain("Mara"); expect(first).toContain("visual-profile+previous-scene"); expect(first).toContain("scene-001 · v3 used");
+    expect(first).not.toContain("Daylight"); expect(first).not.toContain("Zhang");
+    const second = renderToStaticMarkup(<SelectedArtworkProvenance version={v2} approvedVersionNumber={2} />);
+    expect(second).toContain("Selected version · v2"); expect(second).toContain("Daylight"); expect(second).toContain("Zhang"); expect(second).not.toContain("Moonlit ruin");
+    const legacy = renderToStaticMarkup(<SelectedArtworkProvenance version={{ ...baseVersion, artDirectionFingerprint: "legacy-fingerprint" }} approvedVersionNumber={2} />);
+    expect(legacy).toContain("Legacy artwork — detailed grounding was not recorded for this version."); expect(legacy).not.toContain("Mara");
   });
 
   it("maps video resolution presets to canvas dimensions and preserves custom dims", () => {

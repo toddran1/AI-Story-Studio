@@ -27,6 +27,7 @@ import type { SceneRegenerationProposal } from "../../../src/scenes/regeneration
 import { SceneFilmstrip } from "./SceneFilmstrip.js";
 import { AdvancedVisualDirection } from "./AdvancedVisualDirection.js";
 import { VisualGroundingPanel } from "./VisualGroundingPanel.js";
+import { VideoReadinessPanel, type ReadinessCheck } from "./VideoReadinessPanel.js";
 export { Pagination, type PaginationProps, type PaginationVariant } from "./Pagination.js";
 import "./entity-sheet-actions.css";
 import "./stage-execution.css";
@@ -1969,6 +1970,75 @@ function chapterSceneDirty(scene: Scene, saved: Scene[]) {
   return Boolean(original && JSON.stringify(chapterSceneEditableValues(scene)) !== JSON.stringify(chapterSceneEditableValues(original)));
 }
 
+export function chapterSceneStructureDirty(draft: Scene[], saved: Scene[]) {
+  if (draft.map((scene) => scene.id).join("|") !== saved.map((scene) => scene.id).join("|")) return true;
+  const byId = new Map(saved.map((scene) => [scene.id, scene]));
+  return draft.some((scene) => Boolean(scene.disabled) !== Boolean(byId.get(scene.id)?.disabled));
+}
+
+export function chapterScenesDirty(draft: Scene[], saved: Scene[]) {
+  return chapterSceneStructureDirty(draft, saved) || draft.some((scene) => chapterSceneDirty(scene, saved));
+}
+
+export function moveChapterSceneDraft(scenes: Scene[], sceneId: string, offset: -1 | 1) {
+  const from = scenes.findIndex((scene) => scene.id === sceneId);
+  const to = from + offset;
+  if (from < 0 || to < 0 || to >= scenes.length) return scenes;
+  const result = [...scenes];
+  [result[from], result[to]] = [result[to]!, result[from]!];
+  let cursor = 0;
+  return result.map((scene) => {
+    const duration = scene.endSeconds - scene.startSeconds;
+    const next = { ...scene, startSeconds: cursor, endSeconds: cursor + duration };
+    cursor = next.endSeconds;
+    return next;
+  });
+}
+
+export function toggleChapterSceneEnabledDraft(scenes: Scene[], sceneId: string) {
+  const scene = scenes.find((item) => item.id === sceneId);
+  if (!scene) return scenes;
+  if (!scene.disabled && scenes.filter((item) => !item.disabled).length <= 1) return scenes;
+  return scenes.map((item) => item.id === sceneId ? { ...item, disabled: !item.disabled } : item);
+}
+
+export function deleteChapterSceneDraft(scenes: Scene[], sceneId: string, confirmed: boolean) {
+  if (!confirmed || scenes.length <= 1 || !scenes.some((item) => item.id === sceneId)) return scenes;
+  return scenes.filter((item) => item.id !== sceneId);
+}
+
+export function chapterVideoReadinessChecks(chapter: ScenesDashboard["chapters"][number] | undefined, manifest: Array<Scene & { imageUrl?: string }> | undefined, manifestStale: boolean | undefined, subtitleMode: VideoSettings["subtitleMode"]): ReadinessCheck[] {
+  if (!chapter) return [{ label: "Chapter", state: "blocker", detail: "Select a chapter to inspect its production inputs." }];
+  const checks: ReadinessCheck[] = [];
+  checks.push(chapter.audioAvailable
+    ? { label: "Audio", state: chapter.audioStale ? "warning" : "ready", detail: chapter.audioStale ? "Retained audio is available; production can reuse it with a stale-input warning." : "Current mastered audio is available." }
+    : { label: "Audio", state: "blocker", detail: "Required mastered audio is missing." });
+  checks.push(subtitleMode === "none"
+    ? { label: "Subtitle timing", state: "ready", detail: "Subtitles are disabled for this video." }
+    : chapter.subtitlesAvailable
+      ? { label: "Subtitle timing", state: chapter.subtitlesStale ? "warning" : "ready", detail: chapter.subtitlesStale ? "Retained subtitle timing is available; production can regenerate or reuse it." : "Current subtitle timing is available." }
+      : { label: "Subtitle timing", state: "warning", detail: "Timing is missing; the production flow prepares subtitles before rendering." });
+  checks.push(manifest
+    ? { label: "Scene plan", state: manifestStale ? "warning" : "ready", detail: manifestStale ? "A retained scene plan is available; artwork and video can use it with a stale-input warning." : "A current scene plan is available." }
+    : { label: "Scene plan", state: "warning", detail: "No scene plan is available; the chapter renderer can use its configured background fallback." });
+  const active = manifest?.filter((scene) => !scene.disabled) ?? [];
+  const unresolved = active.flatMap((scene) => scene.resolvedCharacters ?? []).filter((item) => !item.entityId || item.profileStatus !== "approved").length;
+  checks.push(!active.length
+    ? { label: "Visual Profiles", state: "warning", detail: "No enabled scene identities are available for artwork." }
+    : unresolved
+      ? { label: "Visual Profiles", state: "warning", detail: `${unresolved} scene identity/profile${unresolved === 1 ? " needs" : "s need"} review before artwork generation.` }
+      : { label: "Visual Profiles", state: "ready", detail: "Enabled scene identities resolve to approved profiles." });
+  const fullyApproved = active.length > 0 && active.every((scene) => scene.artwork.status === "complete" && Boolean(scene.imageUrl) && scene.artwork.review === "approved");
+  const rejected = active.some((scene) => scene.artwork.review === "rejected" || scene.artwork.review === "needs-regeneration");
+  checks.push(fullyApproved
+    ? { label: "Artwork", state: chapter.artworkStatus === "complete" && !manifestStale ? "ready" : "warning", detail: chapter.artworkStatus === "complete" && !manifestStale ? "Every enabled scene has intact approved artwork." : "Approved artwork is retained, but the chapter artwork stage is stale." }
+    : { label: "Artwork", state: "warning", detail: rejected ? "Some artwork is rejected or marked for regeneration; the chapter renderer uses its configured background fallback until all scene artwork is approved." : "Artwork is missing or unreviewed; the chapter renderer can use its configured background fallback." });
+  checks.push(chapter.videoAvailable
+    ? { label: "Video", state: chapter.videoStale ? "warning" : "ready", detail: chapter.videoStale ? "A retained video exists and needs a render to match current inputs." : "A current video render is available." }
+    : { label: "Video", state: "warning", detail: "No video render is available yet." });
+  return checks;
+}
+
 function reconcileChapterSceneDrafts(draft: Scene[], oldSaved: Scene[], incoming: Scene[]) {
   const edited = new Map(draft.filter((scene) => chapterSceneDirty(scene, oldSaved)).map((scene) => [scene.id, scene]));
   const reordered = draft.map((scene) => scene.id).join("|") !== oldSaved.map((scene) => scene.id).join("|");
@@ -2313,6 +2383,10 @@ export function ScenesPage({ slug, onJob, navigate, initialData }: { slug: strin
   };
 
   const chapterArtworkCurrent = data.chapters.find((item) => item.chapter === data.selectedChapter)?.artworkStatus === "complete" && !data.manifestStale;
+  const selectedChapterRow = data.chapters.find((item) => item.chapter === data.selectedChapter);
+  const structuralChanges = chapterSceneStructureDirty(draft, saved);
+  const hasUnsavedSceneChanges = chapterScenesDirty(draft, saved);
+  const videoReadiness = chapterVideoReadinessChecks(selectedChapterRow, data.manifest?.scenes, data.manifestStale, data.videoSubtitleMode);
   const filteredScenes = draft.filter((scene) => {
     if (sceneFilter === "all") return true;
     const state = getSceneProductionState(scene, chapterArtworkCurrent);
@@ -2466,7 +2540,7 @@ export function ScenesPage({ slug, onJob, navigate, initialData }: { slug: strin
           >
             {reupscaling ? "Re-upscaling…" : "Re-upscale"}
           </button>
-          <button type="button" className="button" disabled={!data.selectedChapter || planningProduction || draft.some((scene) => chapterSceneDirty(scene, saved))} onClick={() => void previewChapterProduction()}>{planningProduction ? "Planning…" : "Produce this chapter…"}</button>
+          <button type="button" className="button" disabled={!data.selectedChapter || planningProduction || hasUnsavedSceneChanges} onClick={() => void previewChapterProduction()}>{planningProduction ? "Planning…" : "Produce this chapter…"}</button>
         </div>
 
         {rangeError && (
@@ -2479,6 +2553,8 @@ export function ScenesPage({ slug, onJob, navigate, initialData }: { slug: strin
         {chapterProductionPlan && <div className="summary-scene-proposal" role="region" aria-label="Chapter production plan"><strong>Chapter {data.selectedChapter} production plan</strong><p>{chapterProductionPlan.stages.map((stage) => `${pretty(stage)}: ${chapterProductionPlan.counts[stage]?.required ?? 0} needed / ${chapterProductionPlan.counts[stage]?.reusable ?? 0} reusable`).join(" · ")}</p><p>Potential paid work: {chapterProductionPlan.estimates.llmOperations} LLM · {chapterProductionPlan.estimates.ttsOperations} TTS · {chapterProductionPlan.estimates.imageOperations} images. Existing current stages are reused.</p><div className="scene-edit-actions"><button type="button" className="button primary" disabled={planningProduction} onClick={() => void startChapterProduction()}>Continue production</button><button type="button" className="button" onClick={() => setChapterProductionPlan(undefined)}>Cancel</button></div></div>}
         {data.resolvedBehavior && <ResolvedBehaviorHint behavior={data.resolvedBehavior} />}
       </div>
+
+      <VideoReadinessPanel checks={videoReadiness} />
 
       {error && <ErrorBox text={error} />}
 
@@ -2501,10 +2577,12 @@ export function ScenesPage({ slug, onJob, navigate, initialData }: { slug: strin
               </p>
               <PreviousHandoffBadge handoff={data.previousHandoff} />
             </div>
-            <button className="button primary" disabled={saving || Boolean(savingSceneId) || !draft.some((scene) => chapterSceneDirty(scene, saved))} onClick={save}>
+            <button className="button primary" disabled={saving || Boolean(savingSceneId) || !hasUnsavedSceneChanges} onClick={save}>
               {saving ? "Saving…" : "Save all scene edits"}
             </button>
           </div>
+
+          {structuralChanges && <p className="summary-media-warning" role="status">Scene plan has unsaved structural changes. Order, enable/disable, and deletion edits take effect when you save all scene edits.</p>}
 
           <div className="scene-filter-bar">
             <button
@@ -2540,11 +2618,12 @@ export function ScenesPage({ slug, onJob, navigate, initialData }: { slug: strin
             <span>{selectedSceneIds.length} selected</span>
             <button type="button" className="button small" onClick={() => setSelectedSceneIds(filteredScenes.map((scene) => scene.id))}>Select visible</button>
             <button type="button" className="button small" disabled={!selectedSceneIds.length} onClick={() => setSelectedSceneIds([])}>Clear selection</button>
-            <button type="button" className="button small" disabled={!selectedSceneIds.length || draft.some((scene) => chapterSceneDirty(scene, saved)) || Boolean(rangeError)} onClick={() => { if (confirm(`Regenerate artwork for ${selectedSceneIds.length} selected scene${selectedSceneIds.length === 1 ? "" : "s"}? Existing versions remain available, and this may call the image provider.`)) void run("artwork", { scenes: selectedSceneIds, force: true }); }}>Regenerate selected artwork</button>
+            <button type="button" className="button small" disabled={!selectedSceneIds.length || hasUnsavedSceneChanges || Boolean(rangeError)} onClick={() => { if (confirm(`Regenerate artwork for ${selectedSceneIds.length} selected scene${selectedSceneIds.length === 1 ? "" : "s"}? Existing versions remain available, and this may call the image provider.`)) void run("artwork", { scenes: selectedSceneIds, force: true }); }}>Regenerate selected artwork</button>
           </div>
 
           <div className="scene-cards">
-            {filteredScenes.map((scene, index) => {
+            {filteredScenes.map((scene) => {
+              const draftIndex = draft.findIndex((item) => item.id === scene.id);
               const state = getSceneProductionState(scene, chapterArtworkCurrent);
               const versions = scene.artwork?.versions ?? [];
               const selectedVerId = selectedVersionByScene[scene.id] || scene.artwork?.approvedVersionId || (versions.length ? versions.at(-1)!.id : undefined);
@@ -2558,7 +2637,7 @@ export function ScenesPage({ slug, onJob, navigate, initialData }: { slug: strin
                       <img src={displayImageUrl} alt={scene.summary} />
                     ) : (
                       <div>
-                        <span>{String(index + 1).padStart(2, "0")}</span>
+                        <span>{String(draftIndex + 1).padStart(2, "0")}</span>
                         <small>Frame pending</small>
                       </div>
                     )}
@@ -2576,15 +2655,19 @@ export function ScenesPage({ slug, onJob, navigate, initialData }: { slug: strin
                     </header>
                     <div className="scene-edit-actions">
                       <span role="status">{savingSceneId === scene.id ? "Saving…" : chapterSceneDirty(scene, saved) ? "Unsaved changes" : savedSceneId === scene.id ? "Saved" : ""}</span>
-                      <button type="button" className="button small" disabled={saving || Boolean(savingSceneId) || !chapterSceneDirty(scene, saved)} onClick={() => void saveScene(scene)}>Save this scene</button>
+                      <button type="button" className="button small" disabled={saving || Boolean(savingSceneId) || structuralChanges || !chapterSceneDirty(scene, saved)} onClick={() => void saveScene(scene)}>Save this scene</button>
                       <button type="button" className="button small" disabled={saving || Boolean(savingSceneId) || !chapterSceneDirty(scene, saved)} onClick={() => revertScene(scene.id)}>Revert</button>
                       <select aria-label={`Regeneration mode for ${scene.id}`} disabled={saving || Boolean(regeneratingSceneId)} value={proposalMode[scene.id] ?? "image_prompt"} onChange={(event) => setProposalMode((current) => ({ ...current, [scene.id]: event.target.value as SceneRegenerationProposal["mode"] }))}><option value="image_prompt">Image prompt only</option><option value="full_visual_direction">Full visual direction</option></select>
-                      <button type="button" className="button small" disabled={saving || Boolean(regeneratingSceneId) || chapterSceneDirty(scene, saved)} onClick={() => void previewSceneRegeneration(scene)}>{regeneratingSceneId === scene.id ? "Regenerating…" : "Regenerate scene preview"}</button>
+                      <button type="button" className="button small" disabled={saving || Boolean(regeneratingSceneId) || structuralChanges || chapterSceneDirty(scene, saved)} onClick={() => void previewSceneRegeneration(scene)}>{regeneratingSceneId === scene.id ? "Regenerating…" : "Regenerate scene preview"}</button>
+                      <button type="button" className="button small" disabled={saving || Boolean(savingSceneId) || Boolean(regeneratingSceneId) || draftIndex === 0} onClick={() => { setChapterProductionPlan(undefined); setDraft((current) => moveChapterSceneDraft(current, scene.id, -1)); }}>Move up</button>
+                      <button type="button" className="button small" disabled={saving || Boolean(savingSceneId) || Boolean(regeneratingSceneId) || draftIndex === draft.length - 1} onClick={() => { setChapterProductionPlan(undefined); setDraft((current) => moveChapterSceneDraft(current, scene.id, 1)); }}>Move down</button>
+                      <button type="button" className="button small" disabled={saving || Boolean(savingSceneId) || Boolean(regeneratingSceneId) || (!scene.disabled && draft.filter((item) => !item.disabled).length <= 1)} onClick={() => { setChapterProductionPlan(undefined); setDraft((current) => toggleChapterSceneEnabledDraft(current, scene.id)); }}>{scene.disabled ? "Enable" : "Disable"}</button>
+                      <button type="button" className="button small" disabled={saving || Boolean(savingSceneId) || Boolean(regeneratingSceneId) || draft.length <= 1} onClick={() => { const confirmed = confirm("Delete this visual beat from the chapter scene plan? Existing immutable artwork files are not automatically destroyed."); if (!confirmed) return; setChapterProductionPlan(undefined); setDraft((current) => deleteChapterSceneDraft(current, scene.id, confirmed)); setSelectedSceneIds((current) => current.filter((id) => id !== scene.id)); }}>Delete scene</button>
                     </div>
                     {sceneErrors[scene.id] && <div className="error-box" role="alert">{sceneErrors[scene.id]}</div>}
                     {sceneProposal?.sceneId === scene.id && <div className="summary-scene-proposal"><strong>Regeneration proposal · {sceneProposal.mode === "image_prompt" ? "Image prompt only" : "Full visual direction"}</strong><small>{sceneProposal.provider} · {sceneProposal.model} · Preview only; saved scene unchanged.</small>
                       {([["Visual beat", "summary"], ["Image prompt", "visualPrompt"], ["Characters", "characters"], ["Location", "location"], ["Importance", "importance"]] as const).map(([label, key]) => <div className="summary-proposal-row" key={key}><b>{label}</b><span><small>Current</small>{Array.isArray(sceneProposal.current[key]) ? sceneProposal.current[key].join(", ") : sceneProposal.current[key] ?? "—"}</span><span><small>Proposed</small>{Array.isArray(sceneProposal.proposed[key]) ? sceneProposal.proposed[key].join(", ") : sceneProposal.proposed[key] ?? "—"}</span></div>)}
-                      <div className="scene-edit-actions"><button type="button" className="button primary" disabled={Boolean(regeneratingSceneId) || chapterSceneDirty(scene, saved)} onClick={() => void applySceneRegeneration(scene.id)}>Apply proposal</button><button type="button" className="button" disabled={Boolean(regeneratingSceneId)} onClick={() => setSceneProposal(undefined)}>Cancel</button></div></div>}
+                      <div className="scene-edit-actions"><button type="button" className="button primary" disabled={Boolean(regeneratingSceneId) || structuralChanges || chapterSceneDirty(scene, saved)} onClick={() => void applySceneRegeneration(scene.id)}>Apply proposal</button><button type="button" className="button" disabled={Boolean(regeneratingSceneId)} onClick={() => setSceneProposal(undefined)}>Cancel</button></div></div>}
 
                     {/* Versions Switcher Bar */}
                     {versions.length > 0 && (
@@ -2787,18 +2870,19 @@ export function ScenesPage({ slug, onJob, navigate, initialData }: { slug: strin
                     </Field>
 
                     <div className="scene-review">
-                      <button onClick={() => review(scene, "approved")} disabled={!displayImageUrl}>
+                      <button onClick={() => review(scene, "approved")} disabled={!displayImageUrl || structuralChanges}>
                         Approve
                       </button>
-                      <button onClick={() => review(scene, "rejected")} disabled={!displayImageUrl}>
+                      <button onClick={() => review(scene, "rejected")} disabled={!displayImageUrl || structuralChanges}>
                         Reject
                       </button>
-                      <button onClick={() => review(scene, "needs-regeneration")} disabled={!displayImageUrl}>
+                      <button onClick={() => review(scene, "needs-regeneration")} disabled={!displayImageUrl || structuralChanges}>
                         Needs regeneration
                       </button>
                       <button
                         className="regenerate"
-                        onClick={() => run("artwork", { scene: scene.id, force: true })}
+                        onClick={() => run("artwork", { scenes: [scene.id], force: true })}
+                        disabled={structuralChanges}
                         title="Regenerate this scene as a new Version (preserves earlier versions)"
                       >
                         Regenerate frame (v{versions.length + 1})

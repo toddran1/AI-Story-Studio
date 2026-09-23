@@ -52,7 +52,7 @@ export function invalidateCatalogCache(root: string, slug: string) { const key =
 
 export type ChapterSummary = {
   chapter: number; originalTitle?: string; translation: string; narration: string; qa?: QaResult["status"];
-  qaScore?: number; qaIssues?: QaResult["issues"]; qaStale: boolean; qaNeedsVerification?: number; qaStage?: string; tts: string; audioMastering: string; continuity: string; alignment: string; subtitles: string; scenePlanning: string; artwork: string; video: string; audioAvailable: boolean; audioStale: boolean; videoAvailable: boolean; videoStale: boolean; durationSeconds?: number;
+  qaScore?: number; qaIssues?: QaResult["issues"]; qaStale: boolean; qaNeedsVerification?: number; qaStage?: string; tts: string; audioMastering: string; continuity: string; alignment: string; subtitles: string; subtitlesAvailable: boolean; subtitlesStale: boolean; scenePlanning: string; artwork: string; video: string; audioAvailable: boolean; audioStale: boolean; videoAvailable: boolean; videoStale: boolean; durationSeconds?: number;
 };
 
 export async function listStories(root: string, warnings: string[] = []) {
@@ -366,7 +366,7 @@ async function loadSummaries(root: string, slug: string, numbers: number[], inde
     const qaStage = metadata?.stages.qa.status ?? "pending";
     const tts = fresh ? metadata?.stages.tts.status ?? "pending" : "pending";
     const audioMastering = fresh ? metadata?.stages.audioMastering.status ?? "pending" : "pending"; const continuity = fresh ? metadata?.stages.continuity.status ?? "pending" : "pending"; const alignment = fresh ? metadata?.stages.alignment.status ?? "pending" : "pending"; const subtitles = fresh ? metadata?.stages.subtitles.status ?? "pending" : "pending"; const scenePlanning = fresh ? metadata?.stages.scenePlanning.status ?? "pending" : "pending"; const artwork = fresh ? metadata?.stages.artwork.status ?? "pending" : "pending"; const video = fresh ? metadata?.stages.video.status ?? "pending" : "pending";
-    const [audioFileExists, rawAudioFileExists, translationFileExists, narrationFileExists, videoFileExists] = await Promise.all([exists(chapterPaths.audio), exists(chapterPaths.audioRaw), exists(chapterPaths.english), exists(chapterPaths.narration), exists(chapterPaths.video)]);
+    const [audioFileExists, rawAudioFileExists, translationFileExists, narrationFileExists, videoFileExists, subtitleFileExists] = await Promise.all([exists(chapterPaths.audio), exists(chapterPaths.audioRaw), exists(chapterPaths.english), exists(chapterPaths.narration), exists(chapterPaths.video), exists(chapterPaths.subtitlesSrt)]);
     const audioAvailable = audioFileExists || rawAudioFileExists;
     const audioStale = audioAvailable && (audioMastering !== "complete" || !audioFileExists);
     const videoStale = videoFileExists && video !== "complete";
@@ -376,7 +376,7 @@ async function loadSummaries(root: string, slug: string, numbers: number[], inde
     const videoStatus = fresh && metadata?.stages.video.status === "complete" ? "complete" : videoFileExists ? "stale" : metadata?.stages.video.status ?? "pending";
     return { chapter, originalTitle: metadata?.originalTitle ?? index.titles.get(chapter), translation: translationStatus,
       narration: narrationStatus, qa: qa?.status,
-      qaScore: qa?.score, qaIssues, qaStale: Boolean(qa) && (qaFreshness ? qaFreshness.freshness !== "current" : !fresh || metadata?.stages.qa.status !== "complete"), qaNeedsVerification: qaStats?.needsVerification, qaStage, tts, audioMastering: audioMasteringStatus, continuity, alignment, subtitles, scenePlanning, artwork, video: videoStatus,
+      qaScore: qa?.score, qaIssues, qaStale: Boolean(qa) && (qaFreshness ? qaFreshness.freshness !== "current" : !fresh || metadata?.stages.qa.status !== "complete"), qaNeedsVerification: qaStats?.needsVerification, qaStage, tts, audioMastering: audioMasteringStatus, continuity, alignment, subtitles, subtitlesAvailable: subtitleFileExists, subtitlesStale: subtitleFileExists && (!fresh || subtitles !== "complete"), scenePlanning, artwork, video: videoStatus,
       durationSeconds: audioAvailable ? metadata?.audio?.durationSeconds : undefined,
       audioAvailable, audioStale, videoAvailable: videoFileExists, videoStale };
   });
@@ -595,10 +595,20 @@ export async function getScenesDashboard(root: string, slug: string, selectedCha
     planner: story.pipeline.scenePlanner,
     scenePlannerRouting,
     selectedChapter: chapterNumber,
+    videoSubtitleMode: story.video.subtitleMode,
     chapters: chapters.map((item) => ({
       chapter: item.chapter,
       title: item.originalTitle,
       durationSeconds: item.durationSeconds,
+      audioMastering: item.audioMastering,
+      audioAvailable: item.audioAvailable,
+      audioStale: item.audioStale,
+      subtitleStatus: item.subtitles,
+      subtitlesAvailable: item.subtitlesAvailable,
+      subtitlesStale: item.subtitlesStale,
+      videoStatus: item.video,
+      videoAvailable: item.videoAvailable,
+      videoStale: item.videoStale,
       sceneStatus: item.scenePlanning,
       artworkStatus: item.artwork,
     })),

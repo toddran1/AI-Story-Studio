@@ -7,6 +7,7 @@ import { sceneImagePath, sceneVersionImagePath, sceneVersionProductionImagePath,
 import { exists, readJsonIfExists } from "../storage/story-files.js";
 import { fingerprint } from "../utils/hash.js";
 import { sceneContentFingerprint } from "../scenes/manifest.js";
+import { sceneArtworkContentState } from "../scenes/editable-state.js";
 import { loadCharacterVisualReferences } from "../scenes/visual-references.js";
 import { artworkReviewSchema, ArtworkVersion, Scene, SceneManifest, sceneManifestSchema } from "../scenes/types.js";
 import { ImageAspectRatio, ImageProvider, ImageReferenceImage } from "./provider.js";
@@ -616,7 +617,7 @@ export function artworkFingerprint(
       : undefined);
 
   return fingerprint({
-    scene: sceneContentFingerprint(scene),
+    scene: sceneArtworkContentState(scene),
     visualReferenceFingerprints,
     style: story.artwork.stylePrompt,
     aspectRatio: story.artwork.aspectRatio,

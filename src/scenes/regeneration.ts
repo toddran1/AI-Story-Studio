@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { fingerprint } from "../utils/hash.js";
 import { sceneImportanceSchema, type Scene } from "./types.js";
+import { sceneEditableState } from "./editable-state.js";
 
 export const sceneRegenerationModeSchema = z.enum(["image_prompt", "full_visual_direction"]);
 export const sceneVisualSnapshotSchema = z.object({
@@ -28,11 +29,10 @@ export function sceneVisualSnapshot(scene: Scene) {
     entityIds: scene.entityIds ?? [], location: scene.location, importance: scene.importance,
   });
 }
-export function sceneProposalSourceFingerprint(scene: Scene) {
+export function sceneProposalSourceFingerprint(scene: Scene, continuityState?: unknown) {
   return fingerprint({
-    visual: sceneVisualSnapshot(scene), startSeconds: scene.startSeconds, endSeconds: scene.endSeconds,
-    disabled: scene.disabled, narrationText: scene.narrationText,
+    scene: sceneEditableState(scene), narrationText: scene.narrationText,
     narrationStartWord: scene.narrationStartWord, narrationEndWord: scene.narrationEndWord,
-    direction: scene.direction, overrides: scene.overrides, visualChanges: scene.visualChanges,
+    continuityState,
   });
 }
