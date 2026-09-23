@@ -105,17 +105,17 @@ export class ChapterPipeline {
       if (!shouldRun(stage)) return undefined;
       const forced = Boolean(executionStages?.has(stage)) || isForced(options.force, stage);
       const currentOutputFingerprint = await fileFingerprint(outputPath);
-      if (!forced && state.status === "complete" && state.manualAcceptance && currentOutputFingerprint && state.outputFingerprint === currentOutputFingerprint && state.manualAcceptance.acceptedFingerprint === manualAcceptanceFingerprint(stage, currentOutputFingerprint, options.story)) {
+      if (!forced && !state.staleReason && state.status === "complete" && state.manualAcceptance && currentOutputFingerprint && state.outputFingerprint === currentOutputFingerprint && state.manualAcceptance.acceptedFingerprint === manualAcceptanceFingerprint(stage, currentOutputFingerprint, options.story)) {
         logger.info({ event: "pipeline.stage.reused_manual_acceptance", story: options.story.slug, chapter: options.chapter, stage });
         options.onStageEvent?.({ stage, status: "reused", state });
         return undefined;
       }
-      if (!forced && state.status === "complete" && state.provider === "manual" && currentOutputFingerprint && state.outputFingerprint === currentOutputFingerprint) {
+      if (!forced && !state.staleReason && state.status === "complete" && state.provider === "manual" && currentOutputFingerprint && state.outputFingerprint === currentOutputFingerprint) {
         logger.info({ event: "pipeline.stage.reused_manual", story: options.story.slug, chapter: options.chapter, stage });
         options.onStageEvent?.({ stage, status: "reused", state });
         return undefined;
       }
-      if (!forced && state.status === "complete" && state.fingerprint === fp && currentOutputFingerprint && (!state.outputFingerprint || state.outputFingerprint === currentOutputFingerprint)) {
+      if (!forced && !state.staleReason && state.status === "complete" && state.fingerprint === fp && currentOutputFingerprint && (!state.outputFingerprint || state.outputFingerprint === currentOutputFingerprint)) {
         if (!state.outputFingerprint) { state.outputFingerprint = currentOutputFingerprint; await persist(); }
         logger.info({ event: "pipeline.stage.reused", story: options.story.slug, chapter: options.chapter, stage });
         options.onStageEvent?.({ stage, status: "reused", state });
@@ -210,7 +210,7 @@ export class ChapterPipeline {
       ]);
       const result = await validateChapterQuality(this.llms.forStage(qaConfig), qaConfig, {
         chapter: options.chapter, sourceLanguage: options.story.sourceLanguage, outputLanguage: options.story.outputLanguage,
-        source, translation: english, narration, context: qaContext.parsed, profanityMode: options.story.narrationSettings.profanityMode, includeChapterTitle: options.story.narrationSettings.includeChapterTitle !== false,
+        source, translation: english, narration, context: qaContext.parsed, authorizedNarrationEntities: narrationNamingEntities, profanityMode: options.story.narrationSettings.profanityMode, includeChapterTitle: options.story.narrationSettings.includeChapterTitle !== false,
         exceptionsContext: exceptionsPromptSection(exceptions), mode: options.story.qaMode,
       });
       // Reconcile fresh pipeline detections with any prior QA state so reruns

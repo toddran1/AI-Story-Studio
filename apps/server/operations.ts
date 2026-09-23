@@ -87,13 +87,13 @@ import { alignmentConfig, createAlignmentEngine } from "../../src/alignment/conf
 import { AlignmentEngine } from "../../src/alignment/types.js";
 import { alignStoredChapter } from "../../src/alignment/chapter-alignment.js";
 import { discardManualSubtitles, saveManualSubtitles } from "../../src/subtitles/chapter-subtitles.js";
-import { backfillCanonicalSnapshots, mergeCanonicalEntities, undoCanonicalMerge, updateCanonicalEntity } from "../../src/story-bible/canonical.js";
+import { backfillCanonicalSnapshots, mergeCanonicalEntities, restoreCanonicalEntity, suppressCanonicalEntity, undoCanonicalMerge, updateCanonicalEntity } from "../../src/story-bible/canonical.js";
 import { analyzeStoryBible, applyCleanupRecommendations, demoteCanonicalEntity, promoteMinorReference, restorePreDemoteStoryBible, snapshotPreDemoteStoryBible, updateMinorReference } from "../../src/story-bible/granularity.js";
 import { continuityFindingSchema, resolveContinuityFinding } from "../../src/story-bible/continuity.js";
 import { PostgresUsageRepository } from "../../src/cost/repository.js";
 import { estimatePlanCost } from "../../src/cost/estimate.js";
 import { withUsageScope } from "../../src/cost/context.js";
-import { invalidateNarrationNamingChange } from "../../src/story-bible/narration-names.js";
+import { invalidateCanonicalIdentityChange, invalidateNarrationNamingChange } from "../../src/story-bible/narration-names.js";
 import { findChapterGaps } from "../../src/batch/gaps.js";
 import { Chapter, chapterSchema, StageName } from "../../src/domain/chapter.js";
 import { fingerprint } from "../../src/utils/hash.js";
@@ -544,7 +544,7 @@ export class StudioOperations {
       for (const target of targets) {
         control.update({ type: "qa.repair.started", chapter, target, selectedIssues: issues.length });
         const config = story.pipeline[target]; const provider = this.llm.forStage(config);
-        const result = await withUsageScope({ story: slug, chapter, stage: `qaRepair.${target}` }, () => repairQaText(provider, config, { target, chapter, sourceLanguage: story.sourceLanguage, outputLanguage: story.outputLanguage, source, translation: currentTranslation, narration: currentNarration, issues: issues.filter((issue) => issueRepairTargets(issue).includes(target)), context, profanityMode: story.narrationSettings.profanityMode, includeChapterTitle: story.narrationSettings.includeChapterTitle !== false }));
+        const result = await withUsageScope({ story: slug, chapter, stage: `qaRepair.${target}` }, async () => repairQaText(provider, config, { target, chapter, sourceLanguage: story.sourceLanguage, outputLanguage: story.outputLanguage, source, translation: currentTranslation, narration: currentNarration, issues: issues.filter((issue) => issueRepairTargets(issue).includes(target)), context, authorizedNarrationEntities: await loadNarrationNamingEntities(this.root, slug), profanityMode: story.narrationSettings.profanityMode, includeChapterTitle: story.narrationSettings.includeChapterTitle !== false }));
         await saveChapterTextEdit(this.root, slug, chapter, { field: target, text: result.text });
         if (target === "translation") currentTranslation = result.text; else currentNarration = result.text; repaired.push(target);
         control.update({ type: "qa.repair.completed", chapter, target, completed: repaired.length, total: targets.length });
@@ -668,9 +668,9 @@ export class StudioOperations {
     for (const target of repairTargets([issue])) {
       control?.update({ type: "qa.repair.started", chapter, target, findingId: finding.id });
       const config = story.pipeline[target]; const provider = this.llm.forStage(config);
-      const result = await withUsageScope({ story: slug, chapter, stage: `qaRepair.${target}` }, () => repairQaText(provider, config, {
+      const result = await withUsageScope({ story: slug, chapter, stage: `qaRepair.${target}` }, async () => repairQaText(provider, config, {
         target, chapter, sourceLanguage: story.sourceLanguage, outputLanguage: story.outputLanguage, source: texts.source,
-        translation: currentTranslation, narration: currentNarration, issues: [issue], context: texts.context,
+        translation: currentTranslation, narration: currentNarration, issues: [issue], context: texts.context, authorizedNarrationEntities: await loadNarrationNamingEntities(this.root, slug),
         profanityMode: story.narrationSettings.profanityMode, includeChapterTitle: story.narrationSettings.includeChapterTitle !== false,
       }));
       await saveChapterTextEdit(this.root, slug, chapter, { field: target, text: result.text });
@@ -782,15 +782,15 @@ export class StudioOperations {
     await backfillCanonicalSnapshots(this.root, slug, current);
     const base = await getStoryBible(this.root, slug, { includeCanonicalOverlay: false }); const overlayPath = storyPaths(this.root, slug, 1).bibleCanonicalManual;
     const priorOverlay = await readFile(overlayPath).catch((error: NodeJS.ErrnoException) => { if (error.code === "ENOENT") return undefined; throw error; });
-    const result = await updateCanonicalEntity(this.root, slug, base, id, raw); let entity; let invalidation;
-    try { entity = result.bible.canonicalEntities.find((item) => item.id === id); if (!entity) throw new Error("Canonical entity was not found after update"); invalidation = await invalidateNarrationNamingChange(this.root, slug, before, entity); const soundAffected = await invalidatePronunciationChange(this.root, slug, before, entity); invalidation.affectedChapters = [...new Set([...invalidation.affectedChapters, ...soundAffected])]; if ((raw as { pronunciation?: unknown }).pronunciation === null) await clearPronunciationAttempt(this.root, slug, id); }
+    const result = await updateCanonicalEntity(this.root, slug, base, id, raw); let entity; let invalidation; let visualProfileReviewRequired = false;
+    try { entity = result.bible.canonicalEntities.find((item) => item.id === id); if (!entity) throw new Error("Canonical entity was not found after update"); visualProfileReviewRequired = before.type !== entity.type && Boolean((await loadVisualProfiles(this.root, slug))[id]); invalidation = await invalidateNarrationNamingChange(this.root, slug, before, entity); const soundAffected = await invalidatePronunciationChange(this.root, slug, before, entity); invalidation.affectedChapters = [...new Set([...invalidation.affectedChapters, ...soundAffected])]; if ((raw as { pronunciation?: unknown }).pronunciation === null) await clearPronunciationAttempt(this.root, slug, id); if (before.type !== entity.type) await invalidateCanonicalIdentityChange(this.root, slug, [before, entity], `Canonical entity type changed for ${entity.canonicalName}`, Boolean(entity.preferredNarrationName || entity.localizedNaming || entity.aliasNarrationRules.length)); if (visualProfileReviewRequired) await updateVisualProfile(this.root, slug, id, { status: "draft" }); }
     catch (error) {
       try { if (priorOverlay) await atomicWrite(overlayPath, priorOverlay); else await rm(overlayPath, { force: true }); }
       catch (rollbackError) { throw new AggregateError([error, rollbackError], "Canonical entity update failed and its overlay could not be restored"); }
       throw error;
     }
     if (invalidation.exportCleanupWarnings.length) logger.warn({ event: "bible.entity.export_cleanup_incomplete", story: slug, entityId: id, manifests: invalidation.exportCleanupWarnings });
-    invalidateCatalogCache(this.root, slug); await recordActivity(this.root, slug, "bible.entity.edited", invalidation.affectedChapters.length ? `Updated canonical entity ${id}; marked ${invalidation.affectedChapters.length} chapter(s) affected by narration naming` : `Updated canonical entity ${id}`); return { entity, invalidation };
+    invalidateCatalogCache(this.root, slug); await recordActivity(this.root, slug, "bible.entity.edited", invalidation.affectedChapters.length ? `Updated canonical entity ${id}; marked ${invalidation.affectedChapters.length} chapter(s) affected by narration naming` : `Updated canonical entity ${id}`); return { entity, invalidation, visualProfileReviewRequired };
   }); }
   async listPronunciationDesk(slug: string) {
     slugSchema.parse(slug);
@@ -870,6 +870,8 @@ export class StudioOperations {
     sourceEntityIds: string[],
     reason: string,
   ) {
+    const before = await getStoryBible(this.root, slug);
+    const changedEntities = before.canonicalEntities.filter((entity) => entity.id === targetEntityId || sourceEntityIds.includes(entity.id));
     const prepared = await prepareVisualCanonMerge(this.root, slug, targetEntityId, sourceEntityIds);
     const base = await getStoryBible(this.root, slug, { includeCanonicalOverlay: false });
     const result = await mergeCanonicalEntities(this.root, slug, base, targetEntityId, sourceEntityIds, reason);
@@ -911,6 +913,8 @@ export class StudioOperations {
     }
 
     const cleanup = await finalizeVisualCanonMerge(prepared);
+    try { await invalidateCanonicalIdentityChange(this.root, slug, changedEntities, "Canonical entities were merged"); }
+    catch (error) { cleanup.errors.push(`Could not mark affected chapter reviews stale after merge: ${error instanceof Error ? error.message : String(error)}`); }
     return {
       ...result,
       cleanupWarnings: cleanup.errors.length > 0 ? cleanup.errors : undefined,
@@ -935,6 +939,38 @@ export class StudioOperations {
     });
   }
   async undoCanonicalMerge(slug: string, mergeId: string) { slugSchema.parse(slug); return withStoryLock(this.root, slug, "undo canonical entity merge", async () => { const base = await getStoryBible(this.root, slug, { includeCanonicalOverlay: false }); await undoCanonicalMerge(this.root, slug, base, mergeId); await recordActivity(this.root, slug, "bible.merge.undone", "Undid a canonical entity merge"); return { status: "undone" }; }); }
+  async suppressCanonicalEntity(slug: string, entityId: string, raw: unknown) {
+    slugSchema.parse(slug);
+    const { reason } = z.object({ reason: z.string().trim().min(1).max(1000) }).strict().parse(raw);
+    return withStoryLock(this.root, slug, "canonical entity suppression", async () => {
+      const base = await getStoryBible(this.root, slug, { includeCanonicalOverlay: false });
+      const before = (await getStoryBible(this.root, slug)).canonicalEntities.find((item) => item.id === entityId);
+      if (!before) throw new Error("Canonical entity was not found");
+      const overlayPath = storyPaths(this.root, slug, 1).bibleCanonicalManual;
+      const priorOverlay = await readFile(overlayPath).catch((error: NodeJS.ErrnoException) => { if (error.code === "ENOENT") return undefined; throw error; });
+      const result = await suppressCanonicalEntity(this.root, slug, base, entityId, reason);
+      try { await invalidateCanonicalIdentityChange(this.root, slug, [before], `Canonical entity ${before.canonicalName} was suppressed`); }
+      catch (error) { if (priorOverlay) await atomicWrite(overlayPath, priorOverlay); else await rm(overlayPath, { force: true }); throw error; }
+      invalidateCatalogCache(this.root, slug);
+      await recordActivity(this.root, slug, "bible.entity.suppressed", `Suppressed canonical entity ${entityId}: ${reason}`);
+      return { status: "suppressed", suppression: result.overlay.suppressions.find((item) => item.entityId === entityId) };
+    });
+  }
+  async restoreCanonicalEntity(slug: string, entityId: string) {
+    slugSchema.parse(slug);
+    return withStoryLock(this.root, slug, "canonical entity restoration", async () => {
+      const base = await getStoryBible(this.root, slug, { includeCanonicalOverlay: false });
+      const overlayPath = storyPaths(this.root, slug, 1).bibleCanonicalManual;
+      const priorOverlay = await readFile(overlayPath);
+      const result = await restoreCanonicalEntity(this.root, slug, base, entityId);
+      const entity = result.bible.canonicalEntities.find((item) => item.id === entityId);
+      try { if (entity) await invalidateCanonicalIdentityChange(this.root, slug, [entity], `Canonical entity ${entity.canonicalName} was restored`); }
+      catch (error) { await atomicWrite(overlayPath, priorOverlay); throw error; }
+      invalidateCatalogCache(this.root, slug);
+      await recordActivity(this.root, slug, "bible.entity.restored", `Restored canonical entity ${entityId}`);
+      return { status: "restored", entity: result.bible.canonicalEntities.find((item) => item.id === entityId) };
+    });
+  }
   async resolveContinuity(slug: string, id: string, raw: unknown) {
     slugSchema.parse(slug); const input = z.object({ resolution: z.enum(["accepted_new", "kept_existing", "intentional", "corrected", "merged", "dismissed"]), note: z.string().trim().max(2000).optional() }).strict().parse(raw);
     return withStoryLock(this.root, slug, "continuity resolution", async () => {

@@ -1,12 +1,13 @@
 import { StageModelConfig } from "../domain/provider.js";
 import { generatedQaResultSchema, QaResult, normalizeQaResult } from "../domain/qa.js";
-import { StoryBible } from "../domain/story-bible.js";
+import { CanonicalEntity, StoryBible } from "../domain/story-bible.js";
 import { LLMProvider } from "../llm/provider.js";
 import type { NarrationProfanityMode } from "../domain/story.js";
 import { authorizedNarrationNaming, previousQaFindingsSection, qaChangedContentInstructions, qaInstructionsFor, qaModeInstructionsFor, qaRecheckInstructions } from "./prompts.js";
 
 export type QaValidationInput = {
   chapter: number; sourceLanguage: string; outputLanguage: string; source: string; translation: string; narration: string; context: StoryBible;
+  authorizedNarrationEntities?: CanonicalEntity[];
   profanityMode?: NarrationProfanityMode; includeChapterTitle?: boolean;
   /** Compact rendering of prior findings; present on stateful rechecks. */
   previousFindingsContext?: string;
@@ -38,7 +39,7 @@ export async function validateChapterQuality(
       `SOURCE LANGUAGE: ${input.sourceLanguage}`,
       `OUTPUT LANGUAGE: ${input.outputLanguage}`,
       `ESTABLISHED STORY BIBLE:\n${JSON.stringify(input.context, null, 2)}`,
-      authorizedNarrationNaming(input.context),
+      authorizedNarrationNaming(input.authorizedNarrationEntities ?? input.context),
       input.previousFindingsContext ? previousQaFindingsSection(input.previousFindingsContext) : "",
       input.exceptionsContext ?? "",
       `SOURCE CHAPTER:\n${input.source}`,

@@ -18,6 +18,7 @@ import { QA_PROMPT_VERSION } from "./prompts.js";
 import { validateChapterQuality } from "./validator.js";
 import { runDeterministicQaChecks, type AcceptedContinuity } from "./deterministic.js";
 import { exceptionsPromptSection, filterExceptedFindings, listQaExceptions } from "./exceptions.js";
+import { loadNarrationNamingEntities } from "../story-bible/narration-names.js";
 
 export type FreshQaDetection = {
   category: QaCategory;
@@ -576,7 +577,7 @@ export async function recheckChapterQa(deps: {
   const config = story.pipeline.qa;
   const result = await validateChapterQuality(provider, config, {
     chapter, sourceLanguage: story.sourceLanguage, outputLanguage: story.outputLanguage,
-    source, translation, narration, context,
+    source, translation, narration, context, authorizedNarrationEntities: await loadNarrationNamingEntities(root, story.slug),
     profanityMode: story.narrationSettings.profanityMode, includeChapterTitle: story.narrationSettings.includeChapterTitle !== false,
     previousFindingsContext,
     exceptionsContext: exceptionsPromptSection(exceptions),

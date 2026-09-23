@@ -31,7 +31,8 @@ export class PreviewRunner {
     const eligibleSummaries = await loadEligibleSummaryContext(options.root, options.story.slug, options.chapter, source);
     const baseTranslationContext = retrieveRelevantContext(bible, source, options.chapter, { recentSummaryCount: options.story.context.recentChapterSummaries });
     const translationContext = eligibleSummaries.length ? { ...baseTranslationContext, eligibleSummaries } : baseTranslationContext;
-    const baseContext = retrieveRelevantContext(bible, source, options.chapter, { recentSummaryCount: options.story.context.recentChapterSummaries, narrationNamingEntities: await loadNarrationNamingEntities(options.root, options.story.slug) });
+    const authorizedNarrationEntities = await loadNarrationNamingEntities(options.root, options.story.slug);
+    const baseContext = retrieveRelevantContext(bible, source, options.chapter, { recentSummaryCount: options.story.context.recentChapterSummaries, narrationNamingEntities: authorizedNarrationEntities });
     const context = eligibleSummaries.length ? { ...baseContext, eligibleSummaries } : baseContext;
     const id = options.id ?? `${new Date().toISOString().replace(/[-:.]/g, "").replace("Z", "Z")}-${randomUUID().slice(0, 8)}`;
     const paths = previewPaths(options.root, options.story.slug, id);
@@ -45,7 +46,7 @@ export class PreviewRunner {
       const narration = stripDeliveryCues(narrationScript, preset.tts.provider, preset.tts.model);
       const qa = (await validateChapterQuality(this.llms.forStage(preset.qa), preset.qa, {
         chapter: options.chapter, sourceLanguage: options.story.sourceLanguage, outputLanguage: options.story.outputLanguage,
-        source, translation, narration, context, profanityMode: options.story.narrationSettings.profanityMode, includeChapterTitle: options.story.narrationSettings.includeChapterTitle !== false,
+        source, translation, narration, context, authorizedNarrationEntities, profanityMode: options.story.narrationSettings.profanityMode, includeChapterTitle: options.story.narrationSettings.includeChapterTitle !== false,
       })).value;
       await atomicWrite(choice === "a" ? paths.translationA : paths.translationB, translation);
       await atomicWrite(choice === "a" ? paths.narrationA : paths.narrationB, narration);

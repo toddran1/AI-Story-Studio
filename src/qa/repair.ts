@@ -1,5 +1,5 @@
 import { QaResult } from "../domain/qa.js";
-import { storyBibleSchema } from "../domain/story-bible.js";
+import { CanonicalEntity, storyBibleSchema } from "../domain/story-bible.js";
 import { StageModelConfig } from "../domain/provider.js";
 import { LLMProvider } from "../llm/provider.js";
 import { assertUsableTranslation } from "../translation/translator.js";
@@ -31,12 +31,13 @@ export function issueRepairTargets(issue: QaResult["issues"][number]): QaRepairT
 
 export async function repairQaText(provider: LLMProvider, config: StageModelConfig, input: {
   target: QaRepairTarget; chapter: number; sourceLanguage: string; outputLanguage: string; source: string;
-  translation: string; narration: string; issues: QaResult["issues"]; context?: unknown; profanityMode?: NarrationProfanityMode; includeChapterTitle?: boolean;
+  translation: string; narration: string; issues: QaResult["issues"]; context?: unknown; authorizedNarrationEntities?: CanonicalEntity[]; profanityMode?: NarrationProfanityMode; includeChapterTitle?: boolean;
 }) {
   const current = input.target === "translation" ? input.translation : input.narration;
   if (!current.trim()) throw new Error(`Chapter ${input.chapter} has no ${input.target} to repair`);
   const contextBible = storyBibleSchema.safeParse(input.context ?? {});
-  const hasNamingOverrides = contextBible.success && contextBible.data.canonicalEntities.some((entity) => entity.localizedNaming || entity.preferredNarrationName || entity.aliasNarrationRules.length);
+  const namingEntities = input.authorizedNarrationEntities ?? (contextBible.success ? contextBible.data.canonicalEntities : []);
+  const hasNamingOverrides = namingEntities.some((entity) => entity.localizedNaming || entity.preferredNarrationName || entity.aliasNarrationRules.length);
   const instructions = [
     `You are repairing a complete chapter ${input.target} after a quality review.`,
     "Return only the complete corrected text, with no preface, explanation, markdown fence, or change log.",
@@ -48,7 +49,7 @@ export async function repairQaText(provider: LLMProvider, config: StageModelConf
       ? `Keep the result faithful to the ${input.sourceLanguage} source and natural in ${input.outputLanguage}.`
       : `Keep the narration faithful to the approved ${input.outputLanguage} translation; do not introduce new story information.`,
     hasNamingOverrides
-      ? `${authorizedNarrationNaming(contextBible.data)} Repairs must never revert an authorized narration-name substitution back to the canonical name.`
+      ? `${authorizedNarrationNaming(namingEntities)} Repairs must never revert an authorized narration-name substitution back to the canonical name.`
       : "",
     input.target === "narration" && input.profanityMode === "soften-strong"
       ? "Honor the story's narration-only preference: replace strong profanity with natural milder wording while preserving hostility, emotion, intent, and meaning. Ass, hell, and damn are allowed."

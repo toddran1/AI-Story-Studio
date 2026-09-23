@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const entityTypeSchema = z.enum(["character", "location", "organization", "ability", "item", "concept"]);
+export const entityTypeSchema = z.enum(["character", "location", "organization", "ability", "item", "concept", "other"]);
 export type EntityType = z.infer<typeof entityTypeSchema>;
 export const factOriginSchema = z.enum(["automatic", "manual"]);
 export const provenanceSchema = z.object({ chapter: z.number().int().positive(), kind: z.enum(["extraction", "event", "relationship", "manual"]), confidence: z.number().min(0).max(1).optional(), origin: factOriginSchema.default("automatic") });

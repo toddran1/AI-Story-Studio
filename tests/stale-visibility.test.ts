@@ -6,12 +6,13 @@ import { getChapter, getChapterPage, getStoryBibleView } from "../apps/server/ca
 import { masterStoredChapter } from "../src/audio/chapter-audio.js";
 import { AudioMasteringProcessor } from "../src/audio/mastering.js";
 import { chapterSchema } from "../src/domain/chapter.js";
-import { storyBibleUpdateSchema } from "../src/domain/story-bible.js";
+import { canonicalEntitySchema, storyBibleUpdateSchema } from "../src/domain/story-bible.js";
 import { importSource } from "../src/source/importer.js";
 import { sourceManifestSchema } from "../src/source/types.js";
 import { TxtSource } from "../src/source/txt-source.js";
 import { computeStaleExtractionChapters, rebuildStoryBibleBeforeChapter } from "../src/story-bible/rebuild.js";
 import { updateCanonicalEntity } from "../src/story-bible/canonical.js";
+import { invalidateCanonicalIdentityChange } from "../src/story-bible/narration-names.js";
 import { atomicWrite, atomicWriteJson } from "../src/storage/atomic-write.js";
 import { storyPaths } from "../src/storage/paths.js";
 import { readJsonIfExists } from "../src/storage/story-files.js";
@@ -59,6 +60,21 @@ async function makeManifestStale(root: string, slug: string) {
 }
 
 describe("stale artifact visibility", () => {
+  it("marks only identity-related review and visual stages stale while preserving audio", async () => {
+    const root = await mkdtemp(join(tmpdir(), "identity-stale-")); const slug = "story";
+    const related = storyPaths(root, slug, 1); const unrelated = storyPaths(root, slug, 2);
+    await atomicWrite(related.original, "百宝阁 greeted the hero.");
+    await atomicWrite(unrelated.original, "A distant mountain appeared.");
+    await atomicWriteJson(related.chapterMeta, chapterMetadata(1, "source"));
+    await atomicWriteJson(unrelated.chapterMeta, chapterMetadata(2, "source"));
+    const entity = canonicalEntitySchema.parse({ id: "ent_aaaaaaaaaaaaaaaaaaaaaaaa", type: "organization", canonicalName: "Hundred Treasures Pavilion", originalName: "百宝阁", firstAppearance: 1, lastKnownAppearance: 1 });
+    expect(await invalidateCanonicalIdentityChange(root, slug, [entity], "Identity changed")).toEqual([1]);
+    const first = chapterSchema.parse(await readJsonIfExists(related.chapterMeta));
+    const second = chapterSchema.parse(await readJsonIfExists(unrelated.chapterMeta));
+    for (const stage of ["qa", "scenePlanning", "artwork", "video"] as const) expect(first.stages[stage].staleReason).toBe("Identity changed");
+    for (const stage of ["translation", "narration", "tts", "audioMastering"] as const) expect(first.stages[stage].staleReason).toBeUndefined();
+    expect(second.stages.qa.staleReason).toBeUndefined();
+  });
   it("returns stale artifacts with stale flags after the source fingerprint changes", async () => {
     const root = await mkdtemp(join(tmpdir(), "stale-visible-")); const slug = "story";
     const { paths, manifest } = await importChapter(root, slug, "Original");

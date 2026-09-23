@@ -64,6 +64,20 @@ const namingBible = () => storyBibleSchema.parse({
 const qaCall = (llm: MockLLM) => llm.calls.find((call) => "schemaName" in call && call.schemaName === "chapter_qa")!;
 
 describe("QA authorized narration naming", () => {
+  it("uses current effective naming authority instead of an older chapter context", async () => {
+    const llm = new MockLLM();
+    const current = namingBible().canonicalEntities[0]!;
+    const stale = emptyStoryBible();
+    const result = await validateChapterQuality(llm, { provider: "openai", model: "qa-model" }, {
+      chapter: 22, sourceLanguage: "zh-CN", outputLanguage: "en-US", source: "百宝阁", translation: "Hundred Treasures Pavilion", narration: "Vega Treasures Pavilion",
+      context: stale,
+      authorizedNarrationEntities: [{ ...current, id: "ent_bbbbbbbbbbbbbbbbbbbbbbbb", type: "organization", canonicalName: "Hundred Treasures Pavilion", originalName: "百宝阁", preferredNarrationName: "Vega Treasures Pavilion", localizedNaming: undefined }],
+    });
+    const call = qaCall(llm) as { input: string };
+    expect(call.input).toContain('Preferred Narration Name "Vega Treasures Pavilion"');
+    expect(call.input).toContain('ESTABLISHED STORY BIBLE:\n' + JSON.stringify(stale, null, 2));
+    expect(result.value.checks.names).toBe("pass");
+  });
   it("passes explicit authorized mappings to the model and accepts no finding for authorized replacement in dialogue", async () => {
     const llm = new MockLLM();
     const result = await validateChapterQuality(llm, { provider: "openai", model: "qa-model" }, {

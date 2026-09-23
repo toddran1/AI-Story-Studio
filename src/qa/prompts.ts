@@ -1,5 +1,5 @@
 import type { NarrationProfanityMode } from "../domain/story.js";
-import type { StoryBible } from "../domain/story-bible.js";
+import type { CanonicalEntity, StoryBible } from "../domain/story-bible.js";
 
 export const QA_PROMPT_VERSION = "8";
 
@@ -42,8 +42,8 @@ const usageModeDescription: Record<string, string> = {
 };
 
 /** Renders the explicit canonical-name → authorized narration-name mappings QA must treat as correct. */
-export function authorizedNarrationNaming(context: StoryBible): string {
-  const entities = context.canonicalEntities.filter((entity) => entity.localizedNaming || entity.preferredNarrationName || entity.aliasNarrationRules.length);
+export function authorizedNarrationNaming(context: StoryBible | CanonicalEntity[]): string {
+  const entities = (Array.isArray(context) ? context : context.canonicalEntities).filter((entity) => entity.localizedNaming || entity.preferredNarrationName || entity.aliasNarrationRules.length);
   if (!entities.length) {
     return "AUTHORIZED NARRATION NAMING MAPPINGS:\nNone. No entity has an authorized narration-name override, so narration must use the same names as the translation; any substitution is unauthorized and must be flagged.";
   }

@@ -81,6 +81,8 @@ describe("QA dependency fingerprint", () => {
     expect(fingerprint(afterEdits)).toBe(fingerprint(before));
     const afterNamingEdit = projectNamingForQa(bible({ preferredNarrationName: "Fei" }).canonicalEntities);
     expect(fingerprint(afterNamingEdit)).not.toBe(fingerprint(before));
+    const afterTypeEdit = projectNamingForQa(bible({ type: "organization" }).canonicalEntities);
+    expect(fingerprint(afterTypeEdit)).not.toBe(fingerprint(before));
   });
 
   it("covers only active pronunciation configurations; suggestions and default TTS are invisible", () => {

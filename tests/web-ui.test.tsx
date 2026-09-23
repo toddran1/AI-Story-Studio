@@ -447,6 +447,16 @@ describe("web UI", () => {
     expect(html).not.toContain("Convert to minor reference");
   });
 
+  it("shows duplicate comparison and recoverable removal in entity management", () => {
+    const entity = { id: "ent_aaaaaaaaaaaaaaaaaaaaaaaa", type: "organization", canonicalName: "Hundred Treasures Pavilion", originalName: "百宝阁", aliases: [], firstAppearance: 22, lastKnownAppearance: 530, status: "active", description: "Trading house", notes: "", provenance: [], aliasNarrationRules: [], mergedFromIds: [], canonicalNameLocked: false, origin: "manual" };
+    const detail = { entity, timeline: [], relationships: [], relatedNames: {}, relatedReferences: [], issues: [], merges: [], duplicateSuggestions: [{ id: "pair", entityIds: [entity.id, "ent_bbbbbbbbbbbbbbbbbbbbbbbb"], entities: [{ id: entity.id, name: entity.canonicalName }, { id: "ent_bbbbbbbbbbbbbbbbbbbbbbbb", name: entity.canonicalName }], confidence: 0.9, reason: "Same name", supportingChapters: [22] }] };
+    const html = renderToStaticMarkup(<CanonicalEntitySheet detail={detail} slug="demo-story" navigate={() => undefined} onClose={() => undefined} onUndo={() => undefined} onEdit={() => undefined} onDemote={() => undefined} onSuppress={() => undefined} onMerge={() => undefined} />);
+    expect(html).toContain("Possible duplicate canonical entity");
+    expect(html).toContain("Compare / merge with Hundred Treasures Pavilion");
+    expect(html).toContain("Merge with another entity");
+    expect(html).toContain("Remove canonical entity");
+  });
+
   it("renders ErrorBoundary with fallback UI when an error occurs", () => {
     const boundary = new ErrorBoundary({ children: "content", navigate: () => undefined });
     expect(boundary.render()).toBe("content");

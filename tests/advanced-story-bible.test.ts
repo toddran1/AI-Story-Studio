@@ -6,7 +6,7 @@ import { getCanonicalEntitiesPage } from "../apps/server/catalog.js";
 import { emptyStoryBible, storyBibleUpdateSchema } from "../src/domain/story-bible.js";
 import { atomicWriteJson } from "../src/storage/atomic-write.js";
 import { storyPaths } from "../src/storage/paths.js";
-import { applyCanonicalOverlay, backfillCanonicalSnapshots, findDuplicateSuggestions, mergeCanonicalEntities, undoCanonicalMerge, updateCanonicalEntity } from "../src/story-bible/canonical.js";
+import { applyCanonicalOverlay, backfillCanonicalSnapshots, findDuplicateSuggestions, mergeCanonicalEntities, restoreCanonicalEntity, suppressCanonicalEntity, undoCanonicalMerge, updateCanonicalEntity } from "../src/story-bible/canonical.js";
 import { analyzeAndPersistContinuity, detectContinuityFindings, resolveContinuityFinding } from "../src/story-bible/continuity.js";
 import { retrieveRelevantContext } from "../src/story-bible/retrieval.js";
 import { mergeStoryBible } from "../src/story-bible/updater.js";
@@ -42,6 +42,66 @@ describe("advanced Story Bible continuity", () => {
     const partial = emptyStoryBible();
     const restored = await applyCanonicalOverlay(root, "demo-story", partial);
     expect(restored.bible.canonicalEntities).toEqual(expect.arrayContaining([expect.objectContaining({ id: su.id, canonicalName: "Su Qiang", originalName: "苏强", localizedNaming: expect.objectContaining({ fullName: "Barrett Sterling" }), origin: "manual" })]));
+  });
+
+  it("persists manual type corrections and reconciles incompatible standard status", async () => {
+    const root = await mkdtemp(join(tmpdir(), "canonical-type-"));
+    const base = mergeStoryBible(emptyStoryBible(), update(1, { locations: [named("Hundred Treasures Pavilion", 1, { originalName: "百宝阁", status: "under siege" })] }), 1);
+    const entity = base.canonicalEntities[0]!;
+    const result = await updateCanonicalEntity(root, "demo-story", base, entity.id, { type: "organization", preferredNarrationName: "Vega Treasures Pavilion" });
+    expect(result.bible.canonicalEntities[0]).toMatchObject({ id: entity.id, type: "organization", status: "unknown", preferredNarrationName: "Vega Treasures Pavilion" });
+    expect((await applyCanonicalOverlay(root, "demo-story", emptyStoryBible())).bible.canonicalEntities[0]?.type).toBe("organization");
+    await expect(updateCanonicalEntity(root, "demo-story", base, entity.id, { type: "invalid" })).rejects.toThrow();
+    const custom = await updateCanonicalEntity(root, "demo-story", base, entity.id, { type: "location", status: "Bound to a pocket realm" });
+    expect(custom.bible.canonicalEntities[0]).toMatchObject({ type: "location", status: "Bound to a pocket realm" });
+  });
+
+  it("keeps suppression auditable and recoverable without creating a minor reference", async () => {
+    const root = await mkdtemp(join(tmpdir(), "canonical-suppress-"));
+    const base = mergeStoryBible(emptyStoryBible(), update(1, { characters: [named("Erroneous Hero", 1, { originalName: "错名" })] }), 1);
+    const entity = base.canonicalEntities[0]!;
+    await updateCanonicalEntity(root, "demo-story", base, entity.id, { preferredNarrationName: "False Name" });
+    const removed = await suppressCanonicalEntity(root, "demo-story", base, entity.id, "Duplicate residue");
+    expect(removed.bible.canonicalEntities).toEqual([]);
+    expect(removed.bible.minorReferences).toEqual([]);
+    expect(removed.overlay.suppressions[0]?.snapshot).toMatchObject({ id: entity.id, preferredNarrationName: "False Name" });
+    expect((await applyCanonicalOverlay(root, "demo-story", emptyStoryBible())).bible.canonicalEntities).toEqual([]);
+    const rediscovered = structuredClone(base);
+    rediscovered.canonicalEntities[0]!.id = "ent_bbbbbbbbbbbbbbbbbbbbbbbb";
+    expect((await applyCanonicalOverlay(root, "demo-story", rediscovered)).bible.canonicalEntities).toEqual([]);
+    rediscovered.canonicalEntities[0]!.originalName = "Different original";
+    expect((await applyCanonicalOverlay(root, "demo-story", rediscovered)).bible.canonicalEntities.map((item) => item.id)).toContain("ent_bbbbbbbbbbbbbbbbbbbbbbbb");
+    const restored = await restoreCanonicalEntity(root, "demo-story", emptyStoryBible(), entity.id);
+    expect(restored.bible.canonicalEntities[0]).toMatchObject({ id: entity.id, preferredNarrationName: "False Name" });
+  });
+
+  it("omits suppressed relationship and timeline references without altering the source snapshot", async () => {
+    const root = await mkdtemp(join(tmpdir(), "canonical-suppress-links-"));
+    const base = mergeStoryBible(emptyStoryBible(), update(1, { characters: [named("Hero", 1), named("False Hero", 1)], relationships: [{ subject: "Hero", object: "False Hero", relationship: "knows", firstSeenChapter: 1, lastSeenChapter: 1 }] }), 1);
+    const removedId = base.canonicalEntities.find((item) => item.canonicalName === "False Hero")!.id;
+    const originalRelationshipCount = base.canonicalRelationships.length;
+    const result = await suppressCanonicalEntity(root, "demo-story", base, removedId, "Incorrect identity");
+    expect(result.bible.canonicalRelationships.every((item) => item.sourceEntityId !== removedId && item.targetEntityId !== removedId)).toBe(true);
+    expect(result.bible.entityTimeline.every((item) => item.entityId !== removedId && item.relatedEntityId !== removedId)).toBe(true);
+    expect(base.canonicalRelationships).toHaveLength(originalRelationshipCount);
+  });
+
+  it("requires resolving incompatible manual narration names before a merge", async () => {
+    const root = await mkdtemp(join(tmpdir(), "canonical-merge-names-"));
+    const base = mergeStoryBible(emptyStoryBible(), update(1, { characters: [named("Alpha Hero", 1), named("Beta Hero", 1)] }), 1);
+    const [target, source] = base.canonicalEntities;
+    await updateCanonicalEntity(root, "demo-story", base, target!.id, { preferredNarrationName: "Vega" });
+    await updateCanonicalEntity(root, "demo-story", base, source!.id, { preferredNarrationName: "Orion" });
+    await expect(mergeCanonicalEntities(root, "demo-story", base, target!.id, [source!.id], "Same identity")).rejects.toThrow(/Conflicting narration naming/);
+    await updateCanonicalEntity(root, "demo-story", base, source!.id, { preferredNarrationName: null });
+    const merged = await mergeCanonicalEntities(root, "demo-story", base, target!.id, [source!.id], "Same identity");
+    expect(merged.bible.canonicalEntities.find((item) => item.id === target!.id)?.preferredNarrationName).toBe("Vega");
+  });
+
+  it("surfaces identical canonical labels across entity types for review", () => {
+    const base = mergeStoryBible(emptyStoryBible(), update(1, { characters: [named("Hundred Treasures Pavilion", 1)] }), 1);
+    const entities = [base.canonicalEntities[0]!, { ...base.canonicalEntities[0]!, id: "ent_aaaaaaaaaaaaaaaaaaaaaaaa", type: "organization" as const }];
+    expect(findDuplicateSuggestions(entities)).toEqual(expect.arrayContaining([expect.objectContaining({ recommendation: "needs_review" })]));
   });
 
   it("resolves chained merge references and rejects merge cycles", async () => {

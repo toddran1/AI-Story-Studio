@@ -90,6 +90,28 @@ describe("Milestone 21: Visual Canon Backend Consistency & Asset Safety Hardenin
     await rm(tempDir, { recursive: true, force: true }).catch(() => undefined);
   });
 
+  it("preserves but unapproves a Visual Profile after canonical type correction", async () => {
+    const operations = new StudioOperations(tempDir, loadEnvironment({}));
+    await updateVisualProfile(tempDir, slug, idTarget, { visualType: "character", appearance: "Distinct cloak", status: "approved" });
+    const result = await operations.updateCanonicalEntity(slug, idTarget, { type: "location" });
+    expect(result.visualProfileReviewRequired).toBe(true);
+    expect((await getVisualProfile(tempDir, slug, idTarget))?.status).toBe("draft");
+    expect((await getVisualProfile(tempDir, slug, idTarget))?.appearance).toBe("Distinct cloak");
+    expect((await getStoryBible(tempDir, slug)).canonicalEntities.find((item) => item.id === idTarget)?.type).toBe("location");
+  });
+
+  it("suppresses and restores a canonical identity through the shared operations layer", async () => {
+    const operations = new StudioOperations(tempDir, loadEnvironment({}));
+    await updateVisualProfile(tempDir, slug, idSource, { appearance: "Historical design", status: "approved" });
+    const removed = await operations.suppressCanonicalEntity(slug, idSource, { reason: "Duplicate residue" });
+    expect(removed.status).toBe("suppressed");
+    expect((await getStoryBible(tempDir, slug)).canonicalEntities.some((item) => item.id === idSource)).toBe(false);
+    expect((await loadVisualProfiles(tempDir, slug))[idSource]?.appearance).toBe("Historical design");
+    const restored = await operations.restoreCanonicalEntity(slug, idSource);
+    expect(restored.status).toBe("restored");
+    expect((await getStoryBible(tempDir, slug)).canonicalEntities.some((item) => item.id === idSource)).toBe(true);
+  });
+
   // Scenario A: Visual Canon merge failure prevents Story Bible commit / marks operation failed
   it("Scenario A: merge failure during Visual Canon preparation prevents Story Bible commit", async () => {
     const operations = new StudioOperations(tempDir, loadEnvironment({}));

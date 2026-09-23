@@ -13,7 +13,10 @@ import { QA_PROMPT_VERSION } from "./prompts.js";
 
 /** Naming state QA actually consumes, per entity; unrelated Story Bible fields are excluded. */
 export type QaNamingProjection = {
+  /** Versioned authority distinguishes old context-based QA from overlay-based QA. */
+  authorityVersion?: number;
   id: string;
+  type?: CanonicalEntity["type"];
   canonicalName: string;
   originalName: string;
   aliases: string[];
@@ -57,7 +60,9 @@ export type QaDependencies = {
 
 export function projectNamingForQa(entities: CanonicalEntity[]): QaNamingProjection[] {
   return entities.map((entity) => ({
+    authorityVersion: 1,
     id: entity.id,
+    type: entity.type,
     canonicalName: entity.canonicalName,
     originalName: entity.originalName,
     aliases: entity.aliases,
@@ -219,10 +224,11 @@ export async function deriveChapterQaFreshness(
   root: string,
   story: Story,
   chapter: number,
-  stage?: Pick<StageState, "status" | "fingerprint">,
+  stage?: Pick<StageState, "status" | "fingerprint" | "staleReason">,
   deterministic?: DeterministicQaDependencies,
 ): Promise<ChapterQaFreshness> {
   const currentFingerprint = await computeStoredQaDependencyFingerprint(root, story, chapter, deterministic);
+  if (stage?.staleReason && stage.status === "complete") return { freshness: "needs_recheck", currentFingerprint };
   if (!currentFingerprint) {
     const freshness: QaFreshness = stage?.status === "failed" ? "failed" : !stage?.fingerprint ? "missing" : stage.status === "complete" ? "current" : "needs_recheck";
     return { freshness };

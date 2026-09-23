@@ -6,7 +6,7 @@ import { mkdir, open, rm, stat } from "node:fs/promises";
 import { isAbsolute, join } from "node:path";
 import { IncomingMessage, ServerResponse } from "node:http";
 import { z } from "zod";
-import { getAudioDashboard, getCanonicalEntitiesPage, getCanonicalEntityDetail, getChapter, getChapterPage, getContinuityReview, getMinorReferencesPage, getOutputsLibrary, getQaDashboard, getScenesDashboard, getStoryBibleView, getStoryDashboard, getStoryOverview, getVideoDashboard, listStories, updateStorySettings, chapterFilterSchema } from "./catalog.js";
+import { getAudioDashboard, getCanonicalEntitiesPage, getCanonicalEntityDetail, getChapter, getChapterPage, getContinuityReview, getMinorReferencesPage, getOutputsLibrary, getQaDashboard, getScenesDashboard, getStoryBibleView, getStoryDashboard, getStoryOverview, getSuppressedCanonicalEntities, getVideoDashboard, listStories, updateStorySettings, chapterFilterSchema } from "./catalog.js";
 import { JobConflictError } from "./job-manager.js";
 import { StudioOperations } from "./operations.js";
 import { exportPaths, mediaDownloadName, padChapterNumber, previewPaths, rangeMediaDownloadName, sanitizeFilenamePart, sceneImagePath, sceneVersionImagePath, storyPaths, videoExportPaths, visualProfileRefPath, voicePreviewPaths } from "../../src/storage/paths.js";
@@ -481,9 +481,15 @@ export function createApiHandler(operations: StudioOperations) {
       if (bibleMatch && request.method === "POST") return send(response, 201, await operations.addBibleEntry(bibleMatch[1]!, await jsonBody(request)));
       const bibleEntitiesMatch = /^\/api\/stories\/([a-z0-9-]+)\/story-bible\/entities$/.exec(url.pathname);
       if (bibleEntitiesMatch && request.method === "GET") return send(response, 200, await getCanonicalEntitiesPage(operations.root, bibleEntitiesMatch[1]!, { page: integerParam(url.searchParams.get("page"), 1), pageSize: boundedPageSize(url.searchParams.get("pageSize")), type: entityTypeFilter(url.searchParams.get("type")), query: optionalString(url.searchParams.get("q")), sort: entitySortFilter(url.searchParams.get("sort")) }));
+      const bibleSuppressionsMatch = /^\/api\/stories\/([a-z0-9-]+)\/story-bible\/suppressions$/.exec(url.pathname);
+      if (bibleSuppressionsMatch && request.method === "GET") return send(response, 200, await getSuppressedCanonicalEntities(operations.root, bibleSuppressionsMatch[1]!));
       const bibleEntityMatch = /^\/api\/stories\/([a-z0-9-]+)\/story-bible\/entities\/(ent_[a-f0-9]{24})$/.exec(url.pathname);
       if (bibleEntityMatch && request.method === "GET") return send(response, 200, await getCanonicalEntityDetail(operations.root, bibleEntityMatch[1]!, bibleEntityMatch[2]!));
       if (bibleEntityMatch && request.method === "PUT") return send(response, 200, await operations.updateCanonicalEntity(bibleEntityMatch[1]!, bibleEntityMatch[2]!, await jsonBody(request)));
+      const bibleSuppressMatch = /^\/api\/stories\/([a-z0-9-]+)\/story-bible\/entities\/(ent_[a-f0-9]{24})\/suppress$/.exec(url.pathname);
+      if (bibleSuppressMatch && request.method === "POST") return send(response, 200, await operations.suppressCanonicalEntity(bibleSuppressMatch[1]!, bibleSuppressMatch[2]!, await jsonBody(request)));
+      const bibleRestoreMatch = /^\/api\/stories\/([a-z0-9-]+)\/story-bible\/entities\/(ent_[a-f0-9]{24})\/restore$/.exec(url.pathname);
+      if (bibleRestoreMatch && request.method === "POST") return send(response, 200, await operations.restoreCanonicalEntity(bibleRestoreMatch[1]!, bibleRestoreMatch[2]!));
       const localizationSuggestionsMatch = /^\/api\/stories\/([a-z0-9-]+)\/story-bible\/entities\/(ent_[a-f0-9]{24})\/localization-suggestions$/.exec(url.pathname);
       const pronunciationMatch = /^\/api\/stories\/([a-z0-9-]+)\/pronunciation(?:\/(ent_[a-f0-9]{24})(?:\/(test|enrich|accept-suggestion|dismiss-suggestion))?)?$/.exec(url.pathname);
       if (pronunciationMatch) {
@@ -645,7 +651,7 @@ async function jsonBody(request: IncomingMessage, limit = MAX_JSON_BYTES): Promi
 export function integerParam(value: string | null, fallback: number) { if (value === null) return fallback; const number = Number(value); if (!Number.isInteger(number) || number < 1) throw new HttpError("Pagination values must be positive integers", 400); return number; }
 export function chapterParam(value: string) { const chapter = Number(value); if (!Number.isSafeInteger(chapter) || chapter < 1) throw new HttpError("Chapter must be a positive integer", 400); return chapter; }
 function optionalInteger(value: string | null) { if (value === null) return undefined; return integerParam(value, 1); }
-export function entityTypeFilter(value: string | null) { return value === null ? undefined : z.enum(["all", "character", "location", "organization", "ability", "item", "concept"]).parse(value); }
+export function entityTypeFilter(value: string | null) { return value === null ? undefined : z.enum(["all", "character", "location", "organization", "ability", "item", "concept", "other"]).parse(value); }
 export function entitySortFilter(value: string | null) { return value === null ? undefined : z.enum(["last", "first", "name"]).parse(value); }
 export function continuityStatusFilter(value: string | null) { return value === null ? undefined : z.enum(["all", "open", "accepted_new", "kept_existing", "intentional", "corrected", "merged", "dismissed"]).parse(value); }
 function csvCell(value:unknown){const text=value===undefined||value===null?"":String(value);return /[",\n]/.test(text)?`"${text.replaceAll('"','""')}"`:text;}

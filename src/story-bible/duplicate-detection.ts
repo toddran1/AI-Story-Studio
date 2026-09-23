@@ -559,7 +559,12 @@ export function findDuplicateSuggestions(
   const output: DuplicateSuggestion[] = [];
 
   for (const [id, [a, b]] of pairs) {
-    const score = duplicateScore(a, b, context);
+    const scored = duplicateScore(a, b, context);
+    // Preserve strict merge scoring while still surfacing identical labels of
+    // different classes as a review-only suggestion in the editor.
+    const score = a.type !== b.type && normalizeEntityName(a.canonicalName) === normalizeEntityName(b.canonicalName) && scored.conflict !== "original_name" && scored.conflict !== "relationship"
+      ? { confidence: 0.9, reason: `Same normalized canonical name across ${a.type} and ${b.type}; review identity and type`, recommendation: "needs_review" as const }
+      : scored;
     if (score.confidence < 0.70) continue;
 
     const chapters = unique(
