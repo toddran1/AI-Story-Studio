@@ -206,6 +206,14 @@ describe("web UI", () => {
     );
     expect(staleHtml.match(/class="qa-recheck-split"/g)).toHaveLength(1);
     expect(staleHtml).toContain("button primary");
+    const prerequisiteHtml = renderToStaticMarkup(<QaDetail
+      slug="demo-story" chapter={1} onJob={() => undefined} onEditManually={() => undefined} onChanged={() => undefined}
+      initialData={{ ...mockDetail, artifacts: { translationAvailable: false, narrationAvailable: false }, repairPrerequisites: { storyContextValid: false, storyContextError: "AI repair is blocked because Story Context is invalid." } }}
+    />);
+    expect(prerequisiteHtml).toContain("Translation artifact is unavailable. AI repair for translation findings is disabled.");
+    expect(prerequisiteHtml).toContain("Narration artifact is unavailable. AI repair for narration findings is disabled.");
+    expect(prerequisiteHtml).toContain("AI repair is blocked because Story Context is invalid.");
+    expect(prerequisiteHtml).toContain("Open Story Bible");
   });
   it("surfaces total QA score in attention head and places stale notice below header", () => {
     const currentDetail = {

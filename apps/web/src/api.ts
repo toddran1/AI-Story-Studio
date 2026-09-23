@@ -508,7 +508,7 @@ export type QaFindingStats = {
   needsVerification: number;
 };
 export type QaFreshness = "missing" | "current" | "needs_recheck" | "failed";
-export type ChapterQaDetail = { chapter: number; state: QaState; counts: QaCounts; qaStale: boolean; stats?: QaFindingStats; freshness?: QaFreshness; currentFingerprint?: string };
+export type ChapterQaDetail = { chapter: number; state: QaState; counts: QaCounts; qaStale: boolean; artifacts?: { translationAvailable: boolean; narrationAvailable: boolean }; repairPrerequisites?: { storyContextValid: boolean; storyContextError?: string }; stats?: QaFindingStats; freshness?: QaFreshness; currentFingerprint?: string };
 export type QaRecheckSummary = QaCounts & { verified: number; respected: number; reopened: number; newFindings: number; obsoleted: number; mode: "changed" | "full"; fellBackToFull: boolean };
 export type QaExceptionMatchKind = "terminology" | "entity" | "rule" | "other";
 export type QaException = { id: string; category: string; matchKind: QaExceptionMatchKind; value: string; reason?: string; createdAt: string };

@@ -1,7 +1,7 @@
-import { mkdtemp, readFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { getQaDashboard } from "../apps/server/catalog.js";
 import { Job, JobManager } from "../apps/server/job-manager.js";
 import { StudioOperations } from "../apps/server/operations.js";
@@ -14,6 +14,7 @@ import { qaStateSchema } from "../src/domain/qa.js";
 import { diagnosticIsHistorical } from "../src/errors/diagnostic.js";
 import { LLMRouter } from "../src/llm/router.js";
 import { buildQaState } from "../src/qa/review.js";
+import { deriveIssues } from "../src/qa/findings.js";
 import { computeStoredQaDependencyFingerprint } from "../src/qa/freshness.js";
 import { atomicWrite, atomicWriteJson } from "../src/storage/atomic-write.js";
 import { storyPaths } from "../src/storage/paths.js";
@@ -86,7 +87,101 @@ describe("chapter QA state endpoint", () => {
     const result = await operations.getChapterQa(story.slug, 1);
     expect(result.counts).toEqual({ open: 1, resolved: 0, safeFixesAvailable: 0 });
     expect(result.state.findings[0]!.id).toBe(state!.findings[0]!.id);
+    expect(result.artifacts).toEqual({ translationAvailable: true, narrationAvailable: true });
+    expect(result.repairPrerequisites?.storyContextValid).toBe(true);
     expect(result.qaStale).toBe(false);
+    await operations.close();
+  });
+
+  it("reports missing text artifacts and excludes repairs that need them", async () => {
+    const { root, story, paths } = await fixture({ detections: [detection({ safeToFix: true, provenance: { stage: "narration" } })] });
+    const { operations } = operationsWith(root, openaiQa());
+    await rm(paths.english); await rm(paths.narration);
+    const result = await operations.getChapterQa(story.slug, 1);
+    expect(result.artifacts).toEqual({ translationAvailable: false, narrationAvailable: false });
+    expect(result.counts.safeFixesAvailable).toBe(0);
+    await operations.close();
+  });
+
+  it("does not turn non-ENOENT chapter text read failures into empty text", async () => {
+    const { root, story, paths } = await fixture({ detections: [detection()] });
+    const { operations } = operationsWith(root, openaiQa());
+    await rm(paths.english); await mkdir(paths.english);
+    await expect(operations.getChapterQa(story.slug, 1)).rejects.toMatchObject({ code: "EISDIR" });
+    await operations.close();
+  });
+
+  it("blocks Safe Fix before provider or writes when existing Story Context is malformed", async () => {
+    const { root, story, paths } = await fixture({ detections: [detection({ safeToFix: true, provenance: { stage: "translation" } })] });
+    const llm = openaiQa(); const { operations } = operationsWith(root, llm);
+    const beforeTranslation = await readFile(paths.english, "utf8"); const beforeNarration = await readFile(paths.narration, "utf8"); const beforeQa = await readFile(paths.qa);
+    await atomicWrite(paths.storyContext, "{ definitely not json");
+    const presentation = await operations.getChapterQa(story.slug, 1);
+    expect(presentation.repairPrerequisites).toMatchObject({ storyContextValid: false });
+    expect(presentation.counts.safeFixesAvailable).toBe(0);
+    await expect(operations.applyQaSafeFixes(story.slug, 1)).rejects.toMatchObject({ code: "QA_CONTEXT_INVALID" });
+    expect(llm.calls).toHaveLength(0);
+    expect(await readFile(paths.english, "utf8")).toBe(beforeTranslation);
+    expect(await readFile(paths.narration, "utf8")).toBe(beforeNarration);
+    expect(await readFile(paths.qa)).toEqual(beforeQa);
+    await operations.close();
+  });
+
+  it("queues selected repair by finding ID, not index, when QA ordering changes", async () => {
+    const { root, story, paths } = await fixture({ detections: [
+      detection({ message: "Translation contains the unsupported red blade term", evidence: "Translation says red blade; source says blue blade.", provenance: { stage: "translation" } }),
+      detection({ category: "numbers", message: "Translation contains the wrong quantity", evidence: "Translation says twelve where source says ten.", provenance: { stage: "translation" } }),
+    ] });
+    const before = await readState(paths); const selectedId = before.findings[0]!.id; const selectedMessage = before.findings[0]!.message;
+    const jobs = new JobManager(); const gemini = new MockLLM("gemini", ["The keeper crossed the calm courtyard and counted the small blue flames."]);
+    const openai = openaiQa(); let queuedRunner: Parameters<JobManager["create"]>[2] | undefined;
+    const now = new Date().toISOString();
+    vi.spyOn(jobs, "create").mockImplementation((type, jobStory, runner, payload) => {
+      queuedRunner = runner;
+      return { id: "deferred-qa-repair", type, story: jobStory, status: "queued", createdAt: now, updatedAt: now, payload };
+    });
+    const operations = new StudioOperations(root, env, jobs, { llm: new LLMRouter(new Map([["openai", openai], ["gemini", gemini]])) });
+    const queued = await operations.startQaRepair(story.slug, 1, { issueIndexes: [0], targetOverrides: { "0": "translation" } });
+    expect(queued.payload).toMatchObject({ findingSelections: [{ id: selectedId }], targetOverridesByFindingId: { [selectedId]: "translation" } });
+    const reordered = { ...before, findings: [...before.findings].reverse() };
+    await atomicWriteJson(paths.qa, { ...reordered, issues: deriveIssues(reordered.findings) });
+    const result = await queuedRunner!({ update() {}, setPause() {} });
+    expect(result).toMatchObject({ findingIds: [selectedId], repaired: ["translation"] });
+    expect(gemini.calls).toHaveLength(1);
+    expect(gemini.calls[0]?.input).toContain(selectedMessage);
+    expect(gemini.calls[0]?.input).not.toContain(before.findings[1]!.message);
+    expect(openai.calls).toHaveLength(0);
+    await operations.close();
+  });
+
+  it("rejects malformed Story Context in queued batch repair before provider calls or writes", async () => {
+    const { root, story, paths } = await fixture({ detections: [detection({ safeToFix: true, provenance: { stage: "translation" } })] });
+    const llm = openaiQa(["A repaired chapter with all original details retained. ".repeat(3)]); const { jobs, operations } = operationsWith(root, llm);
+    const beforeTranslation = await readFile(paths.english, "utf8"); const beforeNarration = await readFile(paths.narration, "utf8"); const beforeQa = await readFile(paths.qa);
+    await atomicWrite(paths.storyContext, "{ malformed");
+    const findingId = (await readState(paths)).findings[0]!.id;
+    const job = await operations.startQaRepair(story.slug, 1, { findingIds: [findingId], targetOverridesByFindingId: { [findingId]: "translation" } });
+    const finished = await waitForJob(jobs, job.id);
+    expect(finished.status).toBe("failed"); expect(finished.diagnostic?.code).toBe("QA_CONTEXT_INVALID");
+    expect(llm.calls).toHaveLength(0);
+    expect(await readFile(paths.english, "utf8")).toBe(beforeTranslation);
+    expect(await readFile(paths.narration, "utf8")).toBe(beforeNarration);
+    expect(await readFile(paths.qa)).toEqual(beforeQa);
+    await operations.close();
+  });
+
+  it("blocks single-finding AI repair on malformed Story Context before provider calls or writes", async () => {
+    const { root, story, paths } = await fixture({ detections: [detection({ provenance: { stage: "translation" } })] });
+    const llm = openaiQa(); const { jobs, operations } = operationsWith(root, llm); const findingId = (await readState(paths)).findings[0]!.id;
+    const beforeTranslation = await readFile(paths.english, "utf8"); const beforeNarration = await readFile(paths.narration, "utf8"); const beforeQa = await readFile(paths.qa);
+    await atomicWrite(paths.storyContext, "{ malformed");
+    const job = await operations.startQaFindingFix(story.slug, 1, findingId, { target: "translation" });
+    const finished = await waitForJob(jobs, job.id);
+    expect(finished.status).toBe("failed"); expect(finished.diagnostic?.code).toBe("QA_CONTEXT_INVALID");
+    expect(llm.calls).toHaveLength(0);
+    expect(await readFile(paths.english, "utf8")).toBe(beforeTranslation);
+    expect(await readFile(paths.narration, "utf8")).toBe(beforeNarration);
+    expect(await readFile(paths.qa)).toEqual(beforeQa);
     await operations.close();
   });
 

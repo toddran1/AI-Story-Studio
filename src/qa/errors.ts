@@ -11,6 +11,21 @@ export class QaRepairTargetAmbiguousError extends Error {
   }
 }
 
+export class QaFindingStaleSelectionError extends Error {
+  readonly code = "QA_FINDING_STALE_SELECTION";
+  constructor(message = "One or more selected QA findings changed while this repair job was waiting. Reload QA and review the current findings before retrying.") {
+    super(message); this.name = "QaFindingStaleSelectionError";
+  }
+}
+
+export class QaArtifactUnavailableError extends Error {
+  readonly code = "QA_ARTIFACT_UNAVAILABLE";
+  constructor(readonly artifact: "translation" | "narration", readonly chapter: number) {
+    super(`${artifact === "translation" ? "Translation" : "Narration"} artifact is unavailable for Chapter ${chapter}. Restore or regenerate it before repairing findings that target ${artifact}.`);
+    this.name = "QaArtifactUnavailableError";
+  }
+}
+
 export class QaExceptionTooBroadError extends Error {
   readonly code = "QA_EXCEPTION_TOO_BROAD";
   constructor(message: string) { super(message); this.name = "QaExceptionTooBroadError"; }

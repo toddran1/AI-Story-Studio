@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -31,6 +31,7 @@ import { VideoExportProcessor } from "../src/video/video-export.js";
 import { ImageProvider } from "../src/artwork/provider.js";
 import { ImageProviderRouter } from "../src/artwork/router.js";
 import { chapterParam, continuityStatusFilter, createApiHandler, entitySortFilter, entityTypeFilter, integerParam, publicJob, statusFor, validateLocalRequest, validationIssues } from "../apps/server/api.js";
+import { QaArtifactUnavailableError, QaFindingStaleSelectionError } from "../src/qa/errors.js";
 import { PassThrough, Readable } from "node:stream";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { z } from "zod";
@@ -141,6 +142,8 @@ describe("web service layer", () => {
   it("classifies QA lifecycle conflicts as recoverable client conflicts", () => {
     expect(statusFor(new QaFindingLifecycleConflictError("QA_FINDING_ALREADY_RESOLVED", "already resolved"))).toBe(409);
     expect(statusFor(new QaFindingLifecycleConflictError("QA_FINDING_ALREADY_OPEN", "already open"))).toBe(409);
+    expect(statusFor(new QaFindingStaleSelectionError())).toBe(409);
+    expect(statusFor(new QaArtifactUnavailableError("narration", 12))).toBe(422);
   });
   it("exposes safe field paths for invalid editable input", () => {
     const failure = z.object({ tts: z.object({ model: z.string().min(1) }) }).safeParse({ tts: { model: "" } });
@@ -215,6 +218,8 @@ describe("web service layer", () => {
     const qa = qaResultSchema.parse({ status: "warn", score: .8, issues: [{ category: "terminology", severity: "warn", message: "Use the canonical ability name", evidence: "Azure Flame is the locked term." }], checks: { completeness: "pass", names: "pass", numbers: "pass", terminology: "warn", dialogue: "pass", storyConsistency: "pass", narrationFidelity: "pass" } });
     await atomicWriteJson(paths.chapterMeta, chapter); await atomicWriteJson(paths.qa, qa); await atomicWrite(paths.original, "守灯人穿过庭院。".repeat(50)); await atomicWrite(paths.english, current); await atomicWrite(paths.narration, current); await atomicWriteJson(paths.storyContext, {});
     const gemini = new MockLLM("gemini", [repaired]); const openai = new MockLLM("openai", [repaired]); const jobs = new JobManager(); const operations = new StudioOperations(root, env, jobs, { llm: new LLMRouter(new Map([["gemini", gemini], ["openai", openai]])) });
+    // A missing optional context file uses the supported empty-Bible fallback.
+    await rm(paths.storyContext, { force: true });
     const repairJob = await operations.startQaRepair(story.slug, 1, { issueIndexes: [0], targetOverrides: { "0": "translation" } });
     const finished = await waitForJob(jobs, repairJob.id);
     expect(finished.status).toBe("completed"); expect(await readFile(paths.english, "utf8")).toBe(repaired.trim());

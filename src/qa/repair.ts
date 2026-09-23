@@ -1,4 +1,4 @@
-import { QaResult } from "../domain/qa.js";
+import { QaResult, QaState } from "../domain/qa.js";
 import { CanonicalEntity, storyBibleSchema } from "../domain/story-bible.js";
 import { StageModelConfig } from "../domain/provider.js";
 import { LLMProvider } from "../llm/provider.js";
@@ -8,8 +8,55 @@ import { softenStrongProfanity } from "../narration/profanity.js";
 import { removeLeadingChapterTitle } from "../narration/narration-editor.js";
 import { authorizedNarrationNaming } from "./prompts.js";
 import type { QaFinding } from "../domain/qa.js";
-import { normalizeQaText } from "./findings.js";
-import { QaRepairTargetAmbiguousError } from "./errors.js";
+import { findingFingerprint, normalizeQaText } from "./findings.js";
+import { QaFindingStaleSelectionError, QaRepairTargetAmbiguousError } from "./errors.js";
+
+export type QaRepairFindingSnapshot = { id: string; fingerprint: string };
+export type QaRepairTargetChoice = "translation" | "narration" | "both";
+
+/** Re-key legacy index-based UI overrides onto the preflighted persistent finding identities. */
+export function targetOverridesByFindingId(
+  issueIndexes: number[],
+  snapshots: QaRepairFindingSnapshot[],
+  overrides: Record<string, QaRepairTargetChoice> | undefined,
+): Record<string, QaRepairTargetChoice> {
+  const result: Record<string, QaRepairTargetChoice> = {};
+  for (const [position, index] of [...new Set(issueIndexes)].entries()) {
+    const choice = overrides?.[String(index)];
+    const snapshot = snapshots[position];
+    if (choice && snapshot) result[snapshot.id] = choice;
+  }
+  return result;
+}
+
+/** Resolve legacy issue positions once, before a queued repair can wait on a lock. */
+export function captureQaRepairFindingSnapshots(state: QaState, issueIndexes: number[]): QaRepairFindingSnapshot[] {
+  const indexes = [...new Set(issueIndexes)];
+  const selectable = state.findings.filter((finding) => finding.status !== "obsolete");
+  if (!indexes.length || indexes.some((index) => !Number.isSafeInteger(index) || index < 0 || index >= selectable.length)) {
+    throw new QaFindingStaleSelectionError("One or more selected QA findings no longer exist. Reload QA and select the current findings again.");
+  }
+  const selected = indexes.map((index) => selectable[index]!);
+  if (selected.some((finding) => finding.status !== "open")) {
+    throw new QaFindingStaleSelectionError("One or more selected QA findings are no longer open. Reload QA and select the current findings again.");
+  }
+  return selected.map((finding) => ({ id: finding.id, fingerprint: finding.fingerprint }));
+}
+
+/** Revalidate identity and open status after the queued job acquires the story lock. */
+export function validateQaRepairFindingSnapshots(state: QaState, snapshots: QaRepairFindingSnapshot[]): QaFinding[] {
+  const ids = new Set<string>();
+  const findings: QaFinding[] = [];
+  for (const snapshot of snapshots) {
+    if (ids.has(snapshot.id)) continue;
+    ids.add(snapshot.id);
+    const finding = state.findings.find((item) => item.id === snapshot.id);
+    if (!finding || finding.status !== "open" || finding.fingerprint !== snapshot.fingerprint) throw new QaFindingStaleSelectionError();
+    findings.push(finding);
+  }
+  if (!findings.length) throw new QaFindingStaleSelectionError();
+  return findings;
+}
 
 export function selectRepairStage(qa: QaResult): "translation" | "narration" {
   const translationCategories = new Set(["completeness", "names", "numbers", "terminology", "dialogue"]);

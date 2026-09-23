@@ -692,12 +692,13 @@ function parseRange(header: string | undefined, size: number): { start: number; 
 }
 
 export function statusFor(error: unknown): number {
-  if (error && typeof error === "object" && "code" in error && ["QA_CONTEXT_INVALID", "QA_CONTINUITY_INVALID", "QA_EXCEPTION_TOO_BROAD", "QA_REPAIR_TARGET_AMBIGUOUS"].includes(String((error as { code: unknown }).code))) return 422;
+  if (error && typeof error === "object" && "code" in error && ["QA_CONTEXT_INVALID", "QA_CONTINUITY_INVALID", "QA_EXCEPTION_TOO_BROAD", "QA_REPAIR_TARGET_AMBIGUOUS", "QA_ARTIFACT_UNAVAILABLE"].includes(String((error as { code: unknown }).code))) return 422;
   if (error instanceof HttpError) return error.status;
   if (error instanceof SourceOperationError) return error.status;
   if (error instanceof z.ZodError) return 400;
   if (error instanceof JobConflictError || /locked by PID|already has active job/.test(String(error))) return 409;
   if (error instanceof QaFindingLifecycleConflictError) return 409;
+  if (error && typeof error === "object" && "code" in error && (error as { code?: unknown }).code === "QA_FINDING_STALE_SELECTION") return 409;
   if (error instanceof SummarySceneProposalConflictError) return 409;
   if (error instanceof QueueConflictError) return 409;
   if (error instanceof QueueNotFoundError) return 404;
