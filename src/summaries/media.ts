@@ -32,7 +32,9 @@ import { scenePacingSchema, estimateScenePacing } from "../scenes/pacing.js";
 import { resolveVisualEntities } from "../scenes/identity.js";
 import { bindNarrationSpans } from "../scenes/narration-spans.js";
 import { productionSceneFingerprint } from "../scenes/manifest.js";
-import { sceneImportanceSchema, type Scene } from "../scenes/types.js";
+import { sceneRegenerationModeSchema as summarySceneRegenerationModeSchema, sceneRegenerationProposalSchema as summarySceneRegenerationProposalSchema, sceneVisualSnapshotSchema as summarySceneVisualSnapshotSchema, sceneVisualSnapshot as summarySceneVisualSnapshot, sceneProposalSourceFingerprint as summarySceneProposalSourceFingerprint, type SceneRegenerationProposal as SummarySceneRegenerationProposal } from "../scenes/regeneration.js";
+export { summarySceneRegenerationModeSchema, summarySceneRegenerationProposalSchema, summarySceneVisualSnapshot, summarySceneProposalSourceFingerprint };
+export type { SummarySceneRegenerationProposal };
 import { loadStoryArtDirection } from "../visual-canon/art-direction.js";
 import { resolveSummarySceneArtDirection } from "./art-direction.js";
 
@@ -42,30 +44,7 @@ export const summaryNarrationEditSchema = z.union([
   z.object({ text: z.string().trim().min(1).max(1_000_000) }).strict(),
   z.object({ acceptCurrent: z.literal(true) }).strict(),
 ]);
-export const summarySceneRegenerationModeSchema = z.enum(["image_prompt", "full_visual_direction"]);
 export class SummarySceneProposalConflictError extends Error {}
-const summarySceneVisualSnapshotSchema = z.object({
-  summary: z.string().trim().min(1).max(1000), visualPrompt: z.string().trim().min(1).max(8000),
-  characters: z.array(z.string().trim().min(1)).max(20), entityIds: z.array(z.string().trim().min(1)).max(100),
-  location: z.string().max(300).optional(), importance: sceneImportanceSchema,
-}).strict();
-export const summarySceneRegenerationProposalSchema = z.object({
-  sceneId: z.string().regex(/^scene-\d{3}$/), mode: summarySceneRegenerationModeSchema,
-  sourceFingerprint: z.string().min(1), current: summarySceneVisualSnapshotSchema,
-  proposed: summarySceneVisualSnapshotSchema, provider: z.string().min(1), model: z.string().min(1),
-}).strict();
-export type SummarySceneRegenerationProposal = z.infer<typeof summarySceneRegenerationProposalSchema>;
-export function summarySceneVisualSnapshot(scene: Scene) {
-  return summarySceneVisualSnapshotSchema.parse({ summary: scene.summary, visualPrompt: scene.visualPrompt,
-    characters: scene.characters, entityIds: scene.entityIds ?? [], location: scene.location,
-    importance: scene.importance });
-}
-export function summarySceneProposalSourceFingerprint(scene: Scene) {
-  return fingerprint({ visual: summarySceneVisualSnapshot(scene), startSeconds: scene.startSeconds,
-    endSeconds: scene.endSeconds, disabled: scene.disabled, narrationText: scene.narrationText,
-    narrationStartWord: scene.narrationStartWord, narrationEndWord: scene.narrationEndWord,
-    direction: scene.direction, overrides: scene.overrides });
-}
 export const summaryExportTypeSchema = z.enum(["summary", "narration", "audio"]);
 export function summaryMediaPaths(root: string, story: string, id: string) {
   const record = summaryPath(root, story, id);

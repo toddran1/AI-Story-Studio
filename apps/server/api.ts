@@ -130,6 +130,13 @@ export function createApiHandler(operations: StudioOperations) {
       if (summaryMediaMatch && summaryMediaMatch[3] === "scenes" && request.method === "PUT") return send(response, 200, { summary: await operations.editSummaryScenes(summaryMediaMatch[1]!, summaryMediaMatch[2]!, await jsonBody(request)) });
       const summarySceneGroundingMatch = /^\/api\/stories\/([a-z0-9-]+)\/summaries\/(sum_[a-f0-9-]{36})\/scenes\/grounding$/.exec(url.pathname);
       if (summarySceneGroundingMatch && request.method === "GET") return send(response, 200, { scenes: await operations.summarySceneArtworkGrounding(summarySceneGroundingMatch[1]!, summarySceneGroundingMatch[2]!) });
+      const summarySceneIdentitiesMatch = /^\/api\/stories\/([a-z0-9-]+)\/summaries\/(sum_[a-f0-9-]{36})\/scenes\/identities$/.exec(url.pathname);
+      if (summarySceneIdentitiesMatch && request.method === "GET") return send(response, 200, { scenes: await operations.summaryVisuals().sceneIdentities(summarySceneIdentitiesMatch[1]!, summarySceneIdentitiesMatch[2]!) });
+      const summarySceneContinuityMatch = /^\/api\/stories\/([a-z0-9-]+)\/summaries\/(sum_[a-f0-9-]{36})\/scenes\/continuity$/.exec(url.pathname);
+      if (summarySceneContinuityMatch && request.method === "GET") return send(response, 200, { scenes: await operations.summarySceneContinuity(summarySceneContinuityMatch[1]!, summarySceneContinuityMatch[2]!) });
+      const summarySingleContinuityMatch = /^\/api\/stories\/([a-z0-9-]+)\/summaries\/(sum_[a-f0-9-]{36})\/scenes\/(scene-\d{3})\/continuity$/.exec(url.pathname);
+      if (summarySingleContinuityMatch && request.method === "PUT") return send(response, 200, { scenes: await operations.updateSummarySceneContinuity(summarySingleContinuityMatch[1]!, summarySingleContinuityMatch[2]!, summarySingleContinuityMatch[3]!, await jsonBody(request)) });
+      if (summarySingleContinuityMatch && request.method === "DELETE") return send(response, 200, { scenes: await operations.resetSummarySceneContinuity(summarySingleContinuityMatch[1]!, summarySingleContinuityMatch[2]!, summarySingleContinuityMatch[3]!) });
       const summarySingleSceneMatch = /^\/api\/stories\/([a-z0-9-]+)\/summaries\/(sum_[a-f0-9-]{36})\/scenes\/(scene-\d{3})$/.exec(url.pathname);
       if (summarySingleSceneMatch && request.method === "PUT") return send(response, 200, { summary: await operations.updateSummaryScene(summarySingleSceneMatch[1]!, summarySingleSceneMatch[2]!, summarySingleSceneMatch[3]!, await jsonBody(request)) });
       const summarySceneProposalMatch = /^\/api\/stories\/([a-z0-9-]+)\/summaries\/(sum_[a-f0-9-]{36})\/scenes\/(scene-\d{3})\/(regenerate-preview|apply-regeneration)$/.exec(url.pathname);
@@ -137,9 +144,17 @@ export function createApiHandler(operations: StudioOperations) {
       if (summarySceneProposalMatch && request.method === "PUT" && summarySceneProposalMatch[4] === "apply-regeneration") return send(response, 200, { summary: await operations.applySummarySceneRegeneration(summarySceneProposalMatch[1]!, summarySceneProposalMatch[2]!, summarySceneProposalMatch[3]!, await jsonBody(request)) });
       const summaryArtworkPreflightMatch = /^\/api\/stories\/([a-z0-9-]+)\/summaries\/(sum_[a-f0-9-]{36})\/artwork\/visual-preflight$/.exec(url.pathname);
       if (summaryArtworkPreflightMatch && request.method === "POST") return send(response, 200, await operations.inspectSummaryArtworkVisualPreflight(summaryArtworkPreflightMatch[1]!, summaryArtworkPreflightMatch[2]!, await jsonBody(request)));
+      const summaryArtworkEstimateMatch = /^\/api\/stories\/([a-z0-9-]+)\/summaries\/(sum_[a-f0-9-]{36})\/artwork\/estimate$/.exec(url.pathname);
+      if (summaryArtworkEstimateMatch && request.method === "POST") return send(response, 200, await operations.estimateSummaryArtwork(summaryArtworkEstimateMatch[1]!, summaryArtworkEstimateMatch[2]!, await jsonBody(request)));
       const summaryImageMatch = /^\/api\/stories\/([a-z0-9-]+)\/summaries\/(sum_[a-f0-9-]{36})\/artwork\/(scene-\d{3})$/.exec(url.pathname);
       if (summaryImageMatch && request.method === "PUT") { const input = z.object({ review: z.enum(["unreviewed", "approved", "rejected", "needs-regeneration"]) }).strict().parse(await jsonBody(request)); return send(response, 200, { summary: await operations.reviewSummaryArtwork(summaryImageMatch[1]!, summaryImageMatch[2]!, summaryImageMatch[3]!, input.review) }); }
       if (summaryImageMatch && request.method === "GET") { const artifact = await operations.summaryVisuals().export(summaryImageMatch[1]!, summaryImageMatch[2]!, "artwork", summaryImageMatch[3]!); const downloadName = url.searchParams.get("download") === "1" ? artifact.name : undefined; return sendFile(request, response, artifact.path, artifact.contentType, { downloadName }); }
+      const summaryArtworkVersionMatch = /^\/api\/stories\/([a-z0-9-]+)\/summaries\/(sum_[a-f0-9-]{36})\/artwork\/(scene-\d{3})\/versions\/(v\d+)$/.exec(url.pathname);
+      if (summaryArtworkVersionMatch && request.method === "GET") {
+        const artifact = await operations.summaryVisuals().exportArtworkVersion(summaryArtworkVersionMatch[1]!, summaryArtworkVersionMatch[2]!, summaryArtworkVersionMatch[3]!, summaryArtworkVersionMatch[4]!);
+        return sendFile(request, response, artifact.path, artifact.contentType, { downloadName: url.searchParams.get("download") === "1" ? artifact.name : undefined });
+      }
+      if (summaryArtworkVersionMatch && request.method === "PUT") return send(response, 200, { summary: await operations.reviewSummaryArtworkVersion(summaryArtworkVersionMatch[1]!, summaryArtworkVersionMatch[2]!, summaryArtworkVersionMatch[3]!, summaryArtworkVersionMatch[4]!) });
       const summaryExportMatch = /^\/api\/stories\/([a-z0-9-]+)\/summaries\/(sum_[a-f0-9-]{36})\/export\/(summary|narration|audio|video)$/.exec(url.pathname);
       if (summaryExportMatch && request.method === "GET") {
         const artifact = summaryExportMatch[3] === "video" ? await operations.summaryVisuals().export(summaryExportMatch[1]!, summaryExportMatch[2]!, "video") : await operations.summaryMedia().export(summaryExportMatch[1]!, summaryExportMatch[2]!, summaryExportMatch[3]!);
@@ -409,6 +424,17 @@ export function createApiHandler(operations: StudioOperations) {
       if (productionPlanMatch && request.method === "POST") return send(response, 200, await operations.productionPlan(productionPlanMatch[1]!, await jsonBody(request)));
       const scenesEditMatch = /^\/api\/stories\/([a-z0-9-]+)\/chapters\/(\d+)\/scenes$/.exec(url.pathname);
       if (scenesEditMatch && request.method === "PUT") { const input = z.object({ scenes: z.array(z.unknown()) }).strict().parse(await jsonBody(request)); return send(response, 200, { manifest: await operations.updateScenes(scenesEditMatch[1]!, chapterParam(scenesEditMatch[2]!), input.scenes) }); }
+      const singleChapterSceneMatch = /^\/api\/stories\/([a-z0-9-]+)\/chapters\/(\d+)\/scenes\/(scene-\d{3})$/.exec(url.pathname);
+      if (singleChapterSceneMatch && request.method === "PUT") {
+        const input = z.object({ scene: z.unknown(), expectedFingerprint: z.string().min(1) }).strict().parse(await jsonBody(request));
+        return send(response, 200, { manifest: await operations.updateScene(singleChapterSceneMatch[1]!, chapterParam(singleChapterSceneMatch[2]!), singleChapterSceneMatch[3]!, input.scene, input.expectedFingerprint) });
+      }
+      const chapterSceneProposalMatch = /^\/api\/stories\/([a-z0-9-]+)\/chapters\/(\d+)\/scenes\/(scene-\d{3})\/(regenerate-preview|apply-regeneration)$/.exec(url.pathname);
+      if (chapterSceneProposalMatch && request.method === "POST" && chapterSceneProposalMatch[4] === "regenerate-preview") {
+        const input = z.object({ mode: z.enum(["image_prompt", "full_visual_direction"]) }).strict().parse(await jsonBody(request));
+        return send(response, 200, { proposal: await operations.previewChapterSceneRegeneration(chapterSceneProposalMatch[1]!, chapterParam(chapterSceneProposalMatch[2]!), chapterSceneProposalMatch[3]!, input.mode) });
+      }
+      if (chapterSceneProposalMatch && request.method === "PUT" && chapterSceneProposalMatch[4] === "apply-regeneration") return send(response, 200, { manifest: await operations.applyChapterSceneRegeneration(chapterSceneProposalMatch[1]!, chapterParam(chapterSceneProposalMatch[2]!), chapterSceneProposalMatch[3]!, await jsonBody(request)) });
       const sceneContinuityMatch = /^\/api\/stories\/([a-z0-9-]+)\/chapters\/(\d+)\/scenes\/(scene-\d{3})\/continuity$/.exec(url.pathname);
       if (sceneContinuityMatch && request.method === "PUT") return send(response, 200, { overlay: await operations.updateSceneContinuity(sceneContinuityMatch[1]!, chapterParam(sceneContinuityMatch[2]!), sceneContinuityMatch[3]!, await jsonBody(request)) });
       if (sceneContinuityMatch && request.method === "DELETE") return send(response, 200, { overlay: await operations.deleteSceneContinuity(sceneContinuityMatch[1]!, chapterParam(sceneContinuityMatch[2]!), sceneContinuityMatch[3]!) });

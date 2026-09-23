@@ -278,6 +278,7 @@ export type SceneDirection = {
 
 export type SceneOverrides = {
   wardrobeOverrides?: Record<string, string>;
+  artDirectionMode?: "inherit-summary" | "story-default";
   artDirectionPresetId?: string;
   customVisualPrompt?: string;
   customNegativePrompt?: string;
@@ -316,7 +317,7 @@ export type ArtworkVersion = {
     referenceId?: string;
   }>;
   artDirectionFingerprint?: string;
-  provenance?: { referencesUsed?: "images" | "text-only" | "none"; referenceImageCount?: number; availableReferenceCount?: number };
+  provenance?: { referencesUsed?: "images" | "text-only" | "none"; referenceImageCount?: number; availableReferenceCount?: number; continuityReference?: { kind?: string; used?: boolean; sourceSceneId?: string; versionNumber?: number; reason?: string } };
   settings?: {
     quality?: string;
     size?: string;
@@ -395,6 +396,7 @@ export type VisualContinuityOverrideEntryInput = {
 
 export type Scene = {
   id: string;
+  contentFingerprint?: string;
   summary: string;
   startSeconds: number;
   endSeconds: number;
@@ -402,6 +404,7 @@ export type Scene = {
   location?: string;
   visualPrompt: string;
   importance: "transition" | "standard" | "major";
+  disabled?: boolean;
   artwork: SceneArtwork;
   imageUrl?: string;
   versionUrls?: Record<string, string>;

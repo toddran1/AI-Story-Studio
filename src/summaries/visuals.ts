@@ -5,10 +5,11 @@ import { z } from "zod";
 import { loadStory } from "../config/load-config.js";
 import { storyPaths } from "../storage/paths.js";
 import { atomicWrite, atomicWriteJson } from "../storage/atomic-write.js";
-import { exists } from "../storage/story-files.js";
+import { exists, readJsonIfExists } from "../storage/story-files.js";
 import { fileFingerprint } from "../utils/file-fingerprint.js";
 import { fingerprint } from "../utils/hash.js";
-import { productionSceneFingerprint } from "../scenes/manifest.js";
+import { productionSceneFingerprint, sceneContentFingerprint } from "../scenes/manifest.js";
+import { resolveSceneVisualEntity } from "../scenes/identity.js";
 import { sceneSchema, sceneDirectionSchema, sceneOverridesSchema, artworkReviewSchema, type Scene, type ArtworkVersion } from "../scenes/types.js";
 import { bindNarrationSpans, timeNarrationScenes } from "../scenes/narration-spans.js";
 import {
@@ -45,7 +46,7 @@ import { loadStoryArtDirection } from "../visual-canon/art-direction.js";
 import { resolveVisualCanonPrompt } from "../visual-canon/resolver.js";
 import { inspectArtworkVisualPreflightForScenes } from "../visual-canon/preflight.js";
 import { renderSceneContinuity, resolveVisualContinuity } from "../visual-canon/continuity.js";
-import type { VisualContinuityReferenceDecision } from "../visual-canon/continuity-state.js";
+import { visualContinuityOverlaySchema, visualContinuityOverrideEntrySchema, type VisualContinuityOverlay, type VisualContinuityReferenceDecision } from "../visual-canon/continuity-state.js";
 import { MAX_REFERENCE_IMAGE_BYTES, MAX_REFERENCE_IMAGES, MAX_REFERENCE_TOTAL_BYTES, providerSupportsReferenceImages } from "../artwork/providers.js";
 import { resolveSummarySceneArtDirection } from "./art-direction.js";
 
@@ -141,24 +142,60 @@ export class SummaryVisualService {
       summary.scenes.outputFingerprint === productionSceneFingerprint(summary.scenePlan) &&
       !force && fingerprint(summary.scenePacing ?? pacing) === fingerprint(pacing));
   }
+  private async loadSceneContinuityOverlay(slug: string, id: string) {
+    const raw = await readJsonIfExists<unknown>(join(this.paths(slug, id).directory, "visual-continuity-manual.json"));
+    return raw ? visualContinuityOverlaySchema.parse(raw) : visualContinuityOverlaySchema.parse({ version: 1, entries: [] });
+  }
+  async updateSceneContinuity(slug: string, id: string, sceneId: string, raw: unknown) {
+    const input = visualContinuityOverrideEntrySchema.omit({ revision: true, updatedAt: true }).parse({ ...(typeof raw === "object" && raw !== null ? raw : {}), sceneId });
+    const summary = await this.get(slug, id);
+    const scene = summary.scenePlan?.scenes.find((item) => item.id === sceneId);
+    if (!scene) throw new SummaryArtifactNotFoundError("Scene was not found");
+    const overlay = await this.loadSceneContinuityOverlay(slug, id);
+    const previous = overlay.entries.find((entry) => entry.sceneId === sceneId);
+    const entry = visualContinuityOverrideEntrySchema.parse({ ...input, sceneContentFingerprint: sceneContentFingerprint(scene), revision: (previous?.revision ?? 0) + 1, updatedAt: new Date().toISOString() });
+    const next = visualContinuityOverlaySchema.parse({ version: 1, entries: [...overlay.entries.filter((item) => item.sceneId !== sceneId), entry] });
+    await atomicWriteJson(join(this.paths(slug, id).directory, "visual-continuity-manual.json"), next);
+    if (summary.artwork) summary.artwork.status = "stale";
+    if (summary.video) summary.video.status = "stale";
+    await this.save(slug, summary);
+    return this.sceneContinuityDetail(slug, id);
+  }
+  async resetSceneContinuity(slug: string, id: string, sceneId: string) {
+    const summary = await this.get(slug, id);
+    if (!summary.scenePlan?.scenes.some((item) => item.id === sceneId)) throw new SummaryArtifactNotFoundError("Scene was not found");
+    const overlay = await this.loadSceneContinuityOverlay(slug, id);
+    const next = visualContinuityOverlaySchema.parse({ version: 1, entries: overlay.entries.filter((item) => item.sceneId !== sceneId) });
+    await atomicWriteJson(join(this.paths(slug, id).directory, "visual-continuity-manual.json"), next);
+    if (summary.artwork) summary.artwork.status = "stale";
+    if (summary.video) summary.video.status = "stale";
+    await this.save(slug, summary);
+    return this.sceneContinuityDetail(slug, id);
+  }
+  async sceneContinuityDetail(slug: string, id: string) {
+    const summary = await this.get(slug, id);
+    const resolved = await this.sceneContinuity(slug, id, summary.scenePlan?.scenes ?? []);
+    return (summary.scenePlan?.scenes ?? []).map((scene) => ({ sceneId: scene.id, continuity: resolved.get(scene.id)?.resolved }));
+  }
   private async sceneContinuity(slug: string, id: string, scenes: readonly Scene[]) {
     const paths = this.paths(slug, id);
     const continuityScenes = await Promise.all(scenes.filter((scene) => !scene.disabled).map(async (scene) => {
       const approvedId = scene.artwork.approvedVersionId;
       const approved = scene.artwork.versions?.find((version) => version.id === approvedId && version.review === "approved");
-      if (!approved) return { id: scene.id, location: scene.location, visualChanges: scene.visualChanges };
+      if (!approved) return { id: scene.id, location: scene.location, visualChanges: scene.visualChanges, contentFingerprint: sceneContentFingerprint(scene) };
       const imagePath = paths.sceneVersionImage(scene.id, approved.versionNumber);
       const actual = await validPngFingerprint(imagePath).catch(() => undefined);
-      if (!actual || actual !== approved.imageFingerprint) return { id: scene.id, location: scene.location, visualChanges: scene.visualChanges,
+      if (!actual || actual !== approved.imageFingerprint) return { id: scene.id, location: scene.location, visualChanges: scene.visualChanges, contentFingerprint: sceneContentFingerprint(scene),
         // Preserve the attempted identity for diagnostic provenance. imageInput
         // will verify it again before sending and will fingerprint text-only if
         // the file is missing, damaged, or unreadable.
         approvedArtwork: { versionId: approved.id, versionNumber: approved.versionNumber, imageFingerprint: approved.imageFingerprint } };
-      return { id: scene.id, location: scene.location, visualChanges: scene.visualChanges,
+      return { id: scene.id, location: scene.location, visualChanges: scene.visualChanges, contentFingerprint: sceneContentFingerprint(scene),
         approvedArtwork: { versionId: approved.id, versionNumber: approved.versionNumber, imageFingerprint: actual } };
     }));
-    const resolved = resolveVisualContinuity({ scenes: continuityScenes });
-    return new Map(resolved.perScene.map((entry) => [entry.sceneId, { text: renderSceneContinuity(entry), decision: entry.referenceDecision }]));
+    const manualOverrides = await this.loadSceneContinuityOverlay(slug, id);
+    const resolved = resolveVisualContinuity({ scenes: continuityScenes, manualOverrides });
+    return new Map(resolved.perScene.map((entry) => [entry.sceneId, { text: renderSceneContinuity(entry), decision: entry.referenceDecision, resolved: entry }]));
   }
   private async imageInput(slug: string, id: string, scene: Scene, visualContinuity?: string, continuityDecision?: VisualContinuityReferenceDecision, summaryDirection?: StorySummary["artDirectionOverride"]) {
     const context = await this.context(slug);
@@ -383,6 +420,13 @@ export class SummaryVisualService {
         grounding: visualGrounding, groundingRecorded, legacyGroundingUnknown: Boolean(hasImage && !groundingRecorded),
         artDirection: recordedArtDirection && typeof recordedArtDirection === "object" ? recordedArtDirection as typeof input.artDirectionProvenance : undefined,
         approvedHistoricalVersion: Boolean(!current && (scene.artwork.review === "approved" || scene.artwork.versions?.some((version) => version.review === "approved"))) };
+    }));
+  }
+  async sceneIdentities(slug: string, id: string) {
+    const [summary, context] = await Promise.all([this.get(slug, id), this.context(slug)]);
+    return (summary.scenePlan?.scenes ?? []).map((scene) => ({
+      sceneId: scene.id,
+      characters: scene.characters.map((name) => resolveSceneVisualEntity(name, context.bible.canonicalEntities, context.visualProfiles)),
     }));
   }
   async artwork(slug: string, id: string, raw: unknown = {}, progress?: SummaryVisualProgress, paused?: () => boolean, upscalerOverride?: ImageUpscaler) {
@@ -751,6 +795,34 @@ export class SummaryVisualService {
       scene.artwork.approvedVersionId = undefined;
     }
     if (summary.video) summary.video.status = "stale"; await this.save(slug, summary); return this.get(slug, id);
+  }
+  async reviewArtworkVersion(slug: string, id: string, sceneId: string, versionId: string) {
+    const summary = await this.get(slug, id);
+    const scene = summary.scenePlan?.scenes.find((item) => item.id === sceneId);
+    if (!scene) throw new SummaryArtifactNotFoundError("Scene was not found");
+    const version = scene.artwork.versions?.find((item) => item.id === versionId);
+    if (!version) throw new SummaryArtifactNotFoundError("Artwork version was not found");
+    const paths = this.paths(slug, id);
+    const originalPath = paths.sceneVersionImage(sceneId, version.versionNumber);
+    if (await validPngFingerprint(originalPath) !== version.imageFingerprint) throw new SummaryArtifactNotFoundError("Artwork version is missing or damaged");
+    const { story } = await this.context(slug);
+    scene.artwork.approvedVersionId = version.id;
+    scene.artwork.review = "approved";
+    scene.artwork.status = "complete";
+    scene.artwork.fingerprint = version.promptFingerprint;
+    for (const item of scene.artwork.versions ?? []) item.review = item.id === version.id ? "approved" : "unreviewed";
+    await syncCanonicalSceneImageForPaths({ story, scene, originalPath, productionPath: paths.sceneVersionProductionImage(sceneId, version.versionNumber), standardImagePath: paths.image(sceneId) });
+    if (summary.video) summary.video.status = "stale";
+    await this.save(slug, summary);
+    return this.get(slug, id);
+  }
+  async exportArtworkVersion(slug: string, id: string, sceneId: string, versionId: string) {
+    const summary = await this.get(slug, id);
+    const version = summary.scenePlan?.scenes.find((item) => item.id === sceneId)?.artwork.versions?.find((item) => item.id === versionId);
+    if (!version) throw new SummaryArtifactNotFoundError("Artwork version was not found");
+    const path = this.paths(slug, id).sceneVersionImage(sceneId, version.versionNumber);
+    if (await validPngFingerprint(path) !== version.imageFingerprint) throw new SummaryArtifactNotFoundError("Artwork version is missing or damaged");
+    return { path, name: `${id}-${sceneId}-${versionId}.png`, contentType: "image/png" };
   }
   async video(slug: string, id: string, raw: unknown = {}, progress?: SummaryVisualProgress) {
     const { force } = summaryVisualInputSchema.parse(raw); const summary = await this.get(slug, id); const { story } = await this.context(slug);

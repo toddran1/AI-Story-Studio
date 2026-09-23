@@ -43,7 +43,7 @@ import { FfmpegVideoProcessor, VideoProcessor } from "../../src/video/renderer.j
 import { renderStoredChapterVideo } from "../../src/video/chapter-video.js";
 import { assembleVideoExport, FfmpegVideoExportProcessor, VideoExportProcessor } from "../../src/video/video-export.js";
 import { LLMProvider } from "../../src/llm/provider.js";
-import { planStoredScenes, updateStoredSceneManifest } from "../../src/scenes/manifest.js";
+import { applyStoredSceneRegeneration, planStoredScenes, previewStoredSceneRegeneration, updateStoredScene, updateStoredSceneManifest } from "../../src/scenes/manifest.js";
 import { SceneManifest, sceneManifestSchema } from "../../src/scenes/types.js";
 import { persistChapterVisualContinuity, removeVisualContinuityOverride, upsertVisualContinuityOverride, visualContinuityOverrideEntrySchema } from "../../src/visual-canon/continuity.js";
 import { generateStoredArtwork, reviewStoredArtwork, reviewStoredArtworkVersion, reupscaleStoredArtwork } from "../../src/artwork/generator.js";
@@ -152,7 +152,7 @@ const rangeJobSchema = z.object({ from: z.number().int().positive().optional(), 
 const alignmentJobSchema = z.object({ chapter: z.number().int().positive(), force: z.boolean().default(false), forceEstimated: z.boolean().default(false), requireAligned: z.boolean().default(false) }).strict();
 const videoJobSchema = rangeJobSchema.extend({ subtitleMode: z.enum(["none", "burn", "soft", "both"]).optional() }).strict();
 const explicitRangeJobSchema = z.object({ from: z.number().int().positive(), to: z.number().int().positive(), force: z.boolean().default(false) }).strict().refine((value) => value.to >= value.from, { message: "Range end must be at or after range start" });
-const artworkJobSchema = z.object({ from: z.number().int().positive(), to: z.number().int().positive(), force: z.boolean().default(false), scene: z.string().regex(/^scene-\d{3}$/).optional(), dryRun: z.boolean().default(false), allowUnprofiledEntityIds: z.array(canonicalEntitySchema.shape.id).max(100).default([]) }).strict().refine((value) => value.to >= value.from, { message: "Range end must be at or after range start" }).refine((value) => !value.scene || value.from === value.to, { message: "A single-scene job must select one chapter" });
+const artworkJobSchema = z.object({ from: z.number().int().positive(), to: z.number().int().positive(), force: z.boolean().default(false), scene: z.string().regex(/^scene-\d{3}$/).optional(), scenes: z.array(z.string().regex(/^scene-\d{3}$/)).min(1).max(100).refine((ids) => new Set(ids).size === ids.length, "Selected scene IDs must be unique").optional(), dryRun: z.boolean().default(false), allowUnprofiledEntityIds: z.array(canonicalEntitySchema.shape.id).max(100).default([]) }).strict().refine((value) => value.to >= value.from, { message: "Range end must be at or after range start" }).refine((value) => !value.scenes || !value.scene, { message: "Choose either one scene or a scene selection" }).refine((value) => !(value.scene || value.scenes) || value.from === value.to, { message: "Selected scenes must belong to one chapter" });
 const productionInputSchema = z.object({ from: z.number().int().positive(), to: z.number().int().positive(), profile: z.string().optional(), outputs: z.array(productionOutputSchema).min(1).optional(), artwork: z.boolean().optional(), repairQa: z.boolean().optional(), alignment: z.boolean().optional(), refresh: z.boolean().default(false), dryRun: z.boolean().default(false), force: productionForceSchema.optional(), audiobookFormat: z.enum(["mp3", "m4b"]).optional(), maxProviderBudgetUsd: z.number().positive().max(1_000_000).optional() }).strict().refine((value) => value.to >= value.from, { message: "Range end must be at or after range start" });
 
 type InspectionRecord = { inspection: SourceInspection; temporaryDirectory?: string; createdAt: number; bytes: number };
@@ -448,6 +448,9 @@ export class StudioOperations {
   previewSummarySceneRegeneration(slug: string, id: string, scene: string, raw: unknown) { slugSchema.parse(slug); z.string().regex(/^scene-\d{3}$/).parse(scene); return withUsageScope({ story: slug, stage: "scenePlanning" }, () => this.summaryMedia().previewSceneRegeneration(slug, id, scene, raw)); }
   applySummarySceneRegeneration(slug: string, id: string, scene: string, raw: unknown) { slugSchema.parse(slug); z.string().regex(/^scene-\d{3}$/).parse(scene); return withStoryLock(this.root, slug, "summary scene regeneration apply", () => this.summaryVisuals().applySceneRegeneration(slug, id, scene, raw)); }
   summarySceneArtworkGrounding(slug: string, id: string) { slugSchema.parse(slug); return this.summaryVisuals().sceneArtworkGrounding(slug, id); }
+  summarySceneContinuity(slug: string, id: string) { slugSchema.parse(slug); return this.summaryVisuals().sceneContinuityDetail(slug, id); }
+  updateSummarySceneContinuity(slug: string, id: string, scene: string, raw: unknown) { slugSchema.parse(slug); return withStoryLock(this.root, slug, "summary visual continuity override", () => this.summaryVisuals().updateSceneContinuity(slug, id, scene, raw)); }
+  resetSummarySceneContinuity(slug: string, id: string, scene: string) { slugSchema.parse(slug); return withStoryLock(this.root, slug, "summary visual continuity reset", () => this.summaryVisuals().resetSceneContinuity(slug, id, scene)); }
   async inspectSummaryArtworkVisualPreflight(slug: string, id: string, raw: unknown) {
     slugSchema.parse(slug);
     const input = summaryVisualInputSchema.parse(raw);
@@ -456,6 +459,20 @@ export class StudioOperations {
     return { ...report.preflight, imageCountEstimate: report.imagesToGenerate, sceneIds: report.sceneIds };
   }
   reviewSummaryArtwork(slug: string, id: string, scene: string, review: unknown) { slugSchema.parse(slug); return withStoryLock(this.root, slug, "summary artwork review", () => this.summaryVisuals().reviewArtwork(slug, id, scene, review)); }
+  reviewSummaryArtworkVersion(slug: string, id: string, scene: string, version: string) { slugSchema.parse(slug); return withStoryLock(this.root, slug, "summary artwork version review", () => this.summaryVisuals().reviewArtworkVersion(slug, id, scene, version)); }
+  async estimateSummaryArtwork(slug: string, id: string, raw: unknown) {
+    slugSchema.parse(slug);
+    const input = summaryVisualInputSchema.parse(raw);
+    const result = await this.summaryVisuals().artwork(slug, id, { ...input, dryRun: true });
+    if (!("dryRun" in result)) throw new Error("Artwork estimate did not return a dry-run plan");
+    const story = await loadStory(storyPaths(this.root, slug, 1).storyConfig);
+    const grounding = await this.summaryVisuals().sceneArtworkGrounding(slug, id);
+    const selected = new Set(result.sceneIds);
+    return { imagesToGenerate: result.imagesToGenerate, reusable: result.reusable, derivativesToBuild: result.derivativesToBuild, sceneIds: result.sceneIds,
+      missing: grounding.filter((scene) => selected.has(scene.sceneId) && scene.status === "missing").length,
+      stale: grounding.filter((scene) => selected.has(scene.sceneId) && scene.status === "stale").length,
+      blockedByVisualProfiles: result.preflight.requiresDecision.length, provider: story.artwork.provider, model: story.artwork.model };
+  }
   reupscaleSummaryArtwork(slug: string, id: string, raw: unknown) {
     slugSchema.parse(slug);
     return withStoryLock(this.root, slug, "summary artwork re-upscale", () => this.summaryVisuals().reupscale(slug, id, raw));
@@ -1177,6 +1194,7 @@ export class StudioOperations {
       chapter: chapter.chapter,
       provider: resolveImageProvider(this.image, story),
       sceneId: input.scene,
+      sceneIds: input.scenes,
       force: input.force,
       dryRun: true,
       allowUnprofiledEntityIds: input.allowUnprofiledEntityIds,
@@ -1211,7 +1229,7 @@ export class StudioOperations {
     return { mode: entity.visualProfilePolicy?.mode ?? "prompt" };
   }
 
-  startArtwork(slug: string, raw: unknown) { slugSchema.parse(slug); const input = artworkJobSchema.parse(raw); return this.jobs.create("artwork", slug, async (control) => withStoryLock(this.root, slug, "web artwork generation", async () => { const story = await loadStory(storyPaths(this.root, slug, 1).storyConfig); const selected = selectChapterRange((await loadImportedChapters(this.root, slug)).chapters, input.from, input.to); const shutdown = new ShutdownController(); control.setPause(() => shutdown.request()); let generated = 0; let estimate = 0; const warnings: string[] = []; for (let index = 0; index < selected.length; index++) { if (shutdown.isRequested) return { status: "paused", generated, estimate, warnings: [...new Set(warnings)] }; const chapter = selected[index]!.chapter; const result = await withUsageScope({story:slug,chapter,stage:"artwork"},()=>generateStoredArtwork({ root: this.root, story, chapter, provider: resolveImageProvider(this.image, story), sceneId: input.scene, force: input.force, dryRun: input.dryRun, allowUnprofiledEntityIds: input.allowUnprofiledEntityIds, onProgress: (event) => control.update({ ...event, chapterIndex: index + 1, chapterTotal: selected.length }) })); generated += "generated" in result ? result.generated ?? 0 : 0; estimate += result.imagesToGenerate; warnings.push(...(result.warnings ?? [])); } return { dryRun: input.dryRun, generated, imageCountEstimate: estimate, chapters: selected.length, provider: story.artwork.provider, model: story.artwork.model, warnings: [...new Set(warnings)] }; }), raw); }
+  startArtwork(slug: string, raw: unknown) { slugSchema.parse(slug); const input = artworkJobSchema.parse(raw); return this.jobs.create("artwork", slug, async (control) => withStoryLock(this.root, slug, "web artwork generation", async () => { const story = await loadStory(storyPaths(this.root, slug, 1).storyConfig); const selected = selectChapterRange((await loadImportedChapters(this.root, slug)).chapters, input.from, input.to); const shutdown = new ShutdownController(); control.setPause(() => shutdown.request()); let generated = 0; let estimate = 0; const warnings: string[] = []; for (let index = 0; index < selected.length; index++) { if (shutdown.isRequested) return { status: "paused", generated, estimate, warnings: [...new Set(warnings)] }; const chapter = selected[index]!.chapter; const result = await withUsageScope({story:slug,chapter,stage:"artwork"},()=>generateStoredArtwork({ root: this.root, story, chapter, provider: resolveImageProvider(this.image, story), sceneId: input.scene, sceneIds: input.scenes, force: input.force, dryRun: input.dryRun, allowUnprofiledEntityIds: input.allowUnprofiledEntityIds, onProgress: (event) => control.update({ ...event, chapterIndex: index + 1, chapterTotal: selected.length }) })); generated += "generated" in result ? result.generated ?? 0 : 0; estimate += result.imagesToGenerate; warnings.push(...(result.warnings ?? [])); } return { dryRun: input.dryRun, generated, imageCountEstimate: estimate, chapters: selected.length, provider: story.artwork.provider, model: story.artwork.model, warnings: [...new Set(warnings)] }; }), raw); }
 
   getActiveStoryJob(slug: string) {
     slugSchema.parse(slug);
@@ -1237,6 +1255,26 @@ export class StudioOperations {
   }
 
   async updateScenes(slug: string, chapter: number, scenes: unknown) { slugSchema.parse(slug); return withStoryLock(this.root, slug, "manual scene edit", async () => { const story = await loadStory(storyPaths(this.root, slug, chapter).storyConfig); return updateStoredSceneManifest({ root: this.root, story, chapter, scenes }); }); }
+  async updateScene(slug: string, chapter: number, sceneId: string, scene: unknown, expectedFingerprint: string) {
+    slugSchema.parse(slug);
+    return withStoryLock(this.root, slug, "manual single scene edit", async () => {
+      const story = await loadStory(storyPaths(this.root, slug, chapter).storyConfig);
+      return updateStoredScene({ root: this.root, story, chapter, sceneId, scene, expectedFingerprint });
+    });
+  }
+  async previewChapterSceneRegeneration(slug: string, chapter: number, sceneId: string, mode: unknown) {
+    slugSchema.parse(slug);
+    const story = await loadStory(storyPaths(this.root, slug, chapter).storyConfig);
+    const provider = this.scenePlanner ?? this.runtime.router.forStage(story.pipeline.scenePlanner);
+    return withUsageScope({ story: slug, chapter, stage: "scenePlanning" }, () => previewStoredSceneRegeneration({ root: this.root, story, chapter, sceneId, mode, provider }));
+  }
+  async applyChapterSceneRegeneration(slug: string, chapter: number, sceneId: string, proposal: unknown) {
+    slugSchema.parse(slug);
+    return withStoryLock(this.root, slug, "chapter scene regeneration apply", async () => {
+      const story = await loadStory(storyPaths(this.root, slug, chapter).storyConfig);
+      return applyStoredSceneRegeneration({ root: this.root, story, chapter, sceneId, proposal });
+    });
+  }
   async updateSceneContinuity(slug: string, chapter: number, sceneId: string, raw: unknown) {
     slugSchema.parse(slug);
     const input = visualContinuityOverrideEntrySchema.omit({ revision: true, updatedAt: true }).parse({ ...(typeof raw === "object" && raw !== null ? raw : {}), sceneId });

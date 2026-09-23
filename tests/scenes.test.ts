@@ -7,7 +7,7 @@ import { ImageProviderRouter } from "../src/artwork/router.js";
 import { ImageProvider } from "../src/artwork/provider.js";
 import { chapterSchema } from "../src/domain/chapter.js";
 import { LLMProvider } from "../src/llm/provider.js";
-import { planStoredScenes, scenePlanningFingerprint, updateStoredSceneManifest } from "../src/scenes/manifest.js";
+import { applyStoredSceneRegeneration, planStoredScenes, previewStoredSceneRegeneration, sceneContentFingerprint, scenePlanningFingerprint, updateStoredScene, updateStoredSceneManifest } from "../src/scenes/manifest.js";
 import { SCENE_PLANNER_PROMPT_VERSION, scenePlannerInstructions } from "../src/scenes/prompts.js";
 import { normalizeSceneTiming, validateSceneCoverage } from "../src/scenes/timing.js";
 import { SceneManifest, sceneManifestSchema } from "../src/scenes/types.js";
@@ -31,6 +31,49 @@ describe("scene planning", () => {
   it("uses canonical Story Bible context and reuses its planning fingerprint", async () => { const { root, story } = await fixture(); const provider = new SceneLLM(); const first = await planStoredScenes({ root, story, chapter: 1, provider }); const second = await planStoredScenes({ root, story, chapter: 1, provider }); expect(first.reused).toBe(false); expect(second.reused).toBe(true); expect(provider.calls).toHaveLength(1); expect(provider.calls[0].input).toContain("CANONICAL STORY BIBLE"); expect(scenePlanningFingerprint("n", "b", "a", story.scenes, "openai", "one")).not.toBe(scenePlanningFingerprint("n", "b", "a", story.scenes, "openai", "two")); expect(scenePlanningFingerprint("n", "b", "a1", story.scenes, "openai", "one")).not.toBe(scenePlanningFingerprint("n", "b", "a2", story.scenes, "openai", "one")); });
   it("retries a transient scene-planner failure", async () => { const { root, story } = await fixture(); const provider = new SceneLLM(); const generate = provider.generateStructured.bind(provider); let attempts = 0; provider.generateStructured = async (request: any) => { if (++attempts === 1) throw Object.assign(new Error("temporarily unavailable"), { status: 503, headers: { "retry-after": "0" } }); return generate(request); }; await expect(planStoredScenes({ root, story, chapter: 1, provider })).resolves.toMatchObject({ reused: false }); expect(attempts).toBe(2); });
   it("keeps manual edits as the image-generation source of truth", async () => { const { root, story } = await fixture(); const result = await planStoredScenes({ root, story, chapter: 1, provider: new SceneLLM() }); const scenes = structuredClone(result.manifest.scenes); scenes[0]!.visualPrompt = "A manually art-directed brass observatory"; const updated = await updateStoredSceneManifest({ root, story, chapter: 1, scenes }); expect(updated.manuallyEdited).toBe(true); expect(updated.manualRevision).toBe(1); expect(updated.scenes[0]!.visualPrompt).toContain("manually art-directed"); expect(updated.scenes[0]!.artwork.status).toBe("pending"); });
+  it("saves only the selected chapter scene and rejects an outdated draft", async () => {
+    const { root, story } = await fixture();
+    const planned = await planStoredScenes({ root, story, chapter: 1, provider: new SceneLLM() });
+    const original = planned.manifest.scenes[0]!;
+    const edited = { ...original, visualPrompt: "A revised brass telescope", artwork: { ...original.artwork, review: "approved" as const } };
+    const updated = await updateStoredScene({ root, story, chapter: 1, sceneId: original.id, scene: edited, expectedFingerprint: sceneContentFingerprint(original) });
+    expect(updated.scenes[0]!.visualPrompt).toBe(edited.visualPrompt);
+    expect(updated.scenes[0]!.artwork.review).toBe("unreviewed");
+    expect(updated.scenes[1]).toEqual(planned.manifest.scenes[1]);
+    await expect(updateStoredScene({ root, story, chapter: 1, sceneId: original.id, scene: edited, expectedFingerprint: sceneContentFingerprint(original) })).rejects.toThrow("changed since it was opened");
+  });
+  it("limits a selected Chapter artwork dry run to the requested scenes without image calls", async () => {
+    const { root, story } = await fixture();
+    await planStoredScenes({ root, story, chapter: 1, provider: new SceneLLM() });
+    const images = new FakeImages();
+    const report = await generateStoredArtwork({ root, story, chapter: 1, provider: images, sceneIds: ["scene-002"], dryRun: true });
+    expect(report.sceneIds).toEqual(["scene-002"]);
+    expect(images.calls).toHaveLength(0);
+    await expect(generateStoredArtwork({ root, story, chapter: 1, provider: images, sceneIds: ["scene-099"], dryRun: true })).rejects.toThrow("not found");
+  });
+  it("does not mark Chapter artwork complete when a selected job leaves another scene ungenerated", async () => {
+    const { root, story, paths } = await fixture();
+    await planStoredScenes({ root, story, chapter: 1, provider: new SceneLLM() });
+    const images = new FakeImages();
+    const result = await generateStoredArtwork({ root, story, chapter: 1, provider: images, sceneIds: ["scene-001"] });
+    expect(result.generated).toBe(1);
+    const chapter = chapterSchema.parse(JSON.parse(await readFile(paths.chapterMeta, "utf8")));
+    expect(chapter.stages.artwork.status).toBe("pending");
+  });
+  it("previews chapter scene regeneration without writes and rejects a stale proposal", async () => {
+    const { root, story, paths } = await fixture();
+    await planStoredScenes({ root, story, chapter: 1, provider: new SceneLLM() });
+    const provider = new SceneLLM();
+    provider.generateStructured = async (request: any) => ({ value: request.schema.parse({ visualPrompt: "A more cinematic brass observatory" }) });
+    const before = await readFile(paths.scenesManifest, "utf8");
+    const proposal = await previewStoredSceneRegeneration({ root, story, chapter: 1, sceneId: "scene-001", mode: "image_prompt", provider });
+    expect(proposal.proposed.visualPrompt).toBe("A more cinematic brass observatory");
+    expect(await readFile(paths.scenesManifest, "utf8")).toBe(before);
+    const applied = await applyStoredSceneRegeneration({ root, story, chapter: 1, sceneId: "scene-001", proposal });
+    expect(applied.scenes[0]!.visualPrompt).toBe(proposal.proposed.visualPrompt);
+    expect(applied.scenes[0]!.summary).toBe(proposal.current.summary);
+    await expect(applyStoredSceneRegeneration({ root, story, chapter: 1, sceneId: "scene-001", proposal })).rejects.toThrow("changed since the proposal");
+  });
   it("documents per-scene fields, the importance rubric, and subtitle timing usage", () => {
     // Bumped to v3: the planner schema gained visualChanges and the
     // instructions gained the PREVIOUS VISUAL CONTINUITY contract.

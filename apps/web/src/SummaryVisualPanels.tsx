@@ -1,11 +1,17 @@
 import { useEffect, useRef, useState } from "react";
-import { api, getArtDirection, post, put, type Job, type StoryArtDirection, type StorySummary } from "./api.js";
+import { api, del, getArtDirection, post, put, type Job, type StoryArtDirection, type StoryConfig, type StorySummary } from "./api.js";
 import { estimateScenePacing } from "../../../src/scenes/pacing.js";
 import { summaryAudioAvailable, summaryNarrationTextAvailable, summaryScenePlanAvailable } from "../../../src/summaries/types.js";
 import type { SummarySceneRegenerationProposal } from "../../../src/summaries/media.js";
 import type { Scene } from "../../../src/scenes/types.js";
 import { dirtySceneIds, reconcileSceneDrafts, sceneEditableValues, scenePlanStructureDirty } from "./summary-scene-draft.js";
 import { VisualProfileCheckDialog, type VisualPreflightReport } from "./VisualProfileCheckDialog.js";
+import { SceneFilmstrip } from "./SceneFilmstrip.js";
+import { AdvancedVisualDirection } from "./AdvancedVisualDirection.js";
+import { VideoReadinessPanel, type ReadinessCheck } from "./VideoReadinessPanel.js";
+import { VisualGroundingPanel } from "./VisualGroundingPanel.js";
+import { VisualProfileModal } from "./VisualProfileModal.js";
+import type { ResolvedSceneContinuity } from "../../../src/visual-canon/continuity-state.js";
 
 export type SummaryVisualProps = { slug?: string; summary: StorySummary; base: string; disabled: boolean; onChange: (summary: StorySummary) => void;
   onGenerate: (job: Job) => void; onError: (error: unknown) => void; onEditScene?: (sceneId: string) => void; focusSceneId?: string; produceBlocked?: { id: string; preflight: VisualPreflightReport } };
@@ -21,6 +27,25 @@ function useActions(props: SummaryVisualProps) {
   return { run, disabled: props.disabled || pending, pending };
 }
 const clock = (seconds: number) => `${Math.floor(seconds / 60)}:${String(Math.floor(seconds % 60)).padStart(2, "0")}`;
+function SummaryContinuityEditor({ continuity, busy, onSave, onReset }: { continuity?: ResolvedSceneContinuity; busy: boolean; onSave: (input: { note?: string; usePreviousReference?: "prefer" | "avoid" }) => void; onReset: () => void }) {
+  const [note, setNote] = useState(continuity?.manualOverride?.note ?? "");
+  const [reference, setReference] = useState<"inherit" | "prefer" | "avoid">(continuity?.manualOverride?.usePreviousReference ?? "inherit");
+  const stateText = (state?: ResolvedSceneContinuity["startState"]) => state ? [
+    ...state.characters.map((character) => `${character.name}${character.condition ? ` · ${character.condition}` : ""}${character.wardrobe ? ` · ${character.wardrobe}` : ""}`),
+    state.environment && `Environment · ${Object.values(state.environment).filter(Boolean).join(" · ")}`,
+    ...state.objects.map((object) => `Object · ${object.name}${object.condition ? ` · ${object.condition}` : ""}`),
+    state.spatial && `Spatial · ${state.spatial}`,
+  ].filter(Boolean).join("\n") || "No state recorded" : "No state recorded";
+  return <details className="scene-direction-panel scene-continuity-panel"><summary>Visual continuity {continuity?.manualOverride && <span className="manual-badge">Manual override{continuity.manualOverride.stale ? " · stale" : ""}</span>}</summary><div className="scene-direction-content">
+    <div className="continuity-state"><h5>Entering state</h5><pre>{stateText(continuity?.startState)}</pre></div>
+    {continuity?.changes && <div className="continuity-state"><h5>Changes in this scene</h5><pre>{JSON.stringify(continuity.changes, null, 2)}</pre></div>}
+    <div className="continuity-state"><h5>Ending state</h5><pre>{stateText(continuity?.endState)}</pre></div>
+    <p className="continuity-reference">Previous reference: {continuity?.referenceDecision?.reason ?? "No previous reference"}</p>
+    <label>Continuity note<input value={note} maxLength={1000} disabled={busy} onChange={(event) => setNote(event.target.value)} placeholder="Carry a visible change into this scene" /></label>
+    <label>Previous-scene reference<select value={reference} disabled={busy} onChange={(event) => setReference(event.target.value as typeof reference)}><option value="inherit">Automatic</option><option value="prefer">Prefer previous artwork</option><option value="avoid">Avoid previous artwork</option></select></label>
+    <div className="summary-visual-actions"><button type="button" className="button" disabled={busy} onClick={() => onSave({ ...(note.trim() ? { note: note.trim() } : {}), ...(reference === "inherit" ? {} : { usePreviousReference: reference }) })}>{busy ? "Saving…" : "Save continuity override"}</button>{continuity?.manualOverride && <button type="button" className="button" disabled={busy} onClick={onReset}>Reset override</button>}</div>
+  </div></details>;
+}
 export function summaryArtDirectionChoiceOptions(direction?: StoryArtDirection) {
   const defaultPreset = direction?.presets.find((preset) => preset.isDefault) ?? direction?.presets.find((preset) => preset.id === direction.activePresetId) ?? direction?.presets[0];
   return [
@@ -50,6 +75,10 @@ export function SummaryScenePanel(props: SummaryVisualProps) {
   const [artDirection, setArtDirection] = useState<StoryArtDirection>();
   const [savingArtDirection, setSavingArtDirection] = useState(false);
   const [artDirectionError, setArtDirectionError] = useState("");
+  const [resolvedCharacters, setResolvedCharacters] = useState<Record<string, Array<{ name: string; entityId?: string; canonicalName?: string; profileStatus?: "draft" | "approved" | "missing" }>>>({});
+  const [activeProfile, setActiveProfile] = useState<{ id: string; name: string }>();
+  const [continuity, setContinuity] = useState<Record<string, ResolvedSceneContinuity>>({});
+  const [continuityBusy, setContinuityBusy] = useState<string>();
   const savedTimer = useRef<ReturnType<typeof setTimeout>>();
   useEffect(() => () => { if (savedTimer.current) clearTimeout(savedTimer.current); }, []);
   useEffect(() => {
@@ -58,6 +87,20 @@ export function SummaryScenePanel(props: SummaryVisualProps) {
     void getArtDirection(props.slug).then((value) => { if (active) { setArtDirection(value); setArtDirectionError(""); } }).catch((error) => { if (active) setArtDirectionError(error instanceof Error ? error.message : String(error)); });
     return () => { active = false; };
   }, [props.slug]);
+  useEffect(() => {
+    let active = true;
+    void api<{ scenes: Array<{ sceneId: string; characters: Array<{ name: string; entityId?: string; canonicalName?: string; profileStatus?: "draft" | "approved" | "missing" }> }> }>(`${props.base}/scenes/identities`)
+      .then((result) => { if (active) setResolvedCharacters(Object.fromEntries(result.scenes.map((scene) => [scene.sceneId, scene.characters]))); })
+      .catch(() => { if (active) setResolvedCharacters({}); });
+    return () => { active = false; };
+  }, [props.base, summary.scenePlan]);
+  useEffect(() => {
+    let active = true;
+    void api<{ scenes: Array<{ sceneId: string; continuity?: ResolvedSceneContinuity }> }>(`${props.base}/scenes/continuity`)
+      .then((result) => { if (active) setContinuity(Object.fromEntries(result.scenes.filter((scene) => scene.continuity).map((scene) => [scene.sceneId, scene.continuity!]))); })
+      .catch((error) => { if (active) props.onError(error); });
+    return () => { active = false; };
+  }, [props.base, summary.scenePlan]);
   useEffect(() => {
     const incoming = structuredClone(summary.scenePlan?.scenes ?? []);
     if (summaryIdRef.current !== summary.id) {
@@ -116,6 +159,15 @@ export function SummaryScenePanel(props: SummaryVisualProps) {
     catch (error) { setSceneError((errors) => ({ ...errors, [sceneId]: error instanceof Error ? error.message : String(error) })); }
     finally { setRegeneratingScene(undefined); }
   };
+  const updateContinuity = async (sceneId: string, input?: { note?: string; usePreviousReference?: "prefer" | "avoid" }) => {
+    setContinuityBusy(sceneId);
+    try {
+      const result = input ? await put<{ scenes: Array<{ sceneId: string; continuity?: ResolvedSceneContinuity }> }>(`${props.base}/scenes/${sceneId}/continuity`, input) : await del<{ scenes: Array<{ sceneId: string; continuity?: ResolvedSceneContinuity }> }>(`${props.base}/scenes/${sceneId}/continuity`);
+      setContinuity(Object.fromEntries(result.scenes.filter((scene) => scene.continuity).map((scene) => [scene.sceneId, scene.continuity!])));
+      props.onChange((await api<{ summary: StorySummary }>(props.base)).summary);
+    } catch (error) { setSceneError((errors) => ({ ...errors, [sceneId]: error instanceof Error ? error.message : String(error) })); }
+    finally { setContinuityBusy(undefined); }
+  };
   const defaultPreset = artDirection?.presets.find((preset) => preset.isDefault) ?? artDirection?.presets.find((preset) => preset.id === artDirection.activePresetId) ?? artDirection?.presets[0];
   const summaryDirection = summary.artDirectionOverride;
   const summaryDirectionValue = summaryDirection?.mode === "disabled" ? "disabled" : summaryDirection?.mode === "preset" ? `preset:${summaryDirection.presetId}` : "story-default";
@@ -128,29 +180,7 @@ export function SummaryScenePanel(props: SummaryVisualProps) {
     catch (error) { setArtDirectionError(error instanceof Error ? error.message : String(error)); }
     finally { setSavingArtDirection(false); }
   };
-  const sceneDirectionLabel = (scene: Scene) => {
-    if (scene.direction?.useStoryArtDirection === false) return "Art direction disabled for this scene";
-    const ownId = scene.overrides?.artDirectionPresetId;
-    if (ownId) return artDirection?.presets.find((preset) => preset.id === ownId) ? `Scene override · ${artDirection.presets.find((preset) => preset.id === ownId)!.name}` : `Missing scene preset · ${ownId} (using Story Default)`;
-    if (scene.overrides?.artDirectionMode === "story-default") return `Scene override · Story Default · ${defaultPreset?.name ?? "loading"}`;
-    if (summaryDirection?.mode === "disabled") return "Inherits summary · No Story Art Direction";
-    if (summaryDirection?.mode === "preset") return missingSummaryPreset ? `Inherits summary · missing preset (using Story Default)` : `Inherits summary · ${artDirection?.presets.find((preset) => preset.id === summaryDirection.presetId)?.name ?? "selected preset"}`;
-    return summaryDirection?.mode === "story-default" || !summaryDirection ? `Story Default · ${defaultPreset?.name ?? "loading"}` : `Inherits summary · Story Default · ${defaultPreset?.name ?? "loading"}`;
-  };
   const inheritedDirectionLabel = () => summaryDirection?.mode === "disabled" ? "No Story Art Direction" : summaryDirection?.mode === "preset" ? missingSummaryPreset ? "Missing summary preset (using Story Default)" : artDirection?.presets.find((preset) => preset.id === summaryDirection.presetId)?.name ?? "Summary preset" : `Story Default · ${defaultPreset?.name ?? "loading"}`;
-  const directionOptions = (scene: Scene): Array<{ value: string; label: string }> => {
-    const options = [{ value: "inherit", label: `Inherit Summary · ${inheritedDirectionLabel()}` }, { value: "story-default", label: `Story Default · ${defaultPreset?.name ?? "Main Style"}` }, ...(artDirection?.presets ?? []).map((preset) => ({ value: `preset:${preset.id}`, label: `Preset · ${preset.name}` }))];
-    const ownId = scene.overrides?.artDirectionPresetId;
-    if (ownId && !artDirection?.presets.some((preset) => preset.id === ownId)) options.push({ value: `missing:${ownId}`, label: `Missing preset · ${ownId} (fallback)` });
-    return options;
-  };
-  const setScenePreset = (scene: Scene, value: string) => {
-    const overrides = { ...(scene.overrides ?? {}), wardrobeOverrides: scene.overrides?.wardrobeOverrides ?? {} };
-    if (value === "inherit") { delete overrides.artDirectionPresetId; overrides.artDirectionMode = "inherit-summary"; }
-    else if (value === "story-default") { delete overrides.artDirectionPresetId; overrides.artDirectionMode = "story-default"; }
-    else if (value.startsWith("preset:")) { delete overrides.artDirectionMode; overrides.artDirectionPresetId = value.slice(7); }
-    edit(scene.id, { overrides });
-  };
   const directionFor = (scene: Scene) => ({ characterExpressions: {}, useCharacterReferences: true, useCreatureReferences: true, useLocationReferences: true, preserveWardrobeEquipment: true, useStoryArtDirection: true, ...(scene.direction ?? {}) });
   const overridesFor = (scene: Scene) => ({ wardrobeOverrides: {}, ...(scene.overrides ?? {}) });
   const updateDirection = (scene: Scene, patch: Partial<NonNullable<Scene["direction"]>>) => edit(scene.id, { direction: { ...directionFor(scene), ...patch } });
@@ -167,6 +197,7 @@ export function SummaryScenePanel(props: SummaryVisualProps) {
     {summary.narration?.status === "stale" && summaryNarrationTextAvailable(summary) && <p className="summary-media-warning">Using stale narration — scenes can still be generated from the existing narration; regenerate narration first only if you want the plan based on the latest changes.</p>}
     {planDirty && <p className="summary-media-warning">Scene order or deletion has unsaved changes. Save all scene edits to apply the new plan.</p>}
     {planError && <div className="error-box">{planError}</div>}
+    {draft.length > 0 && <SceneFilmstrip scenes={draft} imageFor={(scene) => scene.artwork.imageFingerprint ? `/api${props.base}/artwork/${scene.id}?v=${scene.artwork.imageFingerprint}` : undefined} statusFor={(scene) => scene.disabled ? "Disabled" : `${scene.artwork.review} artwork`} onSelect={(scene) => document.getElementById(`summary-scene-${summary.id}-${scene.id}`)?.scrollIntoView({ block: "center", behavior: "smooth" })} />}
     <div className="summary-visual-actions"><button className="button primary" disabled={working || anyDirty || !summaryNarrationTextAvailable(summary)} onClick={() => { if (!summary.scenePlan || confirm("Regenerate all scenes? Manual visual directions may be replaced; approved artwork is preserved for review.")) void run("scenes", { ...input, force: Boolean(summary.scenePlan) }); }}>{summary.scenePlan ? "Regenerate all scenes" : "Generate scenes"}</button>
       <button className="button" disabled={working || anyDirty || !summary.scenePlan || summary.audio?.status !== "current"} onClick={() => void run("scenes", { ...summary.scenePacing, force: false })}>Update timing</button>
       {summary.scenes?.status === "stale" && <button className="button" disabled={working || anyDirty || summary.narration?.status !== "current"} onClick={() => { if (confirm("Accept the existing scene visuals against the current narration and settings? Timing will be refreshed locally.")) void run("scenes", { acceptCurrent: true }, true); }}>Review / mark current</button>}
@@ -174,16 +205,11 @@ export function SummaryScenePanel(props: SummaryVisualProps) {
     {draft.map((scene, index) => <article id={`summary-scene-${summary.id}-${scene.id}`} tabIndex={-1} className="summary-scene-card" key={scene.id}><header><span className="eyebrow">Scene {String(index + 1).padStart(2, "0")}</span><span>{clock(scene.startSeconds)}–{clock(scene.endSeconds)} · {scene.disabled ? "disabled" : summary.scenePlan?.timingMethod ?? "estimated"}</span><span className="summary-scene-save-state" role="status">{savingScene === scene.id ? "Saving…" : dirtyIds.has(scene.id) ? "Unsaved changes" : savedScene === scene.id ? "Saved" : ""}</span></header>
       <blockquote>{scene.narrationText ?? scene.summary}</blockquote><label>Visual beat<input disabled={working} value={scene.summary} onChange={(event) => edit(scene.id, { summary: event.target.value })} /></label><label>Image prompt<textarea disabled={working} value={scene.visualPrompt} onChange={(event) => edit(scene.id, { visualPrompt: event.target.value })} /></label>
       <div className="summary-form-row"><label>Characters (comma separated)<input disabled={working} value={scene.characters.join(", ")} onChange={(event) => edit(scene.id, { characters: event.target.value.split(",").map((name) => name.trim()).filter(Boolean), entityIds: [] })} /></label><label>Location<input disabled={working} value={scene.location ?? ""} onChange={(event) => edit(scene.id, { location: event.target.value })} /></label></div>
+      {scene.characters.length > 0 && <div className="entity-chip-list">{scene.characters.map((name, characterIndex) => { const resolved = resolvedCharacters[scene.id]?.[characterIndex]; return resolved?.entityId && resolved.name === name ? <button type="button" className={`entity-chip ${resolved.profileStatus === "approved" ? "approved" : ""}`} key={`${name}-${characterIndex}`} onClick={() => setActiveProfile({ id: resolved.entityId!, name: resolved.canonicalName ?? name })} title={`Visual Profile for ${resolved.canonicalName ?? name} [${resolved.entityId}]`}><span className="chip-canon-icon">✦</span><span>{resolved.canonicalName && resolved.canonicalName !== name ? `${name} (${resolved.canonicalName})` : name}</span><small>({resolved.profileStatus ?? "no profile"})</small></button> : <span className="entity-chip unlinked" key={`${name}-${characterIndex}`}><span className="chip-canon-icon">?</span><span>{name}</span><small>(unlinked)</small></span>; })}</div>}
       <div className="summary-form-row"><label>Start seconds<input disabled={working} type="number" step="0.1" min={0} value={scene.startSeconds} onChange={(event) => edit(scene.id, { startSeconds: Number(event.target.value) })} /></label><label>End seconds<input disabled={working} type="number" step="0.1" min={0} value={scene.endSeconds} onChange={(event) => edit(scene.id, { endSeconds: Number(event.target.value) })} /></label></div>
-      <details className="summary-scene-direction"><summary>Advanced visual direction</summary><p className="summary-direction-inheritance">{sceneDirectionLabel(scene)}</p>
-        <label className="summary-direction-toggle"><input type="checkbox" checked={directionFor(scene).useStoryArtDirection !== false} disabled={working} onChange={(event) => updateDirection(scene, { useStoryArtDirection: event.target.checked })} /> Use Story / Summary Art Direction</label>
-        <label>Art direction preset<select disabled={working || directionFor(scene).useStoryArtDirection === false || !artDirection} value={scene.overrides?.artDirectionPresetId ? artDirection?.presets.some((preset) => preset.id === scene.overrides?.artDirectionPresetId) ? `preset:${scene.overrides.artDirectionPresetId}` : `missing:${scene.overrides.artDirectionPresetId}` : scene.overrides?.artDirectionMode === "story-default" ? "story-default" : "inherit"} onChange={(event) => setScenePreset(scene, event.target.value)}>{directionOptions(scene).map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select><small>Inherit the summary setting, use Story Default, or choose a scene-only preset.</small></label>
-        <div className="summary-form-row"><label>Shot type<select disabled={working} value={directionFor(scene).shotType ?? ""} onChange={(event) => updateDirection(scene, { shotType: (event.target.value || undefined) as NonNullable<Scene["direction"]>["shotType"] })}><option value="">Automatic</option>{["extreme_wide", "wide", "medium_wide", "medium", "medium_close_up", "close_up", "extreme_close_up"].map((value) => <option key={value} value={value}>{value.replaceAll("_", " ")}</option>)}</select></label><label>Camera angle<select disabled={working} value={directionFor(scene).cameraAngle ?? ""} onChange={(event) => updateDirection(scene, { cameraAngle: (event.target.value || undefined) as NonNullable<Scene["direction"]>["cameraAngle"] })}><option value="">Automatic</option>{["eye_level", "low_angle", "high_angle", "overhead", "dutch_angle", "pov", "over_shoulder"].map((value) => <option key={value} value={value}>{value.replaceAll("_", " ")}</option>)}</select></label><label>Composition<select disabled={working} value={directionFor(scene).composition ?? ""} onChange={(event) => updateDirection(scene, { composition: (event.target.value || undefined) as NonNullable<Scene["direction"]>["composition"] })}><option value="">Automatic</option>{["balanced", "centered", "rule_of_thirds", "dynamic", "symmetrical", "environmental", "character_focused"].map((value) => <option key={value} value={value}>{value.replaceAll("_", " ")}</option>)}</select></label></div>
-        <div className="summary-form-row"><label>Lighting<input disabled={working} value={directionFor(scene).lighting ?? ""} onChange={(event) => updateDirection(scene, { lighting: event.target.value || undefined })} /></label><label>Time / environment<select disabled={working} value={directionFor(scene).timeEnvironment ?? ""} onChange={(event) => updateDirection(scene, { timeEnvironment: (event.target.value || undefined) as NonNullable<Scene["direction"]>["timeEnvironment"] })}><option value="">Automatic</option>{["dawn", "day", "sunset", "dusk", "night", "interior", "custom"].map((value) => <option key={value} value={value}>{value}</option>)}</select></label></div>
-        <div className="summary-direction-toggles">{([["useCharacterReferences", "Use character references"], ["useCreatureReferences", "Use creature references"], ["useLocationReferences", "Use location references"], ["preserveWardrobeEquipment", "Preserve wardrobe / equipment"]] as const).map(([key, label]) => <label key={key}><input type="checkbox" checked={directionFor(scene)[key] !== false} disabled={working} onChange={(event) => updateDirection(scene, { [key]: event.target.checked })} /> {label}</label>)}</div>
-        <label>Custom visual prompt<textarea disabled={working} value={overridesFor(scene).customVisualPrompt ?? ""} onChange={(event) => updateOverrides(scene, { customVisualPrompt: event.target.value || undefined })} /></label><label>Custom negative prompt<textarea disabled={working} value={overridesFor(scene).customNegativePrompt ?? ""} onChange={(event) => updateOverrides(scene, { customNegativePrompt: event.target.value || undefined })} /></label>
-        <label>Wardrobe / equipment overrides<textarea disabled={working} value={Object.entries(overridesFor(scene).wardrobeOverrides).map(([name, outfit]) => `${name}: ${outfit}`).join("\n")} onChange={(event) => { const wardrobeOverrides = Object.fromEntries(event.target.value.split("\n").map((line) => { const index = line.indexOf(":"); return index > 0 ? [line.slice(0, index).trim(), line.slice(index + 1).trim()] : ["", ""]; }).filter(([name, outfit]) => name && outfit)); updateOverrides(scene, { wardrobeOverrides }); }} /><small>One entry per line: Character: outfit or equipment detail.</small></label>
-      </details>
+      <AdvancedVisualDirection source="summary" direction={scene.direction} overrides={scene.overrides} artDirection={artDirection} summaryPreset={inheritedDirectionLabel()}
+        disabled={working} onDirection={(patch) => updateDirection(scene, patch)} onOverrides={(patch) => updateOverrides(scene, patch)} />
+      <SummaryContinuityEditor key={`${scene.id}:${continuity[scene.id]?.manualOverride?.revision ?? 0}`} continuity={continuity[scene.id]} busy={continuityBusy === scene.id} onSave={(input) => void updateContinuity(scene.id, input)} onReset={() => void updateContinuity(scene.id)} />
       {sceneError[scene.id] && <div className="error-box">{sceneError[scene.id]}</div>}
       <div className="summary-visual-actions"><button className="button primary" disabled={working || !dirtyIds.has(scene.id)} onClick={() => void saveScene(scene)}>Save this scene</button>
         <button className="button" disabled={working || !dirtyIds.has(scene.id)} onClick={() => { const persisted = savedRef.current.find((item) => item.id === scene.id); if (persisted) setDraft((scenes) => scenes.map((item) => item.id === scene.id ? structuredClone(persisted) : item)); setSceneError((errors) => ({ ...errors, [scene.id]: "" })); }}>Revert changes</button>
@@ -195,11 +221,20 @@ export function SummaryScenePanel(props: SummaryVisualProps) {
         <div className="summary-visual-actions"><button className="button primary" disabled={working || dirtyIds.has(scene.id) || planDirty} onClick={() => void applyRegeneration(scene.id)}>Apply regeneration</button><button className="button" disabled={working} onClick={() => setProposal(undefined)}>Cancel</button></div></div>}
       {summary.audio?.outputFingerprint && <audio controls preload="none" aria-label={`Preview ${scene.id} timing`} src={`/api${props.base}/export/audio#t=${scene.startSeconds},${scene.endSeconds}`} />}</article>)}
     {pending && <p role="status">Starting scene job…</p>}
+    {activeProfile && props.slug && <VisualProfileModal slug={props.slug} entityId={activeProfile.id} entityName={activeProfile.name} onClose={() => setActiveProfile(undefined)} />}
   </section>;
 }
 
 export function SummaryArtworkPanel(props: SummaryVisualProps) {
   const { summary } = props; const { run, disabled } = useActions(props); const [selected, setSelected] = useState<string[]>([]);
+  const [selectedVersionByScene, setSelectedVersionByScene] = useState<Record<string, string>>({});
+  const [versionBusy, setVersionBusy] = useState<string>();
+  const [bulkReviewBusy, setBulkReviewBusy] = useState(false);
+  const [reviewFilter, setReviewFilter] = useState<"all" | "needs-review" | "approved" | "video-ready">("all");
+  const [estimate, setEstimate] = useState<{ imagesToGenerate: number; reusable: number; derivativesToBuild: number; missing: number; stale: number; blockedByVisualProfiles: number; provider: string; model: string }>();
+  const [estimating, setEstimating] = useState(false);
+  const [reupscaling, setReupscaling] = useState(false);
+  const [reupscaleMessage, setReupscaleMessage] = useState("");
   const [grounding, setGrounding] = useState<Array<{ sceneId: string; status: "current" | "stale" | "missing"; grounding: Array<{ entityId?: string; name: string; source: string; reference: boolean; primaryReference?: boolean }>; groundingRecorded?: boolean; legacyGroundingUnknown?: boolean; artDirection?: { source: "story-default" | "summary-override" | "scene-override" | "disabled"; presetName?: string; missingPresetId?: string; fingerprint?: string }; approvedHistoricalVersion: boolean }>>([]);
   const [preflight, setPreflight] = useState<VisualPreflightReport>();
   const [pendingArtworkRequest, setPendingArtworkRequest] = useState<Record<string, unknown>>();
@@ -211,6 +246,16 @@ export function SummaryArtworkPanel(props: SummaryVisualProps) {
     return () => { active = false; };
   }, [props.base, summary.scenePlan, summary.artwork]);
   const scenes = summary.scenePlan?.scenes.filter((scene) => !scene.disabled) ?? [];
+  const statusFor = (scene: Scene) => grounding.find((item) => item.sceneId === scene.id)?.status ?? "missing";
+  const videoReady = (scene: Scene) => scene.artwork.status === "complete" && Boolean(scene.artwork.imageFingerprint) && statusFor(scene) === "current" && !["rejected", "needs-regeneration"].includes(scene.artwork.review);
+  const needsReview = (scene: Scene) => scene.artwork.status === "complete" && (scene.artwork.review === "unreviewed" || scene.artwork.review === "needs-regeneration" || statusFor(scene) === "stale");
+  const visibleScenes = scenes.filter((scene) => reviewFilter === "all" || reviewFilter === "needs-review" && needsReview(scene) || reviewFilter === "approved" && scene.artwork.review === "approved" || reviewFilter === "video-ready" && videoReady(scene));
+  const estimateArtwork = async () => {
+    setEstimating(true);
+    try { setEstimate(await post<typeof estimate>(`${props.base}/artwork/estimate`, { missingOnly: true })); }
+    catch (error) { props.onError(error); }
+    finally { setEstimating(false); }
+  };
   const requestArtwork = async (request: Record<string, unknown>) => {
     setCheckingProfiles(true);
     try {
@@ -243,16 +288,54 @@ export function SummaryArtworkPanel(props: SummaryVisualProps) {
   };
   const cancelArtwork = () => { setPreflight(undefined); setPendingArtworkRequest(undefined); setOneTimeFallbackIds([]); };
   const artworkDisabled = disabled || checkingProfiles;
+  const approveVersion = async (sceneId: string, versionId: string) => {
+    setVersionBusy(sceneId);
+    try {
+      const result = await put<{ summary: StorySummary }>(`${props.base}/artwork/${sceneId}/versions/${versionId}`, {});
+      props.onChange(result.summary);
+    } catch (error) { props.onError(error); }
+    finally { setVersionBusy(undefined); }
+  };
+  const reupscale = async (ids?: string[]) => {
+    setReupscaling(true); setReupscaleMessage("");
+    try {
+      const targets = ids?.length ? ids.map((sceneId) => ({ sceneId })) : [{}];
+      let count = 0; const warnings: string[] = [];
+      for (const input of targets) {
+        const result = await post<{ rederived: unknown[]; warnings: string[] }>(`${props.base}/reupscale`, input);
+        count += result.rederived.length; warnings.push(...result.warnings);
+      }
+      setReupscaleMessage(`${count} production image${count === 1 ? "" : "s"} updated from preserved originals. ${warnings.join(" ")}`.trim());
+      props.onChange((await api<{ summary: StorySummary }>(props.base)).summary);
+    } catch (error) { props.onError(error); }
+    finally { setReupscaling(false); }
+  };
+  const markSelectedNeedsRegeneration = async () => {
+    if (!selected.length || !confirm(`Mark ${selected.length} selected scene${selected.length === 1 ? "" : "s"} as needing artwork regeneration? This changes review state only; no image provider is called.`)) return;
+    setBulkReviewBusy(true);
+    try {
+      let latest: StorySummary | undefined;
+      for (const id of selected) latest = (await put<{ summary: StorySummary }>(`${props.base}/artwork/${id}`, { review: "needs-regeneration" })).summary;
+      if (latest) props.onChange(latest);
+      setSelected([]);
+    } catch (error) { props.onError(error); }
+    finally { setBulkReviewBusy(false); }
+  };
   return <section className="summary-media-editor"><header><span className="eyebrow">Canonical visual continuity</span><h3>Scene artwork</h3><p>Uses this book’s image provider, style, and canonical visual references. Approved work is protected unless you explicitly regenerate it.</p></header>
     <div className="summary-meta"><span>{grounding.some((item) => item.status === "stale") ? "stale" : summary.artwork?.status ?? "Not generated"}</span><span>{scenes.length} enabled scenes</span></div>{summary.artwork?.error && <div className="error-box">{summary.artwork.error}</div>}
     {summary.scenes?.status === "stale" && scenes.length > 0 && <p className="summary-media-warning">The scene plan is stale — artwork will use the existing plan; regenerate scenes first only if you want artwork based on the latest narration.</p>}
-    <div className="summary-visual-actions"><button className="button primary" disabled={artworkDisabled || !scenes.length} onClick={() => void requestArtwork({ missingOnly: true })}>Generate missing artwork</button><button className="button" disabled={artworkDisabled || !selected.length || !scenes.length} onClick={() => regenerate(selected)}>Regenerate selected</button><button className="button" disabled={artworkDisabled || !scenes.length} onClick={() => regenerate()}>Regenerate all</button><button className="button" onClick={() => setSelected(selected.length === scenes.length ? [] : scenes.map((scene) => scene.id))}>Select all</button></div>
+    <div className="summary-visual-actions"><button className="button primary" disabled={artworkDisabled || !scenes.length} onClick={() => void requestArtwork({ missingOnly: true })}>Generate missing artwork</button><button className="button" disabled={artworkDisabled || !selected.length || !scenes.length} onClick={() => regenerate(selected)}>Regenerate selected</button><button className="button" disabled={artworkDisabled || bulkReviewBusy || !selected.length} onClick={() => void markSelectedNeedsRegeneration()}>{bulkReviewBusy ? "Updating review…" : "Mark selected needs regeneration"}</button><button className="button" disabled={artworkDisabled || !scenes.length} onClick={() => regenerate()}>Regenerate all</button><button className="button" disabled={artworkDisabled || estimating || !scenes.length} onClick={() => void estimateArtwork()}>{estimating ? "Estimating…" : "Estimate artwork"}</button><button className="button" disabled={artworkDisabled || reupscaling || !selected.length} onClick={() => void reupscale(selected)}>{reupscaling ? "Re-upscaling…" : `Re-upscale selected (${selected.length})`}</button><button className="button" disabled={artworkDisabled || reupscaling || !scenes.length} onClick={() => void reupscale()}>Re-upscale all</button><button className="button" onClick={() => setSelected(selected.length === visibleScenes.length ? [] : visibleScenes.map((scene) => scene.id))}>Select visible</button></div>
+    {reupscaleMessage && <p role="status" className="summary-media-note">{reupscaleMessage}</p>}
+    {estimate && <div className="summary-meta" role="status"><span>{estimate.imagesToGenerate} images to generate</span><span>{estimate.missing} missing · {estimate.stale} stale candidates</span><span>{estimate.reusable} reusable</span><span>{estimate.derivativesToBuild} local derivatives</span><span>{estimate.blockedByVisualProfiles} Visual Profile decisions</span><span>{estimate.provider} · {estimate.model}</span><span>Dry run · no image requests</span></div>}
+    <div className="scene-filter-bar" aria-label="Artwork review filter">{([["all", "All"], ["needs-review", "Needs Review"], ["approved", "Approved"], ["video-ready", "Video Ready"]] as const).map(([value, label]) => <button key={value} type="button" className={`filter-btn ${reviewFilter === value ? "active" : ""}`} onClick={() => { setReviewFilter(value); setSelected([]); }}>{label}</button>)}</div>
     {!scenes.length && <p>Generate scenes first.</p>}
     <p className="summary-media-note">Artwork uses the currently saved visual beat, image prompt, canonical identities, and available references. It does not regenerate the scene plan.</p>
-    <div className="summary-artwork-grid">{scenes.map((scene) => { const url = `/api${props.base}/artwork/${scene.id}?v=${scene.artwork.imageFingerprint ?? ""}`; const state = grounding.find((item) => item.sceneId === scene.id); return <article className="summary-scene-card" key={scene.id}><header><label><input type="checkbox" checked={selected.includes(scene.id)} onChange={(event) => setSelected(event.target.checked ? [...selected, scene.id] : selected.filter((id) => id !== scene.id))} /> {scene.id}</label><span>{state?.status === "stale" ? "Scene changed — artwork is stale" : state?.status === "missing" ? "Artwork missing" : state?.status === "current" ? "Artwork current" : scene.artwork.status} · {scene.artwork.review}</span></header>
-      {scene.artwork.imageFingerprint ? <a href={url} target="_blank" rel="noreferrer"><img src={url} alt={scene.summary} loading="lazy" /></a> : <p>No artwork yet.</p>}<h4>{scene.summary}</h4>{scene.artwork.error && <div className="error-box">{scene.artwork.error}</div>}<div className="summary-meta"><span>{scene.artwork.provider} {scene.artwork.model}</span>{scene.artwork.manuallyEdited && <span>Manually accepted</span>}</div>
-      {state && <div className="summary-grounding"><small>Art direction</small>{state.artDirection ? <span>{state.artDirection.source === "summary-override" ? "Summary override" : state.artDirection.source === "scene-override" ? "Scene override" : state.artDirection.source === "disabled" ? "Disabled" : "Story default"}{state.artDirection.presetName ? ` · ${state.artDirection.presetName}` : ""}{state.artDirection.missingPresetId ? ` · missing preset ${state.artDirection.missingPresetId}; fallback used` : ""}</span> : <span>{state.status === "missing" ? "Not generated yet" : "Legacy artwork — art direction not recorded"}</span>}<small>Visual grounding</small>{state.legacyGroundingUnknown ? <span>Legacy artwork — visual grounding not recorded</span> : state.grounding.length ? state.grounding.map((item) => <span key={item.entityId ?? item.name}>{item.name} — {item.source}{item.primaryReference ? " · primary reference" : item.reference ? " · approved reference" : ""}</span>) : <span>No resolved canonical entities for this scene</span>}{state.approvedHistoricalVersion && <span>Approved historical version retained</span>}</div>}
-      <div className="summary-visual-actions"><button className="button" disabled={artworkDisabled || !scenes.length} onClick={() => scene.artwork.imageFingerprint ? regenerate([scene.id]) : void requestArtwork({ scenes: [scene.id] })}>{scene.artwork.imageFingerprint ? "Regenerate artwork from current saved scene" : "Generate artwork from current saved scene"}</button><button className="button" onClick={() => props.onEditScene?.(scene.id)}>Edit scene</button>{scene.artwork.imageFingerprint && <><button className="button" disabled={disabled} onClick={() => { if (confirm("Approve this image for the current scene and visual settings?")) void run(`artwork/${scene.id}`, { review: "approved" }, true); }}>Approve / retain</button><button className="button" disabled={disabled} onClick={() => void run(`artwork/${scene.id}`, { review: "rejected" }, true)}>Reject</button><a className="button" download href={`${url}&download=1`}>Download PNG</a></>}</div></article>; })}</div>
+    <div className="summary-artwork-grid">{visibleScenes.map((scene) => { const versions = scene.artwork.versions ?? []; const chosen = versions.find((item) => item.id === selectedVersionByScene[scene.id]) ?? versions.find((item) => item.id === scene.artwork.approvedVersionId) ?? versions.at(-1); const url = chosen ? `/api${props.base}/artwork/${scene.id}/versions/${chosen.id}` : `/api${props.base}/artwork/${scene.id}?v=${scene.artwork.imageFingerprint ?? ""}`; const state = grounding.find((item) => item.sceneId === scene.id); return <article className="summary-scene-card" key={scene.id}><header><label><input type="checkbox" checked={selected.includes(scene.id)} onChange={(event) => setSelected(event.target.checked ? [...selected, scene.id] : selected.filter((id) => id !== scene.id))} /> {scene.id}</label><span>{state?.status === "stale" ? "Scene changed — artwork is stale" : state?.status === "missing" ? "Artwork missing" : state?.status === "current" ? "Artwork current" : scene.artwork.status} · {scene.artwork.review}</span></header>
+      {versions.length > 0 && <div className="version-tabs-bar"><div className="version-tabs">{versions.map((version) => <button type="button" key={version.id} className={`version-tab ${chosen?.id === version.id ? "active" : ""} ${scene.artwork.approvedVersionId === version.id ? "is-approved" : ""}`} onClick={() => setSelectedVersionByScene((current) => ({ ...current, [scene.id]: version.id }))}>v{version.versionNumber}{scene.artwork.approvedVersionId === version.id ? " ✓" : ""}</button>)}</div>{chosen && scene.artwork.approvedVersionId !== chosen.id && <button type="button" className="button small" disabled={artworkDisabled || versionBusy === scene.id} onClick={() => void approveVersion(scene.id, chosen.id)}>Approve v{chosen.versionNumber}</button>}</div>}
+      {chosen && <div className="summary-meta"><span>{new Date(chosen.createdAt).toLocaleString()}</span><span>{chosen.provider} · {chosen.model}</span>{chosen.original && <span>Original {chosen.original.width}×{chosen.original.height}</span>}<span>Upscale: {chosen.upscale?.status ?? "not applied"}</span><span>{scene.artwork.approvedVersionId === chosen.id ? "Approved version" : chosen.id === versions.at(-1)?.id ? "Latest version" : "Historical version"}</span></div>}
+      {(chosen || scene.artwork.imageFingerprint) ? <a href={url} target="_blank" rel="noreferrer"><img src={url} alt={scene.summary} loading="lazy" /></a> : <p>No artwork yet.</p>}<h4>{scene.summary}</h4>{scene.artwork.error && <div className="error-box">{scene.artwork.error}</div>}<div className="summary-meta"><span>{scene.artwork.provider} {scene.artwork.model}</span>{scene.artwork.manuallyEdited && <span>Manually accepted</span>}</div>
+      {state && scene.artwork.imageFingerprint && <VisualGroundingPanel label="Grounding recorded for production version" recorded={!state.legacyGroundingUnknown && Boolean(state.groundingRecorded)}>{chosen && scene.artwork.approvedVersionId !== chosen.id && <span>Grounding below describes the approved production version, not the selected historical preview.</span>}<small>Art direction · production version</small>{state.artDirection ? <span>{state.artDirection.source === "summary-override" ? "Summary override" : state.artDirection.source === "scene-override" ? "Scene override" : state.artDirection.source === "disabled" ? "Disabled" : "Story default"}{state.artDirection.presetName ? ` · ${state.artDirection.presetName}` : ""}{state.artDirection.missingPresetId ? ` · missing preset ${state.artDirection.missingPresetId}; fallback used` : ""}</span> : <span>{state.status === "missing" ? "Not generated yet" : "Legacy artwork — art direction not recorded"}</span>}<small>Visual grounding · production version</small>{state.legacyGroundingUnknown ? <span>Legacy artwork — visual grounding not recorded</span> : state.grounding.length ? state.grounding.map((item) => <span key={item.entityId ?? item.name}>{item.name} — {item.source}{item.primaryReference ? " · primary reference" : item.reference ? " · approved reference" : ""}</span>) : <span>No resolved canonical entities for this scene</span>}{state.approvedHistoricalVersion && <span>Approved historical version retained</span>}</VisualGroundingPanel>}
+      <div className="summary-visual-actions"><button className="button" disabled={artworkDisabled || !scenes.length} onClick={() => scene.artwork.imageFingerprint ? regenerate([scene.id]) : void requestArtwork({ scenes: [scene.id] })}>{scene.artwork.imageFingerprint ? "Regenerate artwork from current saved scene" : "Generate artwork from current saved scene"}</button><button className="button" onClick={() => props.onEditScene?.(scene.id)}>Edit scene</button>{scene.artwork.imageFingerprint && <><button className="button" disabled={disabled || versionBusy === scene.id} onClick={() => { if (!confirm(`Approve ${chosen ? `version ${chosen.versionNumber}` : "the production image"} for this scene?`)) return; if (chosen) void approveVersion(scene.id, chosen.id); else void run(`artwork/${scene.id}`, { review: "approved" }, true); }}>Approve displayed image</button><button className="button" disabled={disabled} onClick={() => void run(`artwork/${scene.id}`, { review: "rejected" }, true)}>Reject</button><button className="button" disabled={disabled} onClick={() => void run(`artwork/${scene.id}`, { review: "needs-regeneration" }, true)}>Needs regeneration</button><a className="button" download href={`${url}${url.includes("?") ? "&" : "?"}download=1`}>Download PNG</a></>}</div></article>; })}</div>
     {checkingProfiles && <p className="summary-media-working" role="status">Checking Visual Profiles for scenes that need new artwork…</p>}
     {preflight && <VisualProfileCheckDialog slug={props.slug ?? props.base.split("/")[2] ?? ""} report={preflight} oneTimeEntityIds={oneTimeFallbackIds} onOneTimeEntityIds={setOneTimeFallbackIds} onCancel={cancelArtwork} onContinue={() => void continueArtwork()} onRefresh={() => void refreshPreflight()} onError={props.onError} />}
   </section>;
@@ -260,10 +343,17 @@ export function SummaryArtworkPanel(props: SummaryVisualProps) {
 
 export function SummaryVideoPanel(props: SummaryVisualProps) {
   const { summary } = props; const { run, disabled } = useActions(props);
+  const [videoSettings, setVideoSettings] = useState<StoryConfig["video"]>();
   const [preflight, setPreflight] = useState<VisualPreflightReport>();
   const [pendingProduceRequest, setPendingProduceRequest] = useState<Record<string, unknown>>();
   const [oneTimeFallbackIds, setOneTimeFallbackIds] = useState<string[]>([]);
   const [checkingProfiles, setCheckingProfiles] = useState(false);
+  useEffect(() => {
+    if (!props.slug) return;
+    let active = true;
+    void api<{ story: StoryConfig }>(`/stories/${props.slug}`).then((result) => { if (active) setVideoSettings(result.story.video); }).catch((error) => { if (active) props.onError(error); });
+    return () => { active = false; };
+  }, [props.slug]);
   useEffect(() => {
     if (props.produceBlocked?.id !== summary.id) return;
     setPendingProduceRequest({}); setPreflight(props.produceBlocked.preflight); setOneTimeFallbackIds([]);
@@ -290,7 +380,21 @@ export function SummaryVideoPanel(props: SummaryVisualProps) {
     finally { setCheckingProfiles(false); }
   };
   const cancelProduce = () => { setPreflight(undefined); setPendingProduceRequest(undefined); setOneTimeFallbackIds([]); };
+  const enabledScenes = summary.scenePlan?.scenes.filter((scene) => !scene.disabled) ?? [];
+  const missingArtwork = enabledScenes.filter((scene) => scene.artwork.status !== "complete" || !scene.artwork.imageFingerprint).length;
+  const rejectedArtwork = enabledScenes.filter((scene) => ["rejected", "needs-regeneration"].includes(scene.artwork.review)).length;
+  const unreviewedArtwork = enabledScenes.filter((scene) => scene.artwork.review === "unreviewed").length;
+  const checks: ReadinessCheck[] = [
+    { label: "Audio", state: !summaryAudioAvailable(summary) ? "blocker" : summary.audio?.status === "stale" ? "warning" : "ready", detail: !summaryAudioAvailable(summary) ? "Mastered audio is missing" : summary.audio?.status === "stale" ? "Retained stale audio will be used" : "Mastered audio available" },
+    { label: "Scene plan", state: !summaryScenePlanAvailable(summary) || !enabledScenes.length ? "blocker" : summary.scenes?.status === "stale" ? "warning" : "ready", detail: !enabledScenes.length ? "No enabled scenes" : summary.scenes?.status === "stale" ? "Retained scene plan will be used" : `${enabledScenes.length} enabled scenes` },
+    { label: "Artwork", state: missingArtwork || rejectedArtwork || summary.artwork?.status !== "current" ? "blocker" : "ready", detail: missingArtwork ? `${missingArtwork} scene image${missingArtwork === 1 ? "" : "s"} missing` : rejectedArtwork ? `${rejectedArtwork} rejected or needing regeneration` : summary.artwork?.status !== "current" ? "At least one image is stale or damaged; renderer requires current artwork" : "Scene images current" },
+    { label: "Review", state: unreviewedArtwork ? "warning" : "ready", detail: unreviewedArtwork ? `${unreviewedArtwork} unreviewed image${unreviewedArtwork === 1 ? "" : "s"}` : "No unreviewed images" },
+    { label: "Subtitle timing", state: summary.alignment?.warning ? "warning" : "ready", detail: videoSettings?.subtitleMode === "none" ? "Subtitles disabled" : summary.alignment?.warning ?? "Generated from alignment or narration during render" },
+    { label: "Video", state: summary.video?.status === "current" ? "ready" : "warning", detail: summary.video?.status === "current" ? "Current render available" : "Render needed" },
+  ];
   return <section className="summary-media-editor"><header><span className="eyebrow">Recap screening room</span><h3>Summary video</h3><p>Uses mastered recap audio, scene artwork, and this book’s video settings. The recap has no silent intro; video length matches its audio.</p></header>
+    <VideoReadinessPanel checks={checks} />
+    {videoSettings && <div className="summary-meta" aria-label="Effective summary video settings"><span>{videoSettings.resolution ?? `${videoSettings.width}×${videoSettings.height}`} · {videoSettings.fps} FPS</span><span>Subtitles: {videoSettings.subtitleMode}</span><span>Background: {videoSettings.backgroundMode}</span><span>No silent intro</span></div>}
     <div className="summary-meta"><span>{summary.video?.status ?? "Not generated"}</span>{summary.video?.durationSeconds && <span>{clock(summary.video.durationSeconds)}</span>}{summary.video?.width && <span>{summary.video.width} × {summary.video.height}</span>}{summary.video?.sceneCount && <span>{summary.video.sceneCount} scenes</span>}{summary.video?.generatedAt && <span>{new Date(summary.video.generatedAt).toLocaleString()}</span>}<span>Audio: mastered summary narration</span></div>
     {summary.video?.status === "stale" && <p className="summary-media-warning">This video uses older inputs. Produce again to update only missing/stale stages.</p>}{summary.video?.error && <div className="error-box">{summary.video.error}</div>}
     {(summary.audio?.status === "stale" || summary.scenes?.status === "stale") && summaryAudioAvailable(summary) && summaryScenePlanAvailable(summary) && <p className="summary-media-warning">Video will render from the existing stale audio/scene inputs without regenerating them; regenerate those stages first only if you want the video based on the latest changes.</p>}

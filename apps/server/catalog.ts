@@ -544,6 +544,7 @@ export async function getScenesDashboard(root: string, slug: string, selectedCha
         const continuityEntry = continuityByScene.get(scene.id);
         return {
           ...scene,
+          contentFingerprint: sceneContentFingerprint(scene),
           resolvedCharacters,
           imageUrl: hasMain
             ? `/api/stories/${slug}/chapters/${chapterNumber}/scenes/${scene.id}.png`

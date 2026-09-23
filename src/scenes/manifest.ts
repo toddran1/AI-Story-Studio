@@ -14,10 +14,14 @@ import { rebuildStoryBibleBeforeChapter } from "../story-bible/rebuild.js";
 import { retrieveRelevantContext } from "../story-bible/retrieval.js";
 import { fingerprint } from "../utils/hash.js";
 import { withRetry } from "../batch/retry.js";
+import { z } from "zod";
 import { retryConfigSchema } from "../batch/types.js";
 import { resolveVisualEntities } from "./identity.js";
 import { planScenes, SCENE_PLANNER_PROMPT_VERSION } from "./planner.js";
 import { normalizeSceneTiming, validateSceneCoverage } from "./timing.js";
+import { planVisualScenes } from "./planner.js";
+import { sceneRegenerationModeSchema, sceneRegenerationProposalSchema, sceneProposalSourceFingerprint, sceneVisualSnapshot, sceneVisualSnapshotSchema } from "./regeneration.js";
+import { loadStoryArtDirection } from "../visual-canon/art-direction.js";
 import { Scene, SceneManifest, sceneManifestSchema, sceneSchema } from "./types.js";
 import { loadVisualContinuityOverlay, normalizeVisualContinuityChange, persistChapterVisualContinuity, renderContinuityForPlanner, resolvePreviousVisualContinuity, visualContinuityOverlayFingerprint } from "../visual-canon/continuity.js";
 
@@ -74,9 +78,87 @@ export async function planStoredScenes(options: { root: string; story: Story; ch
 
 export async function updateStoredSceneManifest(options: { root: string; story: Story; chapter: number; scenes: unknown }) {
   const paths = storyPaths(options.root, options.story.slug, options.chapter); const raw = await readJsonIfExists<SceneManifest>(paths.scenesManifest); if (!raw) throw new SceneError(`Chapter ${options.chapter} has no scene plan`); const manifest = sceneManifestSchema.parse(raw);
-  const incoming = sceneSchema.array().length(manifest.scenes.length).parse(options.scenes); const previous = new Map(manifest.scenes.map((scene) => [scene.id, scene])); const ids = new Set<string>();
+  const incoming = sceneSchema.array().min(1).max(100).parse(options.scenes); const previous = new Map(manifest.scenes.map((scene) => [scene.id, scene])); const ids = new Set<string>();
+  if (incoming.every((scene) => scene.disabled)) throw new SceneError("At least one scene must remain enabled");
   const scenes = incoming.map((scene) => { if (ids.has(scene.id) || !previous.has(scene.id)) throw new SceneError("Scene IDs must remain unique and stable"); ids.add(scene.id); const before = previous.get(scene.id)!; return { ...scene, artwork: sceneContentFingerprint(before) === sceneContentFingerprint(scene) ? before.artwork : { ...before.artwork, status: "pending" as const, review: "unreviewed" as const } }; });
   validateSceneCoverage(scenes, manifest.durationSeconds, options.story.scenes); const updated = sceneManifestSchema.parse({ ...manifest, scenes, manuallyEdited: true, manualRevision: manifest.manualRevision + 1, updatedAt: new Date().toISOString() }); await atomicWriteJson(paths.scenesManifest, updated); await invalidateAfterSceneEdit(paths.chapterMeta, updated); await persistChapterVisualContinuity({ root: options.root, slug: options.story.slug, chapter: options.chapter, manifest: updated }); return updated;
+}
+
+/** Persist one visual beat without accepting unrelated drafts or structural edits. */
+export async function updateStoredScene(options: { root: string; story: Story; chapter: number; sceneId: string; scene: unknown; expectedFingerprint: string }) {
+  const paths = storyPaths(options.root, options.story.slug, options.chapter);
+  const raw = await readJsonIfExists<SceneManifest>(paths.scenesManifest);
+  if (!raw) throw new SceneError(`Chapter ${options.chapter} has no scene plan`);
+  const manifest = sceneManifestSchema.parse(raw);
+  const index = manifest.scenes.findIndex((item) => item.id === options.sceneId);
+  if (index < 0) throw new SceneError(`Scene ${options.sceneId} was not found`);
+  const previous = manifest.scenes[index]!;
+  if (sceneContentFingerprint(previous) !== options.expectedFingerprint) throw new SceneError("Scene changed since it was opened. Refresh before saving this scene.");
+  const input = sceneSchema.parse(options.scene);
+  if (input.id !== options.sceneId) throw new SceneError("Scene ID cannot change during a single-scene edit");
+  const replacement = sceneSchema.parse({
+    ...previous,
+    summary: input.summary, startSeconds: input.startSeconds, endSeconds: input.endSeconds,
+    characters: input.characters, location: input.location, visualPrompt: input.visualPrompt,
+    importance: input.importance, disabled: input.disabled, direction: input.direction,
+    overrides: input.overrides, visualChanges: input.visualChanges,
+  });
+  const scenes = manifest.scenes.map((item, position) => position === index ? replacement : item);
+  return updateStoredSceneManifest({ ...options, scenes });
+}
+
+export async function previewStoredSceneRegeneration(options: { root: string; story: Story; chapter: number; sceneId: string; mode: unknown; provider: LLMProvider }) {
+  const mode = sceneRegenerationModeSchema.parse(options.mode);
+  const paths = storyPaths(options.root, options.story.slug, options.chapter);
+  const manifest = sceneManifestSchema.parse(await readJsonIfExists<SceneManifest>(paths.scenesManifest));
+  const scene = manifest.scenes.find((item) => item.id === options.sceneId);
+  if (!scene) throw new SceneError(`Scene ${options.sceneId} was not found`);
+  const narration = await readTextIfExists(paths.narration);
+  if (!narration?.trim()) throw new SceneError("Chapter narration is required to regenerate a scene");
+  const bible = await rebuildStoryBibleBeforeChapter(options.root, options.story.slug, options.chapter + 1);
+  const context = retrieveRelevantContext(bible, narration, options.chapter + 1, { recentSummaryCount: options.story.context.recentChapterSummaries });
+  const config = options.story.pipeline.scenePlanner;
+  const artDirection = await loadStoryArtDirection(options.root, options.story.slug);
+  const current = sceneVisualSnapshot(scene);
+  const visualDirectionContext = JSON.stringify({
+    storyArtDirection: artDirection,
+    direction: scene.direction, overrides: scene.overrides, visualChanges: scene.visualChanges,
+  });
+  let proposed: typeof current;
+  if (mode === "image_prompt") {
+    await options.provider.validateConfiguration();
+    const result = await options.provider.generateStructured({ model: config.model,
+      schemaName: "chapter_scene_image_prompt_proposal",
+      schema: z.object({ visualPrompt: z.string().trim().min(1).max(8000) }).strict(),
+      instructions: "Rewrite only the image prompt for this saved chapter scene. Keep the visual beat, characters, location, importance, narration timing, identities, and saved art direction unchanged. Honor references, wardrobe, negative prompt, and continuity as editorial constraints. Return only visualPrompt.",
+      input: JSON.stringify({ scene: current, visualDirectionContext, sceneNarration: scene.narrationText ?? scene.summary, chapterContext: narration.slice(0, 8000), canonicalEntities: context.canonicalEntities.map((entity) => ({ id: entity.id, name: entity.canonicalName, description: entity.description })) }),
+    });
+    proposed = { ...current, visualPrompt: result.value.visualPrompt };
+  } else {
+    const planned = await planVisualScenes(options.provider, config, {
+      sourceType: "chapter", sourceId: String(options.chapter), sourceLabel: `CHAPTER ${options.chapter}: regenerate ${scene.id} only`,
+      narration: scene.narrationText ?? scene.summary, durationSeconds: scene.endSeconds - scene.startSeconds,
+      bible: context, settings: options.story.scenes, targetSceneCount: 1, visualDirectionContext,
+    });
+    if (planned.value.scenes.length !== 1) throw new SceneError("Individual scene regeneration must return exactly one scene");
+    const next = planned.value.scenes[0]!;
+    proposed = sceneVisualSnapshotSchema.parse({ summary: next.summary, visualPrompt: next.visualPrompt, characters: next.characters,
+      entityIds: resolveVisualEntities(next.characters, bible.canonicalEntities).map((entity) => entity.id), location: next.location ?? undefined, importance: next.importance });
+  }
+  return sceneRegenerationProposalSchema.parse({ sceneId: scene.id, mode, sourceFingerprint: sceneProposalSourceFingerprint(scene), current, proposed, provider: config.provider, model: config.model });
+}
+
+export async function applyStoredSceneRegeneration(options: { root: string; story: Story; chapter: number; sceneId: string; proposal: unknown }) {
+  const proposal = sceneRegenerationProposalSchema.parse(options.proposal);
+  if (proposal.sceneId !== options.sceneId) throw new SceneError("Proposal scene ID does not match the selected scene");
+  const paths = storyPaths(options.root, options.story.slug, options.chapter);
+  const manifest = sceneManifestSchema.parse(await readJsonIfExists<SceneManifest>(paths.scenesManifest));
+  const scene = manifest.scenes.find((item) => item.id === options.sceneId);
+  if (!scene) throw new SceneError(`Scene ${options.sceneId} was not found`);
+  if (sceneProposalSourceFingerprint(scene) !== proposal.sourceFingerprint) throw new SceneError("This scene changed since the proposal was generated. Generate a new proposal before applying it.");
+  const proposed = proposal.mode === "image_prompt" ? { visualPrompt: proposal.proposed.visualPrompt } : proposal.proposed;
+  const replacement = sceneSchema.parse({ ...scene, ...proposed });
+  return updateStoredScene({ ...options, scene: replacement, expectedFingerprint: sceneContentFingerprint(scene) });
 }
 
 export function scenePlanningFingerprint(narration: string, bible: string, audio: string | undefined, settings: Story["scenes"], provider: string, model: string, continuity = "none") { return fingerprint({ narration, bible, audio, settings, provider, model, continuity, promptVersion: SCENE_PLANNER_PROMPT_VERSION }); }

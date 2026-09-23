@@ -276,6 +276,7 @@ export function renderSceneContinuity(resolved: ResolvedSceneContinuity, maxChar
     if (resolved.changes.note) notes.push(resolved.changes.note);
     if (notes.length) lines.push(`CHANGES IN THIS SCENE:\n${notes.join("\n")}`);
   }
+  if (resolved.manualOverride?.note) lines.push(`MANUAL CONTINUITY NOTE:\n${resolved.manualOverride.note}`);
   if (!lines.length) return undefined;
   const text = lines.join("\n");
   return text.length > maxCharacters ? `${text.slice(0, maxCharacters - 1)}…` : text;

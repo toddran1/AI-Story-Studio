@@ -55,6 +55,7 @@ export async function generateStoredArtwork(options: {
   chapter: number;
   provider: ImageProvider;
   sceneId?: string;
+  sceneIds?: string[];
   force?: boolean;
   dryRun?: boolean;
   /** Explicit, one-request fallback; never persisted by generation itself. */
@@ -131,8 +132,11 @@ export async function generateStoredArtwork(options: {
     }
   }
 
-  let selected = options.sceneId ? manifest.scenes.filter((scene) => scene.id === options.sceneId) : manifest.scenes;
+  if (options.sceneId && options.sceneIds) throw new ArtworkError("Choose either one scene or a scene selection");
+  const requested = options.sceneIds ? new Set(options.sceneIds) : undefined;
+  let selected = options.sceneId ? manifest.scenes.filter((scene) => scene.id === options.sceneId) : requested ? manifest.scenes.filter((scene) => requested.has(scene.id)) : manifest.scenes;
   if (options.sceneId && !selected.length) throw new ArtworkError(`Scene '${options.sceneId}' was not found`);
+  if (requested && selected.length !== requested.size) throw new ArtworkError("One or more selected scenes were not found");
 
   const candidates: Array<{
     scene: Scene;
@@ -421,9 +425,13 @@ export async function generateStoredArtwork(options: {
     }))
   );
   const allGenerated = manifest.scenes.every((scene) => scene.artwork.status === "complete");
+  // A selected-scene job must not mark the whole chapter current while other
+  // scenes still have changed inputs. Reuse the same provider-free candidate
+  // calculation used by Estimate Images, after the selected images are saved.
+  const remaining = options.sceneId || options.sceneIds ? await generateStoredArtwork({ ...options, sceneId: undefined, sceneIds: undefined, force: false, dryRun: true, onProgress: undefined }) : undefined;
   chapter.stages.artwork = {
     ...chapter.stages.artwork,
-    status: allGenerated ? "complete" : "pending",
+    status: allGenerated && (!remaining || remaining.imagesToGenerate === 0) ? "complete" : "pending",
     outputFingerprint,
     completedAt: new Date().toISOString(),
     durationMs: Date.now() - started,

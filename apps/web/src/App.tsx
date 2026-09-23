@@ -23,6 +23,10 @@ import type { ArtworkSettings, ArtworkVersion, PreviousVisualHandoff, ResolvedAr
 import { Pagination } from "./Pagination.js";
 import { BatchProcessingPanel } from "./BatchProcessingPanel.js";
 import { OPENAI_TEXT_MODELS } from "../../../src/llm/openai/models.js";
+import type { SceneRegenerationProposal } from "../../../src/scenes/regeneration.js";
+import { SceneFilmstrip } from "./SceneFilmstrip.js";
+import { AdvancedVisualDirection } from "./AdvancedVisualDirection.js";
+import { VisualGroundingPanel } from "./VisualGroundingPanel.js";
 export { Pagination, type PaginationProps, type PaginationVariant } from "./Pagination.js";
 import "./entity-sheet-actions.css";
 import "./stage-execution.css";
@@ -1575,8 +1579,8 @@ function BibleFields({ category, value, onChange }: { category: string; value: a
 function newBibleValue(category: string) { const chapters = { firstSeenChapter: 1, lastSeenChapter: 1 }; if (category === "relationships") return { subject: "", relationship: "", object: "", ...chapters }; if (category === "translationTerms") return { original: "", canonicalEnglish: "", notes: "", ...chapters }; return { canonicalEnglishName: "", originalName: "", description: "", ...(category === "characters" ? { aliases: [], pronouns: [] } : {}), ...chapters }; }
 function bibleEntryTitle(value: any) { return value.canonicalEnglishName ?? value.canonicalEnglish ?? `${value.subject} → ${value.object}`; }
 
-function getSceneProductionState(scene: Scene): { label: string; cls: string } {
-  if (scene.artwork?.review === "approved" && (scene.imageUrl || scene.artwork?.versions?.some((v) => v.id === scene.artwork.approvedVersionId))) {
+function getSceneProductionState(scene: Scene, artworkCurrent = false): { label: string; cls: string } {
+  if (artworkCurrent && scene.artwork?.review === "approved" && scene.imageUrl && scene.artwork?.status === "complete") {
     return { label: "Video Ready", cls: "state-video-ready" };
   }
   if (scene.artwork?.review === "approved") {
@@ -1955,16 +1959,48 @@ export function SceneContinuityPanel({
   );
 }
 
+function chapterSceneEditableValues(scene: Scene) {
+  const { summary, startSeconds, endSeconds, characters, location, visualPrompt, importance, disabled, direction, overrides, visualChanges } = scene;
+  return { summary, startSeconds, endSeconds, characters, location, visualPrompt, importance, disabled, direction, overrides, visualChanges };
+}
+
+function chapterSceneDirty(scene: Scene, saved: Scene[]) {
+  const original = saved.find((item) => item.id === scene.id);
+  return Boolean(original && JSON.stringify(chapterSceneEditableValues(scene)) !== JSON.stringify(chapterSceneEditableValues(original)));
+}
+
+function reconcileChapterSceneDrafts(draft: Scene[], oldSaved: Scene[], incoming: Scene[]) {
+  const edited = new Map(draft.filter((scene) => chapterSceneDirty(scene, oldSaved)).map((scene) => [scene.id, scene]));
+  const reordered = draft.map((scene) => scene.id).join("|") !== oldSaved.map((scene) => scene.id).join("|");
+  if (reordered) {
+    const fresh = new Map(incoming.map((scene) => [scene.id, scene]));
+    return draft.map((scene) => edited.get(scene.id) ?? fresh.get(scene.id) ?? scene);
+  }
+  return incoming.map((scene) => edited.get(scene.id) ?? scene);
+}
+
 export function ScenesPage({ slug, onJob, navigate, initialData }: { slug: string; onJob: (job: Job) => void; navigate?: (path: string) => void; initialData?: ScenesDashboard }) {
   const [data, setData] = useState<ScenesDashboard | undefined>(initialData);
   const [draft, setDraft] = useState<Scene[]>(() => (initialData?.manifest?.scenes ? structuredClone(initialData.manifest.scenes) : []));
+  const savedRef = useRef<Scene[]>(structuredClone(initialData?.manifest?.scenes ?? []));
+  const [saved, setSaved] = useState<Scene[]>(savedRef.current);
+  const [savingSceneId, setSavingSceneId] = useState<string>();
+  const [sceneErrors, setSceneErrors] = useState<Record<string, string>>({});
+  const [savedSceneId, setSavedSceneId] = useState<string>();
+  const [sceneProposal, setSceneProposal] = useState<SceneRegenerationProposal>();
+  const [proposalMode, setProposalMode] = useState<Record<string, SceneRegenerationProposal["mode"]>>({});
+  const [regeneratingSceneId, setRegeneratingSceneId] = useState<string>();
+  const loadRequest = useRef(0);
   const [rangeMode, setRangeMode] = useState<"single" | "range">("single");
   const [range, setRange] = useState({ from: "", to: "" });
   const [rangeError, setRangeError] = useState("");
   const [error, setError] = useState("");
   const [estimate, setEstimate] = useState<ArtworkEstimate>();
+  const [chapterProductionPlan, setChapterProductionPlan] = useState<ProductionPlan>();
+  const [planningProduction, setPlanningProduction] = useState(false);
   const [saving, setSaving] = useState(false);
   const [sceneFilter, setSceneFilter] = useState<"all" | "needs-review" | "approved" | "video-ready">("all");
+  const [selectedSceneIds, setSelectedSceneIds] = useState<string[]>([]);
   const [selectedVersionByScene, setSelectedVersionByScene] = useState<Record<string, string>>({});
   const [showArtDirectionModal, setShowArtDirectionModal] = useState(false);
   const [visualPreflight, setVisualPreflight] = useState<any | null>(null);
@@ -1974,16 +2010,31 @@ export function ScenesPage({ slug, onJob, navigate, initialData }: { slug: strin
   const [reupscaling, setReupscaling] = useState(false);
   const watcher = useRef<(() => void) | undefined>(undefined);
 
-  const load = async (chapter?: number) => {
+  const load = async (chapter?: number, resetDraft = false, acceptedScene?: Scene) => {
+    const request = ++loadRequest.current;
     const next = await api<ScenesDashboard>(`/stories/${slug}/scenes${chapter ? `?chapter=${chapter}` : ""}`);
+    if (request !== loadRequest.current) return;
     setData(next);
-    setDraft(structuredClone(next.manifest?.scenes ?? []));
+    const incoming = structuredClone(next.manifest?.scenes ?? []);
+    setSelectedSceneIds((current) => resetDraft ? [] : current.filter((id) => incoming.some((scene) => scene.id === id)));
+    const previous = savedRef.current;
+    setDraft((current) => {
+      if (resetDraft) return incoming;
+      const reconciled = reconcileChapterSceneDrafts(current, previous, incoming);
+      return acceptedScene ? reconciled.map((scene) => scene.id === acceptedScene.id && JSON.stringify(chapterSceneEditableValues(scene)) === JSON.stringify(chapterSceneEditableValues(acceptedScene)) ? incoming.find((item) => item.id === acceptedScene.id) ?? scene : scene) : reconciled;
+    });
+    setSaved(incoming);
+    savedRef.current = incoming;
     if (!range.from && next.selectedChapter) {
       setRange({ from: String(next.selectedChapter), to: String(next.selectedChapter) });
     }
   };
 
   useEffect(() => {
+    savedRef.current = [];
+    setSaved([]);
+    setDraft([]);
+    setSceneProposal(undefined);
     setData(undefined);
     setError("");
     void load().catch((value) => setError(message(value)));
@@ -1991,13 +2042,16 @@ export function ScenesPage({ slug, onJob, navigate, initialData }: { slug: strin
   }, [slug]);
 
   const chooseChapter = (chapter: number) => {
+    setSelectedSceneIds([]);
     setEstimate(undefined);
+    setChapterProductionPlan(undefined);
     setRange({ from: String(chapter), to: String(chapter) });
     setRangeError("");
-    void load(chapter).catch((value) => setError(message(value)));
+    void load(chapter, true).catch((value) => setError(message(value)));
   };
 
   const handleRangeChange = (fromVal: string, toVal: string) => {
+    setChapterProductionPlan(undefined);
     setRange({ from: fromVal, to: toVal });
     const fromNum = Number(fromVal);
     const toNum = Number(toVal);
@@ -2022,8 +2076,10 @@ export function ScenesPage({ slug, onJob, navigate, initialData }: { slug: strin
     try {
       setError("");
       const { preflightAccepted, ...requestExtra } = extra as Record<string, unknown> & { preflightAccepted?: boolean };
+      const selectedChapter = kind === "artwork" && requestExtra.scenes ? data?.selectedChapter : undefined;
+      const requestRange = { from: selectedChapter ?? fromNum, to: selectedChapter ?? toNum };
       if (kind === "artwork" && !preflightAccepted) {
-        const preflight = await post<any>(`/stories/${slug}/artwork/visual-preflight`, { from: fromNum, to: toNum, ...requestExtra });
+        const preflight = await post<any>(`/stories/${slug}/artwork/visual-preflight`, { ...requestRange, ...requestExtra });
         if (!preflight.ready) {
           setVisualPreflight(preflight);
           setPendingArtworkExtra(requestExtra);
@@ -2031,7 +2087,7 @@ export function ScenesPage({ slug, onJob, navigate, initialData }: { slug: strin
           return;
         }
       }
-      const job = await post<Job>(`/stories/${slug}/jobs/${kind}`, { from: fromNum, to: toNum, ...requestExtra });
+      const job = await post<Job>(`/stories/${slug}/jobs/${kind}`, { ...requestRange, ...requestExtra });
       onJob(job);
       watcher.current?.();
       watcher.current = watchJob(job.id, async (next) => {
@@ -2061,10 +2117,32 @@ export function ScenesPage({ slug, onJob, navigate, initialData }: { slug: strin
     setPendingArtworkExtra(null);
   };
 
+  const previewChapterProduction = async () => {
+    if (!data?.selectedChapter) return;
+    setPlanningProduction(true);
+    setError("");
+    try { setChapterProductionPlan(await post<ProductionPlan>(`/stories/${slug}/production/plan`, { from: data.selectedChapter, to: data.selectedChapter, outputs: ["video"], artwork: true, refresh: false, dryRun: true })); }
+    catch (cause) { setError(message(cause)); }
+    finally { setPlanningProduction(false); }
+  };
+  const startChapterProduction = async () => {
+    if (!chapterProductionPlan || !data?.selectedChapter || chapterProductionPlan.from !== data.selectedChapter || draft.some((scene) => chapterSceneDirty(scene, saved))) return;
+    setPlanningProduction(true);
+    setError("");
+    try {
+      const job = await post<Job>(`/stories/${slug}/jobs/production`, { from: data.selectedChapter, to: data.selectedChapter, outputs: ["video"], artwork: true, refresh: false });
+      onJob(job);
+      setChapterProductionPlan(undefined);
+      watcher.current?.();
+      watcher.current = watchJob(job.id, async (next) => { onJob(next); if (next.status === "completed") await load(data.selectedChapter); else if (next.status === "failed") setError(next.error ?? "Chapter production failed"); }, (cause) => setError(message(cause)));
+    } catch (cause) { setError(message(cause)); }
+    finally { setPlanningProduction(false); }
+  };
+
   const reopenArtworkPreflight = async () => {
     if (!pendingArtworkExtra) return;
     try {
-      const fromNum = Number(range.from); const toNum = Number(range.to);
+      const fromNum = pendingArtworkExtra.scenes ? data?.selectedChapter : Number(range.from); const toNum = pendingArtworkExtra.scenes ? data?.selectedChapter : Number(range.to);
       const preflight = await post<any>(`/stories/${slug}/artwork/visual-preflight`, { from: fromNum, to: toNum, ...pendingArtworkExtra });
       // Keep the gate visible even when every profile is now ready: the user
       // must explicitly choose Continue before any paid generation starts.
@@ -2079,12 +2157,55 @@ export function ScenesPage({ slug, onJob, navigate, initialData }: { slug: strin
       setSaving(true);
       setError("");
       await put(`/stories/${slug}/chapters/${data.selectedChapter}/scenes`, { scenes: draft });
-      await load(data.selectedChapter);
+      await load(data.selectedChapter, true);
     } catch (value) {
       setError(message(value));
     } finally {
       setSaving(false);
     }
+  };
+
+  const saveScene = async (scene: Scene) => {
+    if (!data?.selectedChapter) return;
+    const original = savedRef.current.find((item) => item.id === scene.id);
+    if (!original?.contentFingerprint) { setSceneErrors((errors) => ({ ...errors, [scene.id]: "Refresh this scene before saving." })); return; }
+    setSavingSceneId(scene.id);
+    setSceneErrors((errors) => ({ ...errors, [scene.id]: "" }));
+    try {
+      await put(`/stories/${slug}/chapters/${data.selectedChapter}/scenes/${scene.id}`, { scene, expectedFingerprint: original.contentFingerprint });
+      await load(data.selectedChapter, false, scene);
+      setSavedSceneId(scene.id);
+    } catch (cause) { setSceneErrors((errors) => ({ ...errors, [scene.id]: message(cause) })); }
+    finally { setSavingSceneId(undefined); }
+  };
+
+  const revertScene = (sceneId: string) => {
+    const original = savedRef.current.find((item) => item.id === sceneId);
+    if (original) setDraft((current) => current.map((item) => item.id === sceneId ? structuredClone(original) : item));
+    setSceneErrors((errors) => ({ ...errors, [sceneId]: "" }));
+  };
+
+  const previewSceneRegeneration = async (scene: Scene) => {
+    if (!data?.selectedChapter) return;
+    setRegeneratingSceneId(scene.id);
+    setSceneErrors((errors) => ({ ...errors, [scene.id]: "" }));
+    try {
+      const result = await post<{ proposal: SceneRegenerationProposal }>(`/stories/${slug}/chapters/${data.selectedChapter}/scenes/${scene.id}/regenerate-preview`, { mode: proposalMode[scene.id] ?? "image_prompt" });
+      setSceneProposal(result.proposal);
+    } catch (cause) { setSceneErrors((errors) => ({ ...errors, [scene.id]: message(cause) })); }
+    finally { setRegeneratingSceneId(undefined); }
+  };
+  const applySceneRegeneration = async (sceneId: string) => {
+    if (!data?.selectedChapter || sceneProposal?.sceneId !== sceneId) return;
+    const sceneAtApply = draft.find((item) => item.id === sceneId);
+    setRegeneratingSceneId(sceneId);
+    try {
+      await put(`/stories/${slug}/chapters/${data.selectedChapter}/scenes/${sceneId}/apply-regeneration`, sceneProposal);
+      setSceneProposal(undefined);
+      await load(data.selectedChapter, false, sceneAtApply);
+      setSavedSceneId(sceneId);
+    } catch (cause) { setSceneErrors((errors) => ({ ...errors, [sceneId]: message(cause) })); }
+    finally { setRegeneratingSceneId(undefined); }
   };
 
   const review = async (scene: Scene, value: Scene["artwork"]["review"]) => {
@@ -2125,14 +2246,21 @@ export function ScenesPage({ slug, onJob, navigate, initialData }: { slug: strin
     }
   };
 
-  const edit = (id: string, patch: Partial<Scene>) =>
+  const edit = (id: string, patch: Partial<Scene>) => {
+    setChapterProductionPlan(undefined);
+    setSavedSceneId(undefined);
     setDraft((current) => current.map((scene) => (scene.id === id ? { ...scene, ...patch } : scene)));
+  };
 
-  const editDirection = (id: string, patch: Partial<NonNullable<Scene["direction"]>>) =>
+  const editDirection = (id: string, patch: Partial<NonNullable<Scene["direction"]>>) => {
+    setChapterProductionPlan(undefined);
     setDraft((current) => current.map((scene) => (scene.id === id ? { ...scene, direction: { ...scene.direction, ...patch } } : scene)));
+  };
 
-  const editOverrides = (id: string, patch: Partial<NonNullable<Scene["overrides"]>>) =>
+  const editOverrides = (id: string, patch: Partial<NonNullable<Scene["overrides"]>>) => {
+    setChapterProductionPlan(undefined);
     setDraft((current) => current.map((scene) => (scene.id === id ? { ...scene, overrides: { ...scene.overrides, ...patch } } : scene)));
+  };
 
   // Refresh continuity from the server without clobbering unsaved scene draft
   // edits: only continuity-related fields are merged back into the draft.
@@ -2184,9 +2312,10 @@ export function ScenesPage({ slug, onJob, navigate, initialData }: { slug: strin
     availableProviders: ARTWORK_PROVIDERS,
   };
 
+  const chapterArtworkCurrent = data.chapters.find((item) => item.chapter === data.selectedChapter)?.artworkStatus === "complete" && !data.manifestStale;
   const filteredScenes = draft.filter((scene) => {
     if (sceneFilter === "all") return true;
-    const state = getSceneProductionState(scene);
+    const state = getSceneProductionState(scene, chapterArtworkCurrent);
     if (sceneFilter === "needs-review") return state.label === "Needs Review";
     if (sceneFilter === "approved") return state.label === "Approved" || state.label === "Video Ready";
     if (sceneFilter === "video-ready") return state.label === "Video Ready";
@@ -2197,9 +2326,9 @@ export function ScenesPage({ slug, onJob, navigate, initialData }: { slug: strin
 
   const filterCounts = {
     all: draft.length,
-    needsReview: draft.filter((s) => getSceneProductionState(s).label === "Needs Review").length,
-    approved: draft.filter((s) => getSceneProductionState(s).label === "Approved" || getSceneProductionState(s).label === "Video Ready").length,
-    videoReady: draft.filter((s) => getSceneProductionState(s).label === "Video Ready").length,
+    needsReview: draft.filter((s) => getSceneProductionState(s, chapterArtworkCurrent).label === "Needs Review").length,
+    approved: draft.filter((s) => getSceneProductionState(s, chapterArtworkCurrent).label === "Approved" || getSceneProductionState(s, chapterArtworkCurrent).label === "Video Ready").length,
+    videoReady: draft.filter((s) => getSceneProductionState(s, chapterArtworkCurrent).label === "Video Ready").length,
   };
 
   return (
@@ -2337,6 +2466,7 @@ export function ScenesPage({ slug, onJob, navigate, initialData }: { slug: strin
           >
             {reupscaling ? "Re-upscaling…" : "Re-upscale"}
           </button>
+          <button type="button" className="button" disabled={!data.selectedChapter || planningProduction || draft.some((scene) => chapterSceneDirty(scene, saved))} onClick={() => void previewChapterProduction()}>{planningProduction ? "Planning…" : "Produce this chapter…"}</button>
         </div>
 
         {rangeError && (
@@ -2346,6 +2476,7 @@ export function ScenesPage({ slug, onJob, navigate, initialData }: { slug: strin
         )}
 
         {estimate !== undefined && <ArtworkEstimateSummary estimate={estimate} />}
+        {chapterProductionPlan && <div className="summary-scene-proposal" role="region" aria-label="Chapter production plan"><strong>Chapter {data.selectedChapter} production plan</strong><p>{chapterProductionPlan.stages.map((stage) => `${pretty(stage)}: ${chapterProductionPlan.counts[stage]?.required ?? 0} needed / ${chapterProductionPlan.counts[stage]?.reusable ?? 0} reusable`).join(" · ")}</p><p>Potential paid work: {chapterProductionPlan.estimates.llmOperations} LLM · {chapterProductionPlan.estimates.ttsOperations} TTS · {chapterProductionPlan.estimates.imageOperations} images. Existing current stages are reused.</p><div className="scene-edit-actions"><button type="button" className="button primary" disabled={planningProduction} onClick={() => void startChapterProduction()}>Continue production</button><button type="button" className="button" onClick={() => setChapterProductionPlan(undefined)}>Cancel</button></div></div>}
         {data.resolvedBehavior && <ResolvedBehaviorHint behavior={data.resolvedBehavior} />}
       </div>
 
@@ -2360,24 +2491,7 @@ export function ScenesPage({ slug, onJob, navigate, initialData }: { slug: strin
             />
           )}
 
-          <div className="filmstrip" aria-label="Scene timing preview">
-            {draft.map((scene) => {
-              const state = getSceneProductionState(scene);
-              return (
-                <button
-                  key={scene.id}
-                  style={{ flexGrow: Math.max(1, scene.endSeconds - scene.startSeconds) }}
-                  className={`${scene.importance ?? "standard"} ${scene.artwork?.review ?? "unreviewed"}`}
-                  onClick={() => document.getElementById(scene.id)?.scrollIntoView({ behavior: "smooth" })}
-                  title={`${scene.id}: ${state.label}`}
-                >
-                  <i />
-                  {scene.imageUrl ? <img src={scene.imageUrl} alt="" /> : <span>{scene.id.replace("scene-", "")}</span>}
-                  <small>{formatTime(scene.startSeconds)}–{formatTime(scene.endSeconds)}</small>
-                </button>
-              );
-            })}
-          </div>
+          <SceneFilmstrip scenes={draft} imageFor={(scene) => scene.imageUrl} statusFor={(scene) => getSceneProductionState(scene, chapterArtworkCurrent).label} onSelect={(scene) => document.getElementById(scene.id)?.scrollIntoView({ behavior: "smooth" })} />
 
           <div className="scene-reel-head">
             <div>
@@ -2387,8 +2501,8 @@ export function ScenesPage({ slug, onJob, navigate, initialData }: { slug: strin
               </p>
               <PreviousHandoffBadge handoff={data.previousHandoff} />
             </div>
-            <button className="button primary" disabled={saving} onClick={save}>
-              {saving ? "Saving…" : "Save scene edits"}
+            <button className="button primary" disabled={saving || Boolean(savingSceneId) || !draft.some((scene) => chapterSceneDirty(scene, saved))} onClick={save}>
+              {saving ? "Saving…" : "Save all scene edits"}
             </button>
           </div>
 
@@ -2422,10 +2536,16 @@ export function ScenesPage({ slug, onJob, navigate, initialData }: { slug: strin
               Video Ready <span className="filter-count">({filterCounts.videoReady})</span>
             </button>
           </div>
+          <div className="scene-edit-actions" aria-label="Selected chapter scenes">
+            <span>{selectedSceneIds.length} selected</span>
+            <button type="button" className="button small" onClick={() => setSelectedSceneIds(filteredScenes.map((scene) => scene.id))}>Select visible</button>
+            <button type="button" className="button small" disabled={!selectedSceneIds.length} onClick={() => setSelectedSceneIds([])}>Clear selection</button>
+            <button type="button" className="button small" disabled={!selectedSceneIds.length || draft.some((scene) => chapterSceneDirty(scene, saved)) || Boolean(rangeError)} onClick={() => { if (confirm(`Regenerate artwork for ${selectedSceneIds.length} selected scene${selectedSceneIds.length === 1 ? "" : "s"}? Existing versions remain available, and this may call the image provider.`)) void run("artwork", { scenes: selectedSceneIds, force: true }); }}>Regenerate selected artwork</button>
+          </div>
 
           <div className="scene-cards">
             {filteredScenes.map((scene, index) => {
-              const state = getSceneProductionState(scene);
+              const state = getSceneProductionState(scene, chapterArtworkCurrent);
               const versions = scene.artwork?.versions ?? [];
               const selectedVerId = selectedVersionByScene[scene.id] || scene.artwork?.approvedVersionId || (versions.length ? versions.at(-1)!.id : undefined);
               const displayedVersion = versions.find((v) => v.id === selectedVerId);
@@ -2448,11 +2568,23 @@ export function ScenesPage({ slug, onJob, navigate, initialData }: { slug: strin
                   <div className="scene-copy">
                     <header>
                       <div>
+                        <label className="scene-select"><input type="checkbox" aria-label={`Select ${scene.id}`} checked={selectedSceneIds.includes(scene.id)} onChange={(event) => setSelectedSceneIds((current) => event.target.checked ? [...current, scene.id] : current.filter((id) => id !== scene.id))} /></label>
                         <span className="eyebrow">{scene.id}</span>
                         <h3>{formatTime(scene.startSeconds)} — {formatTime(scene.endSeconds)}</h3>
                       </div>
                       <Stage value={scene.artwork?.status ?? "pending"} />
                     </header>
+                    <div className="scene-edit-actions">
+                      <span role="status">{savingSceneId === scene.id ? "Saving…" : chapterSceneDirty(scene, saved) ? "Unsaved changes" : savedSceneId === scene.id ? "Saved" : ""}</span>
+                      <button type="button" className="button small" disabled={saving || Boolean(savingSceneId) || !chapterSceneDirty(scene, saved)} onClick={() => void saveScene(scene)}>Save this scene</button>
+                      <button type="button" className="button small" disabled={saving || Boolean(savingSceneId) || !chapterSceneDirty(scene, saved)} onClick={() => revertScene(scene.id)}>Revert</button>
+                      <select aria-label={`Regeneration mode for ${scene.id}`} disabled={saving || Boolean(regeneratingSceneId)} value={proposalMode[scene.id] ?? "image_prompt"} onChange={(event) => setProposalMode((current) => ({ ...current, [scene.id]: event.target.value as SceneRegenerationProposal["mode"] }))}><option value="image_prompt">Image prompt only</option><option value="full_visual_direction">Full visual direction</option></select>
+                      <button type="button" className="button small" disabled={saving || Boolean(regeneratingSceneId) || chapterSceneDirty(scene, saved)} onClick={() => void previewSceneRegeneration(scene)}>{regeneratingSceneId === scene.id ? "Regenerating…" : "Regenerate scene preview"}</button>
+                    </div>
+                    {sceneErrors[scene.id] && <div className="error-box" role="alert">{sceneErrors[scene.id]}</div>}
+                    {sceneProposal?.sceneId === scene.id && <div className="summary-scene-proposal"><strong>Regeneration proposal · {sceneProposal.mode === "image_prompt" ? "Image prompt only" : "Full visual direction"}</strong><small>{sceneProposal.provider} · {sceneProposal.model} · Preview only; saved scene unchanged.</small>
+                      {([["Visual beat", "summary"], ["Image prompt", "visualPrompt"], ["Characters", "characters"], ["Location", "location"], ["Importance", "importance"]] as const).map(([label, key]) => <div className="summary-proposal-row" key={key}><b>{label}</b><span><small>Current</small>{Array.isArray(sceneProposal.current[key]) ? sceneProposal.current[key].join(", ") : sceneProposal.current[key] ?? "—"}</span><span><small>Proposed</small>{Array.isArray(sceneProposal.proposed[key]) ? sceneProposal.proposed[key].join(", ") : sceneProposal.proposed[key] ?? "—"}</span></div>)}
+                      <div className="scene-edit-actions"><button type="button" className="button primary" disabled={Boolean(regeneratingSceneId) || chapterSceneDirty(scene, saved)} onClick={() => void applySceneRegeneration(scene.id)}>Apply proposal</button><button type="button" className="button" disabled={Boolean(regeneratingSceneId)} onClick={() => setSceneProposal(undefined)}>Cancel</button></div></div>}
 
                     {/* Versions Switcher Bar */}
                     {versions.length > 0 && (
@@ -2492,6 +2624,12 @@ export function ScenesPage({ slug, onJob, navigate, initialData }: { slug: strin
                       </div>
                     )}
                     {displayedVersion && <ArtworkVersionMetadata version={displayedVersion} />}
+                    {displayedVersion && <VisualGroundingPanel label={`Grounding recorded for v${displayedVersion.versionNumber}`} recorded={Boolean(displayedVersion.provenance || displayedVersion.resolvedVisualProfileReferences?.length || displayedVersion.artDirectionFingerprint)}>
+                      <span>Art Direction · {displayedVersion.artDirectionFingerprint ? "recorded for this version" : "not recorded"}</span>
+                      {(displayedVersion.resolvedVisualProfileReferences ?? []).length ? displayedVersion.resolvedVisualProfileReferences!.map((reference) => <span key={`${reference.entityId}:${reference.referenceId ?? ""}`}>{reference.name ?? reference.entityId} — {reference.referenceId ? "approved reference" : "Visual Profile context"}</span>) : <span>Visual Profile references not recorded</span>}
+                      {displayedVersion.provenance?.continuityReference?.used ? <span>Continuity · {displayedVersion.provenance.continuityReference.sourceSceneId ?? "previous scene"}{displayedVersion.provenance.continuityReference.versionNumber ? ` approved v${displayedVersion.provenance.continuityReference.versionNumber}` : ""} reference</span> : <span>Continuity · {displayedVersion.provenance?.continuityReference?.reason ?? "no previous artwork reference recorded"}</span>}
+                      <span>Reference mode · {displayedVersion.provenance?.referencesUsed ?? "not recorded"}</span>
+                    </VisualGroundingPanel>}
 
                     <Field label="Summary">
                       <textarea
@@ -2629,147 +2767,8 @@ export function ScenesPage({ slug, onJob, navigate, initialData }: { slug: strin
                       </Field>
                     </div>
 
-                    {/* Collapsible Scene Direction Panel */}
-                    <details className="scene-direction-panel">
-                      <summary>🎬 Scene Direction & Visual Canon Overrides</summary>
-                      <div className="scene-direction-content">
-                        <div className="form-grid-2col">
-                          <div>
-                            <label>Shot Type</label>
-                            <select
-                              value={scene.direction?.shotType ?? ""}
-                              onChange={(e) =>
-                                editDirection(scene.id, {
-                                  shotType: (e.target.value || undefined) as ShotType | undefined,
-                                })
-                              }
-                            >
-                              <option value="">Default / Auto</option>
-                              <option value="extreme_wide">Extreme Wide</option>
-                              <option value="wide">Wide Shot</option>
-                              <option value="medium_wide">Medium Wide</option>
-                              <option value="medium">Medium Shot</option>
-                              <option value="medium_close_up">Medium Close-up</option>
-                              <option value="close_up">Close-up</option>
-                              <option value="extreme_close_up">Extreme Close-up</option>
-                            </select>
-                          </div>
-                          <div>
-                            <label>Camera Angle</label>
-                            <select
-                              value={scene.direction?.cameraAngle ?? ""}
-                              onChange={(e) =>
-                                editDirection(scene.id, {
-                                  cameraAngle: (e.target.value || undefined) as CameraAngle | undefined,
-                                })
-                              }
-                            >
-                              <option value="">Default / Eye-level</option>
-                              <option value="eye_level">Eye Level</option>
-                              <option value="low_angle">Low Angle (Heroic/Imposing)</option>
-                              <option value="high_angle">High Angle (Diminishing)</option>
-                              <option value="overhead">Overhead / Bird's Eye</option>
-                              <option value="dutch_angle">Dutch Angle (Tension/Disorientation)</option>
-                              <option value="pov">Point of View (POV)</option>
-                              <option value="over_shoulder">Over the Shoulder</option>
-                            </select>
-                          </div>
-                        </div>
-
-                        <div className="form-grid-2col">
-                          <div>
-                            <label>Composition Tendency</label>
-                            <select
-                              value={scene.direction?.composition ?? ""}
-                              onChange={(e) =>
-                                editDirection(scene.id, {
-                                  composition: (e.target.value || undefined) as CompositionTendency | undefined,
-                                })
-                              }
-                            >
-                              <option value="">Default Composition</option>
-                              <option value="balanced">Balanced</option>
-                              <option value="centered">Centered / Symmetrical</option>
-                              <option value="rule_of_thirds">Rule of Thirds</option>
-                              <option value="dynamic">Dynamic Action Diagonal</option>
-                              <option value="environmental">Environmental Scale</option>
-                              <option value="character_focused">Character Focused</option>
-                            </select>
-                          </div>
-                          <div>
-                            <label>Time of Day / Atmosphere</label>
-                            <select
-                              value={scene.direction?.timeEnvironment ?? ""}
-                              onChange={(e) =>
-                                editDirection(scene.id, {
-                                  timeEnvironment: (e.target.value || undefined) as any,
-                                })
-                              }
-                            >
-                              <option value="">Auto from scene</option>
-                              <option value="dawn">Dawn</option>
-                              <option value="day">Day</option>
-                              <option value="sunset">Sunset / Golden Hour</option>
-                              <option value="dusk">Dusk</option>
-                              <option value="night">Night</option>
-                              <option value="interior">Interior Lighting</option>
-                              <option value="custom">Custom Atmosphere</option>
-                            </select>
-                          </div>
-                        </div>
-
-                        <div className="form-row">
-                          <label>Lighting Guidance</label>
-                          <input
-                            type="text"
-                            value={scene.direction?.lighting ?? ""}
-                            onChange={(e) =>
-                              editDirection(scene.id, { lighting: e.target.value || undefined })
-                            }
-                            placeholder="e.g. moonlight through broken ceiling, dramatic backlighting"
-                          />
-                        </div>
-
-                        <div className="form-row">
-                          <label>Wardrobe / Outfit Override</label>
-                          <input
-                            type="text"
-                            value={scene.overrides?.customVisualPrompt ?? ""}
-                            onChange={(e) =>
-                              editOverrides(scene.id, { customVisualPrompt: e.target.value || undefined })
-                            }
-                            placeholder="e.g. damaged armor, hood drawn up, soaked in rain"
-                          />
-                        </div>
-
-                        <div style={{ display: "flex", gap: "14px", flexWrap: "wrap", fontSize: "10px", color: "var(--muted)" }}>
-                          <label style={{ display: "inline-flex", alignItems: "center", gap: "5px", cursor: "pointer" }}>
-                            <input
-                              type="checkbox"
-                              checked={scene.direction?.useStoryArtDirection !== false}
-                              onChange={(e) => editDirection(scene.id, { useStoryArtDirection: e.target.checked })}
-                            />
-                            Apply Story Art Direction
-                          </label>
-                          <label style={{ display: "inline-flex", alignItems: "center", gap: "5px", cursor: "pointer" }}>
-                            <input
-                              type="checkbox"
-                              checked={scene.direction?.useCharacterReferences !== false}
-                              onChange={(e) => editDirection(scene.id, { useCharacterReferences: e.target.checked })}
-                            />
-                            Use approved character Visual Profile & references
-                          </label>
-                          <label style={{ display: "inline-flex", alignItems: "center", gap: "5px", cursor: "pointer" }}>
-                            <input
-                              type="checkbox"
-                              checked={scene.direction?.preserveWardrobeEquipment !== false}
-                              onChange={(e) => editDirection(scene.id, { preserveWardrobeEquipment: e.target.checked })}
-                            />
-                            Preserve default wardrobe & equipment canon
-                          </label>
-                        </div>
-                      </div>
-                    </details>
+                    <AdvancedVisualDirection source="chapter" direction={scene.direction} overrides={scene.overrides} artDirection={data.artDirection}
+                      onDirection={(patch) => editDirection(scene.id, patch)} onOverrides={(patch) => editOverrides(scene.id, patch)} />
 
                     <SceneContinuityPanel
                       key={`${scene.id}:${scene.continuity?.manualOverride?.revision ?? 0}`}

@@ -526,6 +526,39 @@ describe("summary visual production", () => {
     expect((await visuals.get("demo-story", id)).scenePlan!.scenes[0]!.endSeconds).toBe(first.endSeconds);
     await expect(visuals.updateScene("demo-story", id, "scene-999", sceneEdit(first))).rejects.toThrow("Scene was not found");
   });
+  it("approves a preserved historical summary image without generating a new one", async () => {
+    const first = await produce();
+    const sceneId = first.scenePlan!.scenes[0]!.id;
+    const initialVersion = first.scenePlan!.scenes[0]!.artwork.versions![0]!;
+    const imageCalls = images.generate.mock.calls.length;
+    await visuals.artwork("demo-story", id, { force: true, scenes: [sceneId] });
+    const afterGeneration = await visuals.get("demo-story", id);
+    expect(afterGeneration.scenePlan!.scenes[0]!.artwork.versions).toHaveLength(2);
+    const approved = await visuals.reviewArtworkVersion("demo-story", id, sceneId, initialVersion.id);
+    expect(approved.scenePlan!.scenes[0]!.artwork.approvedVersionId).toBe(initialVersion.id);
+    expect(approved.scenePlan!.scenes[0]!.artwork.versions![0]!.review).toBe("approved");
+    expect(await fileFingerprint(visuals.paths("demo-story", id).image(sceneId))).toBe(approved.scenePlan!.scenes[0]!.artwork.imageFingerprint);
+    expect(images.generate.mock.calls.length).toBe(imageCalls + 1);
+    expect((await visuals.exportArtworkVersion("demo-story", id, sceneId, initialVersion.id)).path).toContain("scene-001-v1.png");
+    await expect(visuals.reviewArtworkVersion("demo-story", id, sceneId, "v999")).rejects.toThrow("not found");
+  });
+  it("uses shared continuity overrides for summary reference policy and prompt staleness", async () => {
+    const produced = await produce();
+    const secondId = produced.scenePlan!.scenes[1]!.id;
+    await visuals.reviewArtwork("demo-story", id, "scene-001", "approved");
+    const before = (await visuals.sceneContinuityDetail("demo-story", id)).find((item) => item.sceneId === secondId)!.continuity!;
+    expect(before.referenceDecision?.kind).toBe("previous-scene");
+    const changed = await visuals.updateSceneContinuity("demo-story", id, secondId, { note: "The silver staff remains in Malakai's left hand", usePreviousReference: "avoid" });
+    const state = changed.find((item) => item.sceneId === secondId)!.continuity!;
+    expect(state.manualOverride?.note).toContain("silver staff");
+    expect(state.referenceDecision?.used).toBe(false);
+    expect((await visuals.sceneArtworkGrounding("demo-story", id)).find((item) => item.sceneId === secondId)?.status).toBe("stale");
+    images.generate.mockClear();
+    await visuals.artwork("demo-story", id, { force: true, scenes: [secondId] });
+    expect(images.generate.mock.calls[0]?.[0]?.prompt).toContain("silver staff remains");
+    const restored = await visuals.resetSceneContinuity("demo-story", id, secondId);
+    expect(restored.find((item) => item.sceneId === secondId)!.continuity!.manualOverride).toBeUndefined();
+  });
   it("previews image-prompt regeneration without writes and rejects a proposal after a newer scene edit", async () => {
     const before = await produce(); const original = structuredClone(before.scenePlan!.scenes[0]!);
     const direction = { ...original.direction!, composition: "symmetrical" as const, useLocationReferences: false };
@@ -580,7 +613,7 @@ describe("summary visual production", () => {
     expect(scenePanel).toContain("Summary Art Direction"); expect(scenePanel).toContain("Story Default · Main Style"); expect(scenePanel).toContain("No Story Art Direction"); expect(scenePanel).toContain("Advanced visual direction"); expect(scenePanel).toContain("Custom negative prompt");
     expect(scenePanel).toContain("Image prompt only"); expect(scenePanel).toContain("Full visual direction");
     const artworkPanel = renderToStaticMarkup(<SummaryArtworkPanel {...props} />);
-    expect(artworkPanel).toContain("Approve / retain"); expect(artworkPanel).toContain("Regenerate artwork from current saved scene"); expect(artworkPanel).toContain("Edit scene");
+    expect(artworkPanel).toContain("Approve displayed image"); expect(artworkPanel).toContain("Regenerate artwork from current saved scene"); expect(artworkPanel).toContain("Edit scene");
     expect(renderToStaticMarkup(<SummaryVideoPanel {...props} />)).toContain("Download MP4");
     const layers = renderToStaticMarkup(<SummaryLayers {...props} slug="demo-story" busy={false}>Canonical</SummaryLayers>);
     expect(layers).toContain("Artwork"); expect(layers).toContain('hidden=""'); expect(layers).toContain("Save this scene");
