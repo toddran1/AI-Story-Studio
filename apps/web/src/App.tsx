@@ -1587,7 +1587,22 @@ export function EntityImpactDialog({ title, diff = [], impact, busy = false, app
     <div className="editor-sheet-actions"><button className="button" onClick={onCancel}>Cancel</button><button className="button primary" disabled={busy} onClick={onApply}>{applyLabel}</button></div>
   </div>;
 }
-export function CanonicalEntitySheet({ detail, slug, navigate, onClose, onUndo, onEdit, onDemote, onSuppress, onMerge, onOpenVisualProfile, onRevert, historyView }: any) {
+
+export function EntityDetailAccordion({ id, title, badge, defaultOpen = false, children }: { id: string; title: string; badge?: string; defaultOpen?: boolean; children: ReactNode }) {
+  const [open, setOpen] = useState(defaultOpen);
+  const [visited, setVisited] = useState(defaultOpen);
+  const panelId = `entity-section-${id}`;
+  return <section className={`entity-detail-accordion${open ? " is-open" : ""}`}>
+    <button type="button" className="entity-detail-accordion-header" aria-expanded={open} aria-controls={panelId} onClick={() => { setOpen((value) => !value); setVisited(true); }}>
+      <span className="entity-detail-accordion-title">{title}</span>
+      {badge && <span className="entity-section-badge">{badge}</span>}
+      <span className="entity-detail-chevron" aria-hidden="true">⌄</span>
+    </button>
+    <div id={panelId} className="entity-detail-accordion-body" hidden={!open}>{visited ? children : null}</div>
+  </section>;
+}
+
+export function CanonicalEntitySheet({ detail, slug, navigate, onClose, onUndo, onEdit, onDemote, onSuppress, onMerge, onOpenVisualProfile, onRevert, historyView, managementInitiallyOpen = false }: any) {
   const entity = detail.entity;
   const activeMerges = (detail.merges ?? []).filter((item: any) => !item.undoneAt);
   const [descExpanded, setDescExpanded] = useState(false);
@@ -1692,13 +1707,6 @@ export function CanonicalEntitySheet({ detail, slug, navigate, onClose, onUndo, 
         )}
 
         {(!viewing || historical) && (<>
-        {!viewing && detail.readiness?.length > 0 && (
-          <section className="entity-detail-section">
-            <span className="section-eyebrow">Readiness</span>
-            <ReadinessGrid rows={detail.readiness} />
-          </section>
-        )}
-
         <section className="entity-detail-section">
           <span className="section-eyebrow">Identity</span>
           <p className={`entity-description ${descExpanded || !isLongDescription ? "expanded" : "clamped"}`}>
@@ -1714,47 +1722,10 @@ export function CanonicalEntitySheet({ detail, slug, navigate, onClose, onUndo, 
               {descExpanded ? "Show less" : "Show more"}
             </button>
           )}
-          {shown.aliases.length > 0 ? (
-            <div className="alias-chips">
-              {shown.aliases.map((alias: string) => {
-                const rule = (shown.aliasNarrationRules ?? []).find(
-                  (item: any) => item.alias.toLocaleLowerCase() === alias.toLocaleLowerCase()
-                );
-                const hasOverride = rule && rule.behavior !== "no_override";
-                return (
-                  <span key={alias} className="alias-chip" title={namingLabel(alias, shown)}>
-                    {alias}
-                    {hasOverride && <span className="alias-chip-badge">narration</span>}
-                  </span>
-                );
-              })}
-              {manualBadge("aliases")}{overrideBadge("aliases")}
-            </div>
-          ) : (
-            <p className="empty-text">No aliases recorded.</p>
-          )}
-          <dl className="meta-compact-list">
-            {hasStatus && (
-              <div className="meta-compact-row">
-                <dt>Status {manualBadge("status")}{overrideBadge("status")}</dt>
-                <dd>{pretty(shown.status)}</dd>
-              </div>
-            )}
-            {shown.notes && (
-              <div className="meta-compact-row">
-                <dt>Notes {manualBadge("notes")}{overrideBadge("notes")}</dt>
-                <dd>{shown.notes}</dd>
-              </div>
-            )}
-            <div className="meta-compact-row">
-              <dt>Origin</dt>
-              <dd>{pretty(shown.origin)}{shown.canonicalNameLocked ? " · Locked" : ""}</dd>
-            </div>
-          </dl>
         </section>
 
-        <section className="entity-detail-section">
-          <span className="section-eyebrow">Narration &amp; Localization</span>
+        <EntityDetailAccordion key={`${entity.id}-naming`} id="naming" title="Naming & Localization" badge={narrationConfigured ? "Narration configured" : "Needs setup"} defaultOpen>
+          <section className="entity-detail-section">
           <div className="compact-naming-grid">
             <div className="compact-naming-row">
               <div className="compact-naming-content">
@@ -1807,20 +1778,33 @@ export function CanonicalEntitySheet({ detail, slug, navigate, onClose, onUndo, 
               Open localization
             </button>
           )}
-        </section>
+          {shown.aliases.length > 0 ? (
+            <div className="entity-detail-subsection">
+              <span className="entity-subsection-title">Aliases</span>
+              <div className="alias-chips">
+                {shown.aliases.map((alias: string) => {
+                  const rule = (shown.aliasNarrationRules ?? []).find((item: any) => item.alias.toLocaleLowerCase() === alias.toLocaleLowerCase());
+                  const hasOverride = rule && rule.behavior !== "no_override";
+                  return <span key={alias} className="alias-chip" title={namingLabel(alias, shown)}>{alias}{hasOverride && <span className="alias-chip-badge">narration</span>}</span>;
+                })}
+                {manualBadge("aliases")}{overrideBadge("aliases")}
+              </div>
+            </div>
+          ) : <p className="empty-text">No aliases recorded.</p>}
+          </section>
+        </EntityDetailAccordion>
 
-        <section className="entity-detail-section">
-          <span className="section-eyebrow">Story Information</span>
+        <EntityDetailAccordion key={`${entity.id}-story-information`} id="story-information" title="Story Information" badge={`Ch. ${shown.firstAppearance}–${shown.lastKnownAppearance}`} defaultOpen>
+          <section className="entity-detail-section">
           <dl className="meta-compact-list">
+            <div className="meta-compact-row"><dt>Type {manualBadge("type")}{overrideBadge("type")}</dt><dd>{pretty(shown.type)}</dd></div>
+            {hasStatus && <div className="meta-compact-row"><dt>Status {manualBadge("status")}{overrideBadge("status")}</dt><dd>{pretty(shown.status)}</dd></div>}
             <div className="meta-compact-row">
-              <dt>Type {manualBadge("type")}{overrideBadge("type")}</dt>
-              <dd>{pretty(shown.type)}</dd>
+              <dt>Appearances</dt><dd className="mono">Ch. {shown.firstAppearance}—{shown.lastKnownAppearance}</dd>
             </div>
-            <div className="meta-compact-row">
-              <dt>Appearances</dt>
-              <dd className="mono">Ch. {shown.firstAppearance}—{shown.lastKnownAppearance}</dd>
-            </div>
+            <div className="meta-compact-row"><dt>Origin</dt><dd>{pretty(shown.origin)}{shown.canonicalNameLocked ? " · Locked" : ""}</dd></div>
           </dl>
+          {shown.notes && <div className="entity-detail-subsection"><span className="entity-subsection-title">Notes {manualBadge("notes")}{overrideBadge("notes")}</span><p className="entity-notes-copy">{shown.notes}</p></div>}
           {!viewing && detail.relatedReferences?.length > 0 && (
             <details className="related-references">
               <summary>Related references ({detail.relatedReferences.length})</summary>
@@ -1862,32 +1846,21 @@ export function CanonicalEntitySheet({ detail, slug, navigate, onClose, onUndo, 
               ))}
             </div>
           )}
-        </section>
-
-        {!viewing && (
-          <section className="entity-detail-section">
-            <span className="section-eyebrow">Visual Canon</span>
-            <p className="empty-text">{detail.visualProfileExists ? "A Visual Profile exists for this entity." : "No Visual Profile yet."}{entity.visualProfilePolicy?.mode === "skip" ? " Policy: skipped by editorial decision." : ""} {manualBadge("visualProfilePolicy")}</p>
-            <button className="button" onClick={() => onOpenVisualProfile?.(entity.id, entity.canonicalName)}>
-              Visual Profile
-            </button>
           </section>
-        )}
+        </EntityDetailAccordion>
+
+        {!viewing && <EntityDetailAccordion key={`${entity.id}-visual-canon`} id="visual-canon" title="Visual Canon" badge={detail.visualProfileExists ? "Profile available" : "No visual profile"}>
+          <section className="entity-detail-section">
+            <p className="empty-text">{detail.visualProfileExists ? "A Visual Profile exists for this entity." : "No Visual Profile yet."}{entity.visualProfilePolicy?.mode === "skip" ? " Policy: skipped by editorial decision." : ""} {manualBadge("visualProfilePolicy")}</p>
+            <button className="button" onClick={() => onOpenVisualProfile?.(entity.id, entity.canonicalName)}>Visual Profile</button>
+          </section>
+        </EntityDetailAccordion>}
 
         {!viewing && (detail.namingCollisions?.length > 0 || detail.issues?.length > 0 || (detail.readiness ?? []).some((row: any) => row.state === "attention")) && (
-          <section className="entity-detail-section">
-            <span className="section-eyebrow">Issues</span>
+          <EntityDetailAccordion key={`${entity.id}-issues-review`} id="issues-review" title="Issues & Review" badge={`${(detail.issues?.length ?? 0) + (detail.namingCollisions?.length ?? 0) + (detail.readiness ?? []).filter((row: any) => row.state === "attention").length} items`} defaultOpen={Boolean(detail.issues?.length || detail.namingCollisions?.length || (detail.readiness ?? []).some((row: any) => row.state === "attention"))}>
+            <section className="entity-detail-section">
             {detail.namingCollisions?.map((collision: any) => (
-              <div className="naming-notice" key={collision.id}>
-                <p>{collision.hasMergeRelationship ? "These records already share a merge relationship. " : ""}{collision.reason}</p>
-                <div className="management-action-list">
-                  {collision.entities.filter((candidate: any) => candidate.id !== entity.id).map((candidate: any) => (
-                    <button key={candidate.id} className="button management-button" onClick={() => onMerge({ entities: [{ id: entity.id, name: entity.canonicalName }, { id: candidate.id, name: candidate.canonicalName }], reason: collision.reason })}>
-                      Compare with {candidate.canonicalName} · {pretty(candidate.type)} · via {candidate.field}
-                    </button>
-                  ))}
-                </div>
-              </div>
+              <div className="entity-issue-notice" key={collision.id}><b>Naming collision</b><p>{collision.hasMergeRelationship ? "These records already share a merge relationship. " : ""}{collision.reason}</p>{collision.entities.filter((candidate: any) => candidate.id !== entity.id).map((candidate: any) => <span className="entity-collision-entity" key={candidate.id}>{candidate.canonicalName} · {pretty(candidate.type)}{candidate.field ? ` · via ${candidate.field}` : ""}</span>)}</div>
             ))}
             {detail.issues?.length > 0 && (
               <button className="button warn-badge-button" onClick={() => navigate(`/stories/${slug}/continuity?entity=${entity.id}`)}>
@@ -1897,15 +1870,15 @@ export function CanonicalEntitySheet({ detail, slug, navigate, onClose, onUndo, 
             {(detail.readiness ?? []).filter((row: any) => row.state === "attention").map((row: any) => (
               <p key={row.key} className="empty-text">⚠ {row.label}{row.detail ? ` — ${row.detail}` : ""}</p>
             ))}
-          </section>
+            </section>
+          </EntityDetailAccordion>
         )}
 
-        {!viewing && <EntityUsageSection slug={slug} entityId={entity.id} navigate={navigate} />}
-        {!viewing && <EntityHistorySection slug={slug} entityId={entity.id} onRevert={onRevert} />}
+        {!viewing && <EntityDetailAccordion key={`${entity.id}-where-used`} id="where-used" title="Where Used" badge="Chapter references"><EntityUsageSection slug={slug} entityId={entity.id} navigate={navigate} expandedByDefault /></EntityDetailAccordion>}
+        {!viewing && <EntityDetailAccordion key={`${entity.id}-change-history`} id="change-history" title="Change History" badge="Audit trail"><EntityHistorySection slug={slug} entityId={entity.id} onRevert={onRevert} expandedByDefault /></EntityDetailAccordion>}
 
-        {shownProvenance?.length > 0 && (
+        {shownProvenance?.length > 0 && <EntityDetailAccordion key={`${entity.id}-provenance`} id="provenance" title="Provenance" badge={`${shownProvenance.length} records`}>
           <section className="entity-detail-section">
-            <span className="section-eyebrow">Provenance</span>
             <div className="provenance-grid">
               {shownProvenance.map((item: any, index: number) => (
                 <button key={`${item.chapter}-${index}`} onClick={() => navigate(`/stories/${slug}/chapters/${item.chapter}`)}>
@@ -1915,42 +1888,57 @@ export function CanonicalEntitySheet({ detail, slug, navigate, onClose, onUndo, 
               ))}
             </div>
           </section>
-        )}
+        </EntityDetailAccordion>}
+
+        {!viewing && (onDemote || onSuppress || onMerge || activeMerges.length > 0) && <EntityDetailAccordion key={`${entity.id}-entity-management`} id="entity-management" title="Entity Management" badge={detail.duplicateSuggestions?.length ? `${detail.duplicateSuggestions.length} duplicate candidate${detail.duplicateSuggestions.length === 1 ? "" : "s"}` : "Advanced"} defaultOpen={managementInitiallyOpen}>
+          <div className="entity-management-content">
+            <div className="entity-management-intro"><h4>Advanced entity controls</h4><p>Changes here affect canonical Story Bible state. Destructive actions always require confirmation.</p></div>
+
+            {detail.duplicateSuggestions?.length > 0 && <section className="entity-management-group">
+              <div className="entity-management-warning"><b>Possible duplicate identities found</b><p>Compare entity type, aliases, chapter evidence, and narration mappings before merging.</p></div>
+              <div className="entity-management-candidates">{detail.duplicateSuggestions.map((item: any) => {
+                const candidate = item.entities.find((entry: any) => entry.id !== entity.id);
+                return <article key={item.id} className="entity-management-candidate">
+                  <span className="entity-candidate-kicker">Possible duplicate</span>
+                  <b>{candidate?.name ?? "Unknown entity"}</b>
+                  <small>{candidate ? `${candidate.type ? pretty(candidate.type) : "Entity"} · ${item.reason ?? "Matching identity evidence"}` : (item.reason ?? "Matching identity evidence")}</small>
+                  {item.confidence !== undefined && <small>{Math.round(item.confidence * 100)}% match confidence</small>}
+                  <button type="button" className="button" onClick={() => onMerge(item)}>Compare &amp; merge</button>
+                </article>;
+              })}</div>
+            </section>}
+
+            {onMerge && <section className="entity-management-group">
+              <h4>Merge with another entity</h4><p>Search for a canonical entity that is not listed above.</p>
+              <div className="entity-management-search"><input id="merge-entity-search" value={mergeQuery} onChange={(event) => setMergeQuery(event.target.value)} placeholder="Search canonical name" /><button type="button" className="button" disabled={!mergeQuery.trim()} onClick={searchMergeChoices}>Find</button></div>
+              {mergeSearchError && <small className="entity-management-error" role="alert">{mergeSearchError}</small>}
+              {mergeChoices.length > 0 && <div className="entity-management-candidates">{mergeChoices.map((candidate: any) => <article key={candidate.id} className="entity-management-candidate search-result">
+                <b>{candidate.canonicalName}</b><small>{pretty(candidate.type)} · Ch. {candidate.firstAppearance}–{candidate.lastKnownAppearance}</small>
+                <button type="button" className="button" onClick={() => onMerge({ entities: [{ id: entity.id, name: entity.canonicalName }, { id: candidate.id, name: candidate.canonicalName }], reason: "Manual identity merge" })}>Compare &amp; merge</button>
+              </article>)}</div>}
+            </section>}
+
+            {onDemote && <section className="entity-management-group entity-canonical-status">
+              <h4>Canonical status</h4><p>This entity is currently canonical.</p>
+              {entity.canonicalNameLocked ? <span className="locked-demote-notice">🔒 This entity is locked and cannot be converted.</span> : <button type="button" className="button" onClick={onDemote}>Convert to minor reference</button>}
+            </section>}
+
+            {activeMerges.length > 0 && <section className="entity-management-group">
+              <h4>Merge history</h4>{activeMerges.map((item: any) => <button className="button merge-undo" key={item.id} onClick={() => onUndo(item.id)}>Undo merge · {item.reason}</button>)}
+            </section>}
+
+            {onSuppress && <section className="entity-danger-zone">
+              <h4>Danger zone</h4><p>Remove this entity from the active canonical Story Bible. Historical evidence is preserved.</p>
+              <button type="button" className="button danger" onClick={onSuppress}>Remove canonical entity…</button>
+            </section>}
+          </div>
+        </EntityDetailAccordion>}
         </>)}
       </div>
 
       {!viewing && (
       <footer className="entity-sheet-actions" aria-label="Canonical entity actions">
-        <div className="entity-sheet-primary-actions">
-          <button className="button primary full-width" onClick={onEdit}>
-            Edit entity
-          </button>
-        </div>
-
-        {(onDemote || onSuppress || onMerge || activeMerges.length > 0) && (
-          <div className="entity-sheet-management">
-            <span className="management-label">Entity Management — changes here rewrite canonical state and always ask for confirmation first</span>
-            <div className="management-action-list">
-              {detail.duplicateSuggestions?.length > 0 && <div className="naming-notice">Possible duplicate canonical entity: compare identity, type, and evidence before merging.</div>}
-              {detail.duplicateSuggestions?.map((item: any) => <button key={item.id} className="button management-button" onClick={() => onMerge(item)}>Compare / merge with {item.entities.find((candidate: any) => candidate.id !== entity.id)?.name}</button>)}
-              {onMerge && <div><label className="management-label" htmlFor="merge-entity-search">Merge with another entity</label><div className="field-row"><input id="merge-entity-search" value={mergeQuery} onChange={(event) => setMergeQuery(event.target.value)} placeholder="Search canonical name" /><button className="button" disabled={!mergeQuery.trim()} onClick={searchMergeChoices}>Find</button></div>{mergeSearchError && <small>{mergeSearchError}</small>}{mergeChoices.map((candidate: any) => <button className="button management-button" key={candidate.id} onClick={() => onMerge({ entities: [{ id: entity.id, name: entity.canonicalName }, { id: candidate.id, name: candidate.canonicalName }], reason: "Manual identity merge" })}>Compare with {candidate.canonicalName} · {pretty(candidate.type)} · Ch. {candidate.firstAppearance}–{candidate.lastKnownAppearance}</button>)}</div>}
-              {onDemote && !entity.canonicalNameLocked && (
-                <button className="button management-button" onClick={onDemote}>
-                  Convert to minor reference
-                </button>
-              )}
-              {onDemote && entity.canonicalNameLocked && (
-                <span className="locked-demote-notice">🔒 Locked entities cannot be converted</span>
-              )}
-              {onSuppress && <button className="button management-button" onClick={onSuppress}>Remove canonical entity…</button>}
-              {activeMerges.map((item: any) => (
-                <button className="button merge-undo" key={item.id} onClick={() => onUndo(item.id)}>
-                  Undo merge · {item.reason}
-                </button>
-              ))}
-            </div>
-          </div>
-        )}
+        <button className="button primary full-width" onClick={onEdit}>Edit entity</button>
       </footer>
       )}
     </div>
@@ -1960,17 +1948,17 @@ export function CanonicalEntitySheet({ detail, slug, navigate, onClose, onUndo, 
 const ENTITY_USAGE_KIND_LABEL: Record<string, string> = { provenance: "Story Bible", qa: "QA", continuity: "Continuity", scene: "Scene", "visual-profile": "Visual Profile" };
 
 /** "Used in" panel: aggregated entity usage, loaded lazily on expand. */
-export function EntityUsageSection({ slug, entityId, navigate }: { slug: string; entityId: string; navigate: (href: string) => void }) {
-  const [expanded, setExpanded] = useState(false);
+export function EntityUsageSection({ slug, entityId, navigate, expandedByDefault = false }: { slug: string; entityId: string; navigate: (href: string) => void; expandedByDefault?: boolean }) {
+  const [expanded, setExpanded] = useState(expandedByDefault);
   const [data, setData] = useState<EntityUsagePage>();
   const [error, setError] = useState("");
   const load = (page: number) => api<EntityUsagePage>(`/stories/${slug}/story-bible/entities/${entityId}/usage?page=${page}&pageSize=25`).then(setData).catch((value) => setError(message(value)));
-  useEffect(() => { if (expanded && !data) void load(1); });
+  useEffect(() => { if (expanded && !data && !error) void load(1); }, [expanded, data, error, slug, entityId]);
   const [first, last] = data?.summary.sourceChapters ?? [];
   return (
     <section className="entity-detail-section">
-      <span className="section-eyebrow">Used in</span>
-      {!expanded && <button type="button" className="button management-button" onClick={() => setExpanded(true)}>View where this entity is used</button>}
+      {!expandedByDefault && <span className="section-eyebrow">Used in</span>}
+      {!expanded && <button type="button" className="button" onClick={() => setExpanded(true)}>View where this entity is used</button>}
       {expanded && error && <p className="empty-text">{error}</p>}
       {expanded && !data && !error && <p className="empty-text">Loading usage…</p>}
       {expanded && data && (
@@ -2047,16 +2035,16 @@ export function entityAuditDeltaLabel(entry: EntityAuditEntry): string | undefin
 }
 
 /** "Change History" panel: append-only audit entries merged with the pre-existing historical record. */
-export function EntityHistorySection({ slug, entityId, onRevert }: { slug: string; entityId: string; onRevert?: (entry: EntityAuditEntry) => void }) {
-  const [expanded, setExpanded] = useState(false);
+export function EntityHistorySection({ slug, entityId, onRevert, expandedByDefault = false }: { slug: string; entityId: string; onRevert?: (entry: EntityAuditEntry) => void; expandedByDefault?: boolean }) {
+  const [expanded, setExpanded] = useState(expandedByDefault);
   const [data, setData] = useState<EntityAuditPage>();
   const [error, setError] = useState("");
   const load = (page: number) => api<EntityAuditPage>(`/stories/${slug}/story-bible/entities/${entityId}/audit?page=${page}&pageSize=25`).then(setData).catch((value) => setError(message(value)));
-  useEffect(() => { if (expanded && !data) void load(1); });
+  useEffect(() => { if (expanded && !data && !error) void load(1); }, [expanded, data, error, slug, entityId]);
   return (
     <section className="entity-detail-section">
-      <span className="section-eyebrow">Change History</span>
-      {!expanded && <button type="button" className="button management-button" onClick={() => setExpanded(true)}>View change history</button>}
+      {!expandedByDefault && <span className="section-eyebrow">Change History</span>}
+      {!expanded && <button type="button" className="button" onClick={() => setExpanded(true)}>View change history</button>}
       {expanded && error && <p className="empty-text">{error}</p>}
       {expanded && !data && !error && <p className="empty-text">Loading history…</p>}
       {expanded && data && (

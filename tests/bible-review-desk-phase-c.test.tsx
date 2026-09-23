@@ -20,7 +20,7 @@ const detail = (patch: Record<string, unknown> = {}) => ({
 const noop = () => {};
 
 describe("canonical entity sheet — Phase C sections", () => {
-  it("renders the naming collision section with field details and a compare action", () => {
+  it("renders naming collision evidence as an informational issue, without duplicating management actions", () => {
     const other = "ent_aaaaaaaaaaaaaaaaaaaaaaaa";
     const html = renderToStaticMarkup(
       <CanonicalEntitySheet
@@ -38,16 +38,19 @@ describe("canonical entity sheet — Phase C sections", () => {
     );
     expect(html).toContain("Naming collision");
     expect(html).toContain("The name &#x27;Sue&#x27; is used by 2 different entities.");
-    expect(html).toContain("Compare with Ming");
-    expect(html).toContain("preferred narration name");
+    expect(html).toContain("Ming · Character · via preferred narration name");
+    expect(html).not.toContain("Compare with Ming");
+    expect(html).toContain("Entity Management");
   });
 
   it("renders lazy usage and history affordances without fetching", () => {
     const html = renderToStaticMarkup(
       <CanonicalEntitySheet detail={detail()} slug="night-lantern" navigate={noop} onClose={noop} onUndo={noop} onEdit={noop} onDemote={noop} onSuppress={noop} onMerge={noop} onOpenVisualProfile={noop} />,
     );
-    expect(html).toContain("View where this entity is used");
-    expect(html).toContain("View change history");
+    expect(html).toContain("Where Used");
+    expect(html).toContain("Change History");
+    expect(html).not.toContain("View where this entity is used");
+    expect(html).not.toContain("View change history");
     expect(renderToStaticMarkup(<EntityUsageSection slug="s" entityId="ent_0123456789abcdef01234567" navigate={noop} />)).toContain("Used in");
     expect(renderToStaticMarkup(<EntityHistorySection slug="s" entityId="ent_0123456789abcdef01234567" />)).toContain("Change History");
   });

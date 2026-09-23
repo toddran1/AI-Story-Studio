@@ -1,6 +1,6 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
-import { App, applyVideoResolutionPreset, ArtworkEstimateSummary, ArtworkVersionMetadata, artworkModelOptionsFor, BibleReviewQueue, bibleQueryString, CanonicalEntitySheet, canDeleteChapterSceneDraft, chapterPageSize, chapterSceneStructureDirty, chapterScenesDirty, chapterVideoReadinessChecks, deleteChapterSceneDraft, moveChapterSceneDraft, toggleChapterSceneEnabledDraft, ChapterPage, chapterQaStatusView, chunkPresetFor, clearJobDismissal, clearJobMinimized, continuityReferenceTriState, describeContinuityReference, dismissJob, EntityStatusField, ErrorBoundary, EXECUTABLE_CHAPTER_STAGES, getStageActionDetails, humanizeContinuityChanges, isJobConsoleMinimized, isJobDismissed, isTerminalJob, JobConsole, paginateRows, Pagination, parseBibleQuery, PreviousHandoffBadge, QaDetail, QaFindingCard, QaResolvedFindings, ReadinessGrid, ReadinessStrip, resolvedBehaviorSummary, ResolvedBehaviorHint, reupscaleAvailable, SceneContinuityPanel, ScenesPage, setJobConsoleMinimized, SettingsPage, shouldRefreshAfterJob, Status, StoryBibleHealthCard, TtsQualityBadge, TtsSegmentRow, VIDEO_RESOLUTION_PRESETS, videoResolutionFor } from "../apps/web/src/App.js";
+import { App, applyVideoResolutionPreset, ArtworkEstimateSummary, ArtworkVersionMetadata, artworkModelOptionsFor, BibleReviewQueue, bibleQueryString, CanonicalEntitySheet, canDeleteChapterSceneDraft, chapterPageSize, chapterSceneStructureDirty, chapterScenesDirty, chapterVideoReadinessChecks, deleteChapterSceneDraft, moveChapterSceneDraft, toggleChapterSceneEnabledDraft, ChapterPage, chapterQaStatusView, chunkPresetFor, clearJobDismissal, clearJobMinimized, continuityReferenceTriState, describeContinuityReference, dismissJob, EntityDetailAccordion, EntityStatusField, ErrorBoundary, EXECUTABLE_CHAPTER_STAGES, getStageActionDetails, humanizeContinuityChanges, isJobConsoleMinimized, isJobDismissed, isTerminalJob, JobConsole, paginateRows, Pagination, parseBibleQuery, PreviousHandoffBadge, QaDetail, QaFindingCard, QaResolvedFindings, ReadinessGrid, ReadinessStrip, resolvedBehaviorSummary, ResolvedBehaviorHint, reupscaleAvailable, SceneContinuityPanel, ScenesPage, setJobConsoleMinimized, SettingsPage, shouldRefreshAfterJob, Status, StoryBibleHealthCard, TtsQualityBadge, TtsSegmentRow, VIDEO_RESOLUTION_PRESETS, videoResolutionFor } from "../apps/web/src/App.js";
 import { api, ApiError } from "../apps/web/src/api.js";
 import type { ArtworkVersion, ChapterDetail, Job, QaFinding, Scene, TtsQualityArtifact, TtsSegmentQuality, VideoSettings, VisualContinuityChange } from "../apps/web/src/api.js";
 import { pretty } from "../apps/web/src/format.js";
@@ -375,6 +375,7 @@ describe("web UI", () => {
         onUndo={() => undefined}
         onEdit={() => undefined}
         onDemote={() => undefined}
+        managementInitiallyOpen
       />
     );
     // Header
@@ -441,6 +442,7 @@ describe("web UI", () => {
         onUndo={() => undefined}
         onEdit={() => undefined}
         onDemote={() => undefined}
+        managementInitiallyOpen
       />
     );
     expect(html).toContain("Iron Blood Guild");
@@ -451,16 +453,17 @@ describe("web UI", () => {
     expect(html).toContain("Configure →");
     expect(html).toContain("No aliases recorded.");
     // Locked canonical entities cannot be demoted
-    expect(html).toContain("🔒 Locked entities cannot be converted");
+    expect(html).toContain("🔒 This entity is locked and cannot be converted.");
     expect(html).not.toContain("Convert to minor reference");
   });
 
   it("shows duplicate comparison and recoverable removal in entity management", () => {
     const entity = { id: "ent_aaaaaaaaaaaaaaaaaaaaaaaa", type: "organization", canonicalName: "Hundred Treasures Pavilion", originalName: "百宝阁", aliases: [], firstAppearance: 22, lastKnownAppearance: 530, status: "active", description: "Trading house", notes: "", provenance: [], aliasNarrationRules: [], mergedFromIds: [], canonicalNameLocked: false, origin: "manual" };
     const detail = { entity, timeline: [], relationships: [], relatedNames: {}, relatedReferences: [], issues: [], merges: [], duplicateSuggestions: [{ id: "pair", entityIds: [entity.id, "ent_bbbbbbbbbbbbbbbbbbbbbbbb"], entities: [{ id: entity.id, name: entity.canonicalName }, { id: "ent_bbbbbbbbbbbbbbbbbbbbbbbb", name: entity.canonicalName }], confidence: 0.9, reason: "Same name", supportingChapters: [22] }] };
-    const html = renderToStaticMarkup(<CanonicalEntitySheet detail={detail} slug="demo-story" navigate={() => undefined} onClose={() => undefined} onUndo={() => undefined} onEdit={() => undefined} onDemote={() => undefined} onSuppress={() => undefined} onMerge={() => undefined} />);
-    expect(html).toContain("Possible duplicate canonical entity");
-    expect(html).toContain("Compare / merge with Hundred Treasures Pavilion");
+    const html = renderToStaticMarkup(<CanonicalEntitySheet detail={detail} slug="demo-story" navigate={() => undefined} onClose={() => undefined} onUndo={() => undefined} onEdit={() => undefined} onDemote={() => undefined} onSuppress={() => undefined} onMerge={() => undefined} managementInitiallyOpen />);
+    expect(html).toContain("Possible duplicate identities found");
+    expect(html).toContain("Compare &amp; merge");
+    expect(html).toContain("90% match confidence");
     expect(html).toContain("Merge with another entity");
     expect(html).toContain("Remove canonical entity");
   });
@@ -2426,20 +2429,22 @@ describe("story bible review desk (phase D) — as-of-chapter view and sheet org
     expect(html).toContain("View as of chapter");
     // Section organization
     expect(html).toContain("Identity");
-    expect(html).toContain("Narration &amp; Localization");
+    expect(html).toContain("Naming &amp; Localization");
     expect(html).toContain("Story Information");
     expect(html).toContain("Visual Canon");
     expect(html).toContain("Provenance");
     // MANUAL badges visible without opening edit mode
     expect((html.match(/>Manual</g) || []).length).toBeGreaterThanOrEqual(3);
-    // Origin + confidence labels on provenance
-    expect(html).toContain("Origin: Automatic");
-    expect(html).toContain("Confidence: 91%");
-    // Management is the bottom danger group with the destructive actions
+    // Provenance and management start collapsed; details mount only on demand.
+    expect(html).toContain("2 records");
     expect(html).toContain("Entity Management");
-    expect(html).toContain("🔒 Locked entities cannot be converted");
-    expect(html).toContain("Remove canonical entity");
+    expect(html).toContain('aria-expanded="false" aria-controls="entity-section-entity-management"');
+    expect(html).not.toContain("Remove canonical entity");
     expect(html).toContain("Edit entity");
+    const stickyFooter = html.split('<footer class="entity-sheet-actions"')[1]?.split("</footer>")[0] ?? "";
+    expect(stickyFooter).toContain("Edit entity");
+    expect(stickyFooter).not.toContain("Entity Management");
+    expect(stickyFooter).not.toContain("Remove");
   });
 
   it("renders the read-only historical mode with badges and without editing or management controls", () => {
