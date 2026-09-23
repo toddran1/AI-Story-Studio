@@ -78,6 +78,13 @@ export function ArtDirectionModal({
   }, [slug]);
 
   const activePreset = artDirection?.presets.find((p) => p.id === selectedPresetId);
+  const deleteDisabledReason = !activePreset
+    ? undefined
+    : artDirection.presets.length <= 1
+      ? "At least one Art Direction preset must remain."
+      : activePreset.isDefault
+        ? "Set another preset as Story Default before deleting this preset."
+        : undefined;
 
   const handleUpdatePresetField = <K extends keyof ArtDirectionPreset>(
     field: K,
@@ -462,7 +469,8 @@ export function ArtDirectionModal({
               type="button"
               className="button danger"
               onClick={handleDelete}
-              disabled={saving || !activePreset || artDirection.presets.length <= 1}
+              disabled={saving || !activePreset || Boolean(deleteDisabledReason)}
+              title={deleteDisabledReason}
             >
               Delete
             </button>

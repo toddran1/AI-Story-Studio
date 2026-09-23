@@ -89,15 +89,26 @@ describe("Art Direction preset modal", () => {
     await act(async () => reactRoot.render(<ArtDirectionModal slug={slug} onClose={() => undefined} />));
     await waitFor(() => mount.textContent?.includes("Main Style") ?? false);
     expect(mount.textContent).toContain("Main Style");
+    expect(button("Delete").disabled).toBe(true);
+    expect(button("Delete").title).toBe("At least one Art Direction preset must remain.");
 
     await click("+ New");
     await waitFor(() => mount.querySelectorAll(".preset-item").length === 2);
     expect(mount.querySelectorAll(".preset-item")).toHaveLength(2);
     expect(selectedPreset()).toContain("Preset 2");
     expect(mount.textContent).not.toContain("Invalid input: expected string");
+    expect(button("Delete").disabled).toBe(false);
     const created = (await loadStoryArtDirection(root, slug)).presets.find((preset) => preset.name === "Preset 2")!;
     expect(created.id).toMatch(/^preset_[a-f0-9-]{36}$/);
     expect(created.isDefault).toBe(false);
+
+    const mainStyleItem = [...mount.querySelectorAll<HTMLElement>(".preset-item")].find((item) => item.textContent?.includes("Main Style"))!;
+    await act(async () => mainStyleItem.click());
+    expect(button("Delete").disabled).toBe(true);
+    expect(button("Delete").title).toBe("Set another preset as Story Default before deleting this preset.");
+    const createdPresetItem = [...mount.querySelectorAll<HTMLElement>(".preset-item")].find((item) => item.textContent?.includes("Preset 2"))!;
+    await act(async () => createdPresetItem.click());
+    expect(button("Delete").disabled).toBe(false);
 
     const nameInput = mount.querySelector<HTMLInputElement>('.preset-main input[type="text"]')!;
     await act(async () => {
@@ -131,6 +142,10 @@ describe("Art Direction preset modal", () => {
     const persisted = await loadStoryArtDirection(root, slug);
     expect(persisted.activePresetId).toBe(created.id);
     expect(persisted.presets.filter((preset) => preset.isDefault)).toHaveLength(1);
+    expect(button("Delete").disabled).toBe(true);
+    expect(button("Delete").title).toBe("Set another preset as Story Default before deleting this preset.");
+    await act(async () => mainStyleItem.click());
+    expect(button("Delete").disabled).toBe(false);
 
     await act(async () => reactRoot.unmount());
     reactRoot = createRoot(mount);
@@ -138,6 +153,7 @@ describe("Art Direction preset modal", () => {
     await waitFor(() => mount.querySelectorAll(".preset-item").length === 2);
     expect(selectedPreset()).toContain("Preset 2");
     expect(mount.querySelectorAll(".preset-item")).toHaveLength(2);
+    expect(button("Delete").disabled).toBe(true);
   });
 
   it("web API helpers send wrapped editable fields and return the updated state", async () => {
