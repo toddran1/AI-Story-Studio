@@ -30,17 +30,29 @@ export function targetOverridesByFindingId(
 }
 
 /** Resolve legacy issue positions once, before a queued repair can wait on a lock. */
-export function captureQaRepairFindingSnapshots(state: QaState, issueIndexes: number[]): QaRepairFindingSnapshot[] {
+export function captureQaRepairFindingSnapshotsFromIssues(
+  qaIssues: QaState["issues"],
+  findings: QaFinding[],
+  issueIndexes: number[],
+): QaRepairFindingSnapshot[] {
   const indexes = [...new Set(issueIndexes)];
-  const selectable = state.findings.filter((finding) => finding.status !== "obsolete");
-  if (!indexes.length || indexes.some((index) => !Number.isSafeInteger(index) || index < 0 || index >= selectable.length)) {
-    throw new QaFindingStaleSelectionError("One or more selected QA findings no longer exist. Reload QA and select the current findings again.");
-  }
-  const selected = indexes.map((index) => selectable[index]!);
-  if (selected.some((finding) => finding.status !== "open")) {
-    throw new QaFindingStaleSelectionError("One or more selected QA findings are no longer open. Reload QA and select the current findings again.");
-  }
-  return selected.map((finding) => ({ id: finding.id, fingerprint: finding.fingerprint }));
+  if (!indexes.length) throw new QaFindingStaleSelectionError("Select one or more current QA findings, then retry.");
+  return indexes.map((index) => {
+    const issue = Number.isSafeInteger(index) && index >= 0 ? qaIssues[index] : undefined;
+    if (!issue) throw new QaFindingStaleSelectionError("One or more selected QA findings no longer exist. Reload QA and select the current findings again.");
+    const matches = findings.filter((finding) => finding.category === issue.category
+      && finding.severity === issue.severity
+      && finding.message === issue.message
+      && finding.evidence === issue.evidence);
+    if (matches.length !== 1) {
+      throw new QaFindingStaleSelectionError("The selected QA finding can no longer be mapped safely to the current QA state. Reload QA and select the current finding again.");
+    }
+    const finding = matches[0]!;
+    if (finding.status !== "open") {
+      throw new QaFindingStaleSelectionError("One or more selected QA findings are no longer open. Reload QA and select the current findings again.");
+    }
+    return { id: finding.id, fingerprint: finding.fingerprint };
+  });
 }
 
 /** Revalidate identity and open status after the queued job acquires the story lock. */

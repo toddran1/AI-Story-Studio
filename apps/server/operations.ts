@@ -108,7 +108,7 @@ import { addQaException, listQaExceptions, prepareQaException, removeQaException
 import { resetChapterQa, resetChapterQaBatch, qaResetScopeSchema } from "../../src/qa/reset.js";
 import { applyNarrationNamingPreferences } from "../../src/narration/naming-preferences.js";
 import { loadNarrationNamingEntities } from "../../src/story-bible/narration-names.js";
-import { captureQaRepairFindingSnapshots, inferQaRepairTargets, repairQaText, targetOverridesByFindingId, validateQaRepairFindingSnapshots, type QaRepairFindingSnapshot, type QaRepairTarget } from "../../src/qa/repair.js";
+import { captureQaRepairFindingSnapshotsFromIssues, inferQaRepairTargets, repairQaText, targetOverridesByFindingId, validateQaRepairFindingSnapshots, type QaRepairFindingSnapshot, type QaRepairTarget } from "../../src/qa/repair.js";
 import { QaArtifactUnavailableError, QaFindingStaleSelectionError, QaPrerequisiteError, QaRepairTargetAmbiguousError } from "../../src/qa/errors.js";
 import { resolveStoredQaContext } from "../../src/qa/freshness.js";
 import { persistQaStateWithMetadata } from "../../src/qa/persistence.js";
@@ -590,9 +590,10 @@ export class StudioOperations {
       readJsonIfExists(preflightPaths.qa), readTextIfExists(preflightPaths.english), readTextIfExists(preflightPaths.narration),
     ]);
     if (!preflightQaRaw) throw new Error(`Chapter ${chapter} does not have a QA result`);
+    const preflightPublicQa = qaResultSchema.parse(preflightQaRaw);
     const preflightState = migrateQaState(preflightQaRaw, { chapter });
     let snapshots: QaRepairFindingSnapshot[];
-    if (input.issueIndexes) snapshots = captureQaRepairFindingSnapshots(preflightState, input.issueIndexes);
+    if (input.issueIndexes) snapshots = captureQaRepairFindingSnapshotsFromIssues(preflightPublicQa.issues, preflightState.findings, input.issueIndexes);
     else {
       const ids = [...new Set(input.findingIds!)];
       snapshots = ids.map((id) => {
