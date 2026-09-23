@@ -215,7 +215,8 @@ describe("web service layer", () => {
     const qa = qaResultSchema.parse({ status: "warn", score: .8, issues: [{ category: "terminology", severity: "warn", message: "Use the canonical ability name", evidence: "Azure Flame is the locked term." }], checks: { completeness: "pass", names: "pass", numbers: "pass", terminology: "warn", dialogue: "pass", storyConsistency: "pass", narrationFidelity: "pass" } });
     await atomicWriteJson(paths.chapterMeta, chapter); await atomicWriteJson(paths.qa, qa); await atomicWrite(paths.original, "守灯人穿过庭院。".repeat(50)); await atomicWrite(paths.english, current); await atomicWrite(paths.narration, current); await atomicWriteJson(paths.storyContext, {});
     const gemini = new MockLLM("gemini", [repaired]); const openai = new MockLLM("openai", [repaired]); const jobs = new JobManager(); const operations = new StudioOperations(root, env, jobs, { llm: new LLMRouter(new Map([["gemini", gemini], ["openai", openai]])) });
-    const finished = await waitForJob(jobs, operations.startQaRepair(story.slug, 1, { issueIndexes: [0] }).id);
+    const repairJob = await operations.startQaRepair(story.slug, 1, { issueIndexes: [0], targetOverrides: { "0": "translation" } });
+    const finished = await waitForJob(jobs, repairJob.id);
     expect(finished.status).toBe("completed"); expect(await readFile(paths.english, "utf8")).toBe(repaired.trim());
     const retained = await getChapter(root, story.slug, 1); expect(retained.qa?.status).toBe("warn"); expect(retained.qaStale).toBe(true);
     expect((await readJsonIfExists<any>(paths.chapterMeta))?.stages).toMatchObject({ translation: { provider: "manual", model: "studio-editor" }, qa: { status: "pending" } });

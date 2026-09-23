@@ -77,6 +77,7 @@ export const qaFindingSchema = z.object({
     excerptKey: z.string().optional(),
     relation: z.string().optional(),
     continuityIds: z.array(z.string()).optional(),
+    ruleKey: z.string().optional(),
   }).optional(),
   origin: z.enum(["llm", "deterministic"]),
   safeToFix: z.boolean().optional(),
@@ -86,10 +87,17 @@ export const qaContentSpansSchema = z.object({
   paragraphFingerprints: z.array(z.string()),
   textFingerprint: z.string(),
 });
+export const qaDependencySnapshotSchema = z.object({
+  version: z.literal(1), combined: z.string(), text: z.string(), source: z.string(), naming: z.string(),
+  pronunciation: z.string(), exceptions: z.string(), acceptedContinuity: z.string(), context: z.string(),
+  config: z.string(), narrationSettings: z.string(), prompt: z.string(), mode: z.string(),
+});
+export type QaDependencySnapshot = z.infer<typeof qaDependencySnapshotSchema>;
 /** Persisted chapter QA state: the legacy summary shape plus persistent, reconcilable findings. */
 export const qaStateSchema = qaResultSchema.extend({
   findings: z.array(qaFindingSchema).default([]),
   contentSpans: qaContentSpansSchema.optional(),
+  dependencySnapshot: qaDependencySnapshotSchema.optional(),
   mode: z.enum(["production", "thorough"]).optional(),
 });
 export type QaFinding = z.infer<typeof qaFindingSchema>;

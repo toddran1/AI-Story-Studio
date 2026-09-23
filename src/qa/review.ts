@@ -13,13 +13,15 @@ import {
   anchorFromIssue, computeFindingId, deriveIssues, extractNameRelation, FindingAnchor, findingFingerprint,
   migrateQaState, normalizeExcerptKey, normalizeQaText, openFindings, qaCounts, recomputeQaSummary,
 } from "./findings.js";
-import { computeQaDependencyFingerprint, loadQaDeterministicDependencies, resolveStoredQaContext } from "./freshness.js";
+import { computeQaDependencyFingerprint, computeQaDependencyFingerprints, qaDependencySnapshot, loadQaDeterministicDependencies, loadStoredQaDependencies, resolveStoredQaContext } from "./freshness.js";
 import { QA_PROMPT_VERSION } from "./prompts.js";
 import { validateChapterQuality } from "./validator.js";
 import { runDeterministicQaChecks, type AcceptedContinuity } from "./deterministic.js";
 import { exceptionsPromptSection, filterExceptedFindings, listQaExceptions } from "./exceptions.js";
 import { loadStoryBibleWithCanonicalOverlay } from "../story-bible/canonical.js";
 import { authorizedNarrationNames } from "../narration/naming-preferences.js";
+import { persistQaStateWithMetadata } from "./persistence.js";
+import type { QaDependencySnapshot } from "../domain/qa.js";
 
 export type FreshQaDetection = {
   category: QaCategory;
@@ -32,11 +34,31 @@ export type FreshQaDetection = {
   confidence?: number;
   /** Pre-resolved entity anchors (deterministic checks); merged into the computed anchor. */
   entityIds?: string[];
+  /** Auto-anchoring found multiple possible identities; a single-ID exception cannot safely choose one. */
+  entityMatchAmbiguous?: boolean;
   /** Deterministic rule identity (rule kind + matched token); part of the finding identity. */
   ruleKey?: string;
   /** Continuity findings this detection relates to; recorded in provenance. */
   continuityIds?: string[];
 };
+
+/** Anchor provider/deterministic detections before entity-scoped exception filtering. */
+export function prepareQaDetections(detections: FreshQaDetection[], options: {
+  canonicalEntities?: StoryBible["canonicalEntities"];
+  effectiveNamingEntities?: StoryBible["canonicalEntities"];
+  translation: string;
+  narration: string;
+}): FreshQaDetection[] {
+  const paragraphs = combinedQaParagraphs(options.translation, options.narration).map((item) => item.text);
+  return detections.map((detection) => {
+    const entities = detection.category === "names" && options.effectiveNamingEntities?.length
+      ? options.effectiveNamingEntities : options.canonicalEntities;
+    const anchor = anchorFromIssue(detection, { canonicalEntities: entities, paragraphs });
+    const anchoredIds = anchor.entityIds ?? [];
+    return { ...detection, entityIds: [...new Set([...(detection.entityIds ?? []), ...anchoredIds])],
+      ...(detection.entityIds?.length ? {} : anchoredIds.length > 1 ? { entityMatchAmbiguous: true } : {}) };
+  });
+}
 
 export type ReconcileOutcome = { verified: number; respected: number; reopened: number; newFindings: number; obsoleted: number };
 
@@ -249,6 +271,7 @@ export function reconcileQaState(
         ...(anchor.excerptKey ? { excerptKey: anchor.excerptKey } : {}),
         ...(anchor.relation ? { relation: anchor.relation } : {}),
         ...(detection.continuityIds?.length ? { continuityIds: detection.continuityIds } : {}),
+        ...(detection.ruleKey ? { ruleKey: detection.ruleKey } : {}),
       },
       origin: detection.origin ?? "llm",
       ...(detection.safeToFix !== undefined ? { safeToFix: detection.safeToFix } : {}),
@@ -387,6 +410,7 @@ export function buildQaState(
     mode?: "production" | "thorough";
     acceptedContinuity?: AcceptedContinuity[];
     dependencyFingerprint?: string;
+    dependencySnapshot?: QaDependencySnapshot;
     evaluatedContent?: string;
   },
 ): { state: QaState; outcome: ReconcileOutcome } {
@@ -437,6 +461,7 @@ export function buildQaState(
     issues: deriveIssues(findings),
     findings,
     contentSpans: computeContentSpans(options.translation, options.narration),
+    ...(options.dependencySnapshot ? { dependencySnapshot: options.dependencySnapshot } : {}),
     ...((options.mode ?? previous?.mode) ? { mode: options.mode ?? previous?.mode } : {}),
   });
   return { state, outcome };
@@ -513,6 +538,8 @@ export type QaRecheckSummary = ReturnType<typeof qaCounts> & Pick<ReconcileOutco
   mode: QaRecheckMode;
   fellBackToFull: boolean;
   obsoleted: number;
+  reason?: QaRecheckDecision["reason"];
+  globalDependencyChanges?: string[];
 };
 
 export type QaRecheckInspection = {
@@ -524,7 +551,69 @@ export type QaRecheckInspection = {
   selectedLabels: string[];
   previousFindings: number;
   exceptions: number;
+  reason: QaRecheckDecision["reason"];
+  globalDependencyChanges: string[];
+  dependencyChanges: {
+    textChanged: boolean; sourceChanged: boolean; namingChanged: boolean; pronunciationChanged: boolean;
+    exceptionsChanged: boolean; acceptedContinuityChanged: boolean; qaConfigChanged: boolean;
+    promptChanged: boolean; modeChanged: boolean; contextChanged: boolean; narrationSettingsChanged: boolean;
+  };
 };
+
+export type QaRecheckDecision = {
+  requestedMode: QaRecheckMode;
+  effectiveMode: QaRecheckMode;
+  reason: "requested_full" | "missing_prior_spans" | "missing_dependency_snapshot" | "zero_text_changes" | "large_text_change" | "global_dependency_changed" | "changed_text_only";
+  changedCount: number;
+  totalCount: number;
+  selectedLabels: string[];
+  globalDependencyChanges: string[];
+  dependencyChanges: QaRecheckInspection["dependencyChanges"];
+};
+
+const GLOBAL_QA_DEPENDENCIES = ["source", "naming", "pronunciation", "exceptions", "acceptedContinuity", "context", "config", "narrationSettings", "prompt", "mode"] as const;
+
+/** One decision function shared by the no-cost inspector and real provider execution. */
+export function decideQaRecheckMode(input: {
+  requestedMode: QaRecheckMode;
+  previous: QaState | undefined;
+  currentSnapshot: NonNullable<QaState["dependencySnapshot"]>;
+  translation: string;
+  narration: string;
+}): QaRecheckDecision {
+  const selection = selectChangedParagraphs(input.previous?.contentSpans, input.translation, input.narration);
+  const changedCount = selection?.changedCount ?? 0;
+  const totalCount = selection?.totalCount ?? 0;
+  const selectedLabels = selection?.paragraphs.map((paragraph) => paragraph.label) ?? [];
+  const prior = input.previous?.dependencySnapshot;
+  const globalDependencyChanges = prior
+    ? GLOBAL_QA_DEPENDENCIES.filter((key) => prior[key] !== input.currentSnapshot[key])
+    : [...GLOBAL_QA_DEPENDENCIES];
+  const dependencyChanges = {
+    textChanged: !prior || prior.text !== input.currentSnapshot.text,
+    sourceChanged: !prior || prior.source !== input.currentSnapshot.source,
+    namingChanged: !prior || prior.naming !== input.currentSnapshot.naming,
+    pronunciationChanged: !prior || prior.pronunciation !== input.currentSnapshot.pronunciation,
+    exceptionsChanged: !prior || prior.exceptions !== input.currentSnapshot.exceptions,
+    acceptedContinuityChanged: !prior || prior.acceptedContinuity !== input.currentSnapshot.acceptedContinuity,
+    qaConfigChanged: !prior || prior.config !== input.currentSnapshot.config,
+    promptChanged: !prior || prior.prompt !== input.currentSnapshot.prompt,
+    modeChanged: !prior || prior.mode !== input.currentSnapshot.mode,
+    contextChanged: !prior || prior.context !== input.currentSnapshot.context,
+    narrationSettingsChanged: !prior || prior.narrationSettings !== input.currentSnapshot.narrationSettings,
+  };
+  let reason: QaRecheckDecision["reason"];
+  let effectiveMode = input.requestedMode;
+  if (input.requestedMode === "full") reason = "requested_full";
+  else if (!input.previous?.contentSpans) { effectiveMode = "full"; reason = "missing_prior_spans"; }
+  else if (!prior) { effectiveMode = "full"; reason = "missing_dependency_snapshot"; }
+  else if (globalDependencyChanges.length) { effectiveMode = "full"; reason = "global_dependency_changed"; }
+  else if (!selection) { effectiveMode = "full"; reason = "missing_prior_spans"; }
+  else if (selection.changedCount === 0) { effectiveMode = "full"; reason = "zero_text_changes"; }
+  else if (selection.ratio > 0.5) { effectiveMode = "full"; reason = "large_text_change"; }
+  else reason = "changed_text_only";
+  return { requestedMode: input.requestedMode, effectiveMode, reason, changedCount, totalCount, selectedLabels: effectiveMode === "changed" ? selectedLabels : [], globalDependencyChanges, dependencyChanges };
+}
 
 /** What a recheck WOULD do: effective mode, changed-span selection, context sizes. No provider call. */
 export async function inspectQaRecheck(deps: {
@@ -535,26 +624,17 @@ export async function inspectQaRecheck(deps: {
 }): Promise<QaRecheckInspection> {
   const { root, story, chapter } = deps;
   const paths = storyPaths(root, story.slug, chapter);
-  const [qaRaw, translation, narration, exceptions] = await Promise.all([
-    readJsonIfExists(paths.qa), readFile(paths.english, "utf8"), readFile(paths.narration, "utf8"), listQaExceptions(root, story.slug),
+  const [qaRaw, translation, narration, exceptions, dependencies] = await Promise.all([
+    readJsonIfExists(paths.qa), readFile(paths.english, "utf8"), readFile(paths.narration, "utf8"), listQaExceptions(root, story.slug), loadStoredQaDependencies(root, story, chapter),
   ]);
   const previous = qaRaw ? migrateQaState(qaRaw, { chapter }) : undefined;
   const requestedMode = deps.mode ?? "changed";
-  let mode: QaRecheckMode = requestedMode;
-  let changedCount = 0; let totalCount = 0; let selectedLabels: string[] = [];
-  if (requestedMode === "changed") {
-    const selection = selectChangedParagraphs(previous?.contentSpans, translation, narration);
-    if (!selection || selection.changedCount === 0 || selection.ratio > 0.5) {
-      mode = "full";
-    } else {
-      changedCount = selection.changedCount;
-      totalCount = selection.totalCount;
-      selectedLabels = selection.paragraphs.map((paragraph) => paragraph.label);
-    }
-  }
+  const currentSnapshot = qaDependencySnapshot(computeQaDependencyFingerprints(dependencies!));
+  const decision = decideQaRecheckMode({ requestedMode, previous, currentSnapshot, translation, narration });
   return {
-    requestedMode, mode, fellBackToFull: requestedMode === "changed" && mode === "full",
-    changedCount, totalCount, selectedLabels,
+    requestedMode, mode: decision.effectiveMode, fellBackToFull: requestedMode === "changed" && decision.effectiveMode === "full",
+    changedCount: decision.changedCount, totalCount: decision.totalCount, selectedLabels: decision.selectedLabels,
+    reason: decision.reason, globalDependencyChanges: decision.globalDependencyChanges, dependencyChanges: decision.dependencyChanges,
     previousFindings: previous?.findings.length ?? 0,
     exceptions: exceptions.length,
   };
@@ -577,32 +657,13 @@ export async function recheckChapterQa(deps: {
   const paths = storyPaths(root, story.slug, chapter);
   const [qaRaw, chapterRaw, source, translation, narration, qaContext] = await Promise.all([
     readJsonIfExists(paths.qa), readJsonIfExists(paths.chapterMeta), readFile(paths.original, "utf8"),
-    readFile(paths.english, "utf8"), readFile(paths.narration, "utf8"), resolveStoredQaContext(paths),
+    readFile(paths.english, "utf8"), readFile(paths.narration, "utf8"), resolveStoredQaContext({ storyContext: paths.storyContext, chapter }),
   ]);
   if (!chapterRaw) throw new Error(`Chapter ${chapter} has no production metadata`);
   if (!translation.trim() || !narration.trim()) throw new Error(`Chapter ${chapter} needs a retained translation and narration before it can be rechecked`);
   const metadata = chapterSchema.parse(chapterRaw);
   const context = qaContext.parsed;
   const previous = qaRaw ? migrateQaState(qaRaw, { chapter }) : undefined;
-
-  const requestedMode = deps.mode ?? "full";
-  let mode: QaRecheckMode = requestedMode;
-  let changedContent: string | undefined;
-  if (requestedMode === "changed") {
-    const selection = selectChangedParagraphs(previous?.contentSpans, translation, narration);
-    if (!selection || selection.changedCount === 0 || selection.ratio > 0.5) {
-      // Missing/unmappable spans or a wholesale rewrite: a changed-only view
-      // cannot verify previous findings, so recheck the full chapter.
-      mode = "full";
-    } else {
-      changedContent = selection.paragraphs.map((paragraph) => `[${paragraph.label}] ${paragraph.text}`).join("\n\n");
-      if (!changedContent.trim()) {
-        mode = "full";
-        changedContent = undefined;
-      }
-    }
-  }
-  const previousFindingsContext = previous && previous.findings.length ? compactFindingsContext(previous) : undefined;
 
   const [deterministic, exceptions, deterministicDeps] = await Promise.all([
     runDeterministicQaChecks({ root, story, chapter, source, translation, narration }),
@@ -611,6 +672,20 @@ export async function recheckChapterQa(deps: {
   ]);
   const config = story.pipeline.qa;
   const effectiveNamingEntities = (await loadStoryBibleWithCanonicalOverlay(root, story.slug)).canonicalEntities;
+  const currentDependencies = {
+    source: fingerprint({ source, sourceLanguage: story.sourceLanguage, outputLanguage: story.outputLanguage }),
+    translation: fingerprint(translation), narration: fingerprint(narration), context: qaContext.raw,
+    config, narrationSettings: { profanityMode: story.narrationSettings.profanityMode, includeChapterTitle: story.narrationSettings.includeChapterTitle },
+    prompt: QA_PROMPT_VERSION, mode: story.qaMode, ...deterministicDeps,
+  };
+  const dependencyFingerprints = computeQaDependencyFingerprints(currentDependencies);
+  const dependencySnapshot = qaDependencySnapshot(dependencyFingerprints);
+  const requestedMode = deps.mode ?? "full";
+  const decision = decideQaRecheckMode({ requestedMode, previous, currentSnapshot: dependencySnapshot, translation, narration });
+  const mode = decision.effectiveMode;
+  const selection = mode === "changed" ? selectChangedParagraphs(previous?.contentSpans, translation, narration) : undefined;
+  const changedContent = selection?.paragraphs.map((paragraph) => `[${paragraph.label}] ${paragraph.text}`).join("\n\n");
+  const previousFindingsContext = previous && previous.findings.length ? compactFindingsContext(previous) : undefined;
   const result = await validateChapterQuality(provider, config, {
     chapter, sourceLanguage: story.sourceLanguage, outputLanguage: story.outputLanguage,
     source, translation, narration, context, authorizedNarrationEntities: effectiveNamingEntities.filter((entity) => entity.localizedNaming || entity.preferredNarrationName || entity.aliasNarrationRules.length),
@@ -623,40 +698,29 @@ export async function recheckChapterQa(deps: {
 
   // The same authoritative dependency fingerprint the pipeline records, so a
   // recheck-produced stage compares current against a pipeline-produced one.
-  const dependencyFingerprint = computeQaDependencyFingerprint({
-    source: fingerprint({ source, sourceLanguage: story.sourceLanguage, outputLanguage: story.outputLanguage }),
-    translation: fingerprint(translation),
-    narration: fingerprint(narration),
-    context: qaContext.raw,
-    config,
-    narrationSettings: { profanityMode: story.narrationSettings.profanityMode, includeChapterTitle: story.narrationSettings.includeChapterTitle },
-    prompt: QA_PROMPT_VERSION,
-    mode: story.qaMode,
-    ...deterministicDeps,
-  });
+  const dependencyFingerprint = dependencyFingerprints.fingerprint;
   const fullContent = `${translation}\n\n${narration}`;
-  const detections = filterExceptedFindings([...deterministic.detections, ...result.value.issues], exceptions);
+  const detections = filterExceptedFindings(prepareQaDetections([...deterministic.detections, ...result.value.issues], {
+    canonicalEntities: context.canonicalEntities, effectiveNamingEntities, translation, narration,
+  }), exceptions);
   const { state, outcome } = buildQaState(previous, detections, {
     chapter, canonicalEntities: context.canonicalEntities, effectiveNamingEntities, translation, narration, now: deps.now,
     baseScore: { score: result.value.score, originalScore: result.value.originalScore, status: result.value.status, originalStatus: result.value.originalStatus },
     mode: story.qaMode,
     acceptedContinuity: deterministic.acceptedContinuity,
     dependencyFingerprint,
+    dependencySnapshot,
     evaluatedContent: mode === "full" ? fullContent : changedContent,
   });
-  await atomicWriteJson(paths.qa, state);
-
-  metadata.quality = { status: state.status, score: state.score, issueCategories: [...new Set(openFindings(state).map((finding) => finding.category))] };
-  const outputFingerprint = await fileFingerprint(paths.qa);
-  if (!outputFingerprint) throw new Error(`Chapter ${chapter} QA result could not be persisted`);
-  metadata.stages.qa = {
-    status: "complete",
-    fingerprint: dependencyFingerprint,
-    outputFingerprint, provider: config.provider, model: config.model, promptVersion: QA_PROMPT_VERSION,
-    completedAt: new Date().toISOString(), usage: result.usage,
-  };
-  metadata.updatedAt = new Date().toISOString();
-  await atomicWriteJson(paths.chapterMeta, metadata);
+  await persistQaStateWithMetadata(paths, state, metadata, (outputFingerprint, prior) => ({
+    ...prior,
+    quality: { status: state.status, score: state.score, issueCategories: [...new Set(openFindings(state).map((finding) => finding.category))] },
+    stages: { ...prior.stages, qa: {
+      status: "complete", fingerprint: dependencyFingerprint, outputFingerprint, provider: config.provider, model: config.model,
+      promptVersion: QA_PROMPT_VERSION, completedAt: new Date().toISOString(), usage: result.usage,
+    } },
+    updatedAt: new Date().toISOString(),
+  }));
 
   return {
     state,
@@ -669,6 +733,8 @@ export async function recheckChapterQa(deps: {
       obsoleted: outcome.obsoleted,
       mode,
       fellBackToFull: requestedMode === "changed" && mode === "full",
+      reason: decision.reason,
+      globalDependencyChanges: decision.globalDependencyChanges,
     },
   };
 }

@@ -4,7 +4,7 @@ import { Chapter, StageName, StageState, chapterSchema } from "../domain/chapter
 import { ttsSynthesisSettings } from "../domain/provider.js";
 import { Story } from "../domain/story.js";
 import { StoryBibleUpdate, storyBibleUpdateSchema, storyBibleSchema } from "../domain/story-bible.js";
-import { activeQaIssues, QaResult, qaResultSchema } from "../domain/qa.js";
+import { activeQaIssues, QaResult, QaState, qaResultSchema } from "../domain/qa.js";
 import { LLMRouter } from "../llm/router.js";
 import { TTSProvider } from "../tts/provider.js";
 import { pronunciationProvider, pronunciationFingerprint, resolvePronunciations } from "../tts/pronunciation.js";
@@ -24,9 +24,9 @@ import { narrationDeliveryProfile, stripDeliveryCues } from "../narration/tts-di
 import { STORY_BIBLE_PROMPT_VERSION } from "../story-bible/prompts.js";
 import { extractStoryBible } from "../story-bible/extractor.js";
 import { QA_PROMPT_VERSION } from "../qa/prompts.js";
-import { computeQaDependencyFingerprint, loadQaDeterministicDependencies, resolveStoredQaContext } from "../qa/freshness.js";
+import { computeQaDependencyFingerprint, computeQaDependencyFingerprints, qaDependencySnapshot, loadQaDeterministicDependencies, resolveStoredQaContext } from "../qa/freshness.js";
 import { validateChapterQuality } from "../qa/validator.js";
-import { buildQaState } from "../qa/review.js";
+import { buildQaState, prepareQaDetections } from "../qa/review.js";
 import { migrateQaState } from "../qa/findings.js";
 import { runDeterministicQaChecks } from "../qa/deterministic.js";
 import { exceptionsPromptSection, filterExceptedFindings, listQaExceptions } from "../qa/exceptions.js";
@@ -47,6 +47,7 @@ import { persistChapterTtsQuality, removeChapterTtsQuality } from "../tts/chapte
 import { normalizeSpeechForProvider } from "../tts/speech-normalization.js";
 import { manualAcceptanceFingerprint } from "../studio/stage-acceptance.js";
 import { StageExecutionNode, dependentProcessingStages } from "../studio/stage-execution.js";
+import { persistQaStateWithMetadata } from "../qa/persistence.js";
 
 export type ForceStage = "translation" | "narration" | "qa" | "story-bible" | "continuity" | "tts" | "audio" | "all";
 export type PipelineStageEvent = { stage: StageName; status: "started" | "completed" | "reused"; state: StageState; detail?: string };
@@ -129,7 +130,27 @@ export class ChapterPipeline {
       logger.info({ event: "pipeline.stage.started", story: options.story.slug, chapter: options.chapter, stage, provider: details.provider, model: details.model });
       try {
         const value = await withUsageScope({ story: options.story.slug, chapter: options.chapter, productionRunId: options.productionRunId, queueJobId: options.queueJobId, stage }, action);
+        if (stage === "qa") {
+          const qaState = value as QaState;
+          chapter.quality = { status: qaState.status, score: qaState.score, issueCategories: [...new Set(activeQaIssues(qaState).map((issue) => issue.category))] };
+        }
         const producedFingerprint = await fileFingerprint(outputPath);
+        // QA writes its artifact and chapter summary together. The QA action
+        // returns the state instead of writing qa.json itself, so a metadata
+        // failure cannot leave a new QA artifact paired with old chapter data.
+        if (stage === "qa") {
+          const qaState = value as QaState;
+          chapter.stages[stage] = { ...chapter.stages[stage], status: "complete", completedAt: new Date().toISOString(), durationMs: Date.now() - started, error: undefined };
+          const committed = await persistQaStateWithMetadata(paths, qaState, chapter, (outputFingerprint, previous) => ({
+            ...previous,
+            updatedAt: new Date().toISOString(),
+            stages: { ...previous.stages, qa: { ...previous.stages.qa, outputFingerprint } },
+          }));
+          chapter = committed.metadata;
+          options.onStageEvent?.({ stage, status: "completed", state: chapter.stages[stage] });
+          logger.info({ event: "pipeline.stage.completed", story: options.story.slug, chapter: options.chapter, stage, provider: details.provider, model: details.model, durationMs: Date.now() - started });
+          return value;
+        }
         if (!producedFingerprint) throw new Error(`Stage '${stage}' did not produce a non-empty output at ${outputPath}`);
         chapter.stages[stage] = { ...chapter.stages[stage], status: "complete", outputFingerprint: producedFingerprint, completedAt: new Date().toISOString(), durationMs: Date.now() - started, error: undefined };
         await persist();
@@ -195,7 +216,7 @@ export class ChapterPipeline {
 
     const qaConfig = options.story.pipeline.qa;
     const qaDeterministicDeps = await loadQaDeterministicDependencies(options.root, options.story.slug);
-    const qaContext = await resolveStoredQaContext(paths);
+    const qaContext = await resolveStoredQaContext({ storyContext: paths.storyContext, chapter: options.chapter });
     const qaFp = computeQaDependencyFingerprint({
       source: ingestionFp, translation: fingerprint(english), narration: fingerprint(narration),
       context: qaContext.raw, config: qaConfig, narrationSettings: narrationBehavior, prompt: QA_PROMPT_VERSION, mode: options.story.qaMode,
@@ -217,21 +238,27 @@ export class ChapterPipeline {
       // preserve dismissal/fix resolution memory before persisting.
       const priorQaRaw = await readJsonIfExists(paths.qa);
       const previous = priorQaRaw ? migrateQaState(priorQaRaw, { chapter: options.chapter }) : undefined;
-      const { state } = buildQaState(previous, filterExceptedFindings([...deterministic.detections, ...result.value.issues], exceptions), {
-        chapter: options.chapter, canonicalEntities: qaContext.parsed.canonicalEntities, effectiveNamingEntities: (await loadStoryBibleWithCanonicalOverlay(options.root, options.story.slug)).canonicalEntities, translation: english, narration,
+      const effectiveNamingEntities = (await loadStoryBibleWithCanonicalOverlay(options.root, options.story.slug)).canonicalEntities;
+      const detections = prepareQaDetections([...deterministic.detections, ...result.value.issues], { canonicalEntities: qaContext.parsed.canonicalEntities, effectiveNamingEntities, translation: english, narration });
+      const { state } = buildQaState(previous, filterExceptedFindings(detections, exceptions), {
+        chapter: options.chapter, canonicalEntities: qaContext.parsed.canonicalEntities, effectiveNamingEntities, translation: english, narration,
         baseScore: { score: result.value.score, originalScore: result.value.originalScore, status: result.value.status, originalStatus: result.value.originalStatus },
         mode: options.story.qaMode,
         acceptedContinuity: deterministic.acceptedContinuity,
         dependencyFingerprint: qaFp,
+        dependencySnapshot: qaDependencySnapshot(computeQaDependencyFingerprints({
+          source: ingestionFp, translation: fingerprint(english), narration: fingerprint(narration), context: qaContext.raw,
+          config: qaConfig, narrationSettings: narrationBehavior, prompt: QA_PROMPT_VERSION, mode: options.story.qaMode, ...qaDeterministicDeps,
+        })),
       });
-      await atomicWriteJson(paths.qa, state);
       chapter.stages.qa.usage = result.usage;
       return state;
     });
     if (shouldRun("qa")) {
       const quality = qaResult ?? qaResultSchema.parse(await readJsonIfExists<QaResult>(paths.qa));
-      chapter.quality = { status: quality.status, score: quality.score, issueCategories: [...new Set(activeQaIssues(quality).map((issue) => issue.category))] };
-      await persist();
+      // Legacy/reused QA artifacts may predate the chapter-level summary.
+      const expectedQuality = { status: quality.status, score: quality.score, issueCategories: [...new Set(activeQaIssues(quality).map((issue) => issue.category))] };
+      if (JSON.stringify(chapter.quality) !== JSON.stringify(expectedQuality)) { chapter.quality = expectedQuality; await persist(); }
       if (quality.status === "warn") logger.warn({ event: "pipeline.qa.warn", story: options.story.slug, chapter: options.chapter, score: quality.score, issues: quality.issues.length });
       if (quality.status === "fail") {
         chapter.stages.storyBible = pending();

@@ -7,6 +7,9 @@ import type { NarrationProfanityMode } from "../domain/story.js";
 import { softenStrongProfanity } from "../narration/profanity.js";
 import { removeLeadingChapterTitle } from "../narration/narration-editor.js";
 import { authorizedNarrationNaming } from "./prompts.js";
+import type { QaFinding } from "../domain/qa.js";
+import { normalizeQaText } from "./findings.js";
+import { QaRepairTargetAmbiguousError } from "./errors.js";
 
 export function selectRepairStage(qa: QaResult): "translation" | "narration" {
   const translationCategories = new Set(["completeness", "names", "numbers", "terminology", "dialogue"]);
@@ -14,6 +17,32 @@ export function selectRepairStage(qa: QaResult): "translation" | "narration" {
 }
 
 export type QaRepairTarget = "translation" | "narration";
+
+export type QaRepairInference = { targets: QaRepairTarget[]; confidence: "high" | "medium" | "ambiguous"; reason: string };
+
+/** Infer the artifact(s) supported by finding evidence; never guess translation by default. */
+export function inferQaRepairTargets(finding: Pick<QaFinding, "category" | "message" | "evidence" | "provenance" | "origin">, texts: { translation: string; narration: string }): QaRepairInference {
+  const description = `${finding.message}\n${finding.evidence}`;
+  if (finding.category === "narrationFidelity") return { targets: ["narration"], confidence: "high", reason: "Narration Fidelity findings belong to the narration artifact." };
+  if (/both (?:the )?translation and narration/i.test(description)) return { targets: ["translation", "narration"], confidence: "high", reason: "The finding explicitly identifies both artifacts." };
+  if (finding.provenance?.stage === "translation" || finding.provenance?.stage === "narration") return { targets: [finding.provenance.stage], confidence: "high", reason: `Finding provenance identifies ${finding.provenance.stage}.` };
+  if (/\btranslation\s+(?:contains|repeats|uses|adds|omits|changes)\b/i.test(description) && !/\bnarration\s+(?:contains|repeats|uses|adds|omits|changes)\b/i.test(description)) return { targets: ["translation"], confidence: "high", reason: "The finding attributes the defect to translation." };
+  if (/\bnarration\s+(?:contains|repeats|uses|adds|omits|changes)\b/i.test(description) && !/\btranslation\s+(?:contains|repeats|uses|adds|omits|changes)\b/i.test(description)) return { targets: ["narration"], confidence: "high", reason: "The finding attributes the defect to narration." };
+  const quotedEvidence = [...finding.evidence.matchAll(/["“]([^"”]{8,})["”]/g)].map((match) => normalizeQaText(match[1]!));
+  const snippets = [...quotedEvidence, normalizeQaText(finding.evidence)].filter((value) => value.length >= 16);
+  const present = (text: string) => snippets.some((snippet) => normalizeQaText(text).includes(snippet));
+  const inTranslation = present(texts.translation);
+  const inNarration = present(texts.narration);
+  if (inTranslation !== inNarration) {
+    const target = inTranslation ? "translation" : "narration";
+    return { targets: [target], confidence: "high", reason: `Finding evidence occurs only in ${target}.` };
+  }
+  if (finding.origin === "deterministic" && /duplicate paragraph/i.test(description)) {
+    if (/\btranslation\b/i.test(description) && !/\bnarration\b/i.test(description)) return { targets: ["translation"], confidence: "high", reason: "Deterministic duplicate rule identifies translation." };
+    if (/\bnarration\b/i.test(description) && !/\btranslation\b/i.test(description)) return { targets: ["narration"], confidence: "high", reason: "Deterministic duplicate rule identifies narration." };
+  }
+  return { targets: [], confidence: "ambiguous", reason: inTranslation && inNarration ? "The evidence appears in both artifacts but the finding does not specify which one is wrong." : "The finding does not identify a single repair artifact." };
+}
 
 export function repairTargets(issues: QaResult["issues"]): QaRepairTarget[] {
   const targets = new Set<QaRepairTarget>();
@@ -23,10 +52,9 @@ export function repairTargets(issues: QaResult["issues"]): QaRepairTarget[] {
 }
 
 export function issueRepairTargets(issue: QaResult["issues"][number]): QaRepairTarget[] {
-  if (issue.category === "narrationFidelity") return ["narration"];
-  const description = `${issue.message}\n${issue.evidence}`.toLowerCase();
-  if (/translation\s*[/&+]\s*narration|both (?:the )?translation and narration/.test(description)) return ["translation", "narration"];
-  return ["translation"];
+  const result = inferQaRepairTargets(issue as QaFinding, { translation: "", narration: "" });
+  if (result.confidence === "ambiguous") throw new QaRepairTargetAmbiguousError(["translation", "narration", "both"]);
+  return result.targets;
 }
 
 export async function repairQaText(provider: LLMProvider, config: StageModelConfig, input: {

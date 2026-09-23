@@ -124,8 +124,8 @@ describe("chapter QA state endpoint", () => {
     const { jobs, operations } = operationsWith(root, openai);
     const finished = await waitForJob(jobs, operations.startQaRecheck(story.slug, 1, { mode: "changed" }).id);
     expect(finished.status).toBe("completed");
-    // Content is unchanged since the last run, so changed mode really runs.
-    expect(finished.result).toMatchObject({ chapter: 1, qaOnly: true, summary: { mode: "changed", fellBackToFull: false, open: 1 } });
+    // Legacy QA without a dependency snapshot cannot prove a text-only edit, so it falls back conservatively.
+    expect(finished.result).toMatchObject({ chapter: 1, qaOnly: true, summary: { mode: "full", fellBackToFull: true, open: 1 } });
     expect(() => operations.startQaRecheck(story.slug, 1, { mode: "bogus" })).toThrow();
     await operations.close();
   });
@@ -139,7 +139,8 @@ describe("finding lifecycle endpoints", () => {
     const id = state!.findings[0]!.id;
     const gemini = new MockLLM("gemini", [repaired]); const openai = openaiQa();
     const { jobs, operations } = operationsWith(root, gemini, openai);
-    const finished = await waitForJob(jobs, operations.startQaFindingFix(story.slug, 1, id).id);
+    const fixJob = await operations.startQaFindingFix(story.slug, 1, id, { target: "translation" });
+    const finished = await waitForJob(jobs, fixJob.id);
     expect(finished.status).toBe("completed");
     expect(finished.result).toMatchObject({ chapter: 1, findingId: id, repaired: ["translation"], fixed: true });
     const after = await readState(paths);

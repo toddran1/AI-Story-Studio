@@ -16,13 +16,13 @@ describe("repair stage selection", () => {
     expect(selectRepairStage(qa)).toBe("narration");
   });
 
-  it("routes mixed selected findings to both affected artifacts", () => {
+  it("does not guess a target for category-only findings while honoring explicit both-artifact wording", () => {
     const qa = qaResultSchema.parse({ status: "fail", score: 0.2, issues: [
       { category: "terminology", severity: "warn", message: "Wrong term", evidence: "Blade became sword" },
       { category: "narrationFidelity", severity: "fail", message: "Meaning changed", evidence: "Narration adds an event" },
     ], checks: { ...checks, terminology: "warn", narrationFidelity: "fail" } });
-    expect(repairTargets(qa.issues)).toEqual(["translation", "narration"]);
-    expect(repairTargets([...qa.issues].reverse())).toEqual(["translation", "narration"]);
+    expect(() => repairTargets(qa.issues)).toThrow(/Choose whether to repair translation, narration, or both/);
+    expect(() => repairTargets([...qa.issues].reverse())).toThrow(/Choose whether to repair translation, narration, or both/);
     expect(issueRepairTargets({ category: "terminology", severity: "warn", message: "Wrong in both the translation and narration", evidence: "Use Flame Blade" })).toEqual(["translation", "narration"]);
   });
 

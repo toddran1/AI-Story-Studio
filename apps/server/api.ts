@@ -187,7 +187,7 @@ export function createApiHandler(operations: StudioOperations) {
       const chapterTextMatch = /^\/api\/stories\/([a-z0-9-]+)\/chapters\/(\d+)\/text$/.exec(url.pathname);
       if (chapterTextMatch && request.method === "PUT") return send(response, 200, await operations.editChapterText(chapterTextMatch[1]!, chapterParam(chapterTextMatch[2]!), await jsonBody(request)));
       const chapterQaRepairMatch = /^\/api\/stories\/([a-z0-9-]+)\/chapters\/(\d+)\/qa\/repair$/.exec(url.pathname);
-      if (chapterQaRepairMatch && request.method === "POST") return send(response, 202, operations.startQaRepair(chapterQaRepairMatch[1]!, chapterParam(chapterQaRepairMatch[2]!), await jsonBody(request)));
+      if (chapterQaRepairMatch && request.method === "POST") return send(response, 202, await operations.startQaRepair(chapterQaRepairMatch[1]!, chapterParam(chapterQaRepairMatch[2]!), await jsonBody(request)));
       const chapterQaDismissMatch = /^\/api\/stories\/([a-z0-9-]+)\/chapters\/(\d+)\/qa\/dismiss$/.exec(url.pathname);
       if (chapterQaDismissMatch && request.method === "PUT") return send(response, 200, await operations.dismissQaFindings(chapterQaDismissMatch[1]!, chapterParam(chapterQaDismissMatch[2]!), await jsonBody(request)));
       const chapterQaResetMatch = /^\/api\/stories\/([a-z0-9-]+)\/chapters\/(\d+)\/qa\/reset$/.exec(url.pathname);
@@ -205,7 +205,7 @@ export function createApiHandler(operations: StudioOperations) {
       if (qaFindingMatch && request.method === "POST") {
         const slug = qaFindingMatch[1]!; const chapter = chapterParam(qaFindingMatch[2]!); const id = qaFindingMatch[3]!;
         const action = qaFindingMatch[4]!;
-        if (action === "fix-ai") return send(response, 202, operations.startQaFindingFix(slug, chapter, id));
+        if (action === "fix-ai") return send(response, 202, await operations.startQaFindingFix(slug, chapter, id, await jsonBody(request)));
         if (action === "resolve-manual") return send(response, 200, await operations.resolveQaFindingManually(slug, chapter, id, await jsonBody(request)));
         if (action === "dismiss") return send(response, 200, await operations.dismissQaFinding(slug, chapter, id, await jsonBody(request)));
         return send(response, 200, await operations.reopenQaFinding(slug, chapter, id));
@@ -629,7 +629,8 @@ export function createApiHandler(operations: StudioOperations) {
       const displayError = error instanceof z.ZodError ? new Error(z.prettifyError(error), { cause: error }) : error;
       const diagnostic = createErrorDiagnostic(displayError);
       if (status >= 500) logger.error({ event: "web.api.failed", diagnosticId: diagnostic.id, category: diagnostic.category, method: request.method, path: url.pathname, status, error: error instanceof Error ? error.message : String(error) });
-      return send(response, status, { error: diagnostic.summary, diagnostic: publicJob(diagnostic, operations.root), validation: validationIssues(error), ...(error instanceof QaFindingLifecycleConflictError ? { code: error.code } : {}) });
+      const coded = error && typeof error === "object" && "code" in error && typeof (error as { code?: unknown }).code === "string" ? error as { code: string; possibleTargets?: unknown } : undefined;
+      return send(response, status, { error: error instanceof Error ? error.message : diagnostic.summary, diagnostic: publicJob(diagnostic, operations.root), validation: validationIssues(error), ...(error instanceof QaFindingLifecycleConflictError ? { code: error.code } : coded ? { code: coded.code, ...(coded.possibleTargets ? { possibleTargets: coded.possibleTargets } : {}) } : {}) });
     }
   };
 }
@@ -691,6 +692,7 @@ function parseRange(header: string | undefined, size: number): { start: number; 
 }
 
 export function statusFor(error: unknown): number {
+  if (error && typeof error === "object" && "code" in error && ["QA_CONTEXT_INVALID", "QA_CONTINUITY_INVALID", "QA_EXCEPTION_TOO_BROAD", "QA_REPAIR_TARGET_AMBIGUOUS"].includes(String((error as { code: unknown }).code))) return 422;
   if (error instanceof HttpError) return error.status;
   if (error instanceof SourceOperationError) return error.status;
   if (error instanceof z.ZodError) return 400;

@@ -104,7 +104,7 @@ describe("story:qa commands", () => {
     } finally { await operations.close(); }
   });
 
-  it("recheck --dry-run inspects spans without any provider call", async () => {
+  it("recheck --dry-run safely falls back for legacy QA without dependency snapshots", async () => {
     const { root, story, paths } = await fixture();
     const mock = new MockLLM("openai");
     const operations = new StudioOperations(root, env);
@@ -112,10 +112,10 @@ describe("story:qa commands", () => {
       const out = collect();
       await runQaCommand(parseQaArgs(["recheck", story.slug, "1", "--dry-run"]), { root, operations, llm: llmRouter(mock), stdout: out.stdout });
       expect(mock.calls).toHaveLength(0);
-      expect(out.get()).toContain("mode=changed");
+      expect(out.get()).toContain("mode=full (falls back to full)");
       expect(out.get()).toContain("previous findings supplied=2");
       expect(out.get()).toContain("exceptions applied=0");
-      // Without content spans the dry run reports the full-mode fallback.
+      // Without content spans or a dependency snapshot the dry run reports the full-mode fallback.
       const state = await readState(paths);
       await atomicWriteJson(paths.qa, { ...state, contentSpans: undefined });
       const fallback = collect();

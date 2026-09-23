@@ -8,6 +8,7 @@ import { detectVocalizations } from "../tts/vocalizations.js";
 import { readJsonIfExists } from "../storage/story-files.js";
 import { storyPaths } from "../storage/paths.js";
 import { normalizeQaText } from "./findings.js";
+import { QaPrerequisiteError } from "./errors.js";
 import type { FreshQaDetection } from "./review.js";
 
 export type AcceptedContinuity = { id: string; entityIds: string[]; explanation: string };
@@ -168,10 +169,13 @@ function pronunciationDetections(entities: CanonicalEntity[], narration: string)
 }
 
 export async function loadAcceptedContinuity(root: string, slug: string): Promise<AcceptedContinuity[]> {
-  const raw = await readJsonIfExists(storyPaths(root, slug, 1).continuityReview);
+  const path = storyPaths(root, slug, 1).continuityReview;
+  let raw: unknown;
+  try { raw = await readJsonIfExists(path); }
+  catch { throw new QaPrerequisiteError("QA_CONTINUITY_INVALID", "QA could not load the current Continuity Review safely. Repair or rerun Continuity Review before rechecking this chapter.", { path }); }
   if (!raw) return [];
   const parsed = continuityReviewSchema.safeParse(raw);
-  if (!parsed.success) return [];
+  if (!parsed.success) throw new QaPrerequisiteError("QA_CONTINUITY_INVALID", "QA could not load the current Continuity Review safely because it does not match the expected schema. Repair or rerun Continuity Review before rechecking this chapter.", { path });
   return parsed.data.findings
     .filter((finding) => finding.status === "intentional" || finding.status === "accepted_new")
     .map((finding) => ({ id: finding.id, entityIds: finding.entityIds, explanation: finding.explanation }));

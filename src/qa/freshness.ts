@@ -1,5 +1,5 @@
 import { StageState } from "../domain/chapter.js";
-import { QaException } from "../domain/qa.js";
+import { QaException, QaState } from "../domain/qa.js";
 import { Story } from "../domain/story.js";
 import { CanonicalEntity, emptyStoryBible, hasActivePronunciation, StoryBible, storyBibleSchema } from "../domain/story-bible.js";
 import { loadNarrationNamingEntities } from "../story-bible/narration-names.js";
@@ -10,6 +10,7 @@ import { fingerprint } from "../utils/hash.js";
 import { loadAcceptedContinuity, type AcceptedContinuity } from "./deterministic.js";
 import { listQaExceptions } from "./exceptions.js";
 import { QA_PROMPT_VERSION } from "./prompts.js";
+import { QaPrerequisiteError } from "./errors.js";
 
 /** Naming state QA actually consumes, per entity; unrelated Story Bible fields are excluded. */
 export type QaNamingProjection = {
@@ -86,6 +87,13 @@ export type QaDependencyFingerprints = {
   pronunciation: string;
   exceptions: string;
   acceptedContinuity: string;
+  source: string;
+  text: string;
+  context: string;
+  config: string;
+  narrationSettings: string;
+  prompt: string;
+  mode: string;
 };
 
 /** Authoritative QA dependency fingerprint plus per-concern sub-fingerprints for targeted staleness. */
@@ -94,6 +102,13 @@ export function computeQaDependencyFingerprints(deps: QaDependencies): QaDepende
   const pronunciation = fingerprint(deps.pronunciation);
   const exceptions = fingerprint([...deps.exceptions].sort((a, b) => a.id.localeCompare(b.id)));
   const acceptedContinuity = fingerprint([...deps.acceptedContinuity].sort((a, b) => a.id.localeCompare(b.id)));
+  const source = fingerprint(deps.source);
+  const text = fingerprint({ translation: deps.translation, narration: deps.narration });
+  const context = fingerprint(deps.context);
+  const config = fingerprint(deps.config);
+  const narrationSettings = fingerprint(deps.narrationSettings);
+  const prompt = fingerprint(deps.prompt);
+  const mode = fingerprint(deps.mode);
   const combined = fingerprint({
     v: 1,
     source: deps.source,
@@ -109,7 +124,13 @@ export function computeQaDependencyFingerprints(deps: QaDependencies): QaDepende
     exceptions,
     acceptedContinuity,
   });
-  return { fingerprint: combined, naming, pronunciation, exceptions, acceptedContinuity };
+  return { fingerprint: combined, naming, pronunciation, exceptions, acceptedContinuity, source, text, context, config, narrationSettings, prompt, mode };
+}
+
+export function qaDependencySnapshot(value: QaDependencyFingerprints): NonNullable<QaState["dependencySnapshot"]> {
+  return { version: 1, combined: value.fingerprint, text: value.text, source: value.source, naming: value.naming,
+    pronunciation: value.pronunciation, exceptions: value.exceptions, acceptedContinuity: value.acceptedContinuity,
+    context: value.context, config: value.config, narrationSettings: value.narrationSettings, prompt: value.prompt, mode: value.mode };
 }
 
 export function computeQaDependencyFingerprint(deps: QaDependencies): string {
@@ -157,16 +178,19 @@ export type ResolvedQaContext = {
 /**
  * Resolves the authoritative chapter context consumed by QA.
  * Reads the stored context artifact from disk when present, falling back to an
- * empty Story Bible if absent or unparseable.
+ * empty Story Bible if absent. Existing but malformed context blocks QA.
  */
-export async function resolveStoredQaContext(target: string | { storyContext: string }): Promise<ResolvedQaContext> {
+export async function resolveStoredQaContext(target: string | { storyContext: string; chapter?: number }): Promise<ResolvedQaContext> {
   const path = typeof target === "string" ? target : target.storyContext;
-  const raw = (await readJsonIfExists(path)) ?? emptyStoryBible();
+  const chapter = typeof target === "string" ? undefined : target.chapter;
+  let raw: unknown;
+  try { raw = (await readJsonIfExists(path)) ?? emptyStoryBible(); }
+  catch { throw new QaPrerequisiteError("QA_CONTEXT_INVALID", `QA could not safely load ${chapter ? `Chapter ${chapter} ` : "the stored "}Story Context because the file is invalid. Rebuild or repair the Story Bible context, then retry QA.`, { path, chapter }); }
   let parsed: StoryBible;
   try {
     parsed = storyBibleSchema.parse(raw);
   } catch {
-    parsed = emptyStoryBible();
+    throw new QaPrerequisiteError("QA_CONTEXT_INVALID", `QA could not safely load ${chapter ? `Chapter ${chapter} ` : "the stored "}Story Context because it does not match the expected schema. Rebuild or repair the Story Bible context, then retry QA.`, { path, chapter });
   }
   return { raw, parsed };
 }
@@ -185,7 +209,7 @@ export async function loadStoredQaDependencies(
   const paths = storyPaths(root, story.slug, chapter);
   const [source, translation, narration, qaContext, deterministicDeps] = await Promise.all([
     readTextIfExists(paths.original), readTextIfExists(paths.english), readTextIfExists(paths.narration),
-    resolveStoredQaContext(paths), deterministic ? Promise.resolve(deterministic) : loadQaDeterministicDependencies(root, story.slug),
+    resolveStoredQaContext({ storyContext: paths.storyContext, chapter }), deterministic ? Promise.resolve(deterministic) : loadQaDeterministicDependencies(root, story.slug),
   ]);
   if (!source?.trim() || !translation?.trim() || !narration?.trim()) return undefined;
   return {
@@ -227,7 +251,14 @@ export async function deriveChapterQaFreshness(
   stage?: Pick<StageState, "status" | "fingerprint" | "staleReason">,
   deterministic?: DeterministicQaDependencies,
 ): Promise<ChapterQaFreshness> {
-  const currentFingerprint = await computeStoredQaDependencyFingerprint(root, story, chapter, deterministic);
+  let currentFingerprint: string | undefined;
+  try { currentFingerprint = await computeStoredQaDependencyFingerprint(root, story, chapter, deterministic); }
+  catch (error) {
+    // Keep read-only dashboards available while still refusing authoritative QA
+    // execution; inspect/recheck call strict loaders and will surface the error.
+    if (error instanceof QaPrerequisiteError) return { freshness: "needs_recheck" };
+    throw error;
+  }
   if (stage?.staleReason && stage.status === "complete") return { freshness: "needs_recheck", currentFingerprint };
   if (!currentFingerprint) {
     const freshness: QaFreshness = stage?.status === "failed" ? "failed" : !stage?.fingerprint ? "missing" : stage.status === "complete" ? "current" : "needs_recheck";
