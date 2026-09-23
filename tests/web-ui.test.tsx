@@ -1,6 +1,6 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
-import { App, applyVideoResolutionPreset, ArtworkEstimateSummary, ArtworkVersionMetadata, artworkModelOptionsFor, CanonicalEntitySheet, canDeleteChapterSceneDraft, chapterPageSize, chapterSceneStructureDirty, chapterScenesDirty, chapterVideoReadinessChecks, deleteChapterSceneDraft, moveChapterSceneDraft, toggleChapterSceneEnabledDraft, ChapterPage, chapterQaStatusView, chunkPresetFor, clearJobDismissal, clearJobMinimized, continuityReferenceTriState, describeContinuityReference, dismissJob, EntityStatusField, ErrorBoundary, EXECUTABLE_CHAPTER_STAGES, getStageActionDetails, humanizeContinuityChanges, isJobConsoleMinimized, isJobDismissed, isTerminalJob, JobConsole, paginateRows, Pagination, PreviousHandoffBadge, QaDetail, QaFindingCard, QaResolvedFindings, resolvedBehaviorSummary, ResolvedBehaviorHint, reupscaleAvailable, SceneContinuityPanel, ScenesPage, setJobConsoleMinimized, SettingsPage, shouldRefreshAfterJob, Status, TtsQualityBadge, TtsSegmentRow, VIDEO_RESOLUTION_PRESETS, videoResolutionFor } from "../apps/web/src/App.js";
+import { App, applyVideoResolutionPreset, ArtworkEstimateSummary, ArtworkVersionMetadata, artworkModelOptionsFor, BibleReviewQueue, bibleQueryString, CanonicalEntitySheet, canDeleteChapterSceneDraft, chapterPageSize, chapterSceneStructureDirty, chapterScenesDirty, chapterVideoReadinessChecks, deleteChapterSceneDraft, moveChapterSceneDraft, toggleChapterSceneEnabledDraft, ChapterPage, chapterQaStatusView, chunkPresetFor, clearJobDismissal, clearJobMinimized, continuityReferenceTriState, describeContinuityReference, dismissJob, EntityStatusField, ErrorBoundary, EXECUTABLE_CHAPTER_STAGES, getStageActionDetails, humanizeContinuityChanges, isJobConsoleMinimized, isJobDismissed, isTerminalJob, JobConsole, paginateRows, Pagination, parseBibleQuery, PreviousHandoffBadge, QaDetail, QaFindingCard, QaResolvedFindings, ReadinessGrid, ReadinessStrip, resolvedBehaviorSummary, ResolvedBehaviorHint, reupscaleAvailable, SceneContinuityPanel, ScenesPage, setJobConsoleMinimized, SettingsPage, shouldRefreshAfterJob, Status, StoryBibleHealthCard, TtsQualityBadge, TtsSegmentRow, VIDEO_RESOLUTION_PRESETS, videoResolutionFor } from "../apps/web/src/App.js";
 import { api, ApiError } from "../apps/web/src/api.js";
 import type { ArtworkVersion, ChapterDetail, Job, QaFinding, Scene, TtsQualityArtifact, TtsSegmentQuality, VideoSettings, VisualContinuityChange } from "../apps/web/src/api.js";
 import { pretty } from "../apps/web/src/format.js";
@@ -2034,15 +2034,15 @@ describe("TTS quality guard UI", () => {
       expect(paginationBaseMatches?.length).toBe(1);
 
       // App.tsx has no hand-written <div className="pagination">
-      // App.tsx: 4 collections (chapters, canonical entities, minor refs, audio masters)
-      // Exactly 1 top Pagination and 1 bottom Pagination per collection (8 total)
+      // App.tsx: 5 collections (chapters, canonical entities, minor refs, audio masters, bible review queue)
+      // Exactly 1 top Pagination and 1 bottom Pagination per collection (10 total)
       const appTsx = fs.readFileSync(path.resolve(process.cwd(), "apps/web/src/App.tsx"), "utf8");
       expect(appTsx).not.toContain('className="pagination"');
       expect(appTsx).not.toContain('className="localization-pagination"');
       expect(appTsx).not.toContain('className="queue-mini-pages"');
-      expect(appTsx.match(/<Pagination\b/g)?.length).toBe(8);
-      expect(appTsx.match(/<Pagination[^>]*position="top"/g)?.length).toBe(4);
-      expect(appTsx.match(/<Pagination[^>]*position="bottom"/g)?.length).toBe(4);
+      expect(appTsx.match(/<Pagination\b/g)?.length).toBe(10);
+      expect(appTsx.match(/<Pagination[^>]*position="top"/g)?.length).toBe(5);
+      expect(appTsx.match(/<Pagination[^>]*position="bottom"/g)?.length).toBe(5);
 
       // NamesLocalizationPage.tsx has no hand-written <div className="localization-pagination">
       // NamesLocalizationPage.tsx: exactly 1 top Pagination and 1 bottom Pagination
@@ -2305,5 +2305,183 @@ describe("Milestone 23 — image output quality UI", () => {
       expect(htmlB).toContain('<b>Post-Generation Quality Guard</b><small>Transcribes generated audio and checks it against the expected narration to detect missing, incorrect, repeated, or unexpected speech.</small></div><input type="checkbox"/>');
       expect(htmlB).toContain('<b>Provider Quality Guard</b><small>Use the TTS provider&#x27;s native quality-control feature when supported.</small></div><input type="checkbox" checked=""');
     });
+  });
+});
+
+describe("story bible review desk (phase A)", () => {
+  it("renders the Story Bible Health card with prominent non-zero counts and the stale extraction line", () => {
+    const html = renderToStaticMarkup(<StoryBibleHealthCard health={{ totals: { canonicalEntities: 42, minorReferences: 7, needsAttention: 3 }, issues: { duplicateCandidates: 2, continuityOpen: 1, visualProfileIssues: 0, pronunciationNeedsReview: 0, staleExtractionChapters: 5, cleanupRecommendations: 4 } }} onReviewAll={() => undefined} onOpenCleanup={() => undefined} />);
+    expect(html).toContain("Story Bible Health");
+    expect(html).toContain("3 entities need attention");
+    expect(html).toContain("<b>42</b> canonical entities");
+    expect(html).toContain("<b>2</b> duplicate candidates");
+    expect(html).toContain("<b>1</b> open continuity findings");
+    expect(html).toContain("5 chapters have stale Story Bible extraction");
+    expect(html).toContain("Review all issues");
+    expect(html).toContain("Open cleanup");
+  });
+  it("renders the review queue with kind filters, severity badges, and action hrefs", () => {
+    const navigated: string[] = [];
+    const view = { items: [
+      { id: "duplicate:d1", kind: "duplicate", entityIds: ["ent_a"], title: "Possible duplicate: Su Ming ↔ Ming", detail: "92% confidence · Same name", severity: "warn", chapters: [1, 4], source: "duplicate-detection", action: { label: "Compare & merge", href: "/stories/demo-story/bible?entity=ent_a" } },
+      { id: "continuity:c1", kind: "continuity", entityIds: ["ent_a"], title: "Su Ming", detail: "Appears after death.", severity: "critical", chapters: [2], source: "continuity", action: { label: "Review continuity", href: "/stories/demo-story/continuity?entity=ent_a" } },
+    ], total: 2, page: 1, pageSize: 25, pages: 1, counts: { duplicate: 1, continuity: 1 } };
+    const html = renderToStaticMarkup(<BibleReviewQueue view={view} kind="all" status="open" onKind={() => undefined} onStatus={() => undefined} onPage={() => undefined} navigate={(path) => navigated.push(path)} />);
+    expect(html).toContain("Duplicates (1)");
+    expect(html).toContain("Continuity (1)");
+    expect(html).toContain("Possible duplicate: Su Ming ↔ Ming");
+    expect(html).toContain("Duplicate detection");
+    expect(html).toContain("Compare &amp; merge");
+    expect(html).toContain("Open continuity");
+  });
+  it("parses and rebuilds bible page query state, including the entity deep link", () => {
+    const parsed = parseBibleQuery("?tab=review&type=character&q=su&sort=name&readiness=needs-attention&entity=ent_0123456789abcdef01234567&page=3");
+    expect(parsed).toEqual({ tab: "review", type: "character", q: "su", sort: "name", readiness: "needs-attention", entity: "ent_0123456789abcdef01234567", page: 3 });
+    expect(parseBibleQuery("?tab=bogus")).toEqual({});
+    expect(bibleQueryString({ tab: "review", type: "all", q: "", sort: "last", readiness: "all", page: 1, entity: "ent_x" })).toBe("?tab=review&entity=ent_x");
+    expect(bibleQueryString({ tab: "canonical", type: "all", q: "", sort: "last", readiness: "all", page: 1 })).toBe("");
+    const roundtrip = parseBibleQuery(bibleQueryString({ tab: "cleanup", type: "location", q: "hall", sort: "first", readiness: "duplicate-candidates", page: 2 }));
+    expect(roundtrip).toEqual({ tab: "cleanup", type: "location", q: "hall", sort: "first", readiness: "duplicate-candidates", page: 2 });
+  });
+  it("links QA findings with entity provenance to the bible entity sheet", () => {
+    const finding: QaFinding = { id: "qaf_0123456789abcdef01234567", category: "dialogue", severity: "warn", message: "A threat is softened", evidence: "The intent remains intact.", status: "open", origin: "llm", fingerprint: "fp", provenance: { entityIds: ["ent_0123456789abcdef01234567", "ent_89abcdef0123456701234567"] } };
+    const html = renderToStaticMarkup(<QaFindingCard finding={finding} busy="" expanded={[]} slug="demo-story" onToggle={() => undefined} onFixAi={() => undefined} onEdit={() => undefined} onResolve={() => undefined} onDismiss={() => undefined} />);
+    expect(html).toContain('href="/stories/demo-story/bible?entity=ent_0123456789abcdef01234567"');
+    expect(html).toContain("Open entity (+1)");
+    const withoutSlug = renderToStaticMarkup(<QaFindingCard finding={finding} busy="" expanded={[]} onToggle={() => undefined} onFixAi={() => undefined} onEdit={() => undefined} onResolve={() => undefined} onDismiss={() => undefined} />);
+    expect(withoutSlug).not.toContain("Open entity");
+  });
+  it("renders readiness strips and grids with attention states", () => {
+    const rows = [
+      { key: "identity", state: "complete", label: "Identity" },
+      { key: "continuity", state: "attention", label: "Continuity", detail: "2 open continuity findings" },
+      { key: "pronunciation", state: "na", label: "Pronunciation", detail: "Default provider pronunciation" },
+    ];
+    const strip = renderToStaticMarkup(<ReadinessStrip rows={rows} />);
+    expect(strip).toContain("⚠ Continuity");
+    expect(strip).not.toContain("✓");
+    const clean = renderToStaticMarkup(<ReadinessStrip rows={[rows[0]!]} />);
+    expect(clean).toContain("✓");
+    const grid = renderToStaticMarkup(<ReadinessGrid rows={rows} />);
+    expect(grid).toContain("readiness-row attention");
+    expect(grid).toContain("2 open continuity findings");
+    expect(grid).toContain("readiness-row na");
+  });
+});
+
+describe("story bible review desk (phase D) — as-of-chapter view and sheet organization", () => {
+  const baseEntity = {
+    id: "ent_0123456789abcdef01234567",
+    type: "character",
+    canonicalName: "Su Ming the Elder",
+    originalName: "苏明",
+    description: "A wandering cultivator.",
+    status: "active",
+    notes: "Protected identity",
+    firstAppearance: 2,
+    lastKnownAppearance: 42,
+    canonicalNameLocked: true,
+    origin: "manual",
+    aliases: ["Su Ming"],
+    aliasNarrationRules: [],
+    preferredNarrationName: "Elder Ming",
+    localizedNaming: undefined,
+    provenance: [
+      { chapter: 2, kind: "extraction", confidence: 0.91, origin: "automatic" },
+      { chapter: 5, kind: "event", origin: "automatic" },
+    ],
+  };
+  const baseDetail = {
+    entity: baseEntity,
+    timeline: [{ id: "evt_1", chapter: 2, type: "appearance", summary: "Enters the city" }, { id: "evt_2", chapter: 5, type: "rank_change", summary: "Breakthrough" }],
+    relationships: [],
+    relatedNames: {},
+    relatedReferences: [],
+    issues: [],
+    merges: [],
+    duplicateSuggestions: [],
+    namingCollisions: [],
+    visualProfileExists: true,
+    manualFields: ["canonicalName", "preferredNarrationName", "canonicalNameLocked", "notes"],
+  };
+  const sheetProps = { slug: "demo-story", navigate: () => undefined, onClose: () => undefined, onUndo: () => undefined, onEdit: () => undefined, onDemote: () => undefined, onSuppress: () => undefined, onMerge: () => undefined };
+
+  it("renders summary header chips, as-of control, organized sections, and MANUAL badges on protected fields", () => {
+    const html = renderToStaticMarkup(<CanonicalEntitySheet detail={baseDetail} {...sheetProps} />);
+    // Summary header chips
+    expect(html).toContain("Ch. 2—42");
+    expect(html).toContain("Narration configured");
+    expect(html).toContain("Visual profile");
+    // As-of control
+    expect(html).toContain("View as of chapter");
+    // Section organization
+    expect(html).toContain("Identity");
+    expect(html).toContain("Narration &amp; Localization");
+    expect(html).toContain("Story Information");
+    expect(html).toContain("Visual Canon");
+    expect(html).toContain("Provenance");
+    // MANUAL badges visible without opening edit mode
+    expect((html.match(/>Manual</g) || []).length).toBeGreaterThanOrEqual(3);
+    // Origin + confidence labels on provenance
+    expect(html).toContain("Origin: Automatic");
+    expect(html).toContain("Confidence: 91%");
+    // Management is the bottom danger group with the destructive actions
+    expect(html).toContain("Entity Management");
+    expect(html).toContain("🔒 Locked entities cannot be converted");
+    expect(html).toContain("Remove canonical entity");
+    expect(html).toContain("Edit entity");
+  });
+
+  it("renders the read-only historical mode with badges and without editing or management controls", () => {
+    const historyView = {
+      chapter: 2,
+      exists: true,
+      entity: { ...baseEntity, canonicalName: "Su Ming", canonicalNameLocked: false, preferredNarrationName: undefined, notes: "", origin: "automatic", provenance: [baseEntity.provenance[0]] },
+      timeline: [baseDetail.timeline[0]],
+      relationships: [],
+      relatedNames: {},
+      provenance: [baseEntity.provenance[0]],
+      currentOverrides: ["canonicalName", "preferredNarrationName"],
+      warnings: [],
+      firstAppearanceKnown: true,
+    };
+    const html = renderToStaticMarkup(<CanonicalEntitySheet detail={baseDetail} {...sheetProps} historyView={historyView} />);
+    expect(html).toContain("As of chapter 2 · read-only");
+    expect(html).toContain("Current editorial override");
+    // Historical identity is shown (pre-override name), not the current override
+    expect(html).toContain("Su Ming");
+    // Read-only: no editing, management, or lazy action sections
+    expect(html).not.toContain("Edit entity");
+    expect(html).not.toContain("Entity Management");
+    expect(html).not.toContain("Convert to minor reference");
+    expect(html).not.toContain("View where this entity is used");
+    expect(html).not.toContain("View change history");
+    expect(html).not.toContain("Set →");
+    expect(html).not.toContain("Configure →");
+    // Only the chapter ≤ 2 timeline entry renders
+    expect(html).toContain("Enters the city");
+    expect(html).not.toContain("Breakthrough");
+    // Back-to-current toggle is available
+    expect(html).toContain(">Current</button>");
+  });
+
+  it("shows the no-record notice when the entity does not exist before the chapter", () => {
+    const historyView = {
+      chapter: 1,
+      exists: false,
+      timeline: [],
+      relationships: [],
+      relatedNames: {},
+      provenance: [],
+      currentOverrides: [],
+      warnings: [],
+      firstAppearanceKnown: true,
+      earliestKnownChapter: 2,
+    };
+    const html = renderToStaticMarkup(<CanonicalEntitySheet detail={baseDetail} {...sheetProps} historyView={historyView} />);
+    expect(html).toContain("As of chapter 1 · read-only");
+    expect(html).toContain("No record of this entity before chapter 1.");
+    expect(html).toContain("Earliest known record: chapter 2.");
+    expect(html).not.toContain("Edit entity");
   });
 });

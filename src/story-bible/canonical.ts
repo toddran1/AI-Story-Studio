@@ -290,7 +290,27 @@ export async function requireCanonicalStoryBibleEntity(
   return entity;
 }
 
-export async function updateCanonicalEntity(root: string, slug: string, base: StoryBible, id: string, patch: unknown) { const input = overrideSchema.omit({ updatedAt: true, snapshot: true }).partial().strict().parse(patch); const effective = await applyCanonicalOverlay(root, slug, base); const entity = effective.bible.canonicalEntities.find((item) => item.id === id); if (!entity) throw new Error("Canonical entity was not found"); if (input.type && input.type !== entity.type && input.status === undefined && isStandardStatusForAnyType(entity.status) && !isStandardEntityStatus(input.type, entity.status)) input.status = "unknown"; if (input.status !== undefined) { const status = input.status; if (input.type && input.type !== entity.type && isStandardStatusForAnyType(status) && !isStandardEntityStatus(input.type, status)) throw new Error("Status is incompatible with the selected entity type"); input.status = normalizeEntityStatus(input.type ?? entity.type, status); if (!input.status || statusKey(status) === "custom") throw new Error("Custom status requires a non-empty story-specific value"); } const paths = storyPaths(root, slug, 1); const overlay = canonicalOverlaySchema.parse((await readJsonIfExists(paths.bibleCanonicalManual)) ?? { version: 1, overrides: {}, merges: [] }); const value = { ...overlay.overrides[id], ...input, updatedAt: new Date().toISOString() }; overlay.overrides[id] = { ...value, snapshot: applyOverride(structuredClone(entity), value) }; await atomicWriteJson(paths.bibleCanonicalManual, overlay); return applyCanonicalOverlay(root, slug, base); }
+/** Parses and normalizes a manual entity patch against the current entity. Single
+ * source of truth for patch semantics: used by the persisted update, by dry-run
+ * impact previews, and by bulk eligibility checks. Throws ZodError on bad input. */
+export function resolveCanonicalEntityPatch(entity: CanonicalEntity, patch: unknown) {
+  const input = overrideSchema.omit({ updatedAt: true, snapshot: true }).partial().strict().parse(patch);
+  if (input.type && input.type !== entity.type && input.status === undefined && isStandardStatusForAnyType(entity.status) && !isStandardEntityStatus(input.type, entity.status)) input.status = "unknown";
+  if (input.status !== undefined) {
+    const status = input.status;
+    if (input.type && input.type !== entity.type && isStandardStatusForAnyType(status) && !isStandardEntityStatus(input.type, status)) throw new Error("Status is incompatible with the selected entity type");
+    input.status = normalizeEntityStatus(input.type ?? entity.type, status);
+    if (!input.status || statusKey(status) === "custom") throw new Error("Custom status requires a non-empty story-specific value");
+  }
+  return input;
+}
+
+/** The entity as it would look after a patch, without writing anything. */
+export function previewCanonicalEntityUpdate(entity: CanonicalEntity, patch: unknown): CanonicalEntity {
+  return applyOverride(structuredClone(entity), resolveCanonicalEntityPatch(entity, patch));
+}
+
+export async function updateCanonicalEntity(root: string, slug: string, base: StoryBible, id: string, patch: unknown) { const effective = await applyCanonicalOverlay(root, slug, base); const entity = effective.bible.canonicalEntities.find((item) => item.id === id); if (!entity) throw new Error("Canonical entity was not found"); const input = resolveCanonicalEntityPatch(entity, patch); const paths = storyPaths(root, slug, 1); const overlay = canonicalOverlaySchema.parse((await readJsonIfExists(paths.bibleCanonicalManual)) ?? { version: 1, overrides: {}, merges: [] }); const value = { ...overlay.overrides[id], ...input, updatedAt: new Date().toISOString() }; overlay.overrides[id] = { ...value, snapshot: applyOverride(structuredClone(entity), value) }; await atomicWriteJson(paths.bibleCanonicalManual, overlay); return applyCanonicalOverlay(root, slug, base); }
 export async function mergeCanonicalEntities(root: string, slug: string, base: StoryBible, targetEntityId: string, sourceEntityIds: string[], reason: string) { const ids = unique(sourceEntityIds).filter((id) => id !== targetEntityId); const known = new Set(base.canonicalEntities.map((item) => item.id)); if (!known.has(targetEntityId) || !ids.length || ids.some((id) => !known.has(id))) throw new Error("Merge must reference existing distinct entities"); const paths = storyPaths(root, slug, 1); const overlay = canonicalOverlaySchema.parse((await readJsonIfExists(paths.bibleCanonicalManual)) ?? { version: 1, overrides: {}, merges: [] }); const effective = await applyCanonicalOverlay(root, slug, base); const target = effective.bible.canonicalEntities.find((item) => item.id === targetEntityId); for (const id of ids) { const source = effective.bible.canonicalEntities.find((item) => item.id === id); if (target && source && namingMappingConflict(target, source)) throw new Error("Conflicting narration naming mappings; resolve the preferred/localized names in the entity editor before merging"); } const merge = manualMergeSchema.parse({ id: randomUUID(), targetEntityId, sourceEntityIds: ids, reason, createdAt: new Date().toISOString() }); resolveMergeMap([...overlay.merges.filter((item) => !item.undoneAt), merge]); overlay.merges.push(merge); await atomicWriteJson(paths.bibleCanonicalManual, overlay); return { merge, ...(await applyCanonicalOverlay(root, slug, base)) }; }
 export async function undoCanonicalMerge(root: string, slug: string, base: StoryBible, mergeId: string) { const paths = storyPaths(root, slug, 1); const overlay = canonicalOverlaySchema.parse((await readJsonIfExists(paths.bibleCanonicalManual)) ?? { version: 1, overrides: {}, merges: [] }); const merge = overlay.merges.find((item) => item.id === mergeId); if (!merge || merge.undoneAt) throw new Error("Active merge was not found"); merge.undoneAt = new Date().toISOString(); await atomicWriteJson(paths.bibleCanonicalManual, overlay); return applyCanonicalOverlay(root, slug, base); }
 
@@ -321,7 +341,7 @@ function isStandardStatusForAnyType(value: string) {
   return (["character", "location", "organization", "ability", "item", "concept", "other"] as const).some((type) => isStandardEntityStatus(type, value));
 }
 
-function namingMappingConflict(target: CanonicalEntity, source: CanonicalEntity) {
+export function namingMappingConflict(target: CanonicalEntity, source: CanonicalEntity) {
   const targetName = target.localizedNaming?.fullName ?? target.preferredNarrationName;
   const sourceName = source.localizedNaming?.fullName ?? source.preferredNarrationName;
   if (targetName && sourceName && targetName !== sourceName) return true;
@@ -333,7 +353,7 @@ function namingMappingConflict(target: CanonicalEntity, source: CanonicalEntity)
   });
 }
 
-function applyOverride(entity: CanonicalEntity, value: z.infer<typeof overrideSchema>) {
+function applyOverride(entity: CanonicalEntity, value: Partial<z.infer<typeof overrideSchema>>) {
   if (value.type) entity.type = value.type;
   if (value.canonicalName) { if (normalizeEntityName(value.canonicalName) !== normalizeEntityName(entity.canonicalName)) entity.aliases = unique([entity.canonicalName, ...entity.aliases]); entity.canonicalName = value.canonicalName; }
   if (value.aliases) entity.aliases = unique(value.aliases.filter((name) => normalizeEntityName(name) !== normalizeEntityName(entity.canonicalName)));

@@ -28,6 +28,7 @@ import {
   findDuplicateSuggestions,
   mergeCanonicalEntities,
 } from "./canonical.js";
+import { areTypesIncompatible } from "./duplicate-detection.js";
 import { normalizeEntityName } from "./updater.js";
 
 export interface PersistenceClassificationResult {
@@ -506,6 +507,8 @@ export interface BibleAnalysisRecommendation {
   protected: boolean;
   protectedReasons: string[];
   safeToAutoApply: boolean;
+  /** What produced this recommendation. Omitted when the origin cannot be determined honestly. */
+  source?: "deterministic" | "ai";
 }
 
 export interface BibleAnalysisReport {
@@ -584,6 +587,9 @@ export async function analyzeStoryBible(
 
   const recommendations: BibleAnalysisRecommendation[] = [];
   const entityMap = new Map(bible.canonicalEntities.map((e) => [e.id, e]));
+  // Persistence classifications only consult a provider when one is supplied;
+  // duplicate detection above is always deterministic.
+  const classificationSource: "deterministic" | "ai" = options.provider ? "ai" : "deterministic";
 
   for (const entity of bible.canonicalEntities) {
     const protectedReasons: string[] = [];
@@ -641,7 +647,9 @@ export async function analyzeStoryBible(
         supportingChapters: duplicate.supportingChapters,
         protected: isProtected,
         protectedReasons,
-        safeToAutoApply: !isProtected && duplicate.confidence >= 0.90 && duplicate.recommendation === "merge",
+        // A merge across incompatible types is never auto-safe, even at high confidence.
+        safeToAutoApply: !isProtected && duplicate.confidence >= 0.90 && duplicate.recommendation === "merge" && !areTypesIncompatible(entity.type, duplicate.target.type),
+        source: "deterministic",
       });
       continue;
     }
@@ -685,6 +693,7 @@ export async function analyzeStoryBible(
         protected: isProtected,
         protectedReasons,
         safeToAutoApply: !isProtected && classification.confidence >= 0.9,
+        source: classificationSource,
       });
     } else if (classification.disposition === "needs_review") {
       const recId = `rec_${fingerprint({ entityId: entity.id, action: "needs_review" }).slice(0, 16)}`;
@@ -701,6 +710,7 @@ export async function analyzeStoryBible(
         protected: isProtected,
         protectedReasons,
         safeToAutoApply: false,
+        source: classificationSource,
       });
     } else {
       const recId = `rec_${fingerprint({ entityId: entity.id, action: "keep_canonical" }).slice(0, 16)}`;
@@ -717,6 +727,7 @@ export async function analyzeStoryBible(
         protected: isProtected,
         protectedReasons,
         safeToAutoApply: false,
+        source: classificationSource,
       });
     }
   }
@@ -1192,6 +1203,8 @@ export interface BulkCleanupResult {
   appliedMerges: string[];
   skippedProtected: string[];
   failed: BulkCleanupFailedItem[];
+  /** Per-entity change records for the append-only entity audit log (source: analyzer). */
+  auditTrail: Array<{ entityId: string; action: "demoted" | "merged"; before?: Record<string, unknown>; after?: Record<string, unknown>; reason?: string; source: "analyzer" }>;
   bible: StoryBible;
 }
 
@@ -1222,6 +1235,7 @@ export async function applyCleanupRecommendations(
   const appliedMerges: string[] = [];
   const skippedProtected: string[] = [];
   const failed: BulkCleanupFailedItem[] = [];
+  const auditTrail: BulkCleanupResult["auditTrail"] = [];
 
   for (const rec of targetRecs) {
     if (rec.protected) {
@@ -1238,6 +1252,7 @@ export async function applyCleanupRecommendations(
         });
         if (res.status === "demoted") {
           appliedDemotions.push(rec.canonicalName);
+          auditTrail.push({ entityId: rec.entityId, action: "demoted", after: { referenceId: res.referenceId, parentEntityId: rec.parentEntityId ?? null }, reason: rec.reason, source: "analyzer" });
         }
       } catch (err) {
         logger.warn({ entityId: rec.entityId, err }, "Failed to demote canonical entity during cleanup");
@@ -1252,8 +1267,12 @@ export async function applyCleanupRecommendations(
       try {
         const base = await readJsonIfExists(storyPaths(root, slug, 1).bible);
         if (base) {
-          await mergeCanonicalEntities(root, slug, storyBibleSchema.parse(base), rec.targetEntityId, [rec.entityId], rec.reason);
+          const merged = await mergeCanonicalEntities(root, slug, storyBibleSchema.parse(base), rec.targetEntityId, [rec.entityId], rec.reason);
           appliedMerges.push(`${rec.canonicalName} → ${rec.targetEntityName}`);
+          auditTrail.push(
+            { entityId: rec.targetEntityId, action: "merged", after: { mergeId: merged.merge.id, mergedSourceIds: [rec.entityId], reason: rec.reason }, reason: rec.reason, source: "analyzer" },
+            { entityId: rec.entityId, action: "merged", after: { mergeId: merged.merge.id, mergedInto: rec.targetEntityId, reason: rec.reason }, reason: rec.reason, source: "analyzer" },
+          );
         }
       } catch (err) {
         logger.warn({ entityId: rec.entityId, err }, "Failed to merge canonical entity during cleanup");
@@ -1283,6 +1302,7 @@ export async function applyCleanupRecommendations(
     appliedMerges,
     skippedProtected,
     failed,
+    auditTrail,
     bible,
   };
 }

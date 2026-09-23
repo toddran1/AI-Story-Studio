@@ -8,7 +8,7 @@ export function storyPaths(root: string, slug: string, chapter: number) {
   return {
     story, source, sourceManifest: join(source, "source.json"), sourceChapters: join(source, "chapters"), chapterDir,
     storyConfig: join(story, "story.json"), pipelineConfig: join(story, "pipeline.json"),
-    bible: join(story, "story-bible.json"), bibleManual: join(story, "story-bible-manual.json"), bibleCanonicalManual: join(story, "story-bible-canonical-manual.json"), continuityReview: join(story, "continuity-review.json"), qaExceptions: join(story, "qa-exceptions.json"), chapterMeta: join(chapterDir, "chapter.json"),
+    bible: join(story, "story-bible.json"), bibleManual: join(story, "story-bible-manual.json"), bibleCanonicalManual: join(story, "story-bible-canonical-manual.json"), continuityReview: join(story, "continuity-review.json"), qaExceptions: join(story, "qa-exceptions.json"), bibleAudit: join(story, "story-bible-audit.json"), chapterMeta: join(chapterDir, "chapter.json"),
     visualProfiles: join(story, "visual-profiles.json"), artDirection: join(story, "art-direction.json"),
     visualProfilesDirectory: join(story, "assets", "visual-profiles"),
     original: join(chapterDir, "original.txt"), english: join(chapterDir, "english.txt"),

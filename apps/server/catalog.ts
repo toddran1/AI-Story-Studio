@@ -6,7 +6,7 @@ import { isQaIssueActive, QaResult, qaResultSchema, qaStateSchema } from "../../
 import { migrateQaState, openFindings, qaFindingStats } from "../../src/qa/findings.js";
 import { deriveChapterQaFreshness, loadQaDeterministicDependencies } from "../../src/qa/freshness.js";
 import { Story, storySchema } from "../../src/domain/story.js";
-import { StoryBible, emptyStoryBible, storyBibleSchema } from "../../src/domain/story-bible.js";
+import { StoryBible, CanonicalEntity, canonicalEntitySchema, emptyStoryBible, hasActivePronunciation, storyBibleSchema } from "../../src/domain/story-bible.js";
 import { SourceManifest, sourceManifestSchema } from "../../src/source/types.js";
 import { atomicWriteJson } from "../../src/storage/atomic-write.js";
 import { exportPaths, sceneImagePath, sceneVersionImagePath, storyPaths, videoExportPaths } from "../../src/storage/paths.js";
@@ -39,9 +39,14 @@ import { AlignmentArtifact, alignmentArtifactSchema } from "../../src/alignment/
 import { SubtitleDocument, subtitleDocumentSchema } from "../../src/subtitles/types.js";
 import { normalizeSpeechForProvider } from "../../src/tts/speech-normalization.js";
 import { continuityReviewSchema } from "../../src/story-bible/continuity.js";
-import { applyCanonicalOverlay, canonicalOverlaySchema, findDuplicateSuggestions, loadStoryBibleWithCanonicalOverlay } from "../../src/story-bible/canonical.js";
+import { applyCanonicalOverlay, CanonicalOverlay, canonicalOverlaySchema, findDuplicateSuggestions, loadStoryBibleWithCanonicalOverlay } from "../../src/story-bible/canonical.js";
 import { ttsProviderNameSchema } from "../../src/domain/provider.js";
 import { analyzeStoryBible } from "../../src/story-bible/granularity.js";
+import { areTypesIncompatible } from "../../src/story-bible/duplicate-detection.js";
+import { loadPronunciationSuggestions } from "../../src/story-bible/pronunciation.js";
+import { entityReadiness, readinessNeedsAttention, type EntityReadinessRow } from "../../src/story-bible/readiness.js";
+import { findNamingCollisions } from "../../src/story-bible/naming-collisions.js";
+import { readEntityAudit } from "../../src/story-bible/entity-audit.js";
 
 const slugSchema = z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/);
 export const chapterFilterSchema = z.enum(["all", "unprocessed", "warn", "fail", "complete"]);
@@ -189,29 +194,449 @@ export async function getSuppressedCanonicalEntities(root: string, slug: string)
   return canonicalOverlaySchema.parse(raw ?? { version: 1 }).suppressions;
 }
 
-export async function getCanonicalEntitiesPage(root: string, slug: string, options: { page: number; pageSize: number; type?: string; query?: string; sort?: string }) { const bible = await getStoryBible(root, slug); let entities = bible.canonicalEntities; const query = options.query?.trim().toLocaleLowerCase(); if (options.type && options.type !== "all") entities = entities.filter((item) => item.type === options.type); if (query) entities = entities.filter((item) => [item.canonicalName, item.originalName, item.preferredNarrationName ?? "", item.localizedNaming?.fullName ?? "", item.localizedNaming?.shortName ?? "", item.localizedNaming?.notes ?? "", item.description, item.notes, ...item.aliases, ...item.aliasNarrationRules.flatMap((rule) => [rule.alias, rule.replacement ?? ""])].some((value) => value.toLocaleLowerCase().includes(query))); const direction = options.sort === "last" ? (a: typeof entities[number], b: typeof entities[number]) => b.lastKnownAppearance - a.lastKnownAppearance : options.sort === "first" ? (a: typeof entities[number], b: typeof entities[number]) => a.firstAppearance - b.firstAppearance : (a: typeof entities[number], b: typeof entities[number]) => a.canonicalName.localeCompare(b.canonicalName); entities = [...entities].sort(direction); const pageSize = Math.min(100, Math.max(1, Math.floor(options.pageSize))); const pages = Math.max(1, Math.ceil(entities.length / pageSize)); const page = Math.min(pages, Math.max(1, Math.floor(options.page))); const reviewRaw = await readJsonIfExists(storyPaths(root, slug, 1).continuityReview); const review = reviewRaw ? continuityReviewSchema.safeParse(reviewRaw) : undefined; const openCounts = new Map<string, number>(); if (review?.success) for (const finding of review.data.findings.filter((item) => item.status === "open")) for (const id of finding.entityIds) openCounts.set(id, (openCounts.get(id) ?? 0) + 1); return { items: entities.slice((page - 1) * pageSize, page * pageSize).map((item) => ({ ...item, conflictCount: openCounts.get(item.id) ?? 0 })), page, pageSize, pages, total: entities.length, counts: Object.fromEntries(["character", "location", "organization", "ability", "item", "concept", "other"].map((type) => [type, bible.canonicalEntities.filter((item) => item.type === type).length])), duplicateSuggestions: findDuplicateSuggestions(bible.canonicalEntities, { bible }).slice(0, 50) }; }
+export const entityReadinessFilterSchema = z.enum(["needs-attention", "narration-incomplete", "localization-incomplete", "pronunciation-review", "visual-incomplete", "continuity-issues", "duplicate-candidates", "type-conflicts"]);
+export type EntityReadinessFilter = z.infer<typeof entityReadinessFilterSchema>;
+
+/** Canonical overlay fields that replace extracted state with current editorial state. */
+const CANONICAL_OVERRIDE_FIELDS = ["canonicalName", "canonicalNameLocked", "type", "aliases", "notes", "status", "preferredNarrationName", "aliasNarrationRules", "localizedNaming", "pronunciation", "visualProfilePolicy"] as const;
+
+/** Which entity fields carry a manual editorial override (current state, no chapter semantics). */
+function manualOverrideFields(overlay: CanonicalOverlay | undefined, id: string): string[] {
+  const override = overlay?.overrides[id];
+  if (!override) return [];
+  return CANONICAL_OVERRIDE_FIELDS.filter((field) => override[field] !== undefined);
+}
+
+function readinessFilterPredicate(filter: EntityReadinessFilter): (rows: EntityReadinessRow[]) => boolean {
+  const row = (rows: EntityReadinessRow[], key: EntityReadinessRow["key"]) => rows.find((item) => item.key === key);
+  switch (filter) {
+    case "needs-attention": return readinessNeedsAttention;
+    case "narration-incomplete": return (rows) => row(rows, "narration")?.state === "optional";
+    case "localization-incomplete": return (rows) => row(rows, "localization")?.state === "optional";
+    case "pronunciation-review": return (rows) => row(rows, "pronunciation")?.state === "attention";
+    case "visual-incomplete": return (rows) => ["attention", "optional"].includes(row(rows, "visualProfile")?.state ?? "");
+    case "continuity-issues": return (rows) => row(rows, "continuity")?.state === "attention";
+    case "duplicate-candidates": return (rows) => row(rows, "duplicates")?.state === "attention";
+    case "type-conflicts": return (rows) => row(rows, "type")?.state === "attention";
+  }
+}
+
+/**
+ * One pass over the derived Story Bible review inputs (continuity findings,
+ * duplicate suggestions, Visual Profiles, pronunciation suggestions) shared by
+ * the entities page, entity detail, health, and review-queue endpoints. Read
+ * only; nothing here makes provider calls.
+ */
+async function loadBibleReviewContext(root: string, slug: string) {
+  const bible = await getStoryBible(root, slug);
+  const reviewRaw = await readJsonIfExists(storyPaths(root, slug, 1).continuityReview);
+  const review = reviewRaw ? continuityReviewSchema.safeParse(reviewRaw) : undefined;
+  const findings = review?.success ? review.data.findings : [];
+  const openCounts = new Map<string, number>();
+  for (const finding of findings.filter((item) => item.status === "open")) for (const id of finding.entityIds) openCounts.set(id, (openCounts.get(id) ?? 0) + 1);
+  const duplicateSuggestions = findDuplicateSuggestions(bible.canonicalEntities, { bible });
+  const duplicateCounts = new Map<string, number>();
+  const typeConflicts = new Set<string>();
+  for (const suggestion of duplicateSuggestions) {
+    for (const id of suggestion.entityIds) duplicateCounts.set(id, (duplicateCounts.get(id) ?? 0) + 1);
+    const [first, second] = suggestion.entityIds.map((id) => bible.canonicalEntities.find((entity) => entity.id === id));
+    if (first && second && areTypesIncompatible(first.type, second.type)) { typeConflicts.add(first.id); typeConflicts.add(second.id); }
+  }
+  const [visualProfiles, pronunciationSuggestions] = await Promise.all([loadVisualProfiles(root, slug), loadPronunciationSuggestions(root, slug)]);
+  // Deterministic exact-name collisions: distinct from fuzzy duplicate
+  // suggestions above and never fed into merge automation.
+  const namingCollisions = findNamingCollisions(bible.canonicalEntities);
+  const overlayRaw = await readJsonIfExists(storyPaths(root, slug, 1).bibleCanonicalManual);
+  const parsedOverlay = overlayRaw ? canonicalOverlaySchema.safeParse(overlayRaw) : undefined;
+  const readinessOf = (entity: CanonicalEntity) => entityReadiness(entity, {
+    continuityOpenCount: openCounts.get(entity.id) ?? 0,
+    duplicateCandidates: duplicateCounts.get(entity.id) ?? 0,
+    duplicateTypeConflict: typeConflicts.has(entity.id),
+    visualProfile: visualProfiles[entity.id] ? { status: visualProfiles[entity.id]!.status, needsReviewConflicts: (visualProfiles[entity.id]!.conflicts ?? []).filter((conflict) => conflict.status === "needs_review").length } : undefined,
+    pronunciationSuggestionPending: Boolean(pronunciationSuggestions[entity.id]),
+  });
+  return { bible, findings, openCounts, duplicateSuggestions, namingCollisions, visualProfiles, pronunciationSuggestions, readinessOf, overlay: parsedOverlay?.success ? parsedOverlay.data : undefined };
+}
+
+export async function getCanonicalEntitiesPage(root: string, slug: string, options: { page: number; pageSize: number; type?: string; query?: string; sort?: string; readiness?: EntityReadinessFilter }) {
+  const context = await loadBibleReviewContext(root, slug);
+  const { bible } = context;
+  let entities = bible.canonicalEntities;
+  const query = options.query?.trim().toLocaleLowerCase();
+  if (options.type && options.type !== "all") entities = entities.filter((item) => item.type === options.type);
+  if (query) entities = entities.filter((item) => [item.canonicalName, item.originalName, item.preferredNarrationName ?? "", item.localizedNaming?.fullName ?? "", item.localizedNaming?.shortName ?? "", item.localizedNaming?.notes ?? "", item.description, item.notes, ...item.aliases, ...item.aliasNarrationRules.flatMap((rule) => [rule.alias, rule.replacement ?? ""])].some((value) => value.toLocaleLowerCase().includes(query)));
+  const readinessOf = context.readinessOf;
+  if (options.readiness) { const predicate = readinessFilterPredicate(options.readiness); entities = entities.filter((item) => predicate(readinessOf(item))); }
+  const direction = options.sort === "last" ? (a: typeof entities[number], b: typeof entities[number]) => b.lastKnownAppearance - a.lastKnownAppearance : options.sort === "first" ? (a: typeof entities[number], b: typeof entities[number]) => a.firstAppearance - b.firstAppearance : (a: typeof entities[number], b: typeof entities[number]) => a.canonicalName.localeCompare(b.canonicalName);
+  entities = [...entities].sort(direction);
+  const pageSize = Math.min(100, Math.max(1, Math.floor(options.pageSize)));
+  const pages = Math.max(1, Math.ceil(entities.length / pageSize));
+  const page = Math.min(pages, Math.max(1, Math.floor(options.page)));
+  return { items: entities.slice((page - 1) * pageSize, page * pageSize).map((item) => ({ ...item, conflictCount: context.openCounts.get(item.id) ?? 0, readiness: readinessOf(item) })), page, pageSize, pages, total: entities.length, counts: Object.fromEntries(["character", "location", "organization", "ability", "item", "concept", "other"].map((type) => [type, bible.canonicalEntities.filter((item) => item.type === type).length])), duplicateSuggestions: context.duplicateSuggestions.slice(0, 50) };
+}
 
 export async function getCanonicalEntityDetail(root: string, slug: string, id: string) {
-  const bible = await getStoryBible(root, slug);
+  const context = await loadBibleReviewContext(root, slug);
+  const bible = context.bible;
   const entity = bible.canonicalEntities.find((item) => item.id === id);
   if (!entity) throw new Error("Canonical entity was not found");
   const related = bible.canonicalRelationships.filter((item) => item.sourceEntityId === id || item.targetEntityId === id);
   const relatedIds = new Set(related.flatMap((item) => [item.sourceEntityId, item.targetEntityId]));
   const names = Object.fromEntries(bible.canonicalEntities.filter((item) => relatedIds.has(item.id)).map((item) => [item.id, item.canonicalName]));
-  const reviewRaw = await readJsonIfExists(storyPaths(root, slug, 1).continuityReview);
-  const review = reviewRaw ? continuityReviewSchema.safeParse(reviewRaw) : undefined;
   const relatedReferences = (bible.minorReferences ?? []).filter((ref) => ref.parentEntityId === id);
+  const duplicateSuggestions = context.duplicateSuggestions.filter((item) => item.entityIds.includes(id)).slice(0, 20);
   return {
     entity,
     timeline: bible.entityTimeline.filter((item) => item.entityId === id).sort((a, b) => a.chapter - b.chapter),
     relationships: related,
     relatedNames: names,
     relatedReferences,
-    issues: review?.success ? review.data.findings.filter((item) => item.entityIds.includes(id)) : [],
+    issues: context.findings.filter((item) => item.entityIds.includes(id)),
     merges: bible.merges.filter((item) => item.targetEntityId === id || item.sourceEntityIds.includes(id)),
-    duplicateSuggestions: findDuplicateSuggestions(bible.canonicalEntities, { bible }).filter((item) => item.entityIds.includes(id)).slice(0, 20),
-    visualProfileExists: Boolean((await loadVisualProfiles(root, slug))[id]),
+    duplicateSuggestions,
+    namingCollisions: context.namingCollisions.filter((item) => item.entities.some((candidate) => candidate.id === id)),
+    visualProfileExists: Boolean(context.visualProfiles[id]),
+    readiness: context.readinessOf(entity),
+    manualFields: manualOverrideFields(context.overlay, id),
   };
+}
+
+/**
+ * Read-only "entity as of chapter N" view (Phase D). The historical state is
+ * reconstructed solely from chronological per-chapter Story Bible updates via
+ * rebuildStoryBibleBeforeChapter with the canonical overlay EXCLUDED, so manual
+ * edits never masquerade as historical facts. Manual overlay fields have no
+ * chapter semantics: they are reported separately in `currentOverrides` (and
+ * merge/suppression caveats in `warnings`) instead of being projected backward.
+ * No provider calls, no writes.
+ */
+export async function getCanonicalEntityHistory(root: string, slug: string, id: string, chapter: number) {
+  slugSchema.parse(slug); canonicalEntitySchema.shape.id.parse(id);
+  if (!Number.isSafeInteger(chapter) || chapter < 1) throw new Error("Chapter must be a positive integer");
+  const context = await loadBibleReviewContext(root, slug);
+  const current = context.bible.canonicalEntities.find((item) => item.id === id);
+  if (!current) throw new Error("Canonical entity was not found");
+  const index = await loadChapterIndex(root, slug);
+  const maxChapter = index.numbers.at(-1);
+  const effective = maxChapter ? Math.min(chapter, maxChapter) : chapter;
+  // State before chapter N+1 == state as of chapter N, without the canonical overlay.
+  const rebuilt = await rebuildStoryBibleBeforeChapter(root, slug, effective + 1, { includeCanonicalOverlay: false });
+  const historical = rebuilt.canonicalEntities.find((item) => item.id === id);
+  const provenance = (historical?.provenance ?? []).filter((item) => item.chapter <= effective);
+  const relationships = rebuilt.canonicalRelationships
+    .filter((item) => (item.sourceEntityId === id || item.targetEntityId === id) && item.startChapter <= effective && (item.endChapter === undefined || item.endChapter >= effective));
+  const relatedIds = new Set(relationships.flatMap((item) => [item.sourceEntityId, item.targetEntityId]));
+  const warnings: string[] = [];
+  const overlay = context.overlay;
+  if (overlay) {
+    if (overlay.merges.some((merge) => !merge.undoneAt && (merge.targetEntityId === id || merge.sourceEntityIds.includes(id)))) warnings.push("Manual merges carry no chapter information and are applied as current state; this historical view shows the pre-merge extracted records only.");
+    if (overlay.suppressions.some((item) => item.entityId === id)) warnings.push("A manual suppression record exists for this entity; suppressions are current editorial state and are not reflected historically.");
+    if (overlay.demotions.some((item) => item.entityId === id)) warnings.push("A manual demotion record exists for this entity; demotions are current editorial state and are not reflected historically.");
+  }
+  return {
+    chapter: effective,
+    requestedChapter: chapter !== effective ? chapter : undefined,
+    exists: Boolean(historical),
+    entity: historical ? { ...historical, provenance } : undefined,
+    timeline: rebuilt.entityTimeline.filter((item) => item.entityId === id && item.chapter <= effective).sort((a, b) => a.chapter - b.chapter),
+    relationships,
+    relatedNames: Object.fromEntries(rebuilt.canonicalEntities.filter((item) => relatedIds.has(item.id)).map((item) => [item.id, item.canonicalName])),
+    provenance,
+    currentOverrides: manualOverrideFields(overlay, id),
+    overrideUpdatedAt: overlay?.overrides[id]?.updatedAt,
+    warnings,
+    firstAppearanceKnown: Boolean(historical) || current.provenance.length > 0,
+    earliestKnownChapter: historical ? undefined : current.firstAppearance,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Entity "where used" aggregation (Phase C)
+//
+// QA findings and scene manifests only exist as per-chapter artifacts, so a
+// per-story index is built lazily and cached in memory. Revalidation stats the
+// chapter artifacts (cheap) and re-reads only chapters whose chapter.json /
+// qa.json / scenes.json mtimes changed — a 1,600-chapter story pays the full
+// parse once, then ~3 stats per chapter per request.
+// ---------------------------------------------------------------------------
+
+type ChapterUsageSnapshot = {
+  stamp: string;
+  translationComplete: boolean;
+  narrationComplete: boolean;
+  qaFindings: Array<{ id: string; entityIds: string[]; category: string; severity: string; status: string; message: string; evidence?: string }>;
+  sceneRefs: Array<{ sceneId: string; entityIds: string[]; summary: string }>;
+};
+
+const chapterUsageCache = new Map<string, Map<number, ChapterUsageSnapshot>>();
+
+async function mtimeStamp(path: string) { try { return String((await stat(path)).mtimeMs); } catch { return "-"; } }
+
+async function loadChapterUsageIndex(root: string, slug: string): Promise<Map<number, ChapterUsageSnapshot>> {
+  const key = `${root}\0${slug}`;
+  const cache = chapterUsageCache.get(key) ?? new Map<number, ChapterUsageSnapshot>();
+  const index = await loadChapterIndex(root, slug);
+  await mapLimit(index.numbers, 16, async (chapter) => {
+    const paths = storyPaths(root, slug, chapter);
+    const stamp = `${await mtimeStamp(paths.chapterMeta)}|${await mtimeStamp(paths.qa)}|${await mtimeStamp(paths.scenesManifest)}`;
+    if (cache.get(chapter)?.stamp === stamp) return;
+    const [metaRaw, qaRaw, scenesRaw] = await Promise.all([readJsonIfExists(paths.chapterMeta), readJsonIfExists(paths.qa), readJsonIfExists(paths.scenesManifest)]);
+    const meta = metaRaw ? chapterSchema.safeParse(metaRaw) : undefined;
+    const qa = qaRaw ? qaStateSchema.safeParse(qaRaw) : undefined;
+    const scenes = scenesRaw ? sceneManifestSchema.safeParse(scenesRaw) : undefined;
+    cache.set(chapter, {
+      stamp,
+      translationComplete: meta?.success === true && meta.data.stages.translation.status === "complete",
+      narrationComplete: meta?.success === true && meta.data.stages.narration.status === "complete",
+      qaFindings: qa?.success ? qa.data.findings.filter((finding) => finding.provenance?.entityIds?.length).map((finding) => ({ id: finding.id, entityIds: finding.provenance!.entityIds!, category: finding.category, severity: finding.severity, status: finding.status, message: finding.message, evidence: finding.evidence })) : [],
+      sceneRefs: scenes?.success ? scenes.data.scenes.filter((scene) => scene.entityIds?.length).map((scene) => ({ sceneId: scene.id, entityIds: scene.entityIds!, summary: scene.summary })) : [],
+    });
+  });
+  for (const chapter of [...cache.keys()]) if (!index.numbers.includes(chapter)) cache.delete(chapter);
+  chapterUsageCache.set(key, cache);
+  return cache;
+}
+
+export type EntityUsageKind = "provenance" | "qa" | "continuity" | "scene" | "visual-profile";
+
+/** Where a canonical entity is used, derived on read from existing artifacts. No provider calls. */
+export async function getCanonicalEntityUsage(root: string, slug: string, id: string, options: { page: number; pageSize: number }) {
+  slugSchema.parse(slug); canonicalEntitySchema.shape.id.parse(id);
+  const context = await loadBibleReviewContext(root, slug);
+  const entity = context.bible.canonicalEntities.find((item) => item.id === id);
+  if (!entity) throw new Error("Canonical entity was not found");
+  const chapters = await loadChapterUsageIndex(root, slug);
+  const uses: Array<{ kind: EntityUsageKind; chapter?: number; sceneId?: string; label: string; excerpt?: string; href: string }> = [];
+
+  const provenanceChapters = [...new Set(entity.provenance.map((item) => item.chapter))].sort((a, b) => a - b);
+  for (const item of entity.provenance) uses.push({
+    kind: "provenance", chapter: item.chapter,
+    label: `Story Bible ${item.kind} record · Chapter ${item.chapter}`,
+    href: `/stories/${slug}/chapters/${item.chapter}`,
+  });
+
+  let qaFindings = 0; let scenes = 0;
+  for (const [chapter, snapshot] of [...chapters.entries()].sort((a, b) => a[0] - b[0])) {
+    for (const finding of snapshot.qaFindings.filter((item) => item.entityIds.includes(id))) {
+      qaFindings++;
+      uses.push({ kind: "qa", chapter, label: finding.message, excerpt: finding.evidence || undefined, href: `/stories/${slug}/chapters/${chapter}?tab=quality` });
+    }
+    for (const scene of snapshot.sceneRefs.filter((item) => item.entityIds.includes(id))) {
+      scenes++;
+      uses.push({ kind: "scene", chapter, sceneId: scene.sceneId, label: `Scene ${scene.sceneId}: ${scene.summary}`, href: `/stories/${slug}/scenes?chapter=${chapter}` });
+    }
+  }
+
+  const continuityFindings = context.findings.filter((item) => item.entityIds.includes(id));
+  for (const finding of continuityFindings) uses.push({
+    kind: "continuity", chapter: Math.min(...finding.chapters),
+    label: finding.explanation, excerpt: finding.supportingFacts[0]?.summary || undefined,
+    href: `/stories/${slug}/continuity?entity=${id}`,
+  });
+
+  const visualProfile = context.visualProfiles[id];
+  if (visualProfile) uses.push({ kind: "visual-profile", label: `Visual Profile (${visualProfile.status})`, href: `/stories/${slug}/bible?entity=${id}` });
+
+  uses.sort((a, b) => (a.chapter ?? 0) - (b.chapter ?? 0) || a.kind.localeCompare(b.kind));
+  const pageSize = Math.min(100, Math.max(1, Math.floor(options.pageSize)));
+  const pages = Math.max(1, Math.ceil(uses.length / pageSize));
+  const page = Math.min(pages, Math.max(1, Math.floor(options.page)));
+  const summary = {
+    sourceChapters: [entity.firstAppearance, entity.lastKnownAppearance] as [number, number],
+    translationChapters: provenanceChapters.filter((chapter) => chapters.get(chapter)?.translationComplete).length,
+    narrationChapters: provenanceChapters.filter((chapter) => chapters.get(chapter)?.narrationComplete).length,
+    qaFindings, continuityFindings: continuityFindings.length, scenes,
+    visualProfile: Boolean(visualProfile),
+  };
+  return { summary, uses: uses.slice((page - 1) * pageSize, page * pageSize), total: uses.length, page, pageSize };
+}
+
+/**
+ * Paginated entity audit entries (newest first) plus the pre-existing
+ * historical record (merges, granularity audits, first appearance) so the
+ * sheet can render one continuous timeline without fabricating before/after
+ * deltas for events that never recorded them.
+ */
+export async function getCanonicalEntityAudit(root: string, slug: string, id: string, options: { page: number; pageSize: number }) {
+  slugSchema.parse(slug); canonicalEntitySchema.shape.id.parse(id);
+  const bible = await getStoryBible(root, slug);
+  const entity = bible.canonicalEntities.find((item) => item.id === id);
+  if (!entity) throw new Error("Canonical entity was not found");
+  const entries = await readEntityAudit(root, slug, id);
+  const pageSize = Math.min(100, Math.max(1, Math.floor(options.pageSize)));
+  const pages = Math.max(1, Math.ceil(entries.length / pageSize));
+  const page = Math.min(pages, Math.max(1, Math.floor(options.page)));
+  const names = new Map(bible.canonicalEntities.map((item) => [item.id, item.canonicalName]));
+  const historical: Array<{ kind: string; label: string; source?: string; timestamp?: string; chapter?: number }> = [];
+  const firstRecord = entity.provenance.find((item) => item.chapter === entity.firstAppearance);
+  if (firstRecord) historical.push({
+    kind: "provenance", chapter: entity.firstAppearance, source: firstRecord.origin,
+    label: `${firstRecord.origin === "manual" ? "Manually recorded" : "Automatically extracted"} as ${entity.type} · Ch. ${entity.firstAppearance}`,
+  });
+  for (const merge of bible.merges.filter((item) => item.targetEntityId === id || item.sourceEntityIds.includes(id))) {
+    const direction = merge.targetEntityId === id
+      ? `Merged ${merge.sourceEntityIds.map((source) => names.get(source) ?? source).join(", ")} into this entity`
+      : `Merged into ${names.get(merge.targetEntityId) ?? merge.targetEntityId}`;
+    historical.push({ kind: "merge", label: `${direction}: ${merge.reason}`, source: "manual", timestamp: merge.createdAt });
+    if (merge.undoneAt) historical.push({ kind: "merge", label: `Merge undone (${direction})`, source: "manual", timestamp: merge.undoneAt });
+  }
+  for (const audit of bible.granularityAudits.filter((item) => item.fromEntityId === id || item.toEntityId === id)) {
+    historical.push({ kind: "granularity", label: `${audit.action === "kept" ? "Kept" : audit.action === "promoted" ? "Promoted" : audit.action === "demoted" ? "Demoted" : "Merged"} ${audit.name}${audit.reason ? `: ${audit.reason}` : ""}`, source: audit.source, timestamp: audit.timestamp });
+  }
+  return { entries: entries.slice((page - 1) * pageSize, page * pageSize), historical, total: entries.length, page, pageSize };
+}
+
+
+/**
+ * Aggregated Story Bible health summary. Every count is derived on read from
+ * existing artifacts (duplicate detection, continuity review, stale extraction
+ * walk, pronunciation records, Visual Profile conflicts, deterministic cleanup
+ * analysis) — no provider calls, no persistence.
+ */
+export async function getStoryBibleHealth(root: string, slug: string) {
+  const context = await loadBibleReviewContext(root, slug);
+  const { bible } = context;
+  const staleExtractionChapters = await computeStaleExtractionChapters(root, slug);
+  // No provider is passed: classifyEntityPersistence falls back to its
+  // deterministic result, so this analysis is free and reproducible.
+  const analysis = await analyzeStoryBible(root, slug);
+  const cleanupRecommendations = analysis.recommendations.filter((item) => item.recommendation !== "keep_canonical").length;
+  const visualProfileIssues = Object.values(context.visualProfiles).filter((profile) => (profile.conflicts ?? []).some((conflict) => conflict.status === "needs_review")).length;
+  const pronunciationNeedsReview = bible.canonicalEntities.filter((entity) => hasActivePronunciation(entity.pronunciation) && entity.pronunciation?.needsReview).length;
+  const needsAttention = bible.canonicalEntities.filter((entity) => readinessNeedsAttention(context.readinessOf(entity))).length;
+  return {
+    totals: { canonicalEntities: bible.canonicalEntities.length, minorReferences: (bible.minorReferences ?? []).length, needsAttention },
+    issues: {
+      duplicateCandidates: context.duplicateSuggestions.length,
+      continuityOpen: context.findings.filter((item) => item.status === "open").length,
+      visualProfileIssues,
+      pronunciationNeedsReview,
+      staleExtractionChapters: staleExtractionChapters.length,
+      cleanupRecommendations,
+      namingCollisions: context.namingCollisions.filter((item) => !item.hasMergeRelationship).length,
+    },
+  };
+}
+
+export const bibleReviewKindSchema = z.enum(["duplicate", "pronunciation", "continuity", "visual-profile", "stale-extraction", "cleanup", "naming"]);
+export const bibleReviewStatusSchema = z.enum(["open", "resolved", "all"]);
+export type BibleReviewItem = {
+  id: string;
+  kind: z.infer<typeof bibleReviewKindSchema>;
+  entityIds?: string[];
+  title: string;
+  detail: string;
+  severity?: "info" | "warn" | "critical";
+  chapters?: number[];
+  source: string;
+  action: { label: string; href: string };
+};
+
+/**
+ * Unified derived review queue: aggregates existing issue sources into one
+ * paginated list without copying anything into a second store. Only sources
+ * with real resolution state (continuity) respond to the status filter.
+ */
+export async function getStoryBibleReview(root: string, slug: string, options: { kind?: z.infer<typeof bibleReviewKindSchema>; status?: z.infer<typeof bibleReviewStatusSchema>; entityId?: string; page: number; pageSize: number }) {
+  const context = await loadBibleReviewContext(root, slug);
+  const { bible } = context;
+  const names = new Map(bible.canonicalEntities.map((entity) => [entity.id, entity.canonicalName]));
+  const nameOf = (id: string) => names.get(id) ?? id;
+  const items: BibleReviewItem[] = [];
+  const entityHref = (id: string) => `/stories/${slug}/bible?entity=${id}`;
+
+  for (const suggestion of context.duplicateSuggestions) items.push({
+    id: `duplicate:${suggestion.id}`, kind: "duplicate", entityIds: [...suggestion.entityIds],
+    title: `Possible duplicate: ${suggestion.entities[0].name} ↔ ${suggestion.entities[1].name}`,
+    detail: `${Math.round(suggestion.confidence * 100)}% confidence · ${suggestion.reason}`,
+    severity: suggestion.confidence >= 0.85 ? "warn" : "info",
+    chapters: suggestion.supportingChapters, source: "duplicate-detection",
+    action: { label: "Compare & merge", href: entityHref(suggestion.entityIds[0]) },
+  });
+
+  for (const collision of context.namingCollisions) items.push({
+    id: `naming:${collision.id}`, kind: "naming", entityIds: collision.entities.map((entity) => entity.id),
+    title: `Naming collision: ${collision.name}`,
+    detail: collision.hasMergeRelationship ? `${collision.reason} The colliding records already share a merge relationship.` : collision.reason,
+    severity: collision.hasMergeRelationship ? "info" : "warn",
+    chapters: collision.chapters, source: "naming-collision-detection",
+    action: { label: "Compare entities", href: entityHref(collision.entities[0]!.id) },
+  });
+
+  const status = options.status ?? "open";
+  for (const finding of context.findings) {
+    if (status === "open" && finding.status !== "open") continue;
+    if (status === "resolved" && finding.status === "open") continue;
+    items.push({
+      id: `continuity:${finding.id}`, kind: "continuity", entityIds: finding.entityIds,
+      title: finding.entityIds.map(nameOf).join(" · "),
+      detail: finding.explanation,
+      severity: finding.severity === "critical" ? "critical" : finding.severity === "warning" ? "warn" : "info",
+      chapters: finding.chapters, source: "continuity",
+      action: { label: "Review continuity", href: `/stories/${slug}/continuity?entity=${finding.entityIds[0]}` },
+    });
+  }
+
+  for (const entity of bible.canonicalEntities) {
+    if (hasActivePronunciation(entity.pronunciation) && entity.pronunciation?.needsReview) items.push({
+      id: `pronunciation:${entity.id}`, kind: "pronunciation", entityIds: [entity.id],
+      title: `Pronunciation review: ${entity.canonicalName}`,
+      detail: "The active pronunciation configuration is marked for review.",
+      severity: "warn", source: "pronunciation",
+      action: { label: "Open entity", href: entityHref(entity.id) },
+    });
+    if (context.pronunciationSuggestions[entity.id]) items.push({
+      id: `pronunciation-suggestion:${entity.id}`, kind: "pronunciation", entityIds: [entity.id],
+      title: `Pronunciation suggestion: ${entity.canonicalName}`,
+      detail: "An AI pronunciation suggestion is awaiting an explicit decision; default provider pronunciation is in effect.",
+      severity: "info", source: "pronunciation",
+      action: { label: "Review suggestion", href: entityHref(entity.id) },
+    });
+  }
+
+  for (const [entityId, profile] of Object.entries(context.visualProfiles)) {
+    const conflicts = (profile.conflicts ?? []).filter((conflict) => conflict.status === "needs_review");
+    if (!conflicts.length) continue;
+    items.push({
+      id: `visual-profile:${entityId}`, kind: "visual-profile", entityIds: [entityId],
+      title: `Visual Profile conflicts: ${nameOf(entityId)}`,
+      detail: `${conflicts.length} field conflict${conflicts.length === 1 ? "" : "s"} between canonical text and visual canon need${conflicts.length === 1 ? "s" : ""} review.`,
+      severity: "warn", source: "visual-canon",
+      action: { label: "Open entity", href: entityHref(entityId) },
+    });
+  }
+
+  const staleExtractionChapters = await computeStaleExtractionChapters(root, slug);
+  if (staleExtractionChapters.length) items.push({
+    id: "stale-extraction", kind: "stale-extraction",
+    title: `${staleExtractionChapters.length} chapter${staleExtractionChapters.length === 1 ? " has" : "s have"} stale Story Bible extraction`,
+    detail: "Extraction output no longer matches the current source. Canonical records remain available; regeneration is never started automatically.",
+    severity: "warn", chapters: staleExtractionChapters, source: "extraction",
+    action: { label: "Open cleanup", href: `/stories/${slug}/bible?tab=cleanup` },
+  });
+
+  const analysis = await analyzeStoryBible(root, slug);
+  for (const recommendation of analysis.recommendations) {
+    if (recommendation.recommendation === "keep_canonical") continue;
+    items.push({
+      id: `cleanup:${recommendation.id}`, kind: "cleanup", entityIds: [recommendation.entityId],
+      title: `${recommendation.recommendation === "minor_reference" ? "Demote candidate" : recommendation.recommendation === "merge" ? "Merge candidate" : "Cleanup review"}: ${recommendation.canonicalName}`,
+      detail: `${Math.round(recommendation.confidence * 100)}% confidence · ${recommendation.reason}${recommendation.protected ? ` Protected: ${recommendation.protectedReasons.join("; ")}` : ""}`,
+      severity: recommendation.protected ? "info" : "warn",
+      chapters: recommendation.supportingChapters, source: "analyzer",
+      action: { label: "Open cleanup", href: `/stories/${slug}/bible?tab=cleanup` },
+    });
+  }
+
+  const counts: Record<string, number> = {};
+  for (const item of items) counts[item.kind] = (counts[item.kind] ?? 0) + 1;
+  let filtered = items;
+  if (options.kind) filtered = filtered.filter((item) => item.kind === options.kind);
+  if (options.entityId) filtered = filtered.filter((item) => item.entityIds?.includes(options.entityId!));
+  const pageSize = Math.min(100, Math.max(1, Math.floor(options.pageSize)));
+  const pages = Math.max(1, Math.ceil(filtered.length / pageSize));
+  const page = Math.min(pages, Math.max(1, Math.floor(options.page)));
+  return { items: filtered.slice((page - 1) * pageSize, page * pageSize), total: filtered.length, page, pageSize, pages, counts };
 }
 
 export async function getMinorReferencesPage(
@@ -704,7 +1129,7 @@ function isCurrent(metadata: Chapter | undefined, source: SourceManifest["chapte
   return !hasManifest || Boolean(metadata?.source?.fingerprint && sourceFingerprint && metadata.source.fingerprint === sourceFingerprint);
 }
 
-async function mapLimit<T, R>(values: T[], concurrency: number, mapper: (value: T) => Promise<R>): Promise<R[]> {
+export async function mapLimit<T, R>(values: T[], concurrency: number, mapper: (value: T) => Promise<R>): Promise<R[]> {
   const result = new Array<R>(values.length); let next = 0;
   const workers = Array.from({ length: Math.min(concurrency, values.length) }, async () => {
     while (next < values.length) { const index = next++; result[index] = await mapper(values[index]!); }

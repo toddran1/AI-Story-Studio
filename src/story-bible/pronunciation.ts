@@ -141,7 +141,12 @@ export async function invalidatePronunciationChange(root: string, slug: string, 
   return invalidatePronunciationChanges(root, slug, [{ before, after }]);
 }
 
-async function invalidatePronunciationChanges(root: string, slug: string, changes: z.infer<typeof pendingSchema>) {
+async function chapterSpeechText(root: string, slug: string, number: number) {
+  const paths = storyPaths(root, slug, number);
+  return readFile(paths.narrationTts, "utf8").catch((error: NodeJS.ErrnoException) => { if (error.code === "ENOENT") return readFile(paths.narration, "utf8").catch((e: NodeJS.ErrnoException) => { if (e.code === "ENOENT") return ""; throw e; }); throw error; });
+}
+
+async function collectPronunciationChanges(root: string, slug: string, changes: z.infer<typeof pendingSchema>) {
   const parsed = pendingSchema.parse(changes);
   const beforeEntities = parsed.map(change => change.before), afterEntities = parsed.map(change => change.after);
   const entries = await readdir(join(storyPaths(root, slug, 1).story, "chapters"), { withFileTypes: true }).catch((error: NodeJS.ErrnoException) => { if (error.code === "ENOENT") return []; throw error; });
@@ -149,7 +154,7 @@ async function invalidatePronunciationChanges(root: string, slug: string, change
   for (const entry of entries) {
     if (!entry.isDirectory() || !/^\d+$/.test(entry.name)) continue;
     const number = Number(entry.name); const paths = storyPaths(root, slug, number);
-    const text = await readFile(paths.narrationTts, "utf8").catch((error: NodeJS.ErrnoException) => { if (error.code === "ENOENT") return readFile(paths.narration, "utf8").catch((e: NodeJS.ErrnoException) => { if (e.code === "ENOENT") return ""; throw e; }); throw error; });
+    const text = await chapterSpeechText(root, slug, number);
     if (pronunciationFingerprint(resolvePronunciations(text, beforeEntities)) === pronunciationFingerprint(resolvePronunciations(text, afterEntities))) continue;
     const raw = await readJsonIfExists(paths.chapterMeta); if (!raw) continue;
     const original = chapterSchema.parse(raw), chapter = structuredClone(original);
@@ -161,6 +166,16 @@ async function invalidatePronunciationChanges(root: string, slug: string, change
     }
     updates.push({ path: paths.chapterMeta, number, original, chapter });
   }
+  return updates;
+}
+
+/** Dry-run of the pronunciation invalidation: chapters whose sound stages would go stale. No writes. */
+export async function inspectPronunciationImpact(root: string, slug: string, before: CanonicalEntity, after: CanonicalEntity) {
+  return (await collectPronunciationChanges(root, slug, [{ before, after }])).map(update => update.number);
+}
+
+async function invalidatePronunciationChanges(root: string, slug: string, changes: z.infer<typeof pendingSchema>) {
+  const updates = await collectPronunciationChanges(root, slug, changes);
   const written: typeof updates = [];
   try { for (const update of updates) { await atomicWriteJson(update.path, update.chapter); written.push(update); } }
   catch (error) {

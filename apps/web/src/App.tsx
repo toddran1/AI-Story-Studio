@@ -19,7 +19,7 @@ import { VisualProfileModal } from "./VisualProfileModal.js";
 import { VisualProfileCheckDialog } from "./VisualProfileCheckDialog.js";
 import { ArtDirectionModal } from "./ArtDirectionModal.js";
 import { reviewArtworkVersion, reupscaleArtwork, updateSceneContinuity, resetSceneContinuity, ShotType, CameraAngle, CompositionTendency, ARTWORK_PROVIDERS } from "./api.js";
-import type { ArtworkSettings, ArtworkVersion, PreviousVisualHandoff, ResolvedArtworkBehavior, SceneContinuity, VideoResolution, VideoSettings, VisualCharacterState, VisualContinuityChange, VisualContinuityOverrideEntryInput, VisualContinuityReferenceDecision, VisualContinuityState, VisualEnvironmentState, VisualObjectState } from "./api.js";
+import type { ArtworkSettings, ArtworkVersion, BulkEntityUpdateResult, EntityAuditEntry, EntityAuditPage, EntityHistoryView, EntityImpact, EntityUsagePage, PreviousVisualHandoff, ResolvedArtworkBehavior, SceneContinuity, VideoResolution, VideoSettings, VisualCharacterState, VisualContinuityChange, VisualContinuityOverrideEntryInput, VisualContinuityReferenceDecision, VisualContinuityState, VisualEnvironmentState, VisualObjectState } from "./api.js";
 import { Pagination } from "./Pagination.js";
 import { BatchProcessingPanel } from "./BatchProcessingPanel.js";
 import { OPENAI_TEXT_MODELS } from "../../../src/llm/openai/models.js";
@@ -1195,37 +1195,170 @@ function LegacyBiblePage({ slug }: { slug: string }) { const [view, setView] = u
   return <section className="page"><div className="section-heading"><div><h2>Story Bible</h2><p>Generated continuity with protected manual corrections.</p></div><div className="bible-tools"><input className="search" placeholder="Search entries" value={query} onChange={(e) => setQuery(e.target.value)} /><button className="button primary" onClick={beginAdd}>Add entry</button></div></div>{error && <ErrorBox text={error} />}<div className="bible-layout"><aside>{sections.map((section) => <button className={category === section ? "active" : ""} onClick={() => { setCategory(section); setEditing(undefined); }} key={section}>{pretty(section)} <b>{view.entries.filter((entry: any) => entry.category === section).length}</b></button>)}</aside><div className="bible-sections"><section><h3>{pretty(category)}</h3>{entries.length ? entries.map((entry: any) => <article key={entry.id}><div><b>{bibleEntryTitle(entry.value)}</b>{entry.manual && <span className="manual-badge">Manual</span>}</div><span>{entry.value.originalName ?? entry.value.original ?? entry.value.relationship}</span><p>{entry.value.description ?? entry.value.notes}</p><small className="mono">CH {entry.value.firstSeenChapter}—{entry.value.lastSeenChapter}</small><div className="entry-actions"><button onClick={() => setEditing(structuredClone(entry))}>{entry.manual ? "Edit" : "Correct"}</button><button onClick={() => remove(entry)}>Delete</button></div></article>) : <Empty title={`No ${pretty(category).toLowerCase()} yet`} text="Add a deliberate entry or let production extraction discover one." />}</section></div></div>{editing && <div className="editor-sheet"><div className="editor-sheet-head"><div><span className="eyebrow">{editing.id ? "Edit entry" : "New entry"}</span><h3>{pretty(editing.category)}</h3></div><button onClick={() => setEditing(undefined)} aria-label="Close editor">×</button></div><BibleFields category={editing.category} value={editing.value} onChange={(value) => setEditing({ ...editing, value })} /><div className="editor-sheet-actions"><button className="button" onClick={() => setEditing(undefined)}>Cancel</button><button className="button primary" onClick={save}>Save entry</button></div></div>}</section>;
 }
 
+export type BibleTab = "canonical" | "references" | "review" | "cleanup";
+export type BibleQueryState = { tab?: BibleTab; type?: string; q?: string; sort?: string; readiness?: string; entity?: string; page?: number };
+
+export function parseBibleQuery(search: string): BibleQueryState {
+  const params = new URLSearchParams(search);
+  const tab = params.get("tab");
+  const page = Number(params.get("page"));
+  return {
+    tab: tab && ["canonical", "references", "review", "cleanup"].includes(tab) ? tab as BibleTab : undefined,
+    type: params.get("type") || undefined,
+    q: params.get("q") || undefined,
+    sort: params.get("sort") || undefined,
+    readiness: params.get("readiness") || undefined,
+    entity: params.get("entity") || undefined,
+    page: Number.isInteger(page) && page > 0 ? page : undefined,
+  };
+}
+
+export function bibleQueryString(state: { tab: BibleTab; type: string; q: string; sort: string; readiness: string; page: number; entity?: string }): string {
+  const params = new URLSearchParams();
+  if (state.tab !== "canonical") params.set("tab", state.tab);
+  if (state.type !== "all") params.set("type", state.type);
+  if (state.q) params.set("q", state.q);
+  if (state.sort !== "last") params.set("sort", state.sort);
+  if (state.readiness !== "all") params.set("readiness", state.readiness);
+  if (state.page > 1) params.set("page", String(state.page));
+  if (state.entity) params.set("entity", state.entity);
+  const query = params.toString();
+  return query ? `?${query}` : "";
+}
+
+const READINESS_FILTERS: Array<{ value: string; label: string }> = [
+  { value: "needs-attention", label: "Needs attention" },
+  { value: "narration-incomplete", label: "Narration not configured" },
+  { value: "localization-incomplete", label: "Localization not configured" },
+  { value: "pronunciation-review", label: "Pronunciation review" },
+  { value: "visual-incomplete", label: "Visual Profile incomplete" },
+  { value: "continuity-issues", label: "Continuity issues" },
+  { value: "duplicate-candidates", label: "Duplicate candidates" },
+  { value: "type-conflicts", label: "Type conflicts" },
+];
+
+export function ReadinessStrip({ rows }: { rows?: Array<{ key: string; state: string; label: string; detail?: string }> }) {
+  if (!rows?.length) return null;
+  const attention = rows.filter((row) => row.state === "attention");
+  if (!attention.length) return <span className="readiness-strip" title="No attention items"><i className="readiness-dot complete">✓</i></span>;
+  return <span className="readiness-strip">{attention.slice(0, 3).map((row) => <i key={row.key} className="readiness-dot attention" title={`${row.label}: ${row.detail ?? "Needs attention"}`}>⚠ {row.label}</i>)}{attention.length > 3 && <i className="readiness-dot attention">+{attention.length - 3}</i>}</span>;
+}
+
+const READINESS_GLYPH: Record<string, string> = { complete: "✓", attention: "⚠", optional: "○", na: "—" };
+
+export function ReadinessGrid({ rows }: { rows?: Array<{ key: string; state: string; label: string; detail?: string }> }) {
+  if (!rows?.length) return null;
+  return <div className="readiness-grid">{rows.map((row) => <div key={row.key} className={`readiness-row ${row.state}`} title={row.detail}><i>{READINESS_GLYPH[row.state] ?? "—"}</i><span>{row.label}</span><small>{row.detail}</small></div>)}</div>;
+}
+
+export function StoryBibleHealthCard({ health, onReviewAll, onOpenCleanup }: { health: any; onReviewAll: () => void; onOpenCleanup: () => void }) {
+  const issues: Array<{ key: string; label: string; count: number }> = [
+    { key: "duplicateCandidates", label: "duplicate candidates", count: health.issues?.duplicateCandidates ?? 0 },
+    { key: "continuityOpen", label: "open continuity findings", count: health.issues?.continuityOpen ?? 0 },
+    { key: "pronunciationNeedsReview", label: "pronunciations to review", count: health.issues?.pronunciationNeedsReview ?? 0 },
+    { key: "visualProfileIssues", label: "Visual Profile conflicts", count: health.issues?.visualProfileIssues ?? 0 },
+    { key: "cleanupRecommendations", label: "cleanup recommendations", count: health.issues?.cleanupRecommendations ?? 0 },
+  ];
+  const stale = health.issues?.staleExtractionChapters ?? 0;
+  return <section className="bible-health" aria-label="Story Bible Health">
+    <div className="bible-health-head"><div><span className="eyebrow">Story Bible Health</span><b>{health.totals?.needsAttention ? `${health.totals.needsAttention} entit${health.totals.needsAttention === 1 ? "y needs" : "ies need"} attention` : "No entities need attention"}</b></div><button className="button" onClick={onReviewAll}>Review all issues</button></div>
+    <div className="bible-health-counts">
+      <span className="quiet"><b>{health.totals?.canonicalEntities ?? 0}</b> canonical entities</span>
+      <span className="quiet"><b>{health.totals?.minorReferences ?? 0}</b> minor references</span>
+      {issues.map((issue) => <span key={issue.key} className={issue.count ? "hot" : "quiet"}><b>{issue.count}</b> {issue.label}</span>)}
+    </div>
+    {stale > 0 && <p className="bible-health-stale">{stale} chapter{stale === 1 ? " has" : "s have"} stale Story Bible extraction. <button className="inline-action-link" onClick={onOpenCleanup}>Open cleanup →</button></p>}
+  </section>;
+}
+
+export const BIBLE_REVIEW_KIND_LABELS: Record<string, string> = { duplicate: "Duplicates", pronunciation: "Pronunciation", continuity: "Continuity", "visual-profile": "Visual Profiles", "stale-extraction": "Stale Extraction", cleanup: "Cleanup" };
+
+export function BibleReviewQueue({ view, kind, status, onKind, onStatus, onPage, navigate }: { view: any; kind: string; status: string; onKind: (kind: string) => void; onStatus: (status: string) => void; onPage: (page: number) => void; navigate: (path: string) => void }) {
+  const kinds = Object.keys(view.counts ?? {}).filter((key) => view.counts[key] > 0);
+  return <div className="bible-review">
+    <div className="segmented" style={{ marginBottom: "14px" }}>
+      <button className={kind === "all" ? "active" : ""} onClick={() => onKind("all")}>All</button>
+      {kinds.map((key) => <button key={key} className={kind === key ? "active" : ""} onClick={() => onKind(key)}>{BIBLE_REVIEW_KIND_LABELS[key] ?? pretty(key)} ({view.counts[key]})</button>)}
+    </div>
+    {(kind === "all" || kind === "continuity") && view.counts?.continuity > 0 && <div className="canonical-toolbar" style={{ gridTemplateColumns: "200px", margin: "0 0 14px" }}><select aria-label="Continuity status" value={status} onChange={(event) => onStatus(event.target.value)}><option value="open">Open continuity</option><option value="resolved">Resolved continuity</option><option value="all">All continuity</option></select></div>}
+    {view.pages > 1 && <Pagination position="top" page={view.page} pages={view.pages} total={view.total} itemLabel="issues" onPrevious={() => onPage(view.page - 1)} onNext={() => onPage(view.page + 1)} />}
+    <div className="continuity-list">
+      {view.items.map((item: any) => <article key={item.id} className={`continuity-card ${item.severity === "critical" ? "critical" : ""}`}>
+        <header><span className="eyebrow">{BIBLE_REVIEW_KIND_LABELS[item.kind] ?? pretty(item.kind)} · {pretty(item.source)}</span><Status status={item.severity === "critical" ? "fail" : item.severity === "warn" ? "warn" : "pending"} label={item.severity ?? "info"} /></header>
+        <h3>{item.title}</h3>
+        <p>{item.detail}</p>
+        {item.chapters?.length > 0 && <small className="mono">Ch. {item.chapters.slice(0, 12).join(", ")}{item.chapters.length > 12 ? `… +${item.chapters.length - 12}` : ""}</small>}
+        <div className="chapter-links"><button onClick={() => navigate(item.action.href)}>{item.action.label}</button></div>
+      </article>)}
+    </div>
+    {!view.items.length && <Empty title="Nothing to review" text="No open issues match this filter. The queue is derived from existing findings and never runs paid work." />}
+    {view.pages > 1 && <Pagination position="bottom" page={view.page} pages={view.pages} total={view.total} itemLabel="issues" onPrevious={() => onPage(view.page - 1)} onNext={() => onPage(view.page + 1)} />}
+  </div>;
+}
+
 function BiblePage({ slug, navigate }: { slug: string; navigate: (path: string) => void }) {
-  const [view, setView] = useState<any>(); const [detail, setDetail] = useState<any>(); const [editing, setEditing] = useState<any>(); const [error, setError] = useState(""); const [notice, setNotice] = useState(""); const [query, setQuery] = useState(""); const deferred = useDeferredValue(query); const [type, setType] = useState("all"); const [sort, setSort] = useState("last"); const [page, setPage] = useState(1);
-  const [tab, setTab] = useState<"canonical" | "references" | "cleanup">("canonical");
+  const initial = parseBibleQuery(location.search);
+  const [view, setView] = useState<any>(); const [detail, setDetail] = useState<any>(); const [editing, setEditing] = useState<any>(); const [error, setError] = useState(""); const [notice, setNotice] = useState(""); const [query, setQuery] = useState(initial.q ?? ""); const deferred = useDeferredValue(query); const [type, setType] = useState(initial.type ?? "all"); const [sort, setSort] = useState(initial.sort ?? "last"); const [page, setPage] = useState(initial.page ?? 1); const [readiness, setReadiness] = useState(initial.readiness ?? "all");
+  const [tab, setTab] = useState<BibleTab>(initial.tab ?? "canonical");
+  const [health, setHealth] = useState<any>();
+  const [review, setReview] = useState<any>(); const [reviewKind, setReviewKind] = useState("all"); const [reviewStatus, setReviewStatus] = useState("open"); const [reviewPage, setReviewPage] = useState(1);
   const [refsView, setRefsView] = useState<any>(); const [refsQuery, setRefsQuery] = useState(""); const deferredRefs = useDeferredValue(refsQuery); const [refsType, setRefsType] = useState("all"); const [refsPage, setRefsPage] = useState(1);
   const [analysis, setAnalysis] = useState<any>(); const [loadingAnalysis, setLoadingAnalysis] = useState(false);
   const [visualProfileTarget, setVisualProfileTarget] = useState<{ id: string; name?: string } | null>(null);
   const [suppressedEntities, setSuppressedEntities] = useState<any[]>([]);
   const [mergeReview, setMergeReview] = useState<{ target: any; source: any; reason: string } | null>(null);
-  const load = async () => { const [entities, suppressions] = await Promise.all([api<any>(`/stories/${slug}/story-bible/entities?page=${page}&pageSize=50&type=${type}&sort=${sort}&q=${encodeURIComponent(deferred)}`), api<any[]>(`/stories/${slug}/story-bible/suppressions`)]); setView(entities); setSuppressedEntities(suppressions); }; useEffect(() => { void load().catch((value) => setError(message(value))); }, [slug, page, type, sort, deferred]);
+  const [selected, setSelected] = useState<string[]>([]);
+  const [bulkAction, setBulkAction] = useState<"lock" | "unlock" | "set-type" | "set-visual-policy">("lock");
+  const [bulkValue, setBulkValue] = useState("character");
+  const [bulkPreview, setBulkPreview] = useState<BulkEntityUpdateResult | null>(null);
+  const [bulkBusy, setBulkBusy] = useState(false);
+  const [impactPreview, setImpactPreview] = useState<{ title: string; diff: Array<{ label: string; before: string; after: string }>; impact: EntityImpact; applyLabel?: string; apply: () => Promise<void> } | null>(null);
+  const [impactBusy, setImpactBusy] = useState(false);
+  const [checkedRecs, setCheckedRecs] = useState<string[]>([]);
+  const requestImpact = async (entityId: string, body: Record<string, unknown>, preview: { title: string; diff?: Array<{ label: string; before: string; after: string }>; applyLabel?: string; apply: () => Promise<void> }) => {
+    try { setError(""); const impact = await post<EntityImpact>(`/stories/${slug}/story-bible/entities/${entityId}/impact`, body); setImpactPreview({ title: preview.title, diff: preview.diff ?? [], impact, applyLabel: preview.applyLabel, apply: preview.apply }); }
+    catch (value) { setError(message(value)); }
+  };
+  const runImpactApply = async () => { if (!impactPreview) return; try { setImpactBusy(true); setError(""); await impactPreview.apply(); setImpactPreview(null); } catch (value) { setError(message(value)); } finally { setImpactBusy(false); } };
+  const load = async () => { const [entities, suppressions, healthSummary] = await Promise.all([api<any>(`/stories/${slug}/story-bible/entities?page=${page}&pageSize=50&type=${type}&sort=${sort}${readiness === "all" ? "" : `&readiness=${readiness}`}&q=${encodeURIComponent(deferred)}`), api<any[]>(`/stories/${slug}/story-bible/suppressions`), api<any>(`/stories/${slug}/story-bible/health`)]); setView(entities); setSuppressedEntities(suppressions); setHealth(healthSummary); }; useEffect(() => { void load().catch((value) => setError(message(value))); }, [slug, page, type, sort, readiness, deferred]);
   const loadReferences = () => api<any>(`/stories/${slug}/story-bible/references?page=${refsPage}&pageSize=50&type=${refsType}&q=${encodeURIComponent(deferredRefs)}`).then(setRefsView);
   useEffect(() => { if (tab === "references") void loadReferences().catch((value) => setError(message(value))); }, [slug, tab, refsPage, refsType, deferredRefs]);
-  const loadAnalysis = async () => { try { setLoadingAnalysis(true); const res = await api<any>(`/stories/${slug}/story-bible/analysis`); setAnalysis(res); } catch (value) { setError(message(value)); } finally { setLoadingAnalysis(false); } };
+  const loadAnalysis = async () => { try { setLoadingAnalysis(true); const res = await api<any>(`/stories/${slug}/story-bible/analysis`); setAnalysis(res); setCheckedRecs(defaultCleanupSelection(res.recommendations ?? [])); } catch (value) { setError(message(value)); } finally { setLoadingAnalysis(false); } };
   useEffect(() => { if (tab === "cleanup" && !analysis) void loadAnalysis(); }, [slug, tab]);
+  const loadReview = () => api<any>(`/stories/${slug}/story-bible/review?page=${reviewPage}&pageSize=25${reviewKind === "all" ? "" : `&type=${reviewKind}`}&status=${reviewStatus}`).then(setReview);
+  useEffect(() => { if (tab === "review") void loadReview().catch((value) => setError(message(value))); }, [slug, tab, reviewPage, reviewKind, reviewStatus]);
+  const requestedEntity = useRef(initial.entity);
+  useEffect(() => { if (requestedEntity.current) { const id = requestedEntity.current; requestedEntity.current = undefined; open(id); } }, [slug]);
+  useEffect(() => { history.replaceState({}, "", `/stories/${slug}/bible${bibleQueryString({ tab, type, q: deferred, sort, readiness, page, entity: detail?.entity?.id })}`); }, [slug, tab, type, deferred, sort, readiness, page, detail]);
   const open = (id: string) => api<any>(`/stories/${slug}/story-bible/entities/${id}`).then(setDetail).catch((value) => setError(message(value)));
-  const save = async () => { try { setError(""); const aliases = editing.aliasDrafts.map((item: any) => item.alias.trim()).filter(Boolean); const aliasNarrationRules = editing.aliasDrafts.filter((item: any) => item.alias.trim()).map((item: any) => ({ alias: item.alias.trim(), behavior: item.behavior, ...(item.behavior === "custom" ? { replacement: item.replacement.trim() } : {}) })); const response = await put<any>(`/stories/${slug}/story-bible/entities/${editing.id}`, { canonicalName: editing.canonicalName, type: editing.type, aliases, canonicalNameLocked: editing.canonicalNameLocked, preferredNarrationName: editing.preferredNarrationName.trim() || null, aliasNarrationRules, pronunciation: editing.pronunciation ?? null, notes: editing.notes, status: editing.status }); const affected = response.invalidation?.affectedChapters?.length ?? 0; const manual = response.invalidation?.manualNarrationChapters?.length ?? 0; setNotice(affected ? `${affected} chapter${affected === 1 ? "" : "s"} marked affected.${manual ? ` ${manual} manual narration edit${manual === 1 ? " was" : "s were"} preserved for review.` : ""}` : "Protected record saved."); if (response.visualProfileReviewRequired) setNotice("Entity type saved. Existing Visual Profile was preserved; review it before regenerating visual canon."); setEditing(undefined); setDetail(undefined); await load(); } catch (value) { setError(message(value)); } };
+  const persistEdit = async (payload: any) => { const response = await put<any>(`/stories/${slug}/story-bible/entities/${editing.id}`, payload); const affected = response.invalidation?.affectedChapters?.length ?? 0; const manual = response.invalidation?.manualNarrationChapters?.length ?? 0; setNotice(affected ? `${affected} chapter${affected === 1 ? "" : "s"} marked affected.${manual ? ` ${manual} manual narration edit${manual === 1 ? " was" : "s were"} preserved for review.` : ""}` : "Protected record saved."); if (response.visualProfileReviewRequired) setNotice("Entity type saved. Existing Visual Profile was preserved; review it before regenerating visual canon."); setEditing(undefined); setDetail(undefined); await load(); };
+  const save = async () => { try { setError(""); const aliases = editing.aliasDrafts.map((item: any) => item.alias.trim()).filter(Boolean); const aliasNarrationRules = editing.aliasDrafts.filter((item: any) => item.alias.trim()).map((item: any) => ({ alias: item.alias.trim(), behavior: item.behavior, ...(item.behavior === "custom" ? { replacement: item.replacement.trim() } : {}) })); const payload = { canonicalName: editing.canonicalName, type: editing.type, aliases, canonicalNameLocked: editing.canonicalNameLocked, preferredNarrationName: editing.preferredNarrationName.trim() || null, aliasNarrationRules, pronunciation: editing.pronunciation ?? null, notes: editing.notes, status: editing.status }; const base = detail?.entity; if (base && canonicalEntityPatchImpact(base, payload).impactful) { await requestImpact(editing.id, { action: "update", patch: payload }, { title: `Edit ${base.canonicalName}`, diff: canonicalEntityDiff(base, payload), apply: () => persistEdit(payload) }); return; } await persistEdit(payload); } catch (value) { setError(message(value)); } };
   const merge = async (item: any) => { try { const [a, b] = await Promise.all(item.entities.map((entity: any) => api<any>(`/stories/${slug}/story-bible/entities/${entity.id}`))); setMergeReview({ target: a, source: b, reason: item.reason }); } catch (value) { setError(message(value)); } };
-  const confirmMerge = async () => { if (!mergeReview) return; try { await post(`/stories/${slug}/story-bible/merges`, { targetEntityId: mergeReview.target.entity.id, sourceEntityIds: [mergeReview.source.entity.id], reason: `Approved duplicate suggestion: ${mergeReview.reason}` }); setMergeReview(null); setDetail(undefined); await load(); } catch (value) { setError(message(value)); } };
-  const suppress = async (record: any) => { const entity = record.entity; const dependencies = [record.relationships?.length && `${record.relationships.length} relationships`, record.timeline?.length && `${record.timeline.length} timeline events`, record.issues?.length && `${record.issues.length} continuity findings`, entity.preferredNarrationName && "preferred narration name", entity.localizedNaming && "localization", record.visualProfileExists && "Visual Profile"].filter(Boolean).join(", "); if (!confirm(`Remove "${entity.canonicalName}" from the effective Story Bible?\n\nThis suppresses future rebuilt views, keeps historical evidence, and can be restored. Merge instead if this is a duplicate identity.${dependencies ? `\n\nExisting references to review: ${dependencies}.` : ""}`)) return; const reason = prompt("Reason for removing this canonical entity:"); if (!reason?.trim()) return; try { await post(`/stories/${slug}/story-bible/entities/${entity.id}/suppress`, { reason: reason.trim() }); setDetail(undefined); setNotice(`Removed "${entity.canonicalName}" from the effective Story Bible. You can restore it below.`); await load(); } catch (value) { setError(message(value)); } };
+  const revertAuditEntry = async (entry: EntityAuditEntry) => {
+    const patch = entityAuditRevertPatch(entry); const base = detail?.entity;
+    if (!patch || !base) return;
+    const apply = async () => { await put(`/stories/${slug}/story-bible/entities/${base.id}`, patch); setDetail(undefined); await load(); await open(base.id); };
+    try { setError(""); if (canonicalEntityPatchImpact(base, patch).impactful) await requestImpact(base.id, { action: "update", patch }, { title: `Revert ${base.canonicalName}`, diff: canonicalEntityDiff(base, patch), applyLabel: "Revert change", apply }); else await apply(); }
+    catch (value) { setError(message(value)); }
+  };
+  const confirmMerge = async () => { if (!mergeReview) return; const target = mergeReview.target.entity; const source = mergeReview.source.entity; await requestImpact(source.id, { action: "merge", targetEntityId: target.id }, { title: `Merge ${source.canonicalName} into ${target.canonicalName}`, diff: [{ label: "Merge", before: `${source.canonicalName} (${source.id})`, after: `Merged into ${target.canonicalName}` }], applyLabel: "Confirm merge", apply: async () => { await post(`/stories/${slug}/story-bible/merges`, { targetEntityId: target.id, sourceEntityIds: [source.id], reason: `Approved duplicate suggestion: ${mergeReview.reason}` }); setMergeReview(null); setDetail(undefined); await load(); } }); };
+  const suppress = async (record: any) => { const entity = record.entity; const dependencies = [record.relationships?.length && `${record.relationships.length} relationships`, record.timeline?.length && `${record.timeline.length} timeline events`, record.issues?.length && `${record.issues.length} continuity findings`, entity.preferredNarrationName && "preferred narration name", entity.localizedNaming && "localization", record.visualProfileExists && "Visual Profile"].filter(Boolean).join(", "); if (!confirm(`Remove "${entity.canonicalName}" from the effective Story Bible?\n\nThis suppresses future rebuilt views, keeps historical evidence, and can be restored. Merge instead if this is a duplicate identity.${dependencies ? `\n\nExisting references to review: ${dependencies}.` : ""}`)) return; const reason = prompt("Reason for removing this canonical entity:"); if (!reason?.trim()) return; await requestImpact(entity.id, { action: "suppress" }, { title: `Remove ${entity.canonicalName}`, diff: [{ label: "Suppression", before: "Canonical entity", after: "Removed from the effective Story Bible (restorable)" }], applyLabel: "Remove entity", apply: async () => { await post(`/stories/${slug}/story-bible/entities/${entity.id}/suppress`, { reason: reason.trim() }); setDetail(undefined); setNotice(`Removed "${entity.canonicalName}" from the effective Story Bible. You can restore it below.`); await load(); } }); };
   const restore = async (entityId: string) => { try { await post(`/stories/${slug}/story-bible/entities/${entityId}/restore`, {}); setNotice("Canonical entity restored."); await load(); } catch (value) { setError(message(value)); } };
   const undo = async (id: string) => { if (!confirm("Undo this merge and restore the source entities?")) return; try { await post(`/stories/${slug}/story-bible/merges/${id}/undo`, {}); setDetail(undefined); await load(); } catch (value) { setError(message(value)); } };
   const demote = async (entity: any) => {
-    if (!confirm(`Convert "${entity.canonicalName}" to a minor reference?\n\nThis entity will become a minor reference and remain tracked under its parent context without cluttering the canonical entity list.\n\nManual or protected configurations may prevent conversion.`)) return;
-    try {
-      setError("");
-      await post(`/stories/${slug}/story-bible/entities/${entity.id}/demote`, { disposition: "minor_reference", reason: "Converted via Canonical Entity Sheet" });
-      setNotice(`Converted "${entity.canonicalName}" to a minor reference.`);
-      setDetail(undefined);
-      await load();
-      if (tab === "references") void loadReferences();
-      if (analysis) void loadAnalysis();
-    } catch (value) { setError(message(value)); }
+    await requestImpact(entity.id, { action: "demote" }, {
+      title: `Convert ${entity.canonicalName} to a minor reference`,
+      diff: [{ label: "Granularity", before: "Canonical entity", after: "Minor reference (tracked under parent context)" }],
+      applyLabel: "Convert to minor reference",
+      apply: async () => {
+        await post(`/stories/${slug}/story-bible/entities/${entity.id}/demote`, { disposition: "minor_reference", reason: "Converted via Canonical Entity Sheet" });
+        setNotice(`Converted "${entity.canonicalName}" to a minor reference.`);
+        setDetail(undefined);
+        await load();
+        if (tab === "references") void loadReferences();
+        if (analysis) void loadAnalysis();
+      },
+    });
   };
   const promote = async (ref: any) => {
     if (!confirm(`Promote "${ref.name}" to a canonical entity?`)) return;
@@ -1249,18 +1382,53 @@ function BiblePage({ slug, navigate }: { slug: string; navigate: (path: string) 
       if (tab === "references") void loadReferences();
     } catch (value) { setError(message(value)); }
   };
+  const applySelectedCleanup = async () => {
+    if (!checkedRecs.length) return;
+    if (!confirm(`Apply the ${checkedRecs.length} selected cleanup recommendation${checkedRecs.length === 1 ? "" : "s"}? Protected entities are skipped by the server.`)) return;
+    try {
+      setError("");
+      const result = await post<any>(`/stories/${slug}/story-bible/cleanup/apply`, { recommendationIds: checkedRecs });
+      const parts = [`${result.appliedCount ?? 0} applied`];
+      if (result.skippedProtectedCount) parts.push(`${result.skippedProtectedCount} skipped (protected)`);
+      if (result.failedCount) parts.push(`${result.failedCount} failed${result.failed?.length ? `: ${result.failed.map((item: any) => `${item.canonicalName} — ${item.reason}`).join("; ")}` : ""}`);
+      setNotice(`Cleanup plan: ${parts.join(" · ")}.`);
+      await loadAnalysis();
+      await load();
+      if (tab === "references") void loadReferences();
+    } catch (value) { setError(message(value)); }
+  };
+  const reviewBulk = async () => {
+    if (!selected.length) return;
+    try { setError(""); setBulkBusy(true); setBulkPreview(await post<BulkEntityUpdateResult>(`/stories/${slug}/story-bible/entities/bulk`, { action: bulkAction, entityIds: selected, value: bulkAction === "set-type" || bulkAction === "set-visual-policy" ? bulkValue : undefined, dryRun: true })); }
+    catch (value) { setError(message(value)); } finally { setBulkBusy(false); }
+  };
+  const applyBulk = async () => {
+    if (!bulkPreview) return;
+    try {
+      setError(""); setBulkBusy(true);
+      const result = await post<BulkEntityUpdateResult>(`/stories/${slug}/story-bible/entities/bulk`, { action: bulkAction, entityIds: selected, value: bulkAction === "set-type" || bulkAction === "set-visual-policy" ? bulkValue : undefined });
+      const parts = [`${result.applied.length} applied`];
+      if (result.skipped.length) parts.push(`${result.skipped.length} skipped (${result.skipped.map((item) => item.reason).join("; ")})`);
+      if (result.invalidationSummary.affectedChapters) parts.push(`${result.invalidationSummary.affectedChapters} chapters marked affected`);
+      setNotice(`Bulk update: ${parts.join(" · ")}.`);
+      setBulkPreview(null); setSelected([]);
+      await load();
+    } catch (value) { setError(message(value)); } finally { setBulkBusy(false); }
+  };
   if (!view) return error ? <LoadFailure error={error} /> : <Loading />;
-  return <section className="page canonical-page"><div className="section-heading"><div><span className="eyebrow">Long-form memory</span><h2>Story Bible</h2><p>Canonical identities, aliases, history, relationships, and traceable evidence.</p></div><div className="production-head-actions"><button className="button" onClick={() => navigate(`/stories/${slug}/names`)}>Names / Localization</button><button className="button" onClick={() => navigate(`/stories/${slug}/continuity`)}>Continuity review</button></div></div>{error && <ErrorBox text={error} />}{notice && <div className="naming-notice">{notice}</div>}{view.staleExtractionChapters?.length > 0 && <ArtifactStatusNotice status="stale" reason={`${view.staleExtractionChapters.length} chapter${view.staleExtractionChapters.length === 1 ? " has" : "s have"} stale Story Bible extraction. Canonical records remain available, but some evidence may need refresh.`} />}
+  return <section className="page canonical-page"><div className="section-heading"><div><span className="eyebrow">Long-form memory</span><h2>Story Bible</h2><p>Canonical identities, aliases, history, relationships, and traceable evidence.</p></div><div className="production-head-actions"><button className="button" onClick={() => navigate(`/stories/${slug}/names`)}>Names / Localization</button><button className="button" onClick={() => navigate(`/stories/${slug}/continuity`)}>Continuity review</button></div></div>{error && <ErrorBox text={error} />}{notice && <div className="naming-notice">{notice}</div>}{health && <StoryBibleHealthCard health={health} onReviewAll={() => setTab("review")} onOpenCleanup={() => setTab("cleanup")} />}
     <div className="segmented" style={{ marginBottom: "18px" }}>
       <button className={tab === "canonical" ? "active" : ""} onClick={() => setTab("canonical")}>Canonical entities ({view.total})</button>
       <button className={tab === "references" ? "active" : ""} onClick={() => setTab("references")}>Minor references</button>
+      <button className={tab === "review" ? "active" : ""} onClick={() => setTab("review")}>Review{health ? ` (${Object.values(health.issues ?? {}).reduce((sum: number, value) => sum + Number(value), 0)})` : ""}</button>
       <button className={tab === "cleanup" ? "active" : ""} onClick={() => setTab("cleanup")}>Analyzer &amp; Cleanup</button>
     </div>
     {tab === "canonical" && <>
-      <div className="canonical-toolbar"><input className="search" placeholder="Search canonical names, aliases, narration names, or localized names" value={query} onChange={(event) => { setQuery(event.target.value); setPage(1); }} /><select value={type} onChange={(event) => { setType(event.target.value); setPage(1); }}><option value="all">All entity types</option>{Object.keys(view.counts).map((value) => <option value={value} key={value}>{pretty(value)} · {view.counts[value]}</option>)}</select><select value={sort} onChange={(event) => setSort(event.target.value)}><option value="last">Most recently seen</option><option value="first">First appearance</option><option value="name">Canonical name</option></select></div>
+      <div className="canonical-toolbar"><input className="search" placeholder="Search canonical names, aliases, narration names, or localized names" value={query} onChange={(event) => { setQuery(event.target.value); setPage(1); }} /><select value={type} onChange={(event) => { setType(event.target.value); setPage(1); }}><option value="all">All entity types</option>{Object.keys(view.counts).map((value) => <option value={value} key={value}>{pretty(value)} · {view.counts[value]}</option>)}</select><select aria-label="Readiness filter" value={readiness} onChange={(event) => { setReadiness(event.target.value); setPage(1); }}><option value="all">Any readiness</option>{READINESS_FILTERS.map((filter) => <option key={filter.value} value={filter.value}>{filter.label}</option>)}</select><select value={sort} onChange={(event) => setSort(event.target.value)}><option value="last">Most recently seen</option><option value="first">First appearance</option><option value="name">Canonical name</option></select></div>
       {view.duplicateSuggestions?.length > 0 && <div className="duplicate-strip"><div><span className="eyebrow">Possible duplicates</span><b>{view.duplicateSuggestions.length} suggestions need approval</b></div>{view.duplicateSuggestions.slice(0, 3).map((item: any) => <article key={item.id}><div><b>{item.entities[0].name}</b><span>↔</span><b>{item.entities[1].name}</b></div><small>{Math.round(item.confidence * 100)}% · {item.reason} · Ch. {item.supportingChapters.join(", ")}</small><button onClick={() => merge(item)}>Compare & merge…</button></article>)}</div>}
       <Pagination position="top" page={view.page} pages={view.pages} total={view.total} itemLabel="entities" onPrevious={() => setPage(page - 1)} onNext={() => setPage(page + 1)} />
-      <div className="entity-table"><div className="entity-row heading"><span>Canonical entity</span><span>Type</span><span>Appearances</span><span>Origin</span><span>Issues</span></div>{view.items.map((entity: any) => <button className="entity-row" key={entity.id} onClick={() => open(entity.id)}><span><b>{entity.canonicalName}</b>{view.duplicateSuggestions?.some((item: any) => item.entityIds.includes(entity.id)) && <i className="lock-dot">Possible duplicate</i>}<small>{entity.aliases.length ? entity.aliases.join(" · ") : entity.originalName}</small></span><span>{pretty(entity.type)}</span><span className="mono">{entity.firstAppearance}—{entity.lastKnownAppearance}</span><span>{entity.canonicalNameLocked && <i className="lock-dot">Locked</i>} {pretty(entity.origin)}</span><span className={entity.conflictCount ? "issue-count" : ""}>{entity.conflictCount || "—"}</span></button>)}</div>{!view.items.length && <Empty title="No matching canonical entities" text="Run Story Bible extraction or change the filters." />}
+      {selected.length > 0 && <div className="bulk-toolbar"><b>{selected.length} selected</b><select aria-label="Bulk action" value={bulkAction} onChange={(event) => { setBulkAction(event.target.value as typeof bulkAction); setBulkValue(event.target.value === "set-visual-policy" ? "prompt" : "character"); }}><option value="lock">Lock canonical names</option><option value="unlock">Unlock canonical names</option><option value="set-type">Set entity type</option><option value="set-visual-policy">Set Visual Profile policy</option></select>{bulkAction === "set-type" && <select aria-label="Bulk entity type" value={bulkValue} onChange={(event) => setBulkValue(event.target.value)}>{["character", "location", "organization", "ability", "item", "concept", "other"].map((value) => <option key={value} value={value}>{pretty(value)}</option>)}</select>}{bulkAction === "set-visual-policy" && <select aria-label="Bulk Visual Profile policy" value={bulkValue} onChange={(event) => setBulkValue(event.target.value)}><option value="prompt">Prompt for a Visual Profile</option><option value="skip">Skip Visual Profile</option></select>}<button className="button primary" disabled={bulkBusy} onClick={reviewBulk}>Review &amp; apply</button><button className="button" onClick={() => setSelected([])}>Clear</button></div>}
+      <div className="entity-table"><div className="entity-row heading selectable"><span><input type="checkbox" aria-label="Select all on this page" checked={view.items.length > 0 && pageSelectionState(view.items.map((entity: any) => entity.id), selected) === "all"} ref={(input) => { if (input) input.indeterminate = pageSelectionState(view.items.map((entity: any) => entity.id), selected) === "some"; }} onChange={(event) => { const ids = view.items.map((entity: any) => entity.id); setSelected(event.target.checked ? [...new Set([...selected, ...ids])] : selected.filter((id) => !ids.includes(id))); }} /></span><span>Canonical entity</span><span>Type</span><span>Appearances</span><span>Origin</span><span>Issues</span><span>Readiness</span></div>{view.items.map((entity: any) => <div className="entity-row selectable" key={entity.id} onClick={() => open(entity.id)}><span onClick={(event) => event.stopPropagation()}><input type="checkbox" aria-label={`Select ${entity.canonicalName}`} checked={selected.includes(entity.id)} onChange={(event) => setSelected(toggleEntitySelection(selected, entity.id, event.target.checked))} /></span><span><b>{entity.canonicalName}</b>{view.duplicateSuggestions?.some((item: any) => item.entityIds.includes(entity.id)) && <i className="lock-dot">Possible duplicate</i>}<small>{entity.aliases.length ? entity.aliases.join(" · ") : entity.originalName}</small></span><span>{pretty(entity.type)}</span><span className="mono">{entity.firstAppearance}—{entity.lastKnownAppearance}</span><span>{entity.canonicalNameLocked && <i className="lock-dot">Locked</i>} {pretty(entity.origin)}</span><span className={entity.conflictCount ? "issue-count" : ""}>{entity.conflictCount || "—"}</span><span><ReadinessStrip rows={entity.readiness} /></span></div>)}</div>{!view.items.length && <Empty title="No matching canonical entities" text="Run Story Bible extraction or change the filters." />}
       <Pagination position="bottom" page={view.page} pages={view.pages} total={view.total} itemLabel="entities" onPrevious={() => setPage(page - 1)} onNext={() => setPage(page + 1)} />
     </>}
     {tab === "references" && <>
@@ -1269,6 +1437,7 @@ function BiblePage({ slug, navigate }: { slug: string; navigate: (path: string) 
       <div className="entity-table"><div className="entity-row heading" style={{ gridTemplateColumns: "1.5fr 1fr 1.5fr 1fr 1fr 100px" }}><span>Reference name</span><span>Type</span><span>Parent entity</span><span>Appearances</span><span>Disposition</span><span>Actions</span></div>{refsView?.items?.map((ref: any) => <div className="entity-row" key={ref.id} style={{ gridTemplateColumns: "1.5fr 1fr 1.5fr 1fr 1fr 100px", cursor: "default" }}><span><b>{ref.name}</b>{ref.originalName && <small>{ref.originalName}</small>}</span><span>{pretty(ref.type)}</span><span>{ref.parentEntityName ? <b>{ref.parentEntityName}</b> : <span style={{ color: "#777" }}>—</span>}</span><span className="mono">Ch. {ref.firstSeenChapter}—{ref.lastSeenChapter}</span><span>{pretty(ref.disposition)}</span><span><button className="button" style={{ padding: "4px 8px", fontSize: "10px" }} onClick={() => promote(ref)}>Promote</button></span></div>)}</div>{!refsView?.items?.length && <Empty title="No minor references found" text="No minor references recorded yet or matching your filters." />}
       {refsView && refsView.pages > 1 && <Pagination position="bottom" page={refsView.page} pages={refsView.pages} total={refsView.total} itemLabel="references" onPrevious={() => setRefsPage(refsPage - 1)} onNext={() => setRefsPage(refsPage + 1)} />}
     </>}
+    {tab === "review" && (review ? <BibleReviewQueue view={review} kind={reviewKind} status={reviewStatus} onKind={(value) => { setReviewKind(value); setReviewPage(1); }} onStatus={(value) => { setReviewStatus(value); setReviewPage(1); }} onPage={setReviewPage} navigate={navigate} /> : <Loading />)}
     {tab === "cleanup" && (loadingAnalysis ? <Loading /> : analysis ? <div className="cleanup-view">
       <div className="qa-summary" style={{ gridTemplateColumns: "repeat(4, 1fr)", marginBottom: "20px" }}>
         <div className="qa-count"><span>Canonical entities</span><b>{analysis.totalCanonical}</b></div>
@@ -1280,13 +1449,14 @@ function BiblePage({ slug, navigate }: { slug: string; navigate: (path: string) 
         <p style={{ margin: 0, color: "var(--muted)", fontSize: "12px" }}>Automated recommendations for bounded, high-signal entities. Protected entities with locks or manual edits are never auto-demoted.</p>
         <div style={{ display: "flex", gap: "8px" }}>
           <button className="button" onClick={loadAnalysis}>Refresh analysis</button>
+          <button className="button" onClick={applySelectedCleanup} disabled={!checkedRecs.length}>Apply selected ({checkedRecs.length})</button>
           <button className="button primary" onClick={() => applyCleanup(true)} disabled={!analysis.recommendations?.some((r: any) => r.safeToAutoApply)}>Apply safe recommendations</button>
         </div>
       </div>
       <div className="recommendations-list" style={{ display: "grid", gap: "12px" }}>
         {analysis.recommendations?.map((rec: any) => <article key={rec.id} className="continuity-card" style={{ padding: "16px", borderRadius: "8px", background: "#141419", border: "1px solid var(--line)" }}>
-          <header style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "8px" }}>
-            <span className="eyebrow">{pretty(rec.type)} · {rec.targetEntityId && rec.recommendation === "needs_review" ? "Possible duplicate · Review" : pretty(rec.recommendation)}</span>
+          <header style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "8px", gap: "8px" }}>
+            <span style={{ display: "flex", alignItems: "center", gap: "8px" }}><input type="checkbox" aria-label={`Select recommendation for ${rec.canonicalName}`} checked={checkedRecs.includes(rec.id)} onChange={(event) => setCheckedRecs(toggleEntitySelection(checkedRecs, rec.id, event.target.checked))} /><span className="eyebrow">{pretty(rec.type)} · {rec.targetEntityId && rec.recommendation === "needs_review" ? "Possible duplicate · Review" : pretty(rec.recommendation)}</span>{cleanupOriginLabel(rec.source) && <span style={{ fontSize: "9px", fontFamily: "var(--mono)", color: "var(--muted)", border: "1px solid var(--line)", borderRadius: "4px", padding: "1px 5px" }}>{cleanupOriginLabel(rec.source)}</span>}</span>
             <span style={{ fontSize: "10px", fontFamily: "var(--mono)", color: rec.confidence >= 0.85 ? "var(--pass)" : "var(--warn)" }}>{Math.round(rec.confidence * 100)}% confidence</span>
           </header>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: "16px" }}>
@@ -1310,9 +1480,11 @@ function BiblePage({ slug, navigate }: { slug: string; navigate: (path: string) 
     </div> : <LoadFailure error="Could not load analysis." />)}
     {tab === "canonical" && suppressedEntities.length > 0 && <div className="duplicate-strip"><div><span className="eyebrow">Suppression audit</span><b>{suppressedEntities.length} removed canonical records</b></div>{suppressedEntities.map((item: any) => <article key={item.entityId}><div><b>{item.name}</b><small>{pretty(item.type)} · {item.entityId}</small></div><small>{item.reason} · {item.suppressedAt}</small><button onClick={() => restore(item.entityId)}>Restore entity</button></article>)}</div>}
     {mergeReview && <div className="editor-sheet naming-editor" role="dialog" aria-label="Compare canonical entities before merge"><div className="editor-sheet-head"><div><span className="eyebrow">Protected identity merge</span><h3>Compare before merging</h3></div><button onClick={() => setMergeReview(null)} aria-label="Close comparison">×</button></div>{[mergeReview.target, mergeReview.source].map((record: any, index: number) => <section key={record.entity.id}><span className="eyebrow">{index === 0 ? "Surviving target" : "Merged source"}</span><h4>{record.entity.canonicalName} · {pretty(record.entity.type)}</h4><p>Original: {record.entity.originalName || "—"} · Ch. {record.entity.firstAppearance}–{record.entity.lastKnownAppearance}</p><p>Aliases: {record.entity.aliases.join(", ") || "—"}</p><p>Description: {record.entity.description || "—"}</p><p>Preferred narration: {record.entity.preferredNarrationName || "—"} · Localized: {record.entity.localizedNaming?.fullName || "—"}</p><p>Alias rules: {record.entity.aliasNarrationRules.length} · Provenance: {record.entity.provenance.length} · Relationships: {record.relationships.length} · Timeline: {record.timeline.length}</p><p>Visual Profile: {record.visualProfileExists ? "Exists — review before merge" : "None"}</p></section>)}<section><span className="eyebrow">Result preview</span><p>Surviving ID: {mergeReview.target.entity.id}. Appearance range: Ch. {Math.min(mergeReview.target.entity.firstAppearance, mergeReview.source.entity.firstAppearance)}–{Math.max(mergeReview.target.entity.lastKnownAppearance, mergeReview.source.entity.lastKnownAppearance)}.</p><p>Aliases: {[...new Set([...mergeReview.target.entity.aliases, mergeReview.source.entity.canonicalName, ...mergeReview.source.entity.aliases])].join(", ") || "—"}</p><p>Description/notes: target text and source text are both retained. Provenance: {mergeReview.target.entity.provenance.length + mergeReview.source.entity.provenance.length} records. Relationships: {mergeReview.target.relationships.length + mergeReview.source.relationships.length} references remapped. Timeline: {mergeReview.target.timeline.length + mergeReview.source.timeline.length} events remapped.</p><p>Preferred narration: {mergeReview.target.entity.preferredNarrationName || mergeReview.source.entity.preferredNarrationName || "—"}. Localized naming: {mergeReview.target.entity.localizedNaming?.fullName || mergeReview.source.entity.localizedNaming?.fullName || "—"}. Alias rules: {mergeReview.target.entity.aliasNarrationRules.length + mergeReview.source.entity.aliasNarrationRules.length}. Merged-from IDs: {[...mergeReview.target.entity.mergedFromIds, mergeReview.source.entity.id, ...mergeReview.source.entity.mergedFromIds].join(", ")}.</p></section>{mergeNamingConflict(mergeReview.target.entity, mergeReview.source.entity) && <div className="naming-notice">Naming conflict: edit one entity’s preferred/localized naming before merging. The server will reject an unresolved conflict.</div>}<div className="editor-sheet-actions"><button className="button" onClick={() => setMergeReview({ target: mergeReview.source, source: mergeReview.target, reason: mergeReview.reason })}>Swap target</button><button className="button" onClick={() => setMergeReview(null)}>Cancel</button><button className="button primary" disabled={mergeNamingConflict(mergeReview.target.entity, mergeReview.source.entity)} onClick={confirmMerge}>Confirm merge</button></div></div>}
-    {detail && <CanonicalEntitySheet detail={detail} slug={slug} navigate={navigate} onClose={() => setDetail(undefined)} onUndo={undo} onEdit={() => setEditing({ ...canonicalDraft(detail.entity), originalType: detail.entity.type, visualProfileExists: detail.visualProfileExists })} onDemote={() => demote(detail.entity)} onSuppress={() => suppress(detail)} onMerge={(item: any) => merge(item)} onOpenVisualProfile={(id: string, name?: string) => setVisualProfileTarget({ id, name })} />}
+    {detail && <CanonicalEntitySheet detail={detail} slug={slug} navigate={navigate} onClose={() => setDetail(undefined)} onUndo={undo} onEdit={() => setEditing({ ...canonicalDraft(detail.entity), originalType: detail.entity.type, visualProfileExists: detail.visualProfileExists })} onDemote={() => demote(detail.entity)} onSuppress={() => suppress(detail)} onMerge={(item: any) => merge(item)} onOpenVisualProfile={(id: string, name?: string) => setVisualProfileTarget({ id, name })} onRevert={revertAuditEntry} />}
     {visualProfileTarget && <VisualProfileModal slug={slug} entityId={visualProfileTarget.id} entityName={visualProfileTarget.name} onClose={() => setVisualProfileTarget(null)} />}
-    <PronunciationPanel slug={slug} />{editing && <CanonicalEntityEditor slug={slug} value={editing} onChange={setEditing} onClose={() => setEditing(undefined)} onSave={save} />}</section>;
+    <PronunciationPanel slug={slug} />{editing && <CanonicalEntityEditor slug={slug} value={editing} onChange={setEditing} onClose={() => setEditing(undefined)} onSave={save} />}
+    {impactPreview && <EntityImpactDialog title={impactPreview.title} diff={impactPreview.diff} impact={impactPreview.impact} busy={impactBusy} applyLabel={impactPreview.applyLabel} onCancel={() => setImpactPreview(null)} onApply={runImpactApply} />}
+    {bulkPreview && <div className="editor-sheet naming-editor" role="dialog" aria-label="Review bulk update"><div className="editor-sheet-head"><div><span className="eyebrow">Bulk update preview</span><h3>{bulkAction === "lock" ? "Lock canonical names" : bulkAction === "unlock" ? "Unlock canonical names" : bulkAction === "set-type" ? `Set entity type to ${pretty(bulkValue)}` : `Set Visual Profile policy to ${bulkValue}`}</h3></div><button onClick={() => setBulkPreview(null)} aria-label="Cancel bulk update">×</button></div><section className="impact-estimate"><span className="eyebrow">Eligibility</span><p>{selected.length} selected · {bulkPreview.eligible.length} can be changed · {bulkPreview.skipped.length} skipped</p>{bulkPreview.skipped.map((item) => <p key={item.id}><b>{view.items.find((entity: any) => entity.id === item.id)?.canonicalName ?? item.id}</b>: {item.reason}</p>)}</section><section className="impact-estimate"><span className="eyebrow">Estimated impact</span><p>{bulkPreview.invalidationSummary.affectedChapters ? `${bulkPreview.invalidationSummary.affectedChapters} chapters reference the affected entities and will be flagged for review` : "No production artifacts are affected by this change."}</p></section><div className="editor-sheet-actions"><button className="button" onClick={() => setBulkPreview(null)}>Cancel</button><button className="button primary" disabled={bulkBusy || !bulkPreview.eligible.length} onClick={applyBulk}>Apply to {bulkPreview.eligible.length} eligible</button></div></div>}</section>;
 }
 
 function canonicalDraft(entity: any) { const rules = new Map((entity.aliasNarrationRules ?? []).map((rule: any) => [rule.alias.toLocaleLowerCase(), rule])); return { ...entity, preferredNarrationName: entity.preferredNarrationName ?? "", aliasDrafts: entity.aliases.map((alias: string) => ({ alias, behavior: rules.get(alias.toLocaleLowerCase())?.behavior ?? "no_override", replacement: rules.get(alias.toLocaleLowerCase())?.replacement ?? "" })) }; }
@@ -1325,13 +1497,103 @@ function mergeNamingConflict(target: any, source: any) {
   return (source.aliasNarrationRules ?? []).some((rule: any) => rules.has(rule.alias.toLocaleLowerCase()) && rules.get(rule.alias.toLocaleLowerCase()) !== JSON.stringify(rule));
 }
 function namingLabel(alias: string, entity: any) { const rule = (entity.aliasNarrationRules ?? []).find((item: any) => item.alias.toLocaleLowerCase() === alias.toLocaleLowerCase()); if (!rule || rule.behavior === "no_override") return "No override"; if (rule.behavior === "use_preferred") return entity.preferredNarrationName ? `Use ${entity.preferredNarrationName}` : "Use preferred name"; return `Custom → ${rule.replacement}`; }
-export function CanonicalEntitySheet({ detail, slug, navigate, onClose, onUndo, onEdit, onDemote, onSuppress, onMerge, onOpenVisualProfile }: any) {
+
+const sameJson = (left: unknown, right: unknown) => JSON.stringify(left ?? null) === JSON.stringify(right ?? null);
+
+/**
+ * Which entity edits are high-impact and must be previewed before saving.
+ * Mirrors the server-side detectors (narration naming, pronunciation, type,
+ * canonical rename); harmless edits — notes, status, lock toggle, aliases —
+ * save directly.
+ */
+export function canonicalEntityPatchImpact(before: any, payload: any): { impactful: boolean; reasons: string[] } {
+  const reasons: string[] = [];
+  if (payload.canonicalName !== undefined && payload.canonicalName !== before.canonicalName) reasons.push("Canonical rename");
+  if (payload.type !== undefined && payload.type !== before.type) reasons.push("Entity type change");
+  if (payload.preferredNarrationName !== undefined && (payload.preferredNarrationName ?? null) !== (before.preferredNarrationName ?? null)) reasons.push("Preferred narration name change");
+  if (payload.aliasNarrationRules !== undefined && !sameJson(payload.aliasNarrationRules, before.aliasNarrationRules ?? [])) reasons.push("Alias narration rules change");
+  if (payload.localizedNaming !== undefined && !sameJson(payload.localizedNaming, before.localizedNaming)) reasons.push("Localized naming change");
+  if (payload.pronunciation !== undefined && !sameJson(payload.pronunciation, before.pronunciation)) reasons.push("Pronunciation change");
+  return { impactful: reasons.length > 0, reasons };
+}
+
+const formatDiffValue = (value: any): string => {
+  if (value === undefined || value === null || value === "") return "—";
+  if (Array.isArray(value)) return value.length ? value.map((item) => typeof item === "string" ? item : item.alias ? `${item.alias} (${item.behavior}${item.replacement ? `: ${item.replacement}` : ""})` : JSON.stringify(item)).join(", ") : "—";
+  if (typeof value === "object") return value.fullName ?? value.customPronunciation ?? value.mode ?? JSON.stringify(value);
+  return String(value);
+};
+
+/** Old → new lines for the fields an edit actually changes, in impact-preview order. */
+export function canonicalEntityDiff(before: any, payload: any): Array<{ label: string; before: string; after: string }> {
+  const fields: Array<{ key: string; label: string }> = [
+    { key: "canonicalName", label: "Canonical name" }, { key: "type", label: "Entity type" },
+    { key: "preferredNarrationName", label: "Preferred narration name" }, { key: "aliasNarrationRules", label: "Alias narration rules" },
+    { key: "localizedNaming", label: "Localized naming" }, { key: "pronunciation", label: "Pronunciation" },
+    { key: "canonicalNameLocked", label: "Name lock" }, { key: "status", label: "Status" }, { key: "aliases", label: "Aliases" }, { key: "notes", label: "Notes" },
+  ];
+  return fields.filter(({ key }) => payload[key] !== undefined && !sameJson(payload[key], before[key])).map(({ key, label }) => ({ label, before: formatDiffValue(before[key]), after: formatDiffValue(payload[key]) }));
+}
+
+/** Non-zero estimated impact lines shown in the preview dialog. */
+export function impactEstimateLines(impact: EntityImpact): string[] {
+  const plural = (count: number, singular: string, pluralForm?: string) => `${count} ${count === 1 ? singular : (pluralForm ?? `${singular}s`)}`;
+  const lines: string[] = [];
+  if (impact.affectedChapters?.length) lines.push(`${plural(impact.affectedChapters.length, "chapter")} reference this entity`);
+  if (impact.narrationAffected) lines.push(`${plural(impact.narrationAffected, "generated narration")} may become stale`);
+  if (impact.qaAffected) lines.push(`${plural(impact.qaAffected, "QA result")} need${impact.qaAffected === 1 ? "s" : ""} recheck`);
+  if (impact.ttsAffected) lines.push(`${plural(impact.ttsAffected, "TTS output")} need${impact.ttsAffected === 1 ? "s" : ""} regeneration`);
+  if (impact.audioAffected) lines.push(`${plural(impact.audioAffected, "mastered audio file")} need${impact.audioAffected === 1 ? "s" : ""} re-mastering`);
+  if (impact.scenePlanningAffected) lines.push(`${plural(impact.scenePlanningAffected, "scene plan")} flagged for review`);
+  if (impact.artworkAffected) lines.push(`${plural(impact.artworkAffected, "artwork set")} flagged for review`);
+  if (impact.videoAffected) lines.push(`${plural(impact.videoAffected, "video")} flagged for review`);
+  if (impact.manualNarrationChapters?.length) lines.push(`${plural(impact.manualNarrationChapters.length, "manual narration chapter")} will be preserved for review`);
+  if (impact.continuityAffected) lines.push(`${plural(impact.continuityAffected, "open continuity finding")} involve${impact.continuityAffected === 1 ? "s" : ""} this entity`);
+  if (impact.visualProfileAffected) lines.push("Visual Profile needs review before regenerating artwork");
+  return lines;
+}
+
+/** Selection helpers for the canonical table: selection persists across pagination and filters. */
+export function toggleEntitySelection(selected: readonly string[], id: string, on: boolean): string[] {
+  const next = new Set(selected);
+  if (on) next.add(id); else next.delete(id);
+  return [...next];
+}
+export function pageSelectionState(pageIds: readonly string[], selected: readonly string[]): "all" | "some" | "none" {
+  const set = new Set(selected);
+  const onPage = pageIds.filter((id) => set.has(id)).length;
+  return onPage === 0 ? "none" : onPage === pageIds.length ? "all" : "some";
+}
+
+/** Cleanup plan defaults: only unprotected, auto-safe recommendations start checked. */
+export function defaultCleanupSelection(recommendations: any[]): string[] {
+  return (recommendations ?? []).filter((rec: any) => rec.safeToAutoApply && !rec.protected).map((rec: any) => rec.id);
+}
+export function cleanupOriginLabel(source: unknown): string | undefined {
+  return source === "deterministic" ? "Deterministic" : source === "ai" ? "AI-assisted" : undefined;
+}
+
+/** Preview-before-apply confirmation for high-impact entity operations. */
+export function EntityImpactDialog({ title, diff = [], impact, busy = false, applyLabel = "Apply change", onCancel, onApply }: { title: string; diff?: Array<{ label: string; before: string; after: string }>; impact: EntityImpact; busy?: boolean; applyLabel?: string; onCancel: () => void; onApply: () => void }) {
+  const lines = impactEstimateLines(impact);
+  return <div className="editor-sheet naming-editor entity-impact-dialog" role="dialog" aria-label="Review estimated impact">
+    <div className="editor-sheet-head"><div><span className="eyebrow">Estimated impact</span><h3>{title}</h3></div><button onClick={onCancel} aria-label="Cancel impact preview">×</button></div>
+    {diff.length > 0 && <section className="impact-diff"><span className="eyebrow">Change</span>{diff.map((item) => <p key={item.label}><b>{item.label}</b>: {item.before} → {item.after}</p>)}</section>}
+    <section className="impact-estimate"><span className="eyebrow">Estimated impact</span>{lines.length ? lines.map((line) => <p key={line}>{line}</p>) : <p>No production artifacts are affected by this change.</p>}</section>
+    {impact.warnings?.length > 0 && <div className="naming-notice">{impact.warnings.map((warning) => <p key={warning}>{warning}</p>)}</div>}
+    <div className="editor-sheet-actions"><button className="button" onClick={onCancel}>Cancel</button><button className="button primary" disabled={busy} onClick={onApply}>{applyLabel}</button></div>
+  </div>;
+}
+export function CanonicalEntitySheet({ detail, slug, navigate, onClose, onUndo, onEdit, onDemote, onSuppress, onMerge, onOpenVisualProfile, onRevert, historyView }: any) {
   const entity = detail.entity;
   const activeMerges = (detail.merges ?? []).filter((item: any) => !item.undoneAt);
   const [descExpanded, setDescExpanded] = useState(false);
   const [mergeQuery, setMergeQuery] = useState("");
   const [mergeChoices, setMergeChoices] = useState<any[]>([]);
   const [mergeSearchError, setMergeSearchError] = useState("");
+  const [asOfInput, setAsOfInput] = useState(String(entity.firstAppearance ?? 1));
+  const [historyState, setHistoryState] = useState<EntityHistoryView>();
+  const [historyError, setHistoryError] = useState("");
   const searchMergeChoices = async () => { try { setMergeSearchError(""); const response = await api<any>(`/stories/${slug}/story-bible/entities?page=1&pageSize=100&q=${encodeURIComponent(mergeQuery.trim())}`); setMergeChoices(response.items.filter((item: any) => item.id !== entity.id)); } catch (error) { setMergeSearchError(message(error)); } };
 
   useEffect(() => {
@@ -1342,37 +1604,100 @@ export function CanonicalEntitySheet({ detail, slug, navigate, onClose, onUndo, 
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [onClose]);
 
-  const hasStatus = entity.status && entity.status !== "unknown";
-  const statusLabel = hasStatus ? pretty(entity.status) : undefined;
-  const typeLabel = pretty(entity.type);
+  // Read-only "as of chapter" mode: the same sheet renders the reconstructed
+  // historical state; editing, management, and action controls are hidden.
+  const history: EntityHistoryView | undefined = historyView ?? historyState;
+  const viewing = Boolean(history);
+  const historical = viewing && history!.exists;
+  const shown = historical ? history!.entity : entity;
+  const shownTimeline = viewing ? history!.timeline ?? [] : detail.timeline;
+  const shownRelationships = viewing ? history!.relationships ?? [] : detail.relationships;
+  const shownRelatedNames = viewing ? history!.relatedNames ?? {} : detail.relatedNames;
+  const shownProvenance = viewing ? history!.provenance ?? [] : entity.provenance;
+  const overrides = new Set<string>(viewing ? history!.currentOverrides ?? [] : []);
+  const manualFields = new Set<string>(detail.manualFields ?? []);
+  const overrideBadge = (field: string) => overrides.has(field) ? <span className="entity-override-badge" title="Current manual editorial value — not the historical state at this chapter">Current editorial override</span> : null;
+  const manualBadge = (field: string) => !viewing && manualFields.has(field) ? <span className="entity-manual-badge" title="Protected by a manual editorial override">Manual</span> : null;
+
+  const viewAsOf = async () => {
+    const chapter = Number(asOfInput);
+    if (!Number.isSafeInteger(chapter) || chapter < 1) { setHistoryError("Enter a valid chapter number."); return; }
+    try { setHistoryError(""); setHistoryState(await api<EntityHistoryView>(`/stories/${slug}/story-bible/entities/${entity.id}/history?chapter=${chapter}`)); }
+    catch (value) { setHistoryError(message(value)); }
+  };
+
+  const hasStatus = shown.status && shown.status !== "unknown";
+  const statusLabel = hasStatus ? pretty(shown.status) : undefined;
+  const typeLabel = pretty(shown.type);
   const headerSubtitle = statusLabel ? `${typeLabel} · ${statusLabel}` : typeLabel;
 
-  const description = entity.description || "";
+  const description = shown.description || "";
   const isLongDescription = description.length > 220 || description.split("\n").length > 3;
 
-  const localizedDisplay = entity.localizedNaming?.fullName
-    ? [entity.localizedNaming.fullName, entity.localizedNaming.shortName].filter(Boolean).join(" · ")
-    : entity.localizedNaming?.shortName;
+  const localizedDisplay = shown.localizedNaming?.fullName
+    ? [shown.localizedNaming.fullName, shown.localizedNaming.shortName].filter(Boolean).join(" · ")
+    : shown.localizedNaming?.shortName;
+
+  const narrationConfigured = Boolean(entity.preferredNarrationName || entity.localizedNaming?.fullName);
 
   return (
     <div className="editor-sheet entity-sheet" role="dialog" aria-modal="true" aria-labelledby="canonical-entity-title">
       <header className="entity-sheet-header">
         <div className="entity-sheet-title-group">
-          <h3 id="canonical-entity-title" className="entity-sheet-title">{entity.canonicalName}</h3>
+          <h3 id="canonical-entity-title" className="entity-sheet-title">{shown.canonicalName}{manualBadge("canonicalName")}{overrideBadge("canonicalName")}</h3>
           <div className="entity-sheet-subtitle">
             <span>{headerSubtitle}</span>
-            {entity.canonicalNameLocked && <span className="entity-locked-badge">🔒 Locked</span>}
+            {shown.canonicalNameLocked && <span className="entity-locked-badge">🔒 Locked</span>}
           </div>
-          {entity.originalName && (
-            <div className="entity-sheet-original-name" title="Original name">{entity.originalName}</div>
+          {shown.originalName && (
+            <div className="entity-sheet-original-name" title="Original name">{shown.originalName}</div>
           )}
+          {!viewing && (
+            <div className="entity-summary-chips">
+              <span className="entity-chip mono">Ch. {entity.firstAppearance}—{entity.lastKnownAppearance}</span>
+              <span className={`entity-chip ${narrationConfigured ? "ok" : ""}`}>{narrationConfigured ? "Narration configured" : "Narration not configured"}</span>
+              {detail.duplicateSuggestions?.length > 0 && <span className="entity-chip warn">{detail.duplicateSuggestions.length} duplicate candidate{detail.duplicateSuggestions.length === 1 ? "" : "s"}</span>}
+              {detail.issues?.length > 0 && <span className="entity-chip warn">{detail.issues.length} continuity issue{detail.issues.length === 1 ? "" : "s"}</span>}
+              <span className="entity-chip">{detail.visualProfileExists ? "Visual profile" : "No visual profile"}</span>
+              {detail.namingCollisions?.length > 0 && <span className="entity-chip warn">Naming collision</span>}
+            </div>
+          )}
+          <div className="entity-asof-control">
+            <label htmlFor="entity-asof-chapter">View as of chapter</label>
+            <input id="entity-asof-chapter" type="number" min={1} value={asOfInput} onChange={(event) => setAsOfInput(event.target.value)} />
+            <button type="button" className="button" onClick={viewAsOf}>View</button>
+            {viewing && <button type="button" className="button" onClick={() => { setHistoryState(undefined); setHistoryError(""); }}>Current</button>}
+            {historyError && <small className="entity-asof-error">{historyError}</small>}
+          </div>
         </div>
         <button className="entity-sheet-close" onClick={onClose} aria-label="Close entity">×</button>
       </header>
 
       <div className="entity-sheet-scroll">
+        {viewing && (
+          <div className="entity-asof-banner">
+            <span className="entity-asof-badge">As of chapter {history!.chapter} · read-only</span>
+            {history!.requestedChapter && <small>Chapter {history!.requestedChapter} is beyond the imported range; showing chapter {history!.chapter}.</small>}
+            {(history!.warnings ?? []).map((warning) => <small key={warning}>{warning}</small>)}
+          </div>
+        )}
+
+        {viewing && !historical && (
+          <div className="naming-notice">
+            No record of this entity before chapter {history!.chapter}.{history!.earliestKnownChapter ? ` Earliest known record: chapter ${history!.earliestKnownChapter}.` : ""}
+          </div>
+        )}
+
+        {(!viewing || historical) && (<>
+        {!viewing && detail.readiness?.length > 0 && (
+          <section className="entity-detail-section">
+            <span className="section-eyebrow">Readiness</span>
+            <ReadinessGrid rows={detail.readiness} />
+          </section>
+        )}
+
         <section className="entity-detail-section">
-          <span className="section-eyebrow">Description</span>
+          <span className="section-eyebrow">Identity</span>
           <p className={`entity-description ${descExpanded || !isLongDescription ? "expanded" : "clamped"}`}>
             {description || "No description yet."}
           </p>
@@ -1386,31 +1711,68 @@ export function CanonicalEntitySheet({ detail, slug, navigate, onClose, onUndo, 
               {descExpanded ? "Show less" : "Show more"}
             </button>
           )}
+          {shown.aliases.length > 0 ? (
+            <div className="alias-chips">
+              {shown.aliases.map((alias: string) => {
+                const rule = (shown.aliasNarrationRules ?? []).find(
+                  (item: any) => item.alias.toLocaleLowerCase() === alias.toLocaleLowerCase()
+                );
+                const hasOverride = rule && rule.behavior !== "no_override";
+                return (
+                  <span key={alias} className="alias-chip" title={namingLabel(alias, shown)}>
+                    {alias}
+                    {hasOverride && <span className="alias-chip-badge">narration</span>}
+                  </span>
+                );
+              })}
+              {manualBadge("aliases")}{overrideBadge("aliases")}
+            </div>
+          ) : (
+            <p className="empty-text">No aliases recorded.</p>
+          )}
+          <dl className="meta-compact-list">
+            {hasStatus && (
+              <div className="meta-compact-row">
+                <dt>Status {manualBadge("status")}{overrideBadge("status")}</dt>
+                <dd>{pretty(shown.status)}</dd>
+              </div>
+            )}
+            {shown.notes && (
+              <div className="meta-compact-row">
+                <dt>Notes {manualBadge("notes")}{overrideBadge("notes")}</dt>
+                <dd>{shown.notes}</dd>
+              </div>
+            )}
+            <div className="meta-compact-row">
+              <dt>Origin</dt>
+              <dd>{pretty(shown.origin)}{shown.canonicalNameLocked ? " · Locked" : ""}</dd>
+            </div>
+          </dl>
         </section>
 
         <section className="entity-detail-section">
-          <span className="section-eyebrow">Naming</span>
+          <span className="section-eyebrow">Narration &amp; Localization</span>
           <div className="compact-naming-grid">
             <div className="compact-naming-row">
               <div className="compact-naming-content">
-                <span className="compact-naming-label">Preferred narration name</span>
+                <span className="compact-naming-label">Preferred narration name {manualBadge("preferredNarrationName")}{overrideBadge("preferredNarrationName")}</span>
                 <span className="compact-naming-value">
-                  {entity.preferredNarrationName || <span className="unconfigured-label">Not configured</span>}
+                  {shown.preferredNarrationName || <span className="unconfigured-label">Not configured</span>}
                 </span>
               </div>
-              {!entity.preferredNarrationName && (
+              {!viewing && !entity.preferredNarrationName && (
                 <button type="button" className="inline-action-link" onClick={onEdit}>Set →</button>
               )}
             </div>
             <div className="compact-naming-row">
               <div className="compact-naming-content">
-                <span className="compact-naming-label">Localized identity</span>
+                <span className="compact-naming-label">Localized identity {manualBadge("localizedNaming")}{overrideBadge("localizedNaming")}</span>
                 <span className="compact-naming-value">
                   {localizedDisplay ? (
                     <>
                       {localizedDisplay}
-                      {entity.localizedNaming?.locale && (
-                        <small className="compact-naming-meta"> · {entity.localizedNaming.locale}</small>
+                      {shown.localizedNaming?.locale && (
+                        <small className="compact-naming-meta"> · {shown.localizedNaming.locale}</small>
                       )}
                     </>
                   ) : (
@@ -1418,36 +1780,29 @@ export function CanonicalEntitySheet({ detail, slug, navigate, onClose, onUndo, 
                   )}
                 </span>
               </div>
-              <button
-                type="button"
-                className="inline-action-link"
-                onClick={() => navigate(`/stories/${slug}/names?entity=${entity.id}`)}
-              >
-                {localizedDisplay ? "Configure →" : "Configure →"}
-              </button>
+              {!viewing && (
+                <button
+                  type="button"
+                  className="inline-action-link"
+                  onClick={() => navigate(`/stories/${slug}/names?entity=${entity.id}`)}
+                >
+                  Configure →
+                </button>
+              )}
+            </div>
+            <div className="compact-naming-row">
+              <div className="compact-naming-content">
+                <span className="compact-naming-label">Pronunciation {manualBadge("pronunciation")}{overrideBadge("pronunciation")}</span>
+                <span className="compact-naming-value">
+                  {shown.pronunciation ? (shown.pronunciation.customPronunciation ?? shown.pronunciation.phoneticHint ?? shown.pronunciation.ipa ?? "Configured") : <span className="unconfigured-label">Not configured</span>}
+                </span>
+              </div>
             </div>
           </div>
-        </section>
-
-        <section className="entity-detail-section">
-          <span className="section-eyebrow">Aliases</span>
-          {entity.aliases.length > 0 ? (
-            <div className="alias-chips">
-              {entity.aliases.map((alias: string) => {
-                const rule = (entity.aliasNarrationRules ?? []).find(
-                  (item: any) => item.alias.toLocaleLowerCase() === alias.toLocaleLowerCase()
-                );
-                const hasOverride = rule && rule.behavior !== "no_override";
-                return (
-                  <span key={alias} className="alias-chip" title={namingLabel(alias, entity)}>
-                    {alias}
-                    {hasOverride && <span className="alias-chip-badge">narration</span>}
-                  </span>
-                );
-              })}
-            </div>
-          ) : (
-            <p className="empty-text">No aliases recorded.</p>
+          {!viewing && (
+            <button className="button" onClick={() => navigate(`/stories/${slug}/names?entity=${entity.id}`)}>
+              Open localization
+            </button>
           )}
         </section>
 
@@ -1455,49 +1810,35 @@ export function CanonicalEntitySheet({ detail, slug, navigate, onClose, onUndo, 
           <span className="section-eyebrow">Story Information</span>
           <dl className="meta-compact-list">
             <div className="meta-compact-row">
-              <dt>Type</dt>
-              <dd>{pretty(entity.type)}</dd>
+              <dt>Type {manualBadge("type")}{overrideBadge("type")}</dt>
+              <dd>{pretty(shown.type)}</dd>
             </div>
-            {hasStatus && (
-              <div className="meta-compact-row">
-                <dt>Status</dt>
-                <dd>{pretty(entity.status)}</dd>
-              </div>
-            )}
             <div className="meta-compact-row">
               <dt>Appearances</dt>
-              <dd className="mono">Ch. {entity.firstAppearance}—{entity.lastKnownAppearance}</dd>
-            </div>
-            <div className="meta-compact-row">
-              <dt>Origin</dt>
-              <dd>{pretty(entity.origin)}{entity.canonicalNameLocked ? " · Locked" : ""}</dd>
+              <dd className="mono">Ch. {shown.firstAppearance}—{shown.lastKnownAppearance}</dd>
             </div>
           </dl>
-        </section>
-
-        {detail.relatedReferences?.length > 0 && (
-          <details className="related-references">
-            <summary>Related references ({detail.relatedReferences.length})</summary>
-            <div className="related-references-list">
-              {detail.relatedReferences.map((ref: any) => (
-                <div key={ref.id} className="related-ref-row">
-                  <div>
-                    <b>{ref.name}</b>
-                    {ref.originalName && <small> · {ref.originalName}</small>}
+          {!viewing && detail.relatedReferences?.length > 0 && (
+            <details className="related-references">
+              <summary>Related references ({detail.relatedReferences.length})</summary>
+              <div className="related-references-list">
+                {detail.relatedReferences.map((ref: any) => (
+                  <div key={ref.id} className="related-ref-row">
+                    <div>
+                      <b>{ref.name}</b>
+                      {ref.originalName && <small> · {ref.originalName}</small>}
+                    </div>
+                    <span>{pretty(ref.type)}</span>
+                    <span className="mono">Ch. {ref.firstSeenChapter}—{ref.lastSeenChapter}</span>
                   </div>
-                  <span>{pretty(ref.type)}</span>
-                  <span className="mono">Ch. {ref.firstSeenChapter}—{ref.lastSeenChapter}</span>
-                </div>
-              ))}
-            </div>
-          </details>
-        )}
-
-        {detail.timeline?.length > 0 && (
-          <section className="entity-detail-section">
-            <span className="section-eyebrow">Timeline</span>
+                ))}
+              </div>
+            </details>
+          )}
+          {shownTimeline?.length > 0 && (
             <div className="entity-history">
-              {detail.timeline.map((item: any) => (
+              <span className="section-eyebrow">Timeline</span>
+              {shownTimeline.map((item: any) => (
                 <button key={item.id} onClick={() => navigate(`/stories/${slug}/chapters/${item.chapter}`)}>
                   <b>Ch. {item.chapter}</b>
                   <span>{pretty(item.type)}</span>
@@ -1505,62 +1846,87 @@ export function CanonicalEntitySheet({ detail, slug, navigate, onClose, onUndo, 
                 </button>
               ))}
             </div>
-          </section>
-        )}
-
-        {detail.relationships?.length > 0 && (
-          <section className="entity-detail-section">
-            <span className="section-eyebrow">Relationships</span>
+          )}
+          {shownRelationships?.length > 0 && (
             <div className="entity-history">
-              {detail.relationships.map((item: any) => (
+              <span className="section-eyebrow">Relationships</span>
+              {shownRelationships.map((item: any) => (
                 <div key={item.id}>
-                  <b>{detail.relatedNames[item.sourceEntityId] ?? item.sourceEntityId}</b>
-                  <span>{item.type} → {detail.relatedNames[item.targetEntityId] ?? item.targetEntityId}</span>
+                  <b>{shownRelatedNames[item.sourceEntityId] ?? item.sourceEntityId}</b>
+                  <span>{item.type} → {shownRelatedNames[item.targetEntityId] ?? item.targetEntityId}</span>
                   <small>Ch. {item.startChapter}{item.endChapter ? `—${item.endChapter}` : " · current"}</small>
                 </div>
               ))}
             </div>
+          )}
+        </section>
+
+        {!viewing && (
+          <section className="entity-detail-section">
+            <span className="section-eyebrow">Visual Canon</span>
+            <p className="empty-text">{detail.visualProfileExists ? "A Visual Profile exists for this entity." : "No Visual Profile yet."}{entity.visualProfilePolicy?.mode === "skip" ? " Policy: skipped by editorial decision." : ""} {manualBadge("visualProfilePolicy")}</p>
+            <button className="button" onClick={() => onOpenVisualProfile?.(entity.id, entity.canonicalName)}>
+              Visual Profile
+            </button>
           </section>
         )}
 
-        {entity.provenance?.length > 0 && (
+        {!viewing && (detail.namingCollisions?.length > 0 || detail.issues?.length > 0 || (detail.readiness ?? []).some((row: any) => row.state === "attention")) && (
+          <section className="entity-detail-section">
+            <span className="section-eyebrow">Issues</span>
+            {detail.namingCollisions?.map((collision: any) => (
+              <div className="naming-notice" key={collision.id}>
+                <p>{collision.hasMergeRelationship ? "These records already share a merge relationship. " : ""}{collision.reason}</p>
+                <div className="management-action-list">
+                  {collision.entities.filter((candidate: any) => candidate.id !== entity.id).map((candidate: any) => (
+                    <button key={candidate.id} className="button management-button" onClick={() => onMerge({ entities: [{ id: entity.id, name: entity.canonicalName }, { id: candidate.id, name: candidate.canonicalName }], reason: collision.reason })}>
+                      Compare with {candidate.canonicalName} · {pretty(candidate.type)} · via {candidate.field}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            ))}
+            {detail.issues?.length > 0 && (
+              <button className="button warn-badge-button" onClick={() => navigate(`/stories/${slug}/continuity?entity=${entity.id}`)}>
+                {detail.issues.length} continuity issues
+              </button>
+            )}
+            {(detail.readiness ?? []).filter((row: any) => row.state === "attention").map((row: any) => (
+              <p key={row.key} className="empty-text">⚠ {row.label}{row.detail ? ` — ${row.detail}` : ""}</p>
+            ))}
+          </section>
+        )}
+
+        {!viewing && <EntityUsageSection slug={slug} entityId={entity.id} navigate={navigate} />}
+        {!viewing && <EntityHistorySection slug={slug} entityId={entity.id} onRevert={onRevert} />}
+
+        {shownProvenance?.length > 0 && (
           <section className="entity-detail-section">
             <span className="section-eyebrow">Provenance</span>
             <div className="provenance-grid">
-              {entity.provenance.map((item: any, index: number) => (
+              {shownProvenance.map((item: any, index: number) => (
                 <button key={`${item.chapter}-${index}`} onClick={() => navigate(`/stories/${slug}/chapters/${item.chapter}`)}>
                   Chapter {item.chapter}
-                  <small>{pretty(item.kind)}{item.confidence !== undefined ? ` · ${Math.round(item.confidence * 100)}%` : ""}</small>
+                  <small>{pretty(item.kind)} · Origin: {pretty(item.origin ?? "automatic")}{item.confidence !== undefined ? ` · Confidence: ${Math.round(item.confidence * 100)}%` : ""}</small>
                 </button>
               ))}
             </div>
           </section>
         )}
+        </>)}
       </div>
 
+      {!viewing && (
       <footer className="entity-sheet-actions" aria-label="Canonical entity actions">
         <div className="entity-sheet-primary-actions">
           <button className="button primary full-width" onClick={onEdit}>
             Edit entity
           </button>
-          <div className="entity-sheet-secondary-row">
-            <button className="button" onClick={() => navigate(`/stories/${slug}/names?entity=${entity.id}`)}>
-              Open localization
-            </button>
-            <button className="button" onClick={() => onOpenVisualProfile?.(entity.id, entity.canonicalName)}>
-              Visual Profile
-            </button>
-            {detail.issues?.length > 0 && (
-              <button className="button warn-badge-button" onClick={() => navigate(`/stories/${slug}/continuity`)}>
-                {detail.issues.length} continuity issues
-              </button>
-            )}
-          </div>
         </div>
 
         {(onDemote || onSuppress || onMerge || activeMerges.length > 0) && (
           <div className="entity-sheet-management">
-            <span className="management-label">Entity Management</span>
+            <span className="management-label">Entity Management — changes here rewrite canonical state and always ask for confirmation first</span>
             <div className="management-action-list">
               {detail.duplicateSuggestions?.length > 0 && <div className="naming-notice">Possible duplicate canonical entity: compare identity, type, and evidence before merging.</div>}
               {detail.duplicateSuggestions?.map((item: any) => <button key={item.id} className="button management-button" onClick={() => onMerge(item)}>Compare / merge with {item.entities.find((candidate: any) => candidate.id !== entity.id)?.name}</button>)}
@@ -1583,7 +1949,144 @@ export function CanonicalEntitySheet({ detail, slug, navigate, onClose, onUndo, 
           </div>
         )}
       </footer>
+      )}
     </div>
+  );
+}
+
+const ENTITY_USAGE_KIND_LABEL: Record<string, string> = { provenance: "Story Bible", qa: "QA", continuity: "Continuity", scene: "Scene", "visual-profile": "Visual Profile" };
+
+/** "Used in" panel: aggregated entity usage, loaded lazily on expand. */
+export function EntityUsageSection({ slug, entityId, navigate }: { slug: string; entityId: string; navigate: (href: string) => void }) {
+  const [expanded, setExpanded] = useState(false);
+  const [data, setData] = useState<EntityUsagePage>();
+  const [error, setError] = useState("");
+  const load = (page: number) => api<EntityUsagePage>(`/stories/${slug}/story-bible/entities/${entityId}/usage?page=${page}&pageSize=25`).then(setData).catch((value) => setError(message(value)));
+  useEffect(() => { if (expanded && !data) void load(1); });
+  const [first, last] = data?.summary.sourceChapters ?? [];
+  return (
+    <section className="entity-detail-section">
+      <span className="section-eyebrow">Used in</span>
+      {!expanded && <button type="button" className="button management-button" onClick={() => setExpanded(true)}>View where this entity is used</button>}
+      {expanded && error && <p className="empty-text">{error}</p>}
+      {expanded && !data && !error && <p className="empty-text">Loading usage…</p>}
+      {expanded && data && (
+        <>
+          <p className="entity-usage-summary">
+            Appears Ch. <button type="button" className="inline-action-link" onClick={() => navigate(`/stories/${slug}/chapters/${first}`)}>{first}</button>
+            {" — "}
+            <button type="button" className="inline-action-link" onClick={() => navigate(`/stories/${slug}/chapters/${last}`)}>{last}</button>
+            {` · ${data.summary.translationChapters ?? 0} translated · ${data.summary.narrationChapters ?? 0} narrated · ${data.summary.qaFindings} QA · ${data.summary.continuityFindings} continuity · ${data.summary.scenes} scenes${data.summary.visualProfile ? " · Visual Profile" : ""}`}
+          </p>
+          <div className="entity-history">
+            {data.uses.map((use, index) => (
+              <button key={`${use.kind}-${use.chapter ?? 0}-${use.sceneId ?? index}`} onClick={() => navigate(use.href)}>
+                <b>{use.chapter ? `Ch. ${use.chapter}` : "—"}</b>
+                <span>{ENTITY_USAGE_KIND_LABEL[use.kind] ?? use.kind}</span>
+                <p>{use.label}{use.excerpt ? ` — ${use.excerpt}` : ""}</p>
+              </button>
+            ))}
+            {!data.uses.length && <p className="empty-text">No recorded uses beyond the canonical record.</p>}
+          </div>
+          {data.total > data.pageSize && (
+            <div className="field-row">
+              <button type="button" className="button" disabled={data.page <= 1} onClick={() => void load(data.page - 1)}>Previous</button>
+              <small>Page {data.page} · {data.total} uses</small>
+              <button type="button" className="button" disabled={data.page * data.pageSize >= data.total} onClick={() => void load(data.page + 1)}>Next</button>
+            </div>
+          )}
+        </>
+      )}
+    </section>
+  );
+}
+
+const ENTITY_AUDIT_ACTION_LABEL: Record<string, string> = {
+  created: "Created", updated: "Updated", renamed: "Renamed", type_changed: "Type changed",
+  narration_mapping_changed: "Narration mapping changed", localized_naming_changed: "Localized naming changed",
+  locked: "Locked", unlocked: "Unlocked", merged: "Merged", merge_undone: "Merge undone",
+  demoted: "Demoted to minor reference", promoted: "Promoted to canonical entity",
+  suppressed: "Removed (suppressed)", restored: "Restored", visual_profile_policy_changed: "Visual Profile policy changed",
+};
+const ENTITY_AUDIT_FIELD_LABEL: Record<string, string> = {
+  canonicalName: "canonical name", type: "type", aliases: "aliases", canonicalNameLocked: "name lock",
+  notes: "notes", status: "status", preferredNarrationName: "preferred narration name",
+  aliasNarrationRules: "alias narration rules", localizedNaming: "localized naming",
+  pronunciation: "pronunciation", visualProfilePolicy: "Visual Profile policy",
+};
+/** Fields whose recorded `before` value can be safely re-applied through the normal update path. */
+const ENTITY_AUDIT_REVERTABLE_FIELDS = new Set(["canonicalName", "preferredNarrationName", "type", "notes", "canonicalNameLocked", "status"]);
+const ENTITY_AUDIT_REVERTABLE_ACTIONS = new Set(["updated", "renamed", "type_changed", "narration_mapping_changed", "locked", "unlocked"]);
+
+export function entityAuditRevertPatch(entry: EntityAuditEntry): Record<string, unknown> | undefined {
+  if (!ENTITY_AUDIT_REVERTABLE_ACTIONS.has(entry.action) || !entry.before) return undefined;
+  const keys = Object.keys(entry.before);
+  if (!keys.length || keys.some((key) => !ENTITY_AUDIT_REVERTABLE_FIELDS.has(key))) return undefined;
+  return entry.before;
+}
+
+function auditValueLabel(value: unknown): string {
+  if (value === null || value === undefined || value === "") return "—";
+  if (Array.isArray(value)) return value.length ? value.map((item) => auditValueLabel(item)).join(", ") : "—";
+  if (typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    if (typeof record.fullName === "string" || typeof record.shortName === "string") return [record.fullName, record.shortName].filter(Boolean).join(" · ") || "—";
+    if (typeof record.mode === "string") return String(record.mode);
+    return "configured";
+  }
+  return String(value);
+}
+
+export function entityAuditDeltaLabel(entry: EntityAuditEntry): string | undefined {
+  const keys = Object.keys(entry.after ?? entry.before ?? {}).filter((key) => ENTITY_AUDIT_FIELD_LABEL[key]);
+  if (!keys.length) return undefined;
+  return keys.map((key) => `${ENTITY_AUDIT_FIELD_LABEL[key]}: ${auditValueLabel(entry.before?.[key])} → ${auditValueLabel(entry.after?.[key])}`).join(" · ");
+}
+
+/** "Change History" panel: append-only audit entries merged with the pre-existing historical record. */
+export function EntityHistorySection({ slug, entityId, onRevert }: { slug: string; entityId: string; onRevert?: (entry: EntityAuditEntry) => void }) {
+  const [expanded, setExpanded] = useState(false);
+  const [data, setData] = useState<EntityAuditPage>();
+  const [error, setError] = useState("");
+  const load = (page: number) => api<EntityAuditPage>(`/stories/${slug}/story-bible/entities/${entityId}/audit?page=${page}&pageSize=25`).then(setData).catch((value) => setError(message(value)));
+  useEffect(() => { if (expanded && !data) void load(1); });
+  return (
+    <section className="entity-detail-section">
+      <span className="section-eyebrow">Change History</span>
+      {!expanded && <button type="button" className="button management-button" onClick={() => setExpanded(true)}>View change history</button>}
+      {expanded && error && <p className="empty-text">{error}</p>}
+      {expanded && !data && !error && <p className="empty-text">Loading history…</p>}
+      {expanded && data && (
+        <>
+          <div className="entity-history">
+            {data.entries.map((entry) => (
+              <div key={entry.id} className="entity-audit-entry">
+                <b>{ENTITY_AUDIT_ACTION_LABEL[entry.action] ?? pretty(entry.action)}</b>
+                <span>{entry.source}{entry.timestamp ? ` · ${new Date(entry.timestamp).toLocaleString()}` : ""}</span>
+                <p>{entityAuditDeltaLabel(entry) ?? entry.reason ?? ""}</p>
+                {onRevert && entityAuditRevertPatch(entry) && (
+                  <button type="button" className="inline-action-link" onClick={() => onRevert(entry)}>Revert this change</button>
+                )}
+              </div>
+            ))}
+            {!data.entries.length && !data.historical.length && <p className="empty-text">No recorded changes yet.</p>}
+            {data.historical.map((item, index) => (
+              <div key={`historical-${index}`} className="entity-audit-entry">
+                <b>{item.label}</b>
+                <span>{[item.source, item.timestamp ? new Date(item.timestamp).toLocaleString() : undefined].filter(Boolean).join(" · ")}</span>
+              </div>
+            ))}
+          </div>
+          {data.total > data.pageSize && (
+            <div className="field-row">
+              <button type="button" className="button" disabled={data.page <= 1} onClick={() => void load(data.page - 1)}>Previous</button>
+              <small>Page {data.page} · {data.total} changes</small>
+              <button type="button" className="button" disabled={data.page * data.pageSize >= data.total} onClick={() => void load(data.page + 1)}>Next</button>
+            </div>
+          )}
+        </>
+      )}
+    </section>
   );
 }
 
@@ -1599,7 +2102,7 @@ function CanonicalEntityEditor({ slug, value, onChange, onClose, onSave }: any) 
   return <div className="editor-sheet naming-editor"><div className="editor-sheet-head"><div><span className="eyebrow">Protected manual overlay</span><h3>Edit canonical record</h3></div><button onClick={onClose} aria-label="Close editor">×</button></div><Field label="Entity Type"><select aria-label="Entity Type" value={value.type} onChange={(event) => { const nextType = event.target.value; const known = ["character", "location", "organization", "ability", "item", "concept", "other"].some((type) => isStandardEntityStatus(type, value.status ?? "unknown")); const status = known && !isStandardEntityStatus(nextType, value.status ?? "unknown") ? "unknown" : value.status; onChange({ ...value, type: nextType, status }); }}><option value="character">Character</option><option value="location">Location</option><option value="item">Item</option><option value="organization">Organization</option><option value="ability">Ability</option><option value="concept">Concept</option><option value="other">Other</option></select><small>Protected manual type correction. Existing Visual Profile data is preserved; review it before regenerating visual canon.</small></Field>{value.visualProfileExists && value.originalType !== value.type && <div className="naming-notice">The existing Visual Profile will be preserved but moved to draft. Review its type and visual canon before regenerating artwork.</div>}<Field label="Canonical name"><input value={value.canonicalName} onChange={(event) => onChange({ ...value, canonicalName: event.target.value })} /></Field><label className="toggle-line"><input type="checkbox" checked={value.canonicalNameLocked} onChange={(event) => onChange({ ...value, canonicalNameLocked: event.target.checked })} /> Lock canonical name against automatic renaming</label><div className="preferred-name-field"><Field label="Preferred Narration Name"><input value={value.preferredNarrationName} placeholder={value.canonicalName} onChange={(event) => onChange({ ...value, preferredNarrationName: event.target.value })} /></Field><small>A strong, context-aware preference for newly generated narration. Source text and manual narration remain untouched.</small></div><div className="alias-editor-head"><div><span className="eyebrow">Identity aliases</span><p>Choose how each alias should normally read in narration.</p></div><button className="button" onClick={() => onChange({ ...value, aliasDrafts: [...value.aliasDrafts, { alias: "", behavior: "no_override", replacement: "" }] })}>Add alias</button></div><div className="alias-rule-editor">{value.aliasDrafts.map((item: any, index: number) => <div className="alias-rule-row" key={index}><input aria-label={`Alias ${index + 1}`} value={item.alias} placeholder="Alias" onChange={(event) => editAlias(index, { alias: event.target.value })} /><select aria-label={`Narration behavior for alias ${index + 1}`} value={item.behavior} onChange={(event) => editAlias(index, { behavior: event.target.value })}><option value="no_override">No override</option><option value="use_preferred">Use Preferred Narration Name</option><option value="custom">Custom replacement</option></select>{item.behavior === "custom" && <input aria-label={`Custom replacement for alias ${index + 1}`} value={item.replacement} placeholder="Narration phrase" onChange={(event) => editAlias(index, { replacement: event.target.value })} />}<button className="alias-remove" aria-label={`Remove alias ${item.alias || index + 1}`} onClick={() => onChange({ ...value, aliasDrafts: value.aliasDrafts.filter((_: any, position: number) => position !== index) })}>×</button></div>)}</div><PronunciationFields value={value.pronunciation} onChange={(pronunciation) => onChange({ ...value, pronunciation })} /><PronunciationActions slug={slug} id={value.id} locked={Boolean(value.pronunciation?.locked || value.pronunciation?.source === "manual")} onEnriched={(pronunciation) => onChange((current: any) => current?.id === value.id && JSON.stringify(current.pronunciation) === JSON.stringify(value.pronunciation) ? { ...current, pronunciation } : current)} /><EntityStatusField type={value.type} value={value.status} onChange={(status) => onChange({ ...value, status })} /><Field label="Manual notes"><textarea value={value.notes} onChange={(event) => onChange({ ...value, notes: event.target.value })} /></Field><div className="editor-sheet-actions"><button className="button" onClick={onClose}>Cancel</button><button className="button primary" disabled={needsCustomStatus} onClick={onSave}>Save protected record</button></div></div>;
 }
 
-function ContinuityPage({ slug, navigate }: { slug: string; navigate: (path: string) => void }) { const [view, setView] = useState<any>(); const [status, setStatus] = useState("open"); const [error, setError] = useState(""); const load = () => api<any>(`/stories/${slug}/continuity?status=${status}`).then(setView); useEffect(() => { setView(undefined); void load().catch((value) => setError(message(value))); }, [slug, status]); const resolve = async (id: string, resolution: string) => { try { const note = resolution === "dismissed" ? prompt("Optional reason for dismissing this finding:") ?? undefined : undefined; await put(`/stories/${slug}/continuity/${id}`, { resolution, note }); await load(); } catch (value) { setError(message(value)); } }; if (!view) return error ? <LoadFailure error={error} /> : <Loading />; return <section className="page continuity-page"><div className="section-heading"><div><span className="eyebrow">Historical consistency</span><h2>Continuity Review</h2><p>Review contradictions without silently rewriting canonical history.</p></div><button className="button" onClick={() => navigate(`/stories/${slug}/bible`)}>Open Story Bible</button></div>{error && <ErrorBox text={error} />}{view.needsReanalysis && <div className="naming-notice">Canonical identities changed since this continuity review. Re-run analysis before acting on older findings; no paid work starts automatically.</div>}<div className="review-summary"><span><b>{view.counts.open}</b> open</span><span><b>{view.counts.resolved}</b> resolved</span><span><b>{view.analyzedThroughChapter}</b> analyzed through</span></div><div className="segmented"><button className={status === "open" ? "active" : ""} onClick={() => setStatus("open")}>Open</button><button className={status === "all" ? "active" : ""} onClick={() => setStatus("all")}>All findings</button><button className={status === "dismissed" ? "active" : ""} onClick={() => setStatus("dismissed")}>Dismissed</button></div><div className="continuity-list">{view.findings.map((finding: any) => <article key={finding.id} className={`continuity-card ${finding.severity}`}><header><span className="eyebrow">{pretty(finding.type)}</span><Status status={finding.severity === "critical" ? "fail" : "warn"} label={pretty(finding.severity)} /></header><h3>{finding.entityIds.map((id: string) => view.names[id] ?? id).join(" · ")}</h3><p>{finding.explanation}</p><div className="chapter-links">{finding.chapters.map((chapter: number) => <button key={chapter} onClick={() => navigate(`/stories/${slug}/chapters/${chapter}`)}>Open Chapter {chapter}</button>)}</div><details><summary>Why the Bible believes this</summary>{finding.supportingFacts.map((fact: any, index: number) => <div key={index}><b>Chapter {fact.chapter}</b><span>{fact.summary}</span><small>{pretty(fact.provenanceKind)}</small></div>)}</details>{finding.status === "open" ? <div className="resolution-actions">{finding.type === "status_conflict" && <button onClick={() => resolve(finding.id, "accepted_new")}>Accept newest status</button>}<button onClick={() => resolve(finding.id, "kept_existing")}>Keep canonical</button><button onClick={() => resolve(finding.id, "intentional")}>Mark intentional</button><button onClick={() => navigate(`/stories/${slug}/bible`)}>Correct Bible</button>{finding.type === "identity_alias_ambiguity" && <button onClick={() => resolve(finding.id, "merged")}>Merge these entities</button>}<button onClick={() => resolve(finding.id, "dismissed")}>Dismiss false positive</button></div> : <div className="resolution-note"><b>{pretty(finding.status)}</b>{finding.resolutionNote && <span>{finding.resolutionNote}</span>}</div>}</article>)}</div>{!view.findings.length && <Empty title="No continuity findings here" text="Analysis runs during production and never makes paid calls from this page." />}</section>; }
+function ContinuityPage({ slug, navigate }: { slug: string; navigate: (path: string) => void }) { const [view, setView] = useState<any>(); const [status, setStatus] = useState("open"); const [error, setError] = useState(""); const entityFilter = new URLSearchParams(location.search).get("entity"); const load = () => api<any>(`/stories/${slug}/continuity?status=${status}`).then(setView); useEffect(() => { setView(undefined); void load().catch((value) => setError(message(value))); }, [slug, status]); const resolve = async (id: string, resolution: string) => { try { const note = resolution === "dismissed" ? prompt("Optional reason for dismissing this finding:") ?? undefined : undefined; await put(`/stories/${slug}/continuity/${id}`, { resolution, note }); await load(); } catch (value) { setError(message(value)); } }; if (!view) return error ? <LoadFailure error={error} /> : <Loading />; const findings = entityFilter ? view.findings.filter((finding: any) => finding.entityIds.includes(entityFilter)) : view.findings; return <section className="page continuity-page"><div className="section-heading"><div><span className="eyebrow">Historical consistency</span><h2>Continuity Review</h2><p>Review contradictions without silently rewriting canonical history.</p></div><button className="button" onClick={() => navigate(`/stories/${slug}/bible`)}>Open Story Bible</button></div>{error && <ErrorBox text={error} />}{view.needsReanalysis && <div className="naming-notice">Canonical identities changed since this continuity review. Re-run analysis before acting on older findings; no paid work starts automatically.</div>}<div className="review-summary"><span><b>{view.counts.open}</b> open</span><span><b>{view.counts.resolved}</b> resolved</span><span><b>{view.analyzedThroughChapter}</b> analyzed through</span></div><div className="segmented"><button className={status === "open" ? "active" : ""} onClick={() => setStatus("open")}>Open</button><button className={status === "all" ? "active" : ""} onClick={() => setStatus("all")}>All findings</button><button className={status === "dismissed" ? "active" : ""} onClick={() => setStatus("dismissed")}>Dismissed</button></div>{entityFilter && <div className="naming-notice">Showing findings for {view.names[entityFilter] ?? entityFilter}. <button className="inline-action-link" onClick={() => navigate(`/stories/${slug}/continuity`)}>Show all →</button></div>}<div className="continuity-list">{findings.map((finding: any) => <article key={finding.id} className={`continuity-card ${finding.severity}`}><header><span className="eyebrow">{pretty(finding.type)}</span><Status status={finding.severity === "critical" ? "fail" : "warn"} label={pretty(finding.severity)} /></header><h3>{finding.entityIds.map((id: string, index: number) => <span key={id}>{index > 0 && " · "}<button className="entity-link" onClick={() => navigate(`/stories/${slug}/bible?entity=${id}`)}>{view.names[id] ?? id}</button></span>)}</h3><p>{finding.explanation}</p><div className="chapter-links">{finding.chapters.map((chapter: number) => <button key={chapter} onClick={() => navigate(`/stories/${slug}/chapters/${chapter}`)}>Open Chapter {chapter}</button>)}</div><details><summary>Why the Bible believes this</summary>{finding.supportingFacts.map((fact: any, index: number) => <div key={index}><b>Chapter {fact.chapter}</b><span>{fact.summary}</span><small>{pretty(fact.provenanceKind)}</small></div>)}</details>{finding.status === "open" ? <div className="resolution-actions">{finding.type === "status_conflict" && <button onClick={() => resolve(finding.id, "accepted_new")}>Accept newest status</button>}<button onClick={() => resolve(finding.id, "kept_existing")}>Keep canonical</button><button onClick={() => resolve(finding.id, "intentional")}>Mark intentional</button><button onClick={() => navigate(`/stories/${slug}/bible`)}>Correct Bible</button>{finding.type === "identity_alias_ambiguity" && <button onClick={() => resolve(finding.id, "merged")}>Merge these entities</button>}<button onClick={() => resolve(finding.id, "dismissed")}>Dismiss false positive</button></div> : <div className="resolution-note"><b>{pretty(finding.status)}</b>{finding.resolutionNote && <span>{finding.resolutionNote}</span>}</div>}</article>)}</div>{!findings.length && <Empty title="No continuity findings here" text="Analysis runs during production and never makes paid calls from this page." />}</section>; }
 
 function BibleFields({ category, value, onChange }: { category: string; value: any; onChange: (value: any) => void }) { const field = (key: string, label: string) => <Field label={label}><input value={value[key] ?? ""} onChange={(event) => onChange({ ...value, [key]: event.target.value })} /></Field>; return <div className="bible-form">{category === "relationships" ? <>{field("subject", "Subject")}{field("relationship", "Relationship")}{field("object", "Object")}</> : category === "translationTerms" ? <>{field("original", "Original term")}{field("canonicalEnglish", "Canonical English")}<Field label="Notes"><textarea value={value.notes ?? ""} onChange={(event) => onChange({ ...value, notes: event.target.value })} /></Field></> : <>{field("canonicalEnglishName", "Canonical English name")}{field("originalName", "Original name")}<Field label="Description"><textarea value={value.description ?? ""} onChange={(event) => onChange({ ...value, description: event.target.value })} /></Field></>}<div className="field-row"><Field label="First seen"><input type="number" min="1" value={value.firstSeenChapter} onChange={(event) => onChange({ ...value, firstSeenChapter: Number(event.target.value) })} /></Field><Field label="Last updated"><input type="number" min="1" value={value.lastSeenChapter} onChange={(event) => onChange({ ...value, lastSeenChapter: Number(event.target.value) })} /></Field></div></div>; }
 function newBibleValue(category: string) { const chapters = { firstSeenChapter: 1, lastSeenChapter: 1 }; if (category === "relationships") return { subject: "", relationship: "", object: "", ...chapters }; if (category === "translationTerms") return { original: "", canonicalEnglish: "", notes: "", ...chapters }; return { canonicalEnglishName: "", originalName: "", description: "", ...(category === "characters" ? { aliases: [], pronouns: [] } : {}), ...chapters }; }
@@ -3744,7 +4247,7 @@ export function QaDetail({ slug, chapter, onJob, onEditManually, onChanged, init
     {recheckSummary && <div className="naming-notice qa-recheck-summary"><b>Recheck complete{recheckSummary.fellBackToFull ? " (full recheck — changed content could not be isolated)" : ""}</b><span>{summaryParts.length ? summaryParts.join(" · ") : "No changes to findings"}{` — Needs attention: ${recheckSummary.open}`}</span></div>}
     {stale && openFindingsList.length > 0 && <p className="qa-unverified-label">{openFindingsList.length} previous open finding{openFindingsList.length === 1 ? "" : "s"} — awaiting QA verification, not yet confirmed against the current chapter.</p>}
     <div className="issues">
-      {openFindingsList.map((finding) => <QaFindingCard key={finding.id} finding={finding} busy={busy} expanded={expanded} pendingVerification={unverified(finding)} onToggle={toggleExpanded} onFixAi={() => void fixWithAi(finding)} onEdit={onEditManually} onResolve={() => void resolveManual(finding)} onDismiss={() => setDismissTarget(finding)} />)}
+      {openFindingsList.map((finding) => <QaFindingCard key={finding.id} finding={finding} busy={busy} expanded={expanded} pendingVerification={unverified(finding)} slug={slug} onToggle={toggleExpanded} onFixAi={() => void fixWithAi(finding)} onEdit={onEditManually} onResolve={() => void resolveManual(finding)} onDismiss={() => setDismissTarget(finding)} />)}
       {!openFindingsList.length && !stale && <Empty title="Nothing needs attention" text="Every finding for this chapter is resolved. Recheck QA after editing the manuscript to verify it stays clear." />}
     </div>
     {resolvedFindings.length > 0 && <QaResolvedFindings findings={resolvedFindings} busy={busy} expanded={expanded} currentFingerprint={data.currentFingerprint} onToggle={toggleExpanded} onReopen={(finding) => void reopen(finding)} />}
@@ -3753,14 +4256,14 @@ export function QaDetail({ slug, chapter, onJob, onEditManually, onChanged, init
   </div>;
 }
 
-export function QaFindingCard({ finding, busy, expanded, pendingVerification = false, onToggle, onFixAi, onEdit, onResolve, onDismiss }: { finding: QaFinding; busy: string; expanded: string[]; pendingVerification?: boolean; onToggle: (key: string) => void; onFixAi: () => void; onEdit: () => void; onResolve: () => void; onDismiss: () => void }) {
+export function QaFindingCard({ finding, busy, expanded, pendingVerification = false, slug, onToggle, onFixAi, onEdit, onResolve, onDismiss }: { finding: QaFinding; busy: string; expanded: string[]; pendingVerification?: boolean; slug?: string; onToggle: (key: string) => void; onFixAi: () => void; onEdit: () => void; onResolve: () => void; onDismiss: () => void }) {
   const evidenceLong = finding.evidence.length > 240; const evidenceKey = `evidence:${finding.id}`; const detailsKey = `details:${finding.id}`;
   return <article>
     <div className="qa-issue-heading"><span className="qa-category">{pretty(finding.category)}</span><div className="qa-issue-badges"><Status status={finding.severity} label={finding.severity === "fail" ? "Critical" : "Warning"} /><span className="qa-origin-badge">{finding.origin === "llm" ? "AI" : "Deterministic"}</span>{finding.safeToFix === true && <span className="qa-safe-badge">Safe fix</span>}{finding.reopenedAt && <span className="qa-reviewed">Returned after fix</span>}{pendingVerification && <span className="qa-reviewed">Awaiting QA verification</span>}</div></div>
     <h3>{finding.message}</h3>
     <blockquote>{evidenceLong && !expanded.includes(evidenceKey) ? `${finding.evidence.slice(0, 240)}…` : finding.evidence}{evidenceLong && <button className="qa-inline-toggle" onClick={() => onToggle(evidenceKey)}>{expanded.includes(evidenceKey) ? "Show less" : "Show more"}</button>}</blockquote>
     {finding.suggestedFix && <p className="qa-suggested-fix"><b>Suggested fix</b>{finding.suggestedFix}</p>}
-    <div className="qa-finding-actions"><button className="button primary" disabled={Boolean(busy)} onClick={onFixAi}>{busy === `fix:${finding.id}` ? "Repairing…" : "Fix with AI"}</button><button className="button" disabled={Boolean(busy)} onClick={onEdit}>Edit manually</button><button className="button" disabled={Boolean(busy)} onClick={onResolve}>{busy === `resolve:${finding.id}` ? "Marking…" : "Mark resolved"}</button><button className="button" disabled={Boolean(busy)} onClick={onDismiss}>Dismiss</button></div>
+    <div className="qa-finding-actions"><button className="button primary" disabled={Boolean(busy)} onClick={onFixAi}>{busy === `fix:${finding.id}` ? "Repairing…" : "Fix with AI"}</button><button className="button" disabled={Boolean(busy)} onClick={onEdit}>Edit manually</button><button className="button" disabled={Boolean(busy)} onClick={onResolve}>{busy === `resolve:${finding.id}` ? "Marking…" : "Mark resolved"}</button><button className="button" disabled={Boolean(busy)} onClick={onDismiss}>Dismiss</button>{slug && finding.provenance?.entityIds?.length ? <a className="button" href={`/stories/${slug}/bible?entity=${finding.provenance.entityIds[0]}`}>Open entity{finding.provenance.entityIds.length > 1 ? ` (+${finding.provenance.entityIds.length - 1})` : ""}</a> : null}</div>
     <button className="qa-inline-toggle qa-details-toggle" onClick={() => onToggle(detailsKey)}>{expanded.includes(detailsKey) ? "▾ Hide details" : "▸ Details"}</button>
     {expanded.includes(detailsKey) && <small className="qa-provenance mono">Finding {finding.id} · origin {finding.origin}{finding.confidence !== undefined ? ` · confidence ${Math.round(finding.confidence * 100)}%` : ""}{finding.firstDetectedAt ? ` · first detected ${new Date(finding.firstDetectedAt).toLocaleString()}` : ""}{finding.lastVerifiedAt ? ` · last verified ${new Date(finding.lastVerifiedAt).toLocaleString()}` : ""}{finding.provenance?.stage ? ` · stage ${finding.provenance.stage}` : ""}</small>}
   </article>;

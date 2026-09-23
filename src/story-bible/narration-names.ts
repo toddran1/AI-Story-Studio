@@ -17,33 +17,69 @@ export async function loadNarrationNamingEntities(root: string, slug: string) {
   return (await loadStoryBibleWithCanonicalOverlay(root, slug)).canonicalEntities.filter((entity) => entity.localizedNaming || entity.preferredNarrationName || entity.aliasNarrationRules.length);
 }
 
-export async function invalidateNarrationNamingChange(root: string, slug: string, before: CanonicalEntity, after: CanonicalEntity) {
-  if (!narrationNamingChanged(before, after)) return { affectedChapters: [] as number[], manualNarrationChapters: [] as number[], exportCleanupWarnings: [] as string[] };
-  const story = storyPaths(root, slug, 1).story;
-  const chapterRoot = join(story, "chapters");
+async function listChapterNumbers(root: string, slug: string) {
+  const chapterRoot = join(storyPaths(root, slug, 1).story, "chapters");
   const entries = await readdir(chapterRoot, { withFileTypes: true }).catch((error: NodeJS.ErrnoException) => { if (error.code === "ENOENT") return []; throw error; });
-  const available = entries.filter((entry) => entry.isDirectory() && /^\d+$/.test(entry.name)).map((entry) => Number(entry.name)).filter(Number.isSafeInteger).sort((a, b) => a - b);
-  const affected = new Set([...before.provenance, ...after.provenance].map((item) => item.chapter));
-  const names = [...new Set([
-    before.canonicalName, before.originalName, before.preferredNarrationName, ...before.aliases, before.localizedNaming?.fullName, before.localizedNaming?.shortName,
-    after.canonicalName, after.originalName, after.preferredNarrationName, ...after.aliases, after.localizedNaming?.fullName, after.localizedNaming?.shortName,
-  ].filter((value): value is string => Boolean(value)).map((value) => value.trim().toLocaleLowerCase()).filter(Boolean))];
+  return entries.filter((entry) => entry.isDirectory() && /^\d+$/.test(entry.name)).map((entry) => Number(entry.name)).filter(Number.isSafeInteger).sort((a, b) => a - b);
+}
 
+// Story context can contain a broad slice of the canonical Bible, including
+// entities that never appear in this chapter. Scan only chapter-authored text
+// so a naming edit does not invalidate unrelated narration and audio.
+async function readChapterAuthoredText(root: string, slug: string, chapter: number) {
+  const paths = storyPaths(root, slug, chapter);
+  const artifacts = await Promise.all([paths.original, paths.english, paths.narration].map((path) => readFile(path, "utf8").catch((error: NodeJS.ErrnoException) => { if (error.code === "ENOENT") return ""; throw error; })));
+  return artifacts.join("\n").toLocaleLowerCase();
+}
+
+function entityNames(entities: CanonicalEntity[]) {
+  return [...new Set(entities.flatMap((entity) => [entity.canonicalName, entity.originalName, entity.preferredNarrationName, ...entity.aliases, entity.localizedNaming?.fullName, entity.localizedNaming?.shortName]).filter((value): value is string => Boolean(value)).map((value) => value.trim().toLocaleLowerCase()).filter(Boolean))];
+}
+
+/**
+ * Chapters that reference the entities, from provenance plus a bounded
+ * text scan of chapter-authored artifacts. Shared by the real invalidations
+ * and by dry-run impact previews; performs no writes and no provider calls.
+ */
+export async function inspectEntityReferenceChapters(root: string, slug: string, entities: CanonicalEntity[]) {
+  const available = await listChapterNumbers(root, slug);
+  const provenance = new Set(entities.flatMap((entity) => entity.provenance.map((item) => item.chapter)));
+  const names = entityNames(entities);
   const matches = await mapBounded(available, 16, async (chapter) => {
-    const paths = storyPaths(root, slug, chapter);
-    // Story context can contain a broad slice of the canonical Bible, including
-    // entities that never appear in this chapter. Scan only chapter-authored
-    // text so a naming edit does not invalidate unrelated narration and audio.
-    const artifacts = await Promise.all([paths.original, paths.english, paths.narration].map((path) => readFile(path, "utf8").catch((error: NodeJS.ErrnoException) => { if (error.code === "ENOENT") return ""; throw error; })));
-    const text = artifacts.join("\n").toLocaleLowerCase();
+    if (provenance.has(chapter)) return chapter;
+    const text = await readChapterAuthoredText(root, slug, chapter);
+    return names.some((name) => containsName(text, name)) ? chapter : undefined;
+  });
+  return matches.filter((chapter): chapter is number => chapter !== undefined).sort((a, b) => a - b);
+}
+
+/**
+ * Dry-run of the narration naming invalidation: the chapters a naming change
+ * would reset. Consumed by both `invalidateNarrationNamingChange` (which then
+ * performs the writes) and the impact-preview endpoint (which never writes).
+ */
+export async function inspectNarrationNamingImpact(root: string, slug: string, before: CanonicalEntity, after: CanonicalEntity) {
+  if (!narrationNamingChanged(before, after)) return { affectedChapters: [] as number[] };
+  const available = await listChapterNumbers(root, slug);
+  const affected = new Set([...before.provenance, ...after.provenance].map((item) => item.chapter));
+  const names = entityNames([before, after]);
+  const matches = await mapBounded(available, 16, async (chapter) => {
+    const text = await readChapterAuthoredText(root, slug, chapter);
     return names.some((name) => containsName(text, name)) ? chapter : undefined;
   });
   for (const chapter of matches) if (chapter !== undefined) affected.add(chapter);
   if (!affected.size && available.length) for (const chapter of available) if (chapter >= Math.min(before.firstAppearance, after.firstAppearance) && chapter <= Math.max(before.lastKnownAppearance, after.lastKnownAppearance)) affected.add(chapter);
+  const availableSet = new Set(available);
+  return { affectedChapters: [...affected].filter((chapter) => availableSet.has(chapter)).sort((a, b) => a - b) };
+}
+
+export async function invalidateNarrationNamingChange(root: string, slug: string, before: CanonicalEntity, after: CanonicalEntity) {
+  if (!narrationNamingChanged(before, after)) return { affectedChapters: [] as number[], manualNarrationChapters: [] as number[], exportCleanupWarnings: [] as string[] };
+  const story = storyPaths(root, slug, 1).story;
+  const chapterNumbers = (await inspectNarrationNamingImpact(root, slug, before, after)).affectedChapters;
 
   const reason = `Narration naming preferences changed for ${after.canonicalName}`;
   const manualNarrationChapters: number[] = [];
-  const availableSet = new Set(available); const chapterNumbers = [...affected].filter((chapter) => availableSet.has(chapter)).sort((a, b) => a - b);
   // Parse and prepare every affected record before the first write. A corrupt
   // chapter therefore cannot leave earlier chapters partially invalidated.
   const updates = await mapBounded(chapterNumbers, 16, async (chapterNumber) => {
@@ -75,18 +111,9 @@ export async function invalidateNarrationNamingChange(root: string, slug: string
 /** Mark only chapters that reference an edited identity. Artifacts remain usable;
  * this is a review/freshness signal, never an automatic production request. */
 export async function invalidateCanonicalIdentityChange(root: string, slug: string, entities: CanonicalEntity[], reason: string, includeQa = true) {
-  const chapterRoot = join(storyPaths(root, slug, 1).story, "chapters");
-  const entries = await readdir(chapterRoot, { withFileTypes: true }).catch((error: NodeJS.ErrnoException) => { if (error.code === "ENOENT") return []; throw error; });
-  const available = entries.filter((entry) => entry.isDirectory() && /^\d+$/.test(entry.name)).map((entry) => Number(entry.name)).filter(Number.isSafeInteger).sort((a, b) => a - b);
-  const provenance = new Set(entities.flatMap((entity) => entity.provenance.map((item) => item.chapter)));
-  const names = [...new Set(entities.flatMap((entity) => [entity.canonicalName, entity.originalName, ...entity.aliases, entity.preferredNarrationName, entity.localizedNaming?.fullName, entity.localizedNaming?.shortName]).filter((value): value is string => Boolean(value)).map((value) => value.toLocaleLowerCase()))];
-  const updates = await mapBounded(available, 16, async (chapter) => {
+  const chapters = await inspectEntityReferenceChapters(root, slug, entities);
+  const updates = await mapBounded(chapters, 16, async (chapter) => {
     const paths = storyPaths(root, slug, chapter);
-    if (!provenance.has(chapter)) {
-      const contents = await Promise.all([paths.original, paths.english, paths.narration].map((path) => readFile(path, "utf8").catch((error: NodeJS.ErrnoException) => { if (error.code === "ENOENT") return ""; throw error; })));
-      const text = contents.join("\n").toLocaleLowerCase();
-      if (!names.some((name) => containsName(text, name))) return undefined;
-    }
     const original = await readJsonIfExists<Chapter>(paths.chapterMeta);
     if (!original) return undefined;
     const chapterRecord = chapterSchema.parse(original);

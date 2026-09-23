@@ -27,6 +27,44 @@ export function post<T>(path: string, body: unknown) { return api<T>(path, { met
 export function put<T>(path: string, body: unknown) { return api<T>(path, { method: "PUT", body: JSON.stringify(body) }); }
 export function del<T>(path: string) { return api<T>(path, { method: "DELETE", body: JSON.stringify({}) }); }
 
+/** Dry-run impact preview for a Story Bible entity action (no provider calls server-side). */
+export type EntityImpact = {
+  affectedChapters: number[]; narrationAffected: number; qaAffected: number; ttsAffected: number; audioAffected: number;
+  scenePlanningAffected: number; artworkAffected: number; videoAffected: number;
+  manualNarrationChapters: number[]; visualProfileAffected: boolean; continuityAffected: number; warnings: string[];
+};
+export type BulkEntityUpdateResult = {
+  dryRun: boolean; applied: string[]; eligible: string[]; skipped: Array<{ id: string; reason: string }>;
+  invalidationSummary: { affectedChapters: number; manualNarrationChapters: number; visualProfileReviews: number };
+};
+
+/** Entity "where used" aggregation (derived server-side, no provider calls). */
+export type EntityUsage = { kind: "provenance" | "qa" | "continuity" | "scene" | "visual-profile"; chapter?: number; sceneId?: string; label: string; excerpt?: string; href: string };
+export type EntityUsagePage = {
+  summary: { sourceChapters: [number, number]; translationChapters?: number; narrationChapters?: number; qaFindings: number; continuityFindings: number; scenes: number; visualProfile: boolean };
+  uses: EntityUsage[]; total: number; page: number; pageSize: number;
+};
+export type EntityAuditEntry = {
+  id: string; entityId: string; action: string;
+  before?: Record<string, unknown>; after?: Record<string, unknown>;
+  reason?: string; source: "manual" | "automatic" | "analyzer" | "ai"; timestamp: string;
+};
+export type EntityAuditPage = {
+  entries: EntityAuditEntry[];
+  historical: Array<{ kind: string; label: string; source?: string; timestamp?: string; chapter?: number }>;
+  total: number; page: number; pageSize: number;
+};
+
+/** Read-only "entity as of chapter N" historical view (server reconstructs from chapter updates; no provider calls). */
+export type EntityHistoryView = {
+  chapter: number; requestedChapter?: number; exists: boolean;
+  entity?: any;
+  timeline: any[]; relationships: any[]; relatedNames: Record<string, string>;
+  provenance: Array<{ chapter: number; kind: string; confidence?: number; origin?: string }>;
+  currentOverrides: string[]; overrideUpdatedAt?: string; warnings: string[];
+  firstAppearanceKnown: boolean; earliestKnownChapter?: number;
+};
+
 export type ResolvedModelRouting = {
   provider: "openai" | "gemini" | "kimi";
   model: string;
