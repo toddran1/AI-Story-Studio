@@ -32,6 +32,37 @@ export type ResolvedSceneVisualPrompt = {
   resolvedEntities: ResolvedEntityCanon[];
 };
 
+/** Fingerprint the effective direction rather than the serialized shape. The
+ * editor writes defaults explicitly while older scenes may omit them; those
+ * representations produce the same prompt and must therefore share a cache
+ * identity. */
+export function normalizeSceneDirectionForFingerprint(raw: SceneDirection | undefined): Record<string, unknown> {
+  const direction = sceneDirectionSchema.parse(raw ?? {});
+  const normalized: Record<string, unknown> = { ...direction };
+  const characterExpressions = Object.fromEntries(Object.entries(direction.characterExpressions).filter(([, value]) => value.trim()));
+  if (!Object.keys(characterExpressions).length) delete normalized.characterExpressions;
+  else normalized.characterExpressions = characterExpressions;
+  for (const key of ["useCharacterReferences", "useCreatureReferences", "useLocationReferences", "preserveWardrobeEquipment", "useStoryArtDirection"] as const) {
+    if (direction[key]) delete normalized[key];
+  }
+  for (const key of ["lighting"] as const) if (!direction[key]?.trim()) delete normalized[key];
+  return normalized;
+}
+
+/** Omitted inheritance and empty editor scaffolding are equivalent to the
+ * default scene behavior. Meaningful pins and opt-outs remain fingerprinted. */
+export function normalizeSceneOverridesForFingerprint(raw: SceneOverrides | undefined): Record<string, unknown> {
+  const overrides = sceneOverridesSchema.parse(raw ?? {});
+  const normalized: Record<string, unknown> = { ...overrides };
+  const wardrobeOverrides = Object.fromEntries(Object.entries(overrides.wardrobeOverrides).filter(([, value]) => value.trim()));
+  if (!Object.keys(wardrobeOverrides).length) delete normalized.wardrobeOverrides;
+  else normalized.wardrobeOverrides = wardrobeOverrides;
+  if (overrides.artDirectionMode === "inherit-summary") delete normalized.artDirectionMode;
+  if (!overrides.customVisualPrompt?.trim()) delete normalized.customVisualPrompt;
+  if (!overrides.customNegativePrompt?.trim()) delete normalized.customNegativePrompt;
+  return normalized;
+}
+
 /**
  * Keep identity canon separate from a character's temporary state. This is
  * deliberately prompt-level guidance: scene narration and editorial overrides
@@ -362,8 +393,8 @@ export function resolveVisualCanonPrompt(options: {
     additionalVisualInstructions: artDirection.additionalVisualInstructions,
   });
   const sceneDirectionFingerprint = fingerprint({
-    direction: scene.direction,
-    overrides: scene.overrides,
+    direction: normalizeSceneDirectionForFingerprint(scene.direction),
+    overrides: normalizeSceneOverridesForFingerprint(scene.overrides),
   });
   const resolvedPromptFingerprint = fingerprint({ prompt, negativePrompt });
   const visualContinuityFingerprint = visualContinuity ? fingerprint(visualContinuity) : undefined;

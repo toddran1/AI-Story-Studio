@@ -114,6 +114,7 @@ import { canonicalEntitySchema, emptyStoryBible, storyBibleSchema } from "../../
 import { SummaryService } from "../../src/summaries/service.js";
 import { SummaryMediaService, summaryMediaInputSchema, summaryNarrationEditSchema, summaryScenesInputSchema } from "../../src/summaries/media.js";
 import { SummaryVisualService, summaryVisualInputSchema, summaryProduceInputSchema } from "../../src/summaries/visuals.js";
+import type { SummaryArtDirectionOverride } from "../../src/summaries/types.js";
 import { generateLocalizedNameSuggestions, localizationSuggestionRequestSchema } from "../../src/story-bible/localization.js";
 import { inspectStagesForCurrent, markCurrentInputSchema, markStagesCurrent } from "../../src/studio/stage-acceptance.js";
 import { executeStagePlan, planStageExecution, planStageExecutionBatch, stageExecutionInputSchema, stageExecutionModeSchema } from "../../src/studio/stage-execution.js";
@@ -126,6 +127,9 @@ const chapterParamSchema = z.number().int().positive();
 const segmentParamSchema = z.number().int().min(1).max(99_999);
 
 const slugSchema = z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/);
+function summaryArtDirectionIdentity(value: SummaryArtDirectionOverride | undefined) {
+  return value?.mode === "preset" ? { mode: value.mode, presetId: value.presetId } : value?.mode === "disabled" ? { mode: value.mode } : { mode: "story-default" };
+}
 const batchInputSchema = z.object({ from: z.number().int().positive().optional(), to: z.number().int().positive().optional(), force: z.enum(["translation", "narration", "qa", "story-bible", "continuity", "tts", "audio", "all"]).optional(), stage: batchStageSchema.optional(), mode: stageExecutionModeSchema.default("selected"), continueOnError: z.boolean().default(false) }).strict().refine((value) => !(value.stage && value.force), { message: "Choose either a manual stage or the legacy force stage, not both" });
 const qaRepairInputSchema = z.object({ issueIndexes: z.array(z.number().int().nonnegative()).min(1).max(100) }).strict();
 const qaDismissInputSchema = z.object({ issueIndexes: z.array(z.number().int().nonnegative()).min(1).max(100), disposition: z.enum(["dismissed", "manually_fixed"]).default("dismissed") }).strict();
@@ -467,7 +471,16 @@ export class StudioOperations {
       await recordActivity(this.root, slug, "summary.generated", `Generated summary '${result.title}' for ${result.chapters.length} chapter(s)`); return result;
     }));
   }
-  updateSummary(slug: string, id: string, raw: unknown) { slugSchema.parse(slug); return withStoryLock(this.root, slug, "summary edit", async () => { const result = await new SummaryService(this.root, this.llm).update(slug, id, raw); await recordActivity(this.root, slug, "summary.edited", `Edited summary '${result.title}'`); return result; }); }
+  updateSummary(slug: string, id: string, raw: unknown) { slugSchema.parse(slug); return withStoryLock(this.root, slug, "summary edit", async () => {
+    const service = new SummaryService(this.root, this.llm);
+    const before = await service.get(slug, id);
+    let result = await service.update(slug, id, raw);
+    if (fingerprint(summaryArtDirectionIdentity(before.artDirectionOverride)) !== fingerprint(summaryArtDirectionIdentity(result.artDirectionOverride))) {
+      result = await this.summaryVisuals().reconcileSummaryVisualFreshness(slug, result, true);
+    }
+    await recordActivity(this.root, slug, "summary.edited", `Edited summary '${result.title}'`);
+    return result;
+  }); }
   regenerateSummary(slug: string, id: string, raw: unknown) {
     slugSchema.parse(slug);
     return this.jobs.create("summary", slug, async (control) => withStoryLock(this.root, slug, "summary regeneration", async () => {

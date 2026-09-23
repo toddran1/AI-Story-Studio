@@ -17,7 +17,7 @@ import { mergeStoryBible } from "../src/story-bible/updater.js";
 import { tokenizeNarration } from "../src/alignment/quality.js";
 import { MockLLM, MockTTS, pngWithDims, testStory } from "./helpers.js";
 import { parseSummaryArgs, runSummaryCommand } from "../apps/cli/summary.js";
-import { SummaryArtworkPanel, SummaryScenePanel, SummaryVideoPanel } from "../apps/web/src/SummaryVisualPanels.js";
+import { SummaryArtworkPanel, SummaryScenePanel, SummaryVideoPanel, summaryArtDirectionChoiceOptions } from "../apps/web/src/SummaryVisualPanels.js";
 import { SummaryLayers } from "../apps/web/src/SummaryLayers.js";
 import { FfmpegVideoProcessor } from "../src/video/renderer.js";
 import { runCommand } from "../src/audio/ffmpeg.js";
@@ -29,6 +29,7 @@ import { loadStoryBibleWithCanonicalOverlay } from "../src/story-bible/canonical
 import { createDefaultArtDirection } from "../src/domain/art-direction.js";
 import { saveStoryArtDirection } from "../src/visual-canon/art-direction.js";
 import { resolveSummarySceneArtDirection } from "../src/summaries/art-direction.js";
+import { normalizeSceneDirectionForFingerprint, normalizeSceneOverridesForFingerprint } from "../src/visual-canon/resolver.js";
 
 const PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64");
 const narration = "Malakai enters the dungeon. Malakai faces the monsters.";
@@ -98,6 +99,90 @@ describe("summary visual production", () => {
     expect(resolveSummarySceneArtDirection(direction, { mode: "preset", presetId: "preset-flashback" }, ownPreset)).toMatchObject({ source: "story-default", preset: { id: "preset_main_style" }, missingPresetId: "preset-main" });
     const own = { ...scene, overrides: { ...scene.overrides, artDirectionPresetId: "preset-flashback" } };
     expect(resolveSummarySceneArtDirection(direction, { mode: "disabled" }, own)).toMatchObject({ source: "scene-override", preset: { id: "preset-flashback" } });
+    const pinned = { mode: "preset" as const, presetId: "preset_main_style" };
+    direction.presets[0]!.isDefault = false; direction.presets.push({ ...direction.presets[0]!, id: "preset-battle", name: "Battle Cinematic", isDefault: true, customStylePrompt: "battle style" });
+    direction.activePresetId = "preset-battle";
+    expect(resolveSummarySceneArtDirection(direction, { mode: "story-default" }, scene).preset.id).toBe("preset-battle");
+    expect(resolveSummarySceneArtDirection(direction, pinned, scene).preset.id).toBe("preset_main_style");
+  });
+  it("normalizes equivalent direction and override storage shapes for shared Visual Canon fingerprints", () => {
+    expect(normalizeSceneDirectionForFingerprint(undefined)).toEqual(normalizeSceneDirectionForFingerprint({ characterExpressions: {}, useCharacterReferences: true, useCreatureReferences: true, useLocationReferences: true, preserveWardrobeEquipment: true, useStoryArtDirection: true }));
+    expect(normalizeSceneDirectionForFingerprint({ characterExpressions: { "ent_empty": "  " } })).toEqual(normalizeSceneDirectionForFingerprint(undefined));
+    expect(normalizeSceneOverridesForFingerprint(undefined)).toEqual(normalizeSceneOverridesForFingerprint({ wardrobeOverrides: {}, artDirectionMode: "inherit-summary", customVisualPrompt: " ", customNegativePrompt: "" }));
+    expect(normalizeSceneOverridesForFingerprint({ artDirectionMode: "story-default" })).not.toEqual(normalizeSceneOverridesForFingerprint(undefined));
+    expect(normalizeSceneDirectionForFingerprint({ useStoryArtDirection: false })).not.toEqual(normalizeSceneDirectionForFingerprint(undefined));
+    expect(normalizeSceneDirectionForFingerprint({ cameraAngle: "low_angle" })).not.toEqual(normalizeSceneDirectionForFingerprint(undefined));
+  });
+  it("returns artwork to current when edited direction is restored to the generated effective defaults", async () => {
+    const planned = await produce(); const scene = planned.scenePlan!.scenes[0]!;
+    const originalFingerprint = scene.artwork.fingerprint;
+    const low = await visuals.updateScene("demo-story", id, scene.id, sceneEdit(scene, { direction: { ...(scene.direction ?? {}), cameraAngle: "low_angle" } }));
+    expect(await visuals.artwork("demo-story", id, { dryRun: true })).toMatchObject({ sceneIds: [scene.id], imagesToGenerate: 1 });
+    const changed = low.scenePlan!.scenes[0]!;
+    await visuals.updateScene("demo-story", id, scene.id, sceneEdit(changed, { direction: { ...(changed.direction ?? {}), cameraAngle: undefined } }));
+    expect(await visuals.artwork("demo-story", id, { dryRun: true })).toMatchObject({ sceneIds: [], imagesToGenerate: 0 });
+    expect((await visuals.get("demo-story", id)).artwork?.status).toBe("current");
+    expect((await summaries.get("demo-story", id)).scenePlan!.scenes[0]!.artwork.fingerprint).toBe(originalFingerprint);
+  });
+  it("immediately reconciles per-scene and aggregate freshness on semantic art-direction updates", async () => {
+    const planned = await produce();
+    const direction = createDefaultArtDirection();
+    direction.presets.push({ ...direction.presets[0]!, id: "preset-flashback", name: "Flashback", isDefault: false, customStylePrompt: "soft sepia memory" });
+    await saveStoryArtDirection(root, "demo-story", direction);
+    const second = planned.scenePlan!.scenes[1]!;
+    await visuals.updateScene("demo-story", id, second.id, sceneEdit(second, { overrides: { ...(second.overrides ?? {}), artDirectionMode: "story-default" } }));
+    await visuals.artwork("demo-story", id, { force: true, scenes: [second.id] });
+    await visuals.video("demo-story", id);
+
+    const operations = new StudioOperations(root, loadEnvironment({}), undefined, { llm: new LLMRouter(new Map([["openai", llm]])), tts, image: images, video: { version: "fake-video", render },
+      censor: { version: "fake-censor", synthesize: async (provider, request) => provider.synthesize(request) }, audio: { version: "fake-master", master: async (_inputs, path) => { await atomicWrite(path, "fake-mastered-audio"); return { durationSeconds: 12, codec: "mp3", container: "mp3" }; } } });
+    try {
+      const providerCalls = { images: images.generate.mock.calls.length, renders: render.mock.calls.length, llm: llm.calls.length, tts: tts.calls };
+      const changed = await operations.updateSummary("demo-story", id, { artDirectionOverride: { mode: "preset", presetId: "preset-flashback" } });
+      expect(changed).toMatchObject({ artwork: { status: "stale" }, video: { status: "stale" } });
+      expect(await visuals.artwork("demo-story", id, { dryRun: true })).toMatchObject({ sceneIds: ["scene-001"], imagesToGenerate: 1 });
+      expect(images.generate).toHaveBeenCalledTimes(providerCalls.images); expect(render).toHaveBeenCalledTimes(providerCalls.renders); expect(llm.calls).toHaveLength(providerCalls.llm); expect(tts.calls).toBe(providerCalls.tts);
+
+      const same = await operations.updateSummary("demo-story", id, { artDirectionOverride: { mode: "preset", presetId: "preset-flashback" } });
+      expect(same).toMatchObject({ artwork: { status: "stale" }, video: { status: "stale" } });
+      expect(images.generate).toHaveBeenCalledTimes(providerCalls.images);
+      const restored = await operations.updateSummary("demo-story", id, { artDirectionOverride: { mode: "story-default" } });
+      expect(restored).toMatchObject({ artwork: { status: "current" }, video: { status: "current" } });
+      expect(images.generate).toHaveBeenCalledTimes(providerCalls.images);
+
+      // Both remaining scenes now opt out of Summary direction (one directly,
+      // one through Story Default); changing the Summary selection affects neither.
+      const first = changed.scenePlan!.scenes[0]!;
+      await operations.updateSummary("demo-story", id, { artDirectionOverride: { mode: "disabled" } });
+      await visuals.updateScene("demo-story", id, first.id, sceneEdit(restored.scenePlan!.scenes[0]!, { direction: { ...(restored.scenePlan!.scenes[0]!.direction ?? {}), useStoryArtDirection: false } }));
+      await visuals.artwork("demo-story", id, { force: true, scenes: [first.id] });
+      await visuals.video("demo-story", id);
+      const noEffectiveChange = await operations.updateSummary("demo-story", id, { artDirectionOverride: { mode: "preset", presetId: "preset-flashback" } });
+      expect(noEffectiveChange).toMatchObject({ artwork: { status: "current" }, video: { status: "current" } });
+      expect(images.generate).toHaveBeenCalledTimes(providerCalls.images + 1);
+    } finally { await operations.close(); }
+  });
+  it("omits all Story Art Direction text while retaining scene canon and custom instructions", async () => {
+    const planned = await produce();
+    const direction = createDefaultArtDirection("UNIQUE STORY DIRECTION SHOULD NOT APPEAR");
+    direction.presets[0]!.globalNegativePrompt = "UNIQUE GLOBAL NEGATIVE SHOULD NOT APPEAR";
+    await saveStoryArtDirection(root, "demo-story", direction);
+    const story = testStory(); story.artwork.stylePrompt = "UNIQUE BOOK STYLE SHOULD NOT APPEAR"; await atomicWriteJson(storyPaths(root, "demo-story", 1).storyConfig, story);
+    const scene = planned.scenePlan!.scenes[0]!;
+    await visuals.updateScene("demo-story", id, scene.id, sceneEdit(scene, {
+      direction: { ...(scene.direction ?? {}), useStoryArtDirection: false, cameraAngle: "low_angle" },
+      overrides: { ...(scene.overrides ?? {}), customVisualPrompt: "UNIQUE SCENE PROMPT MUST APPEAR", customNegativePrompt: "UNIQUE SCENE NEGATIVE MUST APPEAR" },
+    }));
+    images.generate.mockClear();
+    await visuals.artwork("demo-story", id, { force: true, scenes: [scene.id] });
+    const request = images.generate.mock.calls[0]![0];
+    expect(request.prompt).not.toContain("UNIQUE STORY DIRECTION SHOULD NOT APPEAR");
+    expect(request.prompt).not.toContain("UNIQUE BOOK STYLE SHOULD NOT APPEAR");
+    expect(request.prompt).toContain("UNIQUE SCENE PROMPT MUST APPEAR");
+    expect(request.prompt).toContain("ENTITY VISUAL CANON");
+    expect(request.prompt).toContain("SCENE-STATE PRIORITY");
+    expect(request.negativePrompt).not.toContain("UNIQUE GLOBAL NEGATIVE SHOULD NOT APPEAR");
+    expect(request.negativePrompt).toContain("UNIQUE SCENE NEGATIVE MUST APPEAR");
   });
   it("saves summary art direction without provider calls and only invalidates scenes that inherit it", async () => {
     const planned = await produce();
@@ -366,12 +451,12 @@ describe("summary visual production", () => {
     const fallback = new SummaryVisualService(root, media, images, { version: "fake-video", render }, config);
     const result = await fallback.produce("demo-story", id, { sceneCount: 2 }); expect(result.alignment?.mode).toBe("estimated"); expect(result.scenePlan?.timingMethod).toBe("estimated"); expect(result.scenePlan?.scenes[1]?.startSeconds).toBe(6); expect(result.video?.durationSeconds).toBe(12);
   });
-  it("keeps artwork current for timing-only and voice changes and invalidates only video after an image change", async () => {
+  it("keeps artwork current for timing-only and voice changes and reconciles video against actual image fingerprints", async () => {
     const result = await produce(); const scenes = structuredClone(result.scenePlan!.scenes); scenes[0]!.endSeconds = 7; scenes[1]!.startSeconds = 7;
     await visuals.editScenes("demo-story", id, { scenes }); expect((await visuals.get("demo-story", id)).artwork?.status).toBe("current"); expect((await visuals.get("demo-story", id)).video?.status).toBe("stale");
     const reused = await produce(); expect(reused.scenePlan?.scenes[1]?.startSeconds).toBe(7); expect(images.generate).toHaveBeenCalledTimes(2);
     await visuals.video("demo-story", id); await visuals.artwork("demo-story", id, { force: true, scenes: ["scene-001"] });
-    expect(images.generate).toHaveBeenCalledTimes(3); expect(await visuals.get("demo-story", id)).toMatchObject({ narration: { status: "current" }, audio: { status: "current" }, scenes: { status: "current" }, video: { status: "stale" } });
+    expect(images.generate).toHaveBeenCalledTimes(3); expect(await visuals.get("demo-story", id)).toMatchObject({ narration: { status: "current" }, audio: { status: "current" }, scenes: { status: "current" }, video: { status: "current" } });
     const story = testStory(); story.pipeline.tts.referenceId = "other-voice"; await atomicWriteJson(storyPaths(root, "demo-story", 1).storyConfig, story);
     expect(await visuals.get("demo-story", id)).toMatchObject({ audio: { status: "stale" }, artwork: { status: "current" }, video: { status: "stale" } });
   });
@@ -491,7 +576,8 @@ describe("summary visual production", () => {
     const props = { summary, base: `/stories/demo-story/summaries/${id}`, disabled: false, onChange: () => {}, onGenerate: () => {}, onError: () => {} };
     const scenePanel = renderToStaticMarkup(<SummaryScenePanel {...props} />);
     expect(scenePanel).toContain("Regenerate scene"); expect(scenePanel).toContain("Save this scene"); expect(scenePanel).toContain("Save all scene edits"); expect(scenePanel).toContain("Revert changes");
-    expect(scenePanel).toContain("Summary Art Direction"); expect(scenePanel).toContain("No Story Art Direction"); expect(scenePanel).toContain("Advanced visual direction"); expect(scenePanel).toContain("Custom negative prompt");
+    expect(summaryArtDirectionChoiceOptions(createDefaultArtDirection()).map((option) => option.label)).toEqual(["Story Default · Main Style", "Preset · Main Style", "No Story Art Direction"]);
+    expect(scenePanel).toContain("Summary Art Direction"); expect(scenePanel).toContain("Story Default · Main Style"); expect(scenePanel).toContain("No Story Art Direction"); expect(scenePanel).toContain("Advanced visual direction"); expect(scenePanel).toContain("Custom negative prompt");
     expect(scenePanel).toContain("Image prompt only"); expect(scenePanel).toContain("Full visual direction");
     const artworkPanel = renderToStaticMarkup(<SummaryArtworkPanel {...props} />);
     expect(artworkPanel).toContain("Approve / retain"); expect(artworkPanel).toContain("Regenerate artwork from current saved scene"); expect(artworkPanel).toContain("Edit scene");

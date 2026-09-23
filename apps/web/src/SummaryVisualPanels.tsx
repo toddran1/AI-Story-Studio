@@ -21,6 +21,14 @@ function useActions(props: SummaryVisualProps) {
   return { run, disabled: props.disabled || pending, pending };
 }
 const clock = (seconds: number) => `${Math.floor(seconds / 60)}:${String(Math.floor(seconds % 60)).padStart(2, "0")}`;
+export function summaryArtDirectionChoiceOptions(direction?: StoryArtDirection) {
+  const defaultPreset = direction?.presets.find((preset) => preset.isDefault) ?? direction?.presets.find((preset) => preset.id === direction.activePresetId) ?? direction?.presets[0];
+  return [
+    { value: "story-default", label: `Story Default${defaultPreset ? ` · ${defaultPreset.name}` : ""}` },
+    ...(direction?.presets ?? []).map((preset) => ({ value: `preset:${preset.id}`, label: `Preset · ${preset.name}` })),
+    { value: "disabled", label: "No Story Art Direction" },
+  ];
+}
 
 export function SummaryScenePanel(props: SummaryVisualProps) {
   const { summary } = props; const { run, disabled, pending } = useActions(props);
@@ -127,11 +135,11 @@ export function SummaryScenePanel(props: SummaryVisualProps) {
     if (scene.overrides?.artDirectionMode === "story-default") return `Scene override · Story Default · ${defaultPreset?.name ?? "loading"}`;
     if (summaryDirection?.mode === "disabled") return "Inherits summary · No Story Art Direction";
     if (summaryDirection?.mode === "preset") return missingSummaryPreset ? `Inherits summary · missing preset (using Story Default)` : `Inherits summary · ${artDirection?.presets.find((preset) => preset.id === summaryDirection.presetId)?.name ?? "selected preset"}`;
-    return `Story Default · ${defaultPreset?.name ?? "loading"}`;
+    return summaryDirection?.mode === "story-default" || !summaryDirection ? `Story Default · ${defaultPreset?.name ?? "loading"}` : `Inherits summary · Story Default · ${defaultPreset?.name ?? "loading"}`;
   };
   const inheritedDirectionLabel = () => summaryDirection?.mode === "disabled" ? "No Story Art Direction" : summaryDirection?.mode === "preset" ? missingSummaryPreset ? "Missing summary preset (using Story Default)" : artDirection?.presets.find((preset) => preset.id === summaryDirection.presetId)?.name ?? "Summary preset" : `Story Default · ${defaultPreset?.name ?? "loading"}`;
   const directionOptions = (scene: Scene): Array<{ value: string; label: string }> => {
-    const options = [{ value: "inherit", label: `Inherit · ${inheritedDirectionLabel()}` }, { value: "story-default", label: `Story Default · ${defaultPreset?.name ?? "Main Style"}` }, ...(artDirection?.presets ?? []).map((preset) => ({ value: `preset:${preset.id}`, label: preset.name }))];
+    const options = [{ value: "inherit", label: `Inherit Summary · ${inheritedDirectionLabel()}` }, { value: "story-default", label: `Story Default · ${defaultPreset?.name ?? "Main Style"}` }, ...(artDirection?.presets ?? []).map((preset) => ({ value: `preset:${preset.id}`, label: `Preset · ${preset.name}` }))];
     const ownId = scene.overrides?.artDirectionPresetId;
     if (ownId && !artDirection?.presets.some((preset) => preset.id === ownId)) options.push({ value: `missing:${ownId}`, label: `Missing preset · ${ownId} (fallback)` });
     return options;
@@ -149,7 +157,7 @@ export function SummaryScenePanel(props: SummaryVisualProps) {
   const updateOverrides = (scene: Scene, patch: Partial<NonNullable<Scene["overrides"]>>) => edit(scene.id, { overrides: { ...overridesFor(scene), ...patch } });
   return <section className="summary-media-editor"><header><span className="eyebrow">Recap storyboard</span><h3>Scenes & timing</h3><p>Narration sets the beats. Canonical Story Bible identities guide the visuals.</p></header>
     <div className="summary-art-direction-control"><label>Summary Art Direction<select aria-label="Summary Art Direction" value={summaryDirectionValue} disabled={working || savingArtDirection || !artDirection} onChange={(event) => void saveSummaryDirection(event.target.value)}>
-      <option value="story-default">Story Default{defaultPreset ? ` · ${defaultPreset.name}` : ""}</option>{(artDirection?.presets ?? []).filter((preset) => preset.id !== defaultPreset?.id).map((preset) => <option key={preset.id} value={`preset:${preset.id}`}>{preset.name}</option>)}<option value="disabled">No Story Art Direction</option>{missingSummaryPreset && <option value={`preset:${summaryDirection.presetId}`}>Missing preset · {summaryDirection.presetId} (using Story Default)</option>}
+      {summaryArtDirectionChoiceOptions(artDirection).map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}{missingSummaryPreset && <option value={`preset:${summaryDirection.presetId}`}>Missing preset · {summaryDirection.presetId} (using Story Default)</option>}
     </select><small>Applies to scenes that inherit direction. A scene-specific preset takes precedence. Saving this setting does not call a provider.</small></label>{savingArtDirection && <span role="status">Saving art direction…</span>}</div>
     {missingSummaryPreset && <p className="summary-media-warning">The saved summary preset is missing. Affected scenes safely fall back to Story Default until you choose an available preset.</p>}{artDirectionError && <div className="error-box">{artDirectionError}</div>}
     <div className="summary-form-row"><label>Scene pacing<select value={pacing} onChange={(event) => setPacing(event.target.value as typeof pacing)}>{["automatic", "slow", "balanced", "fast", "custom"].map((value) => <option key={value} value={value}>{value[0]!.toUpperCase() + value.slice(1)}</option>)}</select></label>

@@ -201,7 +201,8 @@ export class SummaryVisualService {
         } else { if (references.mode === "none") references.mode = "text-only"; continuityReference.reason = "approved previous-scene image unavailable or outside reference budget; textual continuity retained"; }
       }
     }
-    const prompt = [resolved.prompt, context.story.artwork.stylePrompt?.trim() ? `BOOK ART STYLE: ${context.story.artwork.stylePrompt.trim()}` : "", references.images.length ? REFERENCE_USAGE_INSTRUCTION : ""].filter(Boolean).join("\n\n");
+    const bookStyle = effectiveDirection.source === "disabled" ? "" : context.story.artwork.stylePrompt?.trim() ? `BOOK ART STYLE: ${context.story.artwork.stylePrompt.trim()}` : "";
+    const prompt = [resolved.prompt, bookStyle, references.images.length ? REFERENCE_USAGE_INSTRUCTION : ""].filter(Boolean).join("\n\n");
     const { provider: pName, model, quality, aspectRatio, size, stylePrompt, outputFormat } = context.story.artwork;
     // Provenance keeps the attempted source and diagnostic reason. Fingerprints
     // include only the image actually sent; a text-only fallback has a stable
@@ -239,26 +240,45 @@ export class SummaryVisualService {
         entityVisual: resolved.entityVisualFingerprints,
         sceneDirection: resolved.sceneDirectionFingerprint,
         resolvedPrompt: resolved.resolvedPromptFingerprint,
-        settings: { provider: pName, model, quality, aspectRatio, size, stylePrompt, outputFormat },
+        settings: { provider: pName, model, quality, aspectRatio, size, ...(effectiveDirection.source === "disabled" ? {} : { stylePrompt }), outputFormat },
         providerVersion: context.provider.version,
       }),
     };
   }
   private videoFingerprint(summary: StorySummary, settings: unknown) { return fingerprint({ version: "summary-video-v1", audio: summary.audio?.outputFingerprint, scenes: summary.scenePlan?.scenes.filter((scene) => !scene.disabled).map((scene) => ({ id: scene.id, start: scene.startSeconds, end: scene.endSeconds, image: scene.artwork.imageFingerprint, review: scene.artwork.review })), settings, alignment: summary.alignment?.inputFingerprint, renderer: this.renderer.version }); }
-  async get(slug: string, id: string) {
-    const summary = await this.media.get(slug, id); const paths = this.paths(slug, id);
-    const continuity = await this.sceneContinuity(slug, id, summary.scenePlan?.scenes ?? []);
-    let intact = true;
-    for (const scene of summary.scenePlan?.scenes.filter((scene) => !scene.disabled) ?? []) {
-      const visual = continuity.get(scene.id); const input = await this.imageInput(slug, id, scene, visual?.text, visual?.decision, summary.artDirectionOverride); const actual = await validPngFingerprint(paths.image(scene.id));
-      if (scene.artwork.status !== "complete" || actual !== scene.artwork.imageFingerprint || !actual || scene.artwork.fingerprint !== input.inputFingerprint || ["rejected", "needs-regeneration"].includes(scene.artwork.review)) intact = false;
-    }
-    if (summary.artwork?.status === "current" && !intact) summary.artwork.status = "stale";
-    if (summary.artwork?.status === "stale" && intact) summary.artwork.status = "current";
+  private async sceneArtworkFreshness(slug: string, summary: StorySummary) {
+    const paths = this.paths(slug, summary.id);
+    const continuity = await this.sceneContinuity(slug, summary.id, summary.scenePlan?.scenes ?? []);
+    return new Map(await Promise.all((summary.scenePlan?.scenes ?? []).map(async (scene) => {
+      const visual = continuity.get(scene.id);
+      const input = await this.imageInput(slug, summary.id, scene, visual?.text, visual?.decision, summary.artDirectionOverride);
+      const actual = await validPngFingerprint(paths.image(scene.id));
+      const hasImage = Boolean(actual && scene.artwork.imageFingerprint === actual);
+      const current = hasImage && scene.artwork.status === "complete" && scene.artwork.fingerprint === input.inputFingerprint && !["rejected", "needs-regeneration"].includes(scene.artwork.review);
+      return [scene.id, { input, actual, hasImage, current }] as const;
+    })));
+  }
+  /** Reconcile visual freshness from the exact same generation inputs used by
+   * artwork production. This is metadata-only: it never calls a provider. */
+  async reconcileSummaryVisualFreshness(slug: string, summary: StorySummary, persist = false) {
+    const before = { artwork: summary.artwork?.status, video: summary.video?.status };
+    const paths = this.paths(slug, summary.id);
+    const freshness = await this.sceneArtworkFreshness(slug, summary);
+    const intact = (summary.scenePlan?.scenes.filter((scene) => !scene.disabled) ?? []).every((scene) => freshness.get(scene.id)?.current);
+    if ((summary.artwork?.status === "current" || summary.artwork?.status === "stale") && summary.scenePlan) summary.artwork.status = intact ? "current" : "stale";
     const { story } = await this.context(slug);
     const settings = { ...resolveVideoSettings(story.video), introDurationSeconds: 0 };
-    if (summary.video?.status === "current" && (summary.audio?.status !== "current" || summary.scenes?.status !== "current" || !intact || summary.video.inputFingerprint !== this.videoFingerprint(summary, settings) || summary.video.outputFingerprint !== await fileFingerprint(paths.video))) summary.video.status = "stale";
+    if (summary.video?.status === "current" || summary.video?.status === "stale") {
+      const videoCurrent = summary.audio?.status === "current" && summary.scenes?.status === "current" && intact &&
+        summary.video.inputFingerprint === this.videoFingerprint(summary, settings) && summary.video.outputFingerprint === await fileFingerprint(paths.video);
+      summary.video.status = videoCurrent ? "current" : "stale";
+    }
+    if (persist && (before.artwork !== summary.artwork?.status || before.video !== summary.video?.status)) await this.save(slug, summary);
     return summary;
+  }
+  async get(slug: string, id: string) {
+    const summary = await this.media.get(slug, id);
+    return this.reconcileSummaryVisualFreshness(slug, summary);
   }
   async align(slug: string, id: string, progress?: SummaryVisualProgress) {
     const summary = await this.media.get(slug, id); if (summary.audio?.status !== "current" || !summary.audio.durationSeconds || !summary.narration?.text) throw new Error("Current mastered summary audio is required for alignment");
@@ -351,13 +371,9 @@ export class SummaryVisualService {
   }
   async sceneArtworkGrounding(slug: string, id: string) {
     const summary = await this.media.get(slug, id);
-    const paths = this.paths(slug, id);
-    const continuity = await this.sceneContinuity(slug, id, summary.scenePlan?.scenes ?? []);
+    const freshness = await this.sceneArtworkFreshness(slug, summary);
     return Promise.all((summary.scenePlan?.scenes ?? []).map(async (scene) => {
-      const visual = continuity.get(scene.id); const input = await this.imageInput(slug, id, scene, visual?.text, visual?.decision, summary.artDirectionOverride);
-      const actual = await validPngFingerprint(paths.image(scene.id));
-      const hasImage = Boolean(actual && scene.artwork.imageFingerprint === actual);
-      const current = hasImage && scene.artwork.status === "complete" && scene.artwork.fingerprint === input.inputFingerprint;
+      const state = freshness.get(scene.id)!; const { input, hasImage, current } = state;
       const backing = backingArtworkVersion(scene);
       const recordedGrounding = backing?.provenance?.visualCanon;
       const recordedArtDirection = backing?.provenance?.artDirection;
