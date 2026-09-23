@@ -1,6 +1,6 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
-import { App, applyVideoResolutionPreset, ArtworkEstimateSummary, ArtworkVersionMetadata, artworkModelOptionsFor, CanonicalEntitySheet, chapterPageSize, chapterSceneStructureDirty, chapterScenesDirty, chapterVideoReadinessChecks, deleteChapterSceneDraft, moveChapterSceneDraft, toggleChapterSceneEnabledDraft, ChapterPage, chapterQaStatusView, chunkPresetFor, clearJobDismissal, clearJobMinimized, continuityReferenceTriState, describeContinuityReference, dismissJob, EntityStatusField, ErrorBoundary, EXECUTABLE_CHAPTER_STAGES, getStageActionDetails, humanizeContinuityChanges, isJobConsoleMinimized, isJobDismissed, isTerminalJob, JobConsole, paginateRows, Pagination, PreviousHandoffBadge, QaDetail, QaFindingCard, QaResolvedFindings, resolvedBehaviorSummary, ResolvedBehaviorHint, reupscaleAvailable, SceneContinuityPanel, ScenesPage, setJobConsoleMinimized, SettingsPage, shouldRefreshAfterJob, Status, TtsQualityBadge, TtsSegmentRow, VIDEO_RESOLUTION_PRESETS, videoResolutionFor } from "../apps/web/src/App.js";
+import { App, applyVideoResolutionPreset, ArtworkEstimateSummary, ArtworkVersionMetadata, artworkModelOptionsFor, CanonicalEntitySheet, canDeleteChapterSceneDraft, chapterPageSize, chapterSceneStructureDirty, chapterScenesDirty, chapterVideoReadinessChecks, deleteChapterSceneDraft, moveChapterSceneDraft, toggleChapterSceneEnabledDraft, ChapterPage, chapterQaStatusView, chunkPresetFor, clearJobDismissal, clearJobMinimized, continuityReferenceTriState, describeContinuityReference, dismissJob, EntityStatusField, ErrorBoundary, EXECUTABLE_CHAPTER_STAGES, getStageActionDetails, humanizeContinuityChanges, isJobConsoleMinimized, isJobDismissed, isTerminalJob, JobConsole, paginateRows, Pagination, PreviousHandoffBadge, QaDetail, QaFindingCard, QaResolvedFindings, resolvedBehaviorSummary, ResolvedBehaviorHint, reupscaleAvailable, SceneContinuityPanel, ScenesPage, setJobConsoleMinimized, SettingsPage, shouldRefreshAfterJob, Status, TtsQualityBadge, TtsSegmentRow, VIDEO_RESOLUTION_PRESETS, videoResolutionFor } from "../apps/web/src/App.js";
 import { api, ApiError } from "../apps/web/src/api.js";
 import type { ArtworkVersion, ChapterDetail, Job, QaFinding, Scene, TtsQualityArtifact, TtsSegmentQuality, VideoSettings, VisualContinuityChange } from "../apps/web/src/api.js";
 import { pretty } from "../apps/web/src/format.js";
@@ -491,6 +491,41 @@ describe("web UI", () => {
     expect(deleted.map((scene) => scene.id)).toEqual(["scene-001"]);
     expect(deleted[0]).toMatchObject({ startSeconds: 0, endSeconds: 30, artwork: scenes[0]!.artwork });
     expect(chapterScenesDirty(deleted, scenes)).toBe(true);
+
+    const enabledAndDisabled: Scene[] = [scenes[0]!, { ...scenes[1]!, disabled: true }];
+    const enabledAndDisabledTiming = enabledAndDisabled.map(({ id, startSeconds, endSeconds }) => ({ id, startSeconds, endSeconds }));
+    expect(canDeleteChapterSceneDraft(enabledAndDisabled, "scene-001")).toBe(false);
+    expect(canDeleteChapterSceneDraft(enabledAndDisabled, "scene-002")).toBe(true);
+    const rejectedEnabledDelete = deleteChapterSceneDraft(enabledAndDisabled, "scene-001", true, 30, sceneSettings);
+    expect(rejectedEnabledDelete).toBe(enabledAndDisabled);
+    expect(rejectedEnabledDelete.map(({ id, startSeconds, endSeconds }) => ({ id, startSeconds, endSeconds }))).toEqual(enabledAndDisabledTiming);
+    expect(rejectedEnabledDelete.map((scene) => scene.id)).toEqual(["scene-001", "scene-002"]);
+    expect(rejectedEnabledDelete[0]!.artwork).toBe(enabledAndDisabled[0]!.artwork);
+    const removedDisabled = deleteChapterSceneDraft(enabledAndDisabled, "scene-002", true, 30, sceneSettings);
+    expect(removedDisabled.map((scene) => scene.id)).toEqual(["scene-001"]);
+    expect(removedDisabled[0]).toMatchObject({ startSeconds: 0, endSeconds: 30 });
+    expect(removedDisabled[0]).not.toHaveProperty("disabled");
+
+    const oneEnabledTwoDisabled: Scene[] = [
+      scenes[0]!,
+      { ...scenes[1]!, id: "scene-003", disabled: true },
+      { ...scenes[1]!, id: "scene-004", disabled: true },
+    ];
+    expect(canDeleteChapterSceneDraft(oneEnabledTwoDisabled, "scene-001")).toBe(false);
+    for (const disabledId of ["scene-003", "scene-004"]) {
+      expect(canDeleteChapterSceneDraft(oneEnabledTwoDisabled, disabledId)).toBe(true);
+      const cleaned = deleteChapterSceneDraft(oneEnabledTwoDisabled, disabledId, true, 30, sceneSettings);
+      expect(cleaned.map((scene) => scene.id)).not.toContain(disabledId);
+      expect(cleaned.some((scene) => !scene.disabled)).toBe(true);
+    }
+
+    for (const sceneId of ["scene-001", "scene-002"]) {
+      expect(canDeleteChapterSceneDraft(scenes, sceneId)).toBe(true);
+      const remaining = deleteChapterSceneDraft(scenes, sceneId, true, 30, sceneSettings);
+      expect(remaining.some((scene) => !scene.disabled)).toBe(true);
+      expect(remaining[0]!.startSeconds).toBe(0);
+      expect(remaining.at(-1)!.endSeconds).toBe(30);
+    }
     const weightedScenes: Scene[] = [
       { ...scenes[0]!, startSeconds: 0, endSeconds: 10 },
       { ...scenes[1]!, startSeconds: 10, endSeconds: 20, id: "scene-003" },
@@ -509,6 +544,7 @@ describe("web UI", () => {
     const markupScenes = [scenes[0]!, { ...scenes[1]!, disabled: true }];
     const markup = renderToStaticMarkup(<ScenesPage slug="demo-story" onJob={() => undefined} initialData={{ settings: { targetDurationSeconds: 20, minimumDurationSeconds: 10, maximumDurationSeconds: 30, maximumScenesPerChapter: 50 }, artwork: { provider: "openai", model: "fake", stylePrompt: "style", aspectRatio: "16:9", quality: "medium", size: "1536x1024", outputFormat: "png", outputResolution: "native", upscaling: "off", upscaler: "local-realesrgan" }, planner: { provider: "openai", model: "fake" }, videoSubtitleMode: "burn", selectedChapter: 1, chapters: [], counts: { chapters: 1, planned: 1, artworkReady: 1 }, manifest: { version: 1, chapter: 1, durationSeconds: 30, planningFingerprint: "x", manualRevision: 0, manuallyEdited: false, updatedAt: new Date().toISOString(), scenes: markupScenes } } as any} />);
     expect(markup).toContain("Move up"); expect(markup).toContain("Move down"); expect(markup).toContain("Enable"); expect(markup).toContain("Delete scene"); expect(markup).toContain("Save all scene edits"); expect(markup).toContain("Produce this chapter");
+    expect(markup).toMatch(/title="A chapter must keep at least one scene and at least one enabled scene\." disabled=""[^>]*>Delete scene/);
   });
 
   it("shows Chapter video readiness from existing availability and freshness without providers", () => {

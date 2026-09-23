@@ -2005,9 +2005,16 @@ export function toggleChapterSceneEnabledDraft(scenes: Scene[], sceneId: string)
   return scenes.map((item) => item.id === sceneId ? { ...item, disabled: !item.disabled } : item);
 }
 
+export function canDeleteChapterSceneDraft(scenes: Scene[], sceneId: string) {
+  if (scenes.length <= 1 || !scenes.some((item) => item.id === sceneId)) return false;
+  const remaining = scenes.filter((item) => item.id !== sceneId);
+  return enabledProductionScenes(remaining).length > 0;
+}
+
 export function deleteChapterSceneDraft(scenes: Scene[], sceneId: string, confirmed: boolean, durationSeconds: number, settings: SceneSettings) {
-  if (!confirmed || scenes.length <= 1 || !scenes.some((item) => item.id === sceneId)) return scenes;
-  return retimeScenesToDuration(scenes.filter((item) => item.id !== sceneId), durationSeconds, settings);
+  if (!confirmed || !canDeleteChapterSceneDraft(scenes, sceneId)) return scenes;
+  const remaining = scenes.filter((item) => item.id !== sceneId);
+  return retimeScenesToDuration(remaining, durationSeconds, settings);
 }
 
 export function chapterVideoReadinessChecks(chapter: ScenesDashboard["chapters"][number] | undefined, manifest: Array<Scene & { imageUrl?: string }> | undefined, manifestStale: boolean | undefined, subtitleMode: VideoSettings["subtitleMode"]): ReadinessCheck[] {
@@ -2665,7 +2672,7 @@ export function ScenesPage({ slug, onJob, navigate, initialData }: { slug: strin
                       <button type="button" className="button small" disabled={saving || Boolean(savingSceneId) || Boolean(regeneratingSceneId) || draftIndex === 0} onClick={() => { setChapterProductionPlan(undefined); setDraft((current) => moveChapterSceneDraft(current, scene.id, -1)); }}>Move up</button>
                       <button type="button" className="button small" disabled={saving || Boolean(savingSceneId) || Boolean(regeneratingSceneId) || draftIndex === draft.length - 1} onClick={() => { setChapterProductionPlan(undefined); setDraft((current) => moveChapterSceneDraft(current, scene.id, 1)); }}>Move down</button>
                       <button type="button" className="button small" disabled={saving || Boolean(savingSceneId) || Boolean(regeneratingSceneId) || (!scene.disabled && enabledProductionScenes(draft).length <= 1)} onClick={() => { setChapterProductionPlan(undefined); setDraft((current) => toggleChapterSceneEnabledDraft(current, scene.id)); }}>{scene.disabled ? "Enable" : "Disable"}</button>
-                      <button type="button" className="button small" disabled={saving || Boolean(savingSceneId) || Boolean(regeneratingSceneId) || draft.length <= 1} onClick={() => { const confirmed = confirm("Delete this visual beat from the chapter scene plan? Existing immutable artwork files are not automatically destroyed."); if (!confirmed || !data.manifest) return; try { const next = deleteChapterSceneDraft(draft, scene.id, confirmed, data.manifest.durationSeconds, data.settings); setChapterProductionPlan(undefined); setDraft(next); setSelectedSceneIds((current) => current.filter((id) => id !== scene.id)); setError(""); } catch (cause) { setError(message(cause)); } }}>Delete scene</button>
+                      <button type="button" className="button small" title={!canDeleteChapterSceneDraft(draft, scene.id) ? "A chapter must keep at least one scene and at least one enabled scene." : undefined} disabled={saving || Boolean(savingSceneId) || Boolean(regeneratingSceneId) || !canDeleteChapterSceneDraft(draft, scene.id)} onClick={() => { const confirmed = confirm("Delete this visual beat from the chapter scene plan? Existing immutable artwork files are not automatically destroyed."); if (!confirmed || !data.manifest) return; try { const next = deleteChapterSceneDraft(draft, scene.id, confirmed, data.manifest.durationSeconds, data.settings); setChapterProductionPlan(undefined); setDraft(next); setSelectedSceneIds((current) => current.filter((id) => id !== scene.id)); setError(""); } catch (cause) { setError(message(cause)); } }}>Delete scene</button>
                     </div>
                     {sceneErrors[scene.id] && <div className="error-box" role="alert">{sceneErrors[scene.id]}</div>}
                     {sceneProposal?.sceneId === scene.id && <div className="summary-scene-proposal"><strong>Regeneration proposal · {sceneProposal.mode === "image_prompt" ? "Image prompt only" : "Full visual direction"}</strong><small>{sceneProposal.provider} · {sceneProposal.model} · Preview only; saved scene unchanged.</small>
