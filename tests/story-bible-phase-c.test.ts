@@ -85,6 +85,9 @@ describe("naming collision detection", () => {
     expect(health.issues.namingCollisions).toBe(1);
     const review = await getStoryBibleReview(root, story.slug, { kind: "naming", page: 1, pageSize: 50 });
     expect(review.items).toHaveLength(1);
+    expect(review.openTotal).toBe(1);
+    expect(review.items[0]!.lifecycle).toBe("derived");
+    expect((await getStoryBibleReview(root, story.slug, { status: "resolved", page: 1, pageSize: 50 })).items).toEqual([]);
     expect(review.items[0]!.severity).toBe("warn");
     expect(review.items[0]!.entityIds).toEqual(expect.arrayContaining([a.id, b.id]));
     expect(review.items[0]!.action.href).toBe(`/stories/${story.slug}/bible?entity=${a.id}`);
@@ -136,6 +139,22 @@ async function usageFixture() {
 }
 
 describe("entity usage endpoint", () => {
+  it("counts open review rows while resolved filtering retains only stateful history", async () => {
+    const { root, story, target } = await usageFixture();
+    const open = await getStoryBibleReview(root, story.slug, { status: "open", page: 1, pageSize: 1 });
+    expect(open.openTotal).toBe(open.total);
+    expect(open.items).toHaveLength(1);
+    expect(open.pages).toBe(open.total);
+    const resolved = await getStoryBibleReview(root, story.slug, { status: "resolved", page: 1, pageSize: 50 });
+    expect(resolved.items).toEqual([]);
+    const paths = storyPaths(root, story.slug, 1);
+    const review = continuityReviewSchema.parse({ version: 1, analyzedThroughChapter: 3, inputFingerprint: "x", updatedAt: new Date().toISOString(), findings: [{ id: `ctf_${"e1".padEnd(24, "0")}`, type: "status_conflict", severity: "critical", entityIds: [target.id], chapters: [1, 2], explanation: "Appears after death without resurrection.", supportingFacts: [{ entityId: target.id, chapter: 1, summary: "Died.", provenanceKind: "event" }], evidenceFingerprint: "e1", status: "intentional" }] });
+    await atomicWriteJson(paths.continuityReview, review);
+    const after = await getStoryBibleReview(root, story.slug, { status: "resolved", page: 1, pageSize: 50 });
+    expect(after.items).toHaveLength(1);
+    expect(after.items[0]).toMatchObject({ kind: "continuity", lifecycle: "stateful", status: "resolved" });
+    expect((await getStoryBibleReview(root, story.slug, { status: "open", page: 1, pageSize: 50 })).items.some((item) => item.id === after.items[0]!.id)).toBe(false);
+  });
   it("aggregates provenance, QA, continuity, scene, and visual profile uses with real excerpts and hrefs", async () => {
     const { root, story, target } = await usageFixture();
     const usage = await getCanonicalEntityUsage(root, story.slug, target.id, { page: 1, pageSize: 50 });

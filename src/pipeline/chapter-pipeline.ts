@@ -31,7 +31,7 @@ import { migrateQaState } from "../qa/findings.js";
 import { runDeterministicQaChecks } from "../qa/deterministic.js";
 import { exceptionsPromptSection, filterExceptedFindings, listQaExceptions } from "../qa/exceptions.js";
 import { mergeStoryBible, normalizeStoryBibleUpdate } from "../story-bible/updater.js";
-import { backfillCanonicalSnapshots } from "../story-bible/canonical.js";
+import { backfillCanonicalSnapshots, loadStoryBibleWithCanonicalOverlay } from "../story-bible/canonical.js";
 import { rebuildStoryBibleBeforeChapter } from "../story-bible/rebuild.js";
 import { PipelineError, QualityGateError } from "./errors.js";
 import { AudioMasteringProcessor, FfmpegMasteringProcessor } from "../audio/mastering.js";
@@ -218,7 +218,7 @@ export class ChapterPipeline {
       const priorQaRaw = await readJsonIfExists(paths.qa);
       const previous = priorQaRaw ? migrateQaState(priorQaRaw, { chapter: options.chapter }) : undefined;
       const { state } = buildQaState(previous, filterExceptedFindings([...deterministic.detections, ...result.value.issues], exceptions), {
-        chapter: options.chapter, canonicalEntities: qaContext.parsed.canonicalEntities, translation: english, narration,
+        chapter: options.chapter, canonicalEntities: qaContext.parsed.canonicalEntities, effectiveNamingEntities: (await loadStoryBibleWithCanonicalOverlay(options.root, options.story.slug)).canonicalEntities, translation: english, narration,
         baseScore: { score: result.value.score, originalScore: result.value.originalScore, status: result.value.status, originalStatus: result.value.originalStatus },
         mode: options.story.qaMode,
         acceptedContinuity: deterministic.acceptedContinuity,

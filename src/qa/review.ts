@@ -18,7 +18,8 @@ import { QA_PROMPT_VERSION } from "./prompts.js";
 import { validateChapterQuality } from "./validator.js";
 import { runDeterministicQaChecks, type AcceptedContinuity } from "./deterministic.js";
 import { exceptionsPromptSection, filterExceptedFindings, listQaExceptions } from "./exceptions.js";
-import { loadNarrationNamingEntities } from "../story-bible/narration-names.js";
+import { loadStoryBibleWithCanonicalOverlay } from "../story-bible/canonical.js";
+import { authorizedNarrationNames } from "../narration/naming-preferences.js";
 
 export type FreshQaDetection = {
   category: QaCategory;
@@ -112,6 +113,29 @@ function wrongTermAbsent(finding: QaFinding, content: string): boolean {
   return normalized.length > 0 && !normalized.includes(wrong);
 }
 
+/** An old naming objection can be retired only when its disputed term and
+ * identity both resolve uniquely to an explicit current Story Bible rule. */
+function authorizedNamingObjection(finding: Pick<QaFinding, "category" | "message" | "evidence" | "provenance">, entities: StoryBible["canonicalEntities"]): { entity: string; used: string } | undefined {
+  if (finding.category !== "names" || !entities.length) return undefined;
+  const relation = finding.provenance?.relation ?? extractNameRelation(finding);
+  const [wrong, right] = relation?.split(">") ?? [];
+  const identityNames = (entity: StoryBible["canonicalEntities"][number]) => [entity.canonicalName, entity.originalName, ...entity.aliases].map(normalizeQaText);
+  const anchors = finding.provenance?.entityIds ?? [];
+  const candidates = entities.filter((entity) => anchors.length ? anchors.includes(entity.id) : right && identityNames(entity).includes(right));
+  if (candidates.length !== 1) return undefined;
+  const entity = candidates[0]!;
+  if (right && !identityNames(entity).includes(right)) return undefined;
+  const sourceName = right ? [entity.canonicalName, entity.originalName, ...entity.aliases].find((name) => normalizeQaText(name) === right) : undefined;
+  const allowed = authorizedNarrationNames(entity, sourceName);
+  const quoted = [...`${finding.message}\n${finding.evidence}`.matchAll(/["“]([^"”]{2,300})["”]/g)].map((match) => normalizeQaText(match[1]!));
+  const disputed = wrong || (/(?:unauthori[sz]ed|improperly|incorrectly|wrong(?:ly)?|renam)/i.test(`${finding.message} ${finding.evidence}`)
+    ? allowed.map(normalizeQaText).find((name) => quoted.includes(name)) : undefined);
+  if (!disputed || !allowed.some((name) => normalizeQaText(name) === disputed)) return undefined;
+  // A name shared with another identity cannot prove which entity the finding concerns.
+  if (entities.some((other) => other.id !== entity.id && [...identityNames(other), ...authorizedNarrationNames(other).map(normalizeQaText)].includes(disputed))) return undefined;
+  return { entity: entity.canonicalName, used: allowed.find((name) => normalizeQaText(name) === disputed)! };
+}
+
 /** True when the content a recheck actually evaluated plausibly covers the finding's anchored region. */
 function anchorCoveredByEvaluation(finding: QaFinding, evaluatedContent: string, entities: StoryBible["canonicalEntities"]): boolean {
   const normalized = normalizeQaText(evaluatedContent);
@@ -149,6 +173,7 @@ export function reconcileQaState(
     now?: string;
     chapter?: number;
     canonicalEntities?: StoryBible["canonicalEntities"];
+    effectiveNamingEntities?: StoryBible["canonicalEntities"];
     paragraphs?: string[];
     content?: string;
     /** QA dependency fingerprint this reconciliation verifies against. */
@@ -160,6 +185,7 @@ export function reconcileQaState(
   const now = options.now ?? new Date().toISOString();
   const chapter = options.chapter ?? previous?.findings.find((finding) => finding.provenance?.chapter)?.provenance?.chapter ?? 0;
   const entities = options.canonicalEntities ?? [];
+  const namingEntities = options.effectiveNamingEntities ?? [];
   const outcome: ReconcileOutcome = { verified: 0, respected: 0, reopened: 0, newFindings: 0, obsoleted: 0 };
   const findings = (previous?.findings ?? []).map((finding) => ({ ...finding }));
   const unmatched = new Map(findings.map((finding) => [finding.id, finding]));
@@ -197,7 +223,7 @@ export function reconcileQaState(
   };
 
   for (const detection of freshDetections) {
-    const anchor = anchorFromIssue(detection, { canonicalEntities: entities, paragraphs: options.paragraphs });
+    const anchor = anchorFromIssue(detection, { canonicalEntities: detection.category === "names" && namingEntities.length ? namingEntities : entities, paragraphs: options.paragraphs });
     if (detection.entityIds?.length) anchor.entityIds = [...new Set([...(anchor.entityIds ?? []), ...detection.entityIds])];
     if (detection.ruleKey) anchor.ruleKey = detection.ruleKey;
     const id = computeFindingId(detection.category, chapter, anchor);
@@ -247,11 +273,13 @@ export function reconcileQaState(
       // a covered recheck that did not re-fire the rule is proof of absence even
       // when the anchor text remains (e.g. the rule itself was removed).
       const verifiedAbsent = anchorGone || prior.origin === "deterministic";
-      if (dependenciesChanged && covered && verifiedAbsent) {
+      const authorized = covered ? authorizedNamingObjection(prior, namingEntities) : undefined;
+      if ((dependenciesChanged && covered && verifiedAbsent) || authorized) {
         prior.status = "obsolete";
         prior.resolution = {
           action: "obsolete", resolvedAt: now,
-          ...(options.dependencyFingerprint ? { reason: "Verified absent after the QA dependency fingerprint changed" } : {}),
+          ...(authorized ? { reason: `Obsolete because the current Story Bible explicitly authorizes “${authorized.used}” as the narration name for ${authorized.entity}.` }
+            : options.dependencyFingerprint ? { reason: "Verified absent after the QA dependency fingerprint changed" } : {}),
         };
         prior.lastVerifiedAt = now;
         stampVerification(prior);
@@ -351,6 +379,7 @@ export function buildQaState(
   options: {
     chapter: number;
     canonicalEntities?: StoryBible["canonicalEntities"];
+    effectiveNamingEntities?: StoryBible["canonicalEntities"];
     translation: string;
     narration: string;
     now?: string;
@@ -365,6 +394,7 @@ export function buildQaState(
   const acceptedContinuity = options.acceptedContinuity ?? [];
   const prepared: FreshQaDetection[] = [];
   for (const detection of detections) {
+    if (detection.category === "names" && options.effectiveNamingEntities?.length && authorizedNamingObjection({ ...detection, provenance: detection.entityIds?.length ? { entityIds: detection.entityIds } : undefined }, options.effectiveNamingEntities)) continue;
     if (detection.category === "storyConsistency" && (detection.origin ?? "llm") === "llm" && acceptedContinuity.length) {
       const anchor = anchorFromIssue(detection, { canonicalEntities: options.canonicalEntities, paragraphs });
       const related = acceptedContinuity.filter((accepted) => relatesToContinuity(detection, anchor, accepted));
@@ -385,6 +415,7 @@ export function buildQaState(
     now: options.now,
     chapter: options.chapter,
     canonicalEntities: options.canonicalEntities,
+    effectiveNamingEntities: options.effectiveNamingEntities,
     paragraphs,
     content: `${options.translation}\n\n${options.narration}`,
     dependencyFingerprint: options.dependencyFingerprint,
@@ -575,9 +606,10 @@ export async function recheckChapterQa(deps: {
     loadQaDeterministicDependencies(root, story.slug),
   ]);
   const config = story.pipeline.qa;
+  const effectiveNamingEntities = (await loadStoryBibleWithCanonicalOverlay(root, story.slug)).canonicalEntities;
   const result = await validateChapterQuality(provider, config, {
     chapter, sourceLanguage: story.sourceLanguage, outputLanguage: story.outputLanguage,
-    source, translation, narration, context, authorizedNarrationEntities: await loadNarrationNamingEntities(root, story.slug),
+    source, translation, narration, context, authorizedNarrationEntities: effectiveNamingEntities.filter((entity) => entity.localizedNaming || entity.preferredNarrationName || entity.aliasNarrationRules.length),
     profanityMode: story.narrationSettings.profanityMode, includeChapterTitle: story.narrationSettings.includeChapterTitle !== false,
     previousFindingsContext,
     exceptionsContext: exceptionsPromptSection(exceptions),
@@ -601,7 +633,7 @@ export async function recheckChapterQa(deps: {
   const fullContent = `${translation}\n\n${narration}`;
   const detections = filterExceptedFindings([...deterministic.detections, ...result.value.issues], exceptions);
   const { state, outcome } = buildQaState(previous, detections, {
-    chapter, canonicalEntities: context.canonicalEntities, translation, narration, now: deps.now,
+    chapter, canonicalEntities: context.canonicalEntities, effectiveNamingEntities, translation, narration, now: deps.now,
     baseScore: { score: result.value.score, originalScore: result.value.originalScore, status: result.value.status, originalStatus: result.value.originalStatus },
     mode: story.qaMode,
     acceptedContinuity: deterministic.acceptedContinuity,

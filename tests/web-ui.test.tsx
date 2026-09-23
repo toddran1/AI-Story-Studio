@@ -2310,11 +2310,12 @@ describe("Milestone 23 — image output quality UI", () => {
 
 describe("story bible review desk (phase A)", () => {
   it("renders the Story Bible Health card with prominent non-zero counts and the stale extraction line", () => {
-    const html = renderToStaticMarkup(<StoryBibleHealthCard health={{ totals: { canonicalEntities: 42, minorReferences: 7, needsAttention: 3 }, issues: { duplicateCandidates: 2, continuityOpen: 1, visualProfileIssues: 0, pronunciationNeedsReview: 0, staleExtractionChapters: 5, cleanupRecommendations: 4 } }} onReviewAll={() => undefined} onOpenCleanup={() => undefined} />);
+    const html = renderToStaticMarkup(<StoryBibleHealthCard health={{ totals: { canonicalEntities: 42, minorReferences: 7, needsAttention: 3 }, issues: { duplicateCandidates: 2, namingCollisions: 1, continuityOpen: 1, visualProfileIssues: 0, pronunciationNeedsReview: 0, staleExtractionChapters: 5, cleanupRecommendations: 4 } }} onReviewAll={() => undefined} onOpenCleanup={() => undefined} />);
     expect(html).toContain("Story Bible Health");
     expect(html).toContain("3 entities need attention");
     expect(html).toContain("<b>42</b> canonical entities");
     expect(html).toContain("<b>2</b> duplicate candidates");
+    expect(html).toContain("<b>1</b> naming collisions");
     expect(html).toContain("<b>1</b> open continuity findings");
     expect(html).toContain("5 chapters have stale Story Bible extraction");
     expect(html).toContain("Review all issues");
@@ -2332,7 +2333,8 @@ describe("story bible review desk (phase A)", () => {
     expect(html).toContain("Possible duplicate: Su Ming ↔ Ming");
     expect(html).toContain("Duplicate detection");
     expect(html).toContain("Compare &amp; merge");
-    expect(html).toContain("Open continuity");
+    expect(html).toContain('aria-label="Review status"');
+    expect(html).toContain('<option value="resolved">Resolved</option>');
   });
   it("parses and rebuilds bible page query state, including the entity deep link", () => {
     const parsed = parseBibleQuery("?tab=review&type=character&q=su&sort=name&readiness=needs-attention&entity=ent_0123456789abcdef01234567&page=3");

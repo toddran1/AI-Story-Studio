@@ -1,3 +1,5 @@
+import type { CanonicalEntity } from "../domain/story-bible.js";
+
 type NamingRule = { alias?: unknown; behavior?: unknown; replacement?: unknown };
 type NamingEntity = {
   canonicalName?: unknown;
@@ -59,3 +61,23 @@ function stringValue(value: unknown): string | undefined {
 }
 
 function escapeRegExp(value: string): string { return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); }
+
+/** Explicit current narration renderings for one identity. Manual localization
+ * requires editorial notes, so it cannot prove a form by itself. */
+export function authorizedNarrationNames(entity: CanonicalEntity, sourceName?: string): string[] {
+  const names: string[] = [];
+  const localized = entity.localizedNaming;
+  const source = sourceName?.trim().toLocaleLowerCase();
+  const sourceRule = source ? entity.aliasNarrationRules.find((rule) => rule.alias.toLocaleLowerCase() === source) : undefined;
+  if (sourceRule?.behavior === "custom") return sourceRule.replacement ? [sourceRule.replacement] : [];
+  if (localized) {
+    if (localized.usageMode !== "manual" && sourceRule?.behavior !== "no_override") {
+      if (localized.usageMode !== "always_short" && localized.fullName) names.push(localized.fullName);
+      if (localized.usageMode !== "always_full" && localized.shortName) names.push(localized.shortName);
+    }
+  } else if (entity.preferredNarrationName && sourceRule?.behavior !== "no_override") names.push(entity.preferredNarrationName);
+  for (const rule of entity.aliasNarrationRules) {
+    if (source === rule.alias.toLocaleLowerCase() && rule.behavior === "custom" && rule.replacement) names.push(rule.replacement);
+  }
+  return [...new Set(names.map((name) => name.trim()).filter(Boolean))];
+}

@@ -100,6 +100,43 @@ describe("finding identity", () => {
 });
 
 describe("reconcileQaState outcome matrix", () => {
+  it.each([
+    { label: "preferred", patch: { preferredNarrationName: "Vega Treasures Pavilion" } },
+    { label: "localized full", patch: { localizedNaming: { locale: "en-US", fullName: "Vega Treasures Pavilion", usageMode: "always_full" } } },
+    { label: "localized short", patch: { localizedNaming: { locale: "en-US", shortName: "Vega Treasures Pavilion", usageMode: "always_short" } } },
+  ])("retires an old naming objection when $label explicitly authorizes the narration term", ({ patch }) => {
+    const historical = storyBibleSchema.parse({ ...emptyStoryBible(), canonicalEntities: [{ id: "ent_aaaaaaaaaaaaaaaaaaaaaaaa", type: "organization", canonicalName: "Hundred Treasures Pavilion", originalName: "百宝阁", aliases: ["The Pavilion"], firstAppearance: 1, lastKnownAppearance: 3 }] }).canonicalEntities;
+    const current = storyBibleSchema.parse({ ...emptyStoryBible(), canonicalEntities: [{ ...historical[0], ...patch }] }).canonicalEntities;
+    const issue = detection({ category: "names", message: "The narration improperly renames Hundred Treasures Pavilion as Vega Treasures Pavilion.", evidence: 'Narration says "Vega Treasures Pavilion" rather than "Hundred Treasures Pavilion".' });
+    const first = buildQaState(undefined, [issue], { chapter: 3, canonicalEntities: historical, translation: "Hundred Treasures Pavilion", narration: "Vega Treasures Pavilion", dependencyFingerprint: "old", now: NOW }).state;
+    const result = buildQaState(first, [], { chapter: 3, canonicalEntities: historical, effectiveNamingEntities: current, translation: "Hundred Treasures Pavilion", narration: "Vega Treasures Pavilion", dependencyFingerprint: "new", now: NOW });
+    expect(result.state.findings[0]!.status).toBe("obsolete");
+    expect(result.state.findings[0]!.resolution?.reason).toContain("explicitly authorizes");
+    expect(result.state.issues).toEqual([]);
+    const repeated = buildQaState(first, [issue], { chapter: 3, canonicalEntities: historical, effectiveNamingEntities: current, translation: "Hundred Treasures Pavilion", narration: "Vega Treasures Pavilion", dependencyFingerprint: "new", now: NOW });
+    expect(repeated.state.findings[0]!.status).toBe("obsolete");
+    expect(repeated.state.findings).toHaveLength(1);
+  });
+
+  it("preserves naming objections without unique, explicit current authority", () => {
+    const historical = storyBibleSchema.parse({ ...emptyStoryBible(), canonicalEntities: [{ id: "ent_aaaaaaaaaaaaaaaaaaaaaaaa", type: "organization", canonicalName: "Hundred Treasures Pavilion", originalName: "百宝阁", firstAppearance: 1, lastKnownAppearance: 3 }] }).canonicalEntities;
+    const issue = detection({ category: "names", message: "The narration improperly renames Hundred Treasures Pavilion as Vega Treasures Pavilion.", evidence: 'Narration says "Vega Treasures Pavilion".' });
+    const first = buildQaState(undefined, [issue], { chapter: 3, canonicalEntities: historical, translation: "Hundred Treasures Pavilion", narration: "Vega Treasures Pavilion", now: NOW }).state;
+    for (const current of [historical, storyBibleSchema.parse({ ...emptyStoryBible(), canonicalEntities: [{ ...historical[0], preferredNarrationName: "Another Pavilion" }] }).canonicalEntities, storyBibleSchema.parse({ ...emptyStoryBible(), canonicalEntities: [{ ...historical[0], preferredNarrationName: "Vega Treasures Pavilion" }, { ...historical[0], id: "ent_bbbbbbbbbbbbbbbbbbbbbbbb", canonicalName: "Vega Treasures Pavilion" }] }).canonicalEntities]) {
+      const result = buildQaState(first, [], { chapter: 3, canonicalEntities: historical, effectiveNamingEntities: current, translation: "Hundred Treasures Pavilion", narration: "Vega Treasures Pavilion", now: NOW });
+      expect(result.state.findings[0]!.status).toBe("open");
+    }
+  });
+
+  it("requires the source alias for a custom replacement", () => {
+    const historical = storyBibleSchema.parse({ ...emptyStoryBible(), canonicalEntities: [{ id: "ent_aaaaaaaaaaaaaaaaaaaaaaaa", type: "organization", canonicalName: "Hundred Treasures Pavilion", originalName: "百宝阁", aliases: ["The Pavilion"], firstAppearance: 1, lastKnownAppearance: 3 }] }).canonicalEntities;
+    const current = storyBibleSchema.parse({ ...emptyStoryBible(), canonicalEntities: [{ ...historical[0], aliasNarrationRules: [{ alias: "The Pavilion", behavior: "custom", replacement: "Vega Treasures Pavilion" }] }] }).canonicalEntities;
+    const issue = detection({ category: "names", message: "The narration renames The Pavilion as Vega Treasures Pavilion.", evidence: 'Narration says "Vega Treasures Pavilion".' });
+    const first = buildQaState(undefined, [issue], { chapter: 3, canonicalEntities: historical, translation: "The Pavilion", narration: "Vega Treasures Pavilion", now: NOW }).state;
+    expect(buildQaState(first, [], { chapter: 3, canonicalEntities: historical, effectiveNamingEntities: current, translation: "The Pavilion", narration: "Vega Treasures Pavilion", now: NOW }).state.findings[0]!.status).toBe("obsolete");
+    const canonicalObjection = buildQaState(undefined, [detection({ category: "names", message: "The narration renames Hundred Treasures Pavilion as Vega Treasures Pavilion.", evidence: 'Narration says "Vega Treasures Pavilion".' })], { chapter: 3, canonicalEntities: historical, translation: "Hundred Treasures Pavilion", narration: "Vega Treasures Pavilion", now: NOW }).state;
+    expect(buildQaState(canonicalObjection, [], { chapter: 3, canonicalEntities: historical, effectiveNamingEntities: current, translation: "Hundred Treasures Pavilion", narration: "Vega Treasures Pavilion", now: NOW }).state.findings[0]!.status).toBe("open");
+  });
   const baseState = () => buildQaState(undefined, [detection()], { chapter: 3, translation: "T", narration: "N", now: NOW }).state;
   const resolveFirst = (state: ReturnType<typeof baseState>, disposition: "dismissed" | "manually_fixed") =>
     resolveQaFindingsByIndex(state, [0], disposition, "2026-09-16T13:00:00.000Z", 3);

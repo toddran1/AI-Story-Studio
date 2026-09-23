@@ -529,6 +529,8 @@ export type BibleReviewItem = {
   severity?: "info" | "warn" | "critical";
   chapters?: number[];
   source: string;
+  lifecycle: "derived" | "stateful";
+  status: "open" | "resolved";
   action: { label: string; href: string };
 };
 
@@ -550,7 +552,7 @@ export async function getStoryBibleReview(root: string, slug: string, options: {
     title: `Possible duplicate: ${suggestion.entities[0].name} ↔ ${suggestion.entities[1].name}`,
     detail: `${Math.round(suggestion.confidence * 100)}% confidence · ${suggestion.reason}`,
     severity: suggestion.confidence >= 0.85 ? "warn" : "info",
-    chapters: suggestion.supportingChapters, source: "duplicate-detection",
+    chapters: suggestion.supportingChapters, source: "duplicate-detection", lifecycle: "derived", status: "open",
     action: { label: "Compare & merge", href: entityHref(suggestion.entityIds[0]) },
   });
 
@@ -559,20 +561,17 @@ export async function getStoryBibleReview(root: string, slug: string, options: {
     title: `Naming collision: ${collision.name}`,
     detail: collision.hasMergeRelationship ? `${collision.reason} The colliding records already share a merge relationship.` : collision.reason,
     severity: collision.hasMergeRelationship ? "info" : "warn",
-    chapters: collision.chapters, source: "naming-collision-detection",
+    chapters: collision.chapters, source: "naming-collision-detection", lifecycle: "derived", status: "open",
     action: { label: "Compare entities", href: entityHref(collision.entities[0]!.id) },
   });
 
-  const status = options.status ?? "open";
   for (const finding of context.findings) {
-    if (status === "open" && finding.status !== "open") continue;
-    if (status === "resolved" && finding.status === "open") continue;
     items.push({
       id: `continuity:${finding.id}`, kind: "continuity", entityIds: finding.entityIds,
       title: finding.entityIds.map(nameOf).join(" · "),
       detail: finding.explanation,
       severity: finding.severity === "critical" ? "critical" : finding.severity === "warning" ? "warn" : "info",
-      chapters: finding.chapters, source: "continuity",
+      chapters: finding.chapters, source: "continuity", lifecycle: "stateful", status: finding.status === "open" ? "open" : "resolved",
       action: { label: "Review continuity", href: `/stories/${slug}/continuity?entity=${finding.entityIds[0]}` },
     });
   }
@@ -582,14 +581,14 @@ export async function getStoryBibleReview(root: string, slug: string, options: {
       id: `pronunciation:${entity.id}`, kind: "pronunciation", entityIds: [entity.id],
       title: `Pronunciation review: ${entity.canonicalName}`,
       detail: "The active pronunciation configuration is marked for review.",
-      severity: "warn", source: "pronunciation",
+      severity: "warn", source: "pronunciation", lifecycle: "derived", status: "open",
       action: { label: "Open entity", href: entityHref(entity.id) },
     });
     if (context.pronunciationSuggestions[entity.id]) items.push({
       id: `pronunciation-suggestion:${entity.id}`, kind: "pronunciation", entityIds: [entity.id],
       title: `Pronunciation suggestion: ${entity.canonicalName}`,
       detail: "An AI pronunciation suggestion is awaiting an explicit decision; default provider pronunciation is in effect.",
-      severity: "info", source: "pronunciation",
+      severity: "info", source: "pronunciation", lifecycle: "derived", status: "open",
       action: { label: "Review suggestion", href: entityHref(entity.id) },
     });
   }
@@ -601,7 +600,7 @@ export async function getStoryBibleReview(root: string, slug: string, options: {
       id: `visual-profile:${entityId}`, kind: "visual-profile", entityIds: [entityId],
       title: `Visual Profile conflicts: ${nameOf(entityId)}`,
       detail: `${conflicts.length} field conflict${conflicts.length === 1 ? "" : "s"} between canonical text and visual canon need${conflicts.length === 1 ? "s" : ""} review.`,
-      severity: "warn", source: "visual-canon",
+      severity: "warn", source: "visual-canon", lifecycle: "derived", status: "open",
       action: { label: "Open entity", href: entityHref(entityId) },
     });
   }
@@ -611,7 +610,7 @@ export async function getStoryBibleReview(root: string, slug: string, options: {
     id: "stale-extraction", kind: "stale-extraction",
     title: `${staleExtractionChapters.length} chapter${staleExtractionChapters.length === 1 ? " has" : "s have"} stale Story Bible extraction`,
     detail: "Extraction output no longer matches the current source. Canonical records remain available; regeneration is never started automatically.",
-    severity: "warn", chapters: staleExtractionChapters, source: "extraction",
+    severity: "warn", chapters: staleExtractionChapters, source: "extraction", lifecycle: "derived", status: "open",
     action: { label: "Open cleanup", href: `/stories/${slug}/bible?tab=cleanup` },
   });
 
@@ -623,20 +622,23 @@ export async function getStoryBibleReview(root: string, slug: string, options: {
       title: `${recommendation.recommendation === "minor_reference" ? "Demote candidate" : recommendation.recommendation === "merge" ? "Merge candidate" : "Cleanup review"}: ${recommendation.canonicalName}`,
       detail: `${Math.round(recommendation.confidence * 100)}% confidence · ${recommendation.reason}${recommendation.protected ? ` Protected: ${recommendation.protectedReasons.join("; ")}` : ""}`,
       severity: recommendation.protected ? "info" : "warn",
-      chapters: recommendation.supportingChapters, source: "analyzer",
+      chapters: recommendation.supportingChapters, source: "analyzer", lifecycle: "derived", status: "open",
       action: { label: "Open cleanup", href: `/stories/${slug}/bible?tab=cleanup` },
     });
   }
 
+  const openTotal = items.filter((item) => item.status === "open").length;
+  const status = options.status ?? "open";
+  const statusItems = status === "all" ? items : items.filter((item) => item.status === status);
   const counts: Record<string, number> = {};
-  for (const item of items) counts[item.kind] = (counts[item.kind] ?? 0) + 1;
-  let filtered = items;
+  for (const item of statusItems) counts[item.kind] = (counts[item.kind] ?? 0) + 1;
+  let filtered = statusItems;
   if (options.kind) filtered = filtered.filter((item) => item.kind === options.kind);
   if (options.entityId) filtered = filtered.filter((item) => item.entityIds?.includes(options.entityId!));
   const pageSize = Math.min(100, Math.max(1, Math.floor(options.pageSize)));
   const pages = Math.max(1, Math.ceil(filtered.length / pageSize));
   const page = Math.min(pages, Math.max(1, Math.floor(options.page)));
-  return { items: filtered.slice((page - 1) * pageSize, page * pageSize), total: filtered.length, page, pageSize, pages, counts };
+  return { items: filtered.slice((page - 1) * pageSize, page * pageSize), total: filtered.length, openTotal, page, pageSize, pages, counts };
 }
 
 export async function getMinorReferencesPage(

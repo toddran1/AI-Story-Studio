@@ -1254,6 +1254,7 @@ export function ReadinessGrid({ rows }: { rows?: Array<{ key: string; state: str
 export function StoryBibleHealthCard({ health, onReviewAll, onOpenCleanup }: { health: any; onReviewAll: () => void; onOpenCleanup: () => void }) {
   const issues: Array<{ key: string; label: string; count: number }> = [
     { key: "duplicateCandidates", label: "duplicate candidates", count: health.issues?.duplicateCandidates ?? 0 },
+    { key: "namingCollisions", label: "naming collisions", count: health.issues?.namingCollisions ?? 0 },
     { key: "continuityOpen", label: "open continuity findings", count: health.issues?.continuityOpen ?? 0 },
     { key: "pronunciationNeedsReview", label: "pronunciations to review", count: health.issues?.pronunciationNeedsReview ?? 0 },
     { key: "visualProfileIssues", label: "Visual Profile conflicts", count: health.issues?.visualProfileIssues ?? 0 },
@@ -1271,7 +1272,7 @@ export function StoryBibleHealthCard({ health, onReviewAll, onOpenCleanup }: { h
   </section>;
 }
 
-export const BIBLE_REVIEW_KIND_LABELS: Record<string, string> = { duplicate: "Duplicates", pronunciation: "Pronunciation", continuity: "Continuity", "visual-profile": "Visual Profiles", "stale-extraction": "Stale Extraction", cleanup: "Cleanup" };
+export const BIBLE_REVIEW_KIND_LABELS: Record<string, string> = { duplicate: "Duplicates", naming: "Naming collisions", pronunciation: "Pronunciation", continuity: "Continuity", "visual-profile": "Visual Profiles", "stale-extraction": "Stale Extraction", cleanup: "Cleanup" };
 
 export function BibleReviewQueue({ view, kind, status, onKind, onStatus, onPage, navigate }: { view: any; kind: string; status: string; onKind: (kind: string) => void; onStatus: (status: string) => void; onPage: (page: number) => void; navigate: (path: string) => void }) {
   const kinds = Object.keys(view.counts ?? {}).filter((key) => view.counts[key] > 0);
@@ -1280,7 +1281,8 @@ export function BibleReviewQueue({ view, kind, status, onKind, onStatus, onPage,
       <button className={kind === "all" ? "active" : ""} onClick={() => onKind("all")}>All</button>
       {kinds.map((key) => <button key={key} className={kind === key ? "active" : ""} onClick={() => onKind(key)}>{BIBLE_REVIEW_KIND_LABELS[key] ?? pretty(key)} ({view.counts[key]})</button>)}
     </div>
-    {(kind === "all" || kind === "continuity") && view.counts?.continuity > 0 && <div className="canonical-toolbar" style={{ gridTemplateColumns: "200px", margin: "0 0 14px" }}><select aria-label="Continuity status" value={status} onChange={(event) => onStatus(event.target.value)}><option value="open">Open continuity</option><option value="resolved">Resolved continuity</option><option value="all">All continuity</option></select></div>}
+    <div className="canonical-toolbar" style={{ gridTemplateColumns: "200px", margin: "0 0 14px" }}><select aria-label="Review status" value={status} onChange={(event) => onStatus(event.target.value)}><option value="open">Open</option><option value="resolved">Resolved</option><option value="all">All</option></select></div>
+    {status === "resolved" && <p className="quiet">Resolved view includes only review sources that keep resolution history. Derived issues disappear once corrected.</p>}
     {view.pages > 1 && <Pagination position="top" page={view.page} pages={view.pages} total={view.total} itemLabel="issues" onPrevious={() => onPage(view.page - 1)} onNext={() => onPage(view.page + 1)} />}
     <div className="continuity-list">
       {view.items.map((item: any) => <article key={item.id} className={`continuity-card ${item.severity === "critical" ? "critical" : ""}`}>
@@ -1301,6 +1303,7 @@ function BiblePage({ slug, navigate }: { slug: string; navigate: (path: string) 
   const [view, setView] = useState<any>(); const [detail, setDetail] = useState<any>(); const [editing, setEditing] = useState<any>(); const [error, setError] = useState(""); const [notice, setNotice] = useState(""); const [query, setQuery] = useState(initial.q ?? ""); const deferred = useDeferredValue(query); const [type, setType] = useState(initial.type ?? "all"); const [sort, setSort] = useState(initial.sort ?? "last"); const [page, setPage] = useState(initial.page ?? 1); const [readiness, setReadiness] = useState(initial.readiness ?? "all");
   const [tab, setTab] = useState<BibleTab>(initial.tab ?? "canonical");
   const [health, setHealth] = useState<any>();
+  const [openReviewTotal, setOpenReviewTotal] = useState<number>();
   const [review, setReview] = useState<any>(); const [reviewKind, setReviewKind] = useState("all"); const [reviewStatus, setReviewStatus] = useState("open"); const [reviewPage, setReviewPage] = useState(1);
   const [refsView, setRefsView] = useState<any>(); const [refsQuery, setRefsQuery] = useState(""); const deferredRefs = useDeferredValue(refsQuery); const [refsType, setRefsType] = useState("all"); const [refsPage, setRefsPage] = useState(1);
   const [analysis, setAnalysis] = useState<any>(); const [loadingAnalysis, setLoadingAnalysis] = useState(false);
@@ -1320,12 +1323,12 @@ function BiblePage({ slug, navigate }: { slug: string; navigate: (path: string) 
     catch (value) { setError(message(value)); }
   };
   const runImpactApply = async () => { if (!impactPreview) return; try { setImpactBusy(true); setError(""); await impactPreview.apply(); setImpactPreview(null); } catch (value) { setError(message(value)); } finally { setImpactBusy(false); } };
-  const load = async () => { const [entities, suppressions, healthSummary] = await Promise.all([api<any>(`/stories/${slug}/story-bible/entities?page=${page}&pageSize=50&type=${type}&sort=${sort}${readiness === "all" ? "" : `&readiness=${readiness}`}&q=${encodeURIComponent(deferred)}`), api<any[]>(`/stories/${slug}/story-bible/suppressions`), api<any>(`/stories/${slug}/story-bible/health`)]); setView(entities); setSuppressedEntities(suppressions); setHealth(healthSummary); }; useEffect(() => { void load().catch((value) => setError(message(value))); }, [slug, page, type, sort, readiness, deferred]);
+  const load = async () => { const [entities, suppressions, healthSummary, reviewSummary] = await Promise.all([api<any>(`/stories/${slug}/story-bible/entities?page=${page}&pageSize=50&type=${type}&sort=${sort}${readiness === "all" ? "" : `&readiness=${readiness}`}&q=${encodeURIComponent(deferred)}`), api<any[]>(`/stories/${slug}/story-bible/suppressions`), api<any>(`/stories/${slug}/story-bible/health`), api<any>(`/stories/${slug}/story-bible/review?page=1&pageSize=1&status=open`)]); setView(entities); setSuppressedEntities(suppressions); setHealth(healthSummary); setOpenReviewTotal(reviewSummary.openTotal); }; useEffect(() => { void load().catch((value) => setError(message(value))); }, [slug, page, type, sort, readiness, deferred]);
   const loadReferences = () => api<any>(`/stories/${slug}/story-bible/references?page=${refsPage}&pageSize=50&type=${refsType}&q=${encodeURIComponent(deferredRefs)}`).then(setRefsView);
   useEffect(() => { if (tab === "references") void loadReferences().catch((value) => setError(message(value))); }, [slug, tab, refsPage, refsType, deferredRefs]);
   const loadAnalysis = async () => { try { setLoadingAnalysis(true); const res = await api<any>(`/stories/${slug}/story-bible/analysis`); setAnalysis(res); setCheckedRecs(defaultCleanupSelection(res.recommendations ?? [])); } catch (value) { setError(message(value)); } finally { setLoadingAnalysis(false); } };
   useEffect(() => { if (tab === "cleanup" && !analysis) void loadAnalysis(); }, [slug, tab]);
-  const loadReview = () => api<any>(`/stories/${slug}/story-bible/review?page=${reviewPage}&pageSize=25${reviewKind === "all" ? "" : `&type=${reviewKind}`}&status=${reviewStatus}`).then(setReview);
+  const loadReview = () => api<any>(`/stories/${slug}/story-bible/review?page=${reviewPage}&pageSize=25${reviewKind === "all" ? "" : `&type=${reviewKind}`}&status=${reviewStatus}`).then((result) => { setReview(result); setOpenReviewTotal(result.openTotal); });
   useEffect(() => { if (tab === "review") void loadReview().catch((value) => setError(message(value))); }, [slug, tab, reviewPage, reviewKind, reviewStatus]);
   const requestedEntity = useRef(initial.entity);
   useEffect(() => { if (requestedEntity.current) { const id = requestedEntity.current; requestedEntity.current = undefined; open(id); } }, [slug]);
@@ -1420,7 +1423,7 @@ function BiblePage({ slug, navigate }: { slug: string; navigate: (path: string) 
     <div className="segmented" style={{ marginBottom: "18px" }}>
       <button className={tab === "canonical" ? "active" : ""} onClick={() => setTab("canonical")}>Canonical entities ({view.total})</button>
       <button className={tab === "references" ? "active" : ""} onClick={() => setTab("references")}>Minor references</button>
-      <button className={tab === "review" ? "active" : ""} onClick={() => setTab("review")}>Review{health ? ` (${Object.values(health.issues ?? {}).reduce((sum: number, value) => sum + Number(value), 0)})` : ""}</button>
+      <button className={tab === "review" ? "active" : ""} onClick={() => setTab("review")}>Review{openReviewTotal !== undefined ? ` (${openReviewTotal})` : ""}</button>
       <button className={tab === "cleanup" ? "active" : ""} onClick={() => setTab("cleanup")}>Analyzer &amp; Cleanup</button>
     </div>
     {tab === "canonical" && <>
