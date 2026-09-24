@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { qaResultSchema } from "../src/domain/qa.js";
 import { emptyStoryBible, storyBibleSchema } from "../src/domain/story-bible.js";
 import { buildQaState } from "../src/qa/review.js";
-import { captureQaRepairFindingSnapshotsFromIssues, issueRepairTargets, repairQaText, repairTargets, selectRepairStage, targetOverridesByFindingId, validateQaRepairFindingSnapshots } from "../src/qa/repair.js";
+import { captureQaRepairFindingSnapshotsFromIssues, captureQaRepairTextSnapshot, issueRepairTargets, repairQaText, repairTargets, selectRepairStage, targetOverridesByFindingId, validateQaRepairFindingSnapshots, validateQaRepairTextSnapshot } from "../src/qa/repair.js";
 import { MockLLM } from "./helpers.js";
 
 const checks = { completeness: "pass", names: "pass", numbers: "pass", terminology: "pass", dialogue: "pass", storyConsistency: "pass", narrationFidelity: "pass" } as const;
@@ -122,5 +122,23 @@ describe("stable QA repair selection", () => {
     expect(targetOverridesByFindingId(indexes, snapshots, { "0": "narration", "1": "translation" })).toEqual({
       [state.findings[1]!.id]: "translation", [state.findings[0]!.id]: "narration",
     });
+  });
+});
+
+describe("QA repair text snapshots", () => {
+  it("allow unchanged text and distinguish missing, empty, and present artifacts", () => {
+    const snapshot = captureQaRepairTextSnapshot("", undefined);
+    expect(() => validateQaRepairTextSnapshot(snapshot, "", undefined)).not.toThrow();
+    expect(() => validateQaRepairTextSnapshot(snapshot, undefined, "")).toThrowError(expect.objectContaining({ code: "QA_FINDING_STALE_SELECTION" }));
+    expect(() => validateQaRepairTextSnapshot(snapshot, "text", undefined)).toThrowError(expect.objectContaining({ code: "QA_FINDING_STALE_SELECTION" }));
+  });
+
+  it("rejects a change to either selected text artifact but ignores unrelated QA timestamps", () => {
+    const snapshot = captureQaRepairTextSnapshot("translation", "narration");
+    expect(() => validateQaRepairTextSnapshot(snapshot, "translation changed", "narration")).toThrowError(expect.objectContaining({ code: "QA_FINDING_STALE_SELECTION" }));
+    expect(() => validateQaRepairTextSnapshot(snapshot, "translation", "narration changed")).toThrowError(expect.objectContaining({ code: "QA_FINDING_STALE_SELECTION" }));
+    // Snapshot inputs deliberately contain only the two chapter text artifacts;
+    // QA timestamps/state mutations cannot affect their identity.
+    expect(() => validateQaRepairTextSnapshot(snapshot, "translation", "narration")).not.toThrow();
   });
 });

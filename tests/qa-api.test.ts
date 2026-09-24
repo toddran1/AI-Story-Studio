@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 import { getQaDashboard } from "../apps/server/catalog.js";
 import { Job, JobManager } from "../apps/server/job-manager.js";
 import { StudioOperations } from "../apps/server/operations.js";
+import { readActivity } from "../src/studio/projects.js";
 import { loadEnvironment } from "../src/config/env.js";
 import { defaultStory } from "../src/config/load-config.js";
 import { chapterSchema } from "../src/domain/chapter.js";
@@ -154,6 +155,28 @@ describe("chapter QA state endpoint", () => {
     await operations.close();
   });
 
+  it("rejects queued selected repair when chapter text changes after selection", async () => {
+    const { root, story, paths } = await fixture({ detections: [detection({ provenance: { stage: "translation" } })] });
+    const beforeQa = await readFile(paths.qa); const beforeNarration = await readFile(paths.narration, "utf8"); const findingId = (await readState(paths)).findings[0]!.id;
+    const llm = new MockLLM("gemini", ["A repaired translation with every chapter detail retained.".repeat(2)]);
+    const jobs = new JobManager(); let queuedRunner: Parameters<JobManager["create"]>[2] | undefined;
+    vi.spyOn(jobs, "create").mockImplementation((type, jobStory, runner) => {
+      queuedRunner = runner;
+      return { id: "deferred-stale-text-repair", type, story: jobStory, status: "queued", createdAt: NOW, updatedAt: NOW };
+    });
+    const operations = new StudioOperations(root, env, jobs, { llm: new LLMRouter(new Map([["gemini", llm]])) });
+    await operations.startQaRepair(story.slug, 1, { findingIds: [findingId], targetOverridesByFindingId: { [findingId]: "translation" } });
+    await atomicWrite(paths.english, "Translation changed while the selected QA repair was waiting for its story lock.");
+    const afterTranslation = await readFile(paths.english, "utf8");
+    await expect(queuedRunner!({ update() {}, setPause() {} })).rejects.toMatchObject({ code: "QA_FINDING_STALE_SELECTION" });
+    expect(llm.calls).toHaveLength(0);
+    expect(await readFile(paths.english, "utf8")).toBe(afterTranslation);
+    expect(await readFile(paths.narration, "utf8")).toBe(beforeNarration);
+    expect(await readFile(paths.qa)).toEqual(beforeQa);
+    expect(await readActivity(root, story.slug)).toHaveLength(0);
+    await operations.close();
+  });
+
   it("rejects malformed Story Context in queued batch repair before provider calls or writes", async () => {
     const { root, story, paths } = await fixture({ detections: [detection({ safeToFix: true, provenance: { stage: "translation" } })] });
     const llm = openaiQa(["A repaired chapter with all original details retained. ".repeat(3)]); const { jobs, operations } = operationsWith(root, llm);
@@ -247,6 +270,33 @@ describe("finding lifecycle endpoints", () => {
     expect(metadata.stages.tts.status).toBe("pending");
     expect(metadata.stages.qa.status).toBe("complete");
     await operations.close();
+  });
+
+  it("keeps a saved single-finding repair when final QA recheck fails and permits QA-only retry", async () => {
+    const current = "The keeper crossed the quiet courtyard and counted the small blue flames.";
+    const repaired = "The keeper crossed the quiet courtyard and counted the small azure flames.";
+    const { root, story, paths, state } = await fixture({ detections: [detection()], translation: current, narration: current });
+    const id = state!.findings[0]!.id;
+    const gemini = new MockLLM("gemini", [repaired]); const failingQa = openaiQa();
+    vi.spyOn(failingQa, "generateStructured").mockRejectedValue(new Error("QA provider unavailable"));
+    const { jobs, operations } = operationsWith(root, gemini, failingQa);
+    const fixJob = await operations.startQaFindingFix(story.slug, 1, id, { target: "translation" });
+    const finished = await waitForJob(jobs, fixJob.id);
+    expect(finished.status).toBe("completed");
+    expect(finished.result).toMatchObject({ status: "repair_applied_recheck_failed", findingId: id, repaired: ["translation"], fixed: true, requiresQaRecheck: true, recheck: { attempted: true, success: false, error: "QA provider unavailable" } });
+    expect(await readFile(paths.english, "utf8")).toBe(repaired);
+    expect((await readState(paths)).findings.find((finding) => finding.id === id)).toMatchObject({ status: "fixed_ai" });
+    expect((await operations.getChapterQa(story.slug, 1)).freshness).toBe("needs_recheck");
+    expect((await readActivity(root, story.slug))[0]?.message).toMatch(/saved.*verification failed/i);
+    expect(gemini.calls).toHaveLength(1);
+
+    const qaOnly = openaiQa();
+    const retryOperations = new StudioOperations(root, env, jobs, { llm: new LLMRouter(new Map([["openai", qaOnly], ["gemini", gemini]])) });
+    const retry = await waitForJob(jobs, retryOperations.startQaRecheck(story.slug, 1, { mode: "full" }).id);
+    expect(retry.status).toBe("completed");
+    expect(qaOnly.calls).toHaveLength(1);
+    expect(gemini.calls).toHaveLength(1);
+    await operations.close(); await retryOperations.close();
   });
 
   it("resolve-manual marks fixed_manual without touching downstream stage fingerprints", async () => {

@@ -10,9 +10,30 @@ import { authorizedNarrationNaming } from "./prompts.js";
 import type { QaFinding } from "../domain/qa.js";
 import { findingFingerprint, normalizeQaText } from "./findings.js";
 import { QaFindingStaleSelectionError, QaRepairTargetAmbiguousError } from "./errors.js";
+import { fingerprint } from "../utils/hash.js";
 
-export type QaRepairFindingSnapshot = { id: string; fingerprint: string };
+export type QaRepairTextSnapshot = { translationTextFingerprint: string; narrationTextFingerprint: string };
+export type QaRepairFindingSnapshot = { id: string; fingerprint: string } & Partial<QaRepairTextSnapshot>;
 export type QaRepairTargetChoice = "translation" | "narration" | "both";
+
+const staleTextMessage = "The chapter text changed after this QA repair was selected. Reload QA and review the current finding before retrying.";
+
+/** Hash presence as well as content so missing and present-but-empty artifacts differ. */
+function repairTextFingerprint(text: string | undefined) {
+  return fingerprint(text === undefined ? { present: false } : { present: true, text });
+}
+
+export function captureQaRepairTextSnapshot(translation: string | undefined, narration: string | undefined): QaRepairTextSnapshot {
+  return { translationTextFingerprint: repairTextFingerprint(translation), narrationTextFingerprint: repairTextFingerprint(narration) };
+}
+
+export function validateQaRepairTextSnapshot(snapshot: Partial<QaRepairTextSnapshot>, translation: string | undefined, narration: string | undefined) {
+  const current = captureQaRepairTextSnapshot(translation, narration);
+  if (!snapshot.translationTextFingerprint || !snapshot.narrationTextFingerprint
+    || current.translationTextFingerprint !== snapshot.translationTextFingerprint || current.narrationTextFingerprint !== snapshot.narrationTextFingerprint) {
+    throw new QaFindingStaleSelectionError(staleTextMessage);
+  }
+}
 
 /** Re-key legacy index-based UI overrides onto the preflighted persistent finding identities. */
 export function targetOverridesByFindingId(
