@@ -28,7 +28,11 @@ export function matchEntityIds(text: string, entities: StoryBible["canonicalEnti
   if (!haystack) return [];
   const matched: string[] = [];
   for (const entity of entities) {
-    const names = [entity.canonicalName, entity.originalName, ...entity.aliases, entity.preferredNarrationName ?? ""];
+    const names = [
+      entity.canonicalName, entity.originalName, ...entity.aliases,
+      entity.preferredNarrationName ?? "", entity.localizedNaming?.fullName ?? "", entity.localizedNaming?.shortName ?? "",
+      ...entity.aliasNarrationRules.flatMap((rule) => rule.behavior === "custom" && rule.replacement ? [rule.replacement] : []),
+    ];
     if (names.some((name) => { const needle = normalizeQaText(name); return needle.length > 0 && haystack.includes(needle); })) matched.push(entity.id);
   }
   return matched;
@@ -39,6 +43,7 @@ const CALLS_RELATION = /\bcalls?\s+["“]?(.+?)["”]?\s+by the name\s+["“]?(.
 const SHOULD_BE_RELATION = /["“]([^"”]{1,80})["”]\s+should be\s+["“]?(.+?)["”]?\s*(?:[.,;:!?)]|$)/i;
 const USES_FOR_RELATION = /\buses?\s+["“]([^"”]{1,80})["”]\s+for\s+["“]?(.+?)["”]?\s*(?:[.,;:(]|$)/i;
 const CONTAINS_NEVER_RELATION = /contains\s+["“]([^"”]{1,80})["”]\s+but\s+never\s+["“]?(.+?)["”]?\s*(?:[.,;)]|$)/i;
+const INSTEAD_OF_RELATION = /\b(?:uses?|calls?|renders?|names?)\s+["“]([^"”]{1,120})["”]\s+instead of\s+(?:the required\s+)?["“]([^"”]{1,120})["”]/i;
 
 /**
  * Stable semantic discriminator for naming-style issues: the normalized
@@ -47,6 +52,7 @@ const CONTAINS_NEVER_RELATION = /contains\s+["“]([^"”]{1,80})["”]\s+but\s+
  */
 export function extractNameRelation(issue: { message: string; evidence: string }): string | undefined {
   const attempts: [string, RegExp, 1 | 2][] = [
+    [issue.message, INSTEAD_OF_RELATION, 1],
     [issue.message, RENAME_RELATION, 2],
     [issue.message, CALLS_RELATION, 2],
     [issue.message, SHOULD_BE_RELATION, 1],

@@ -10,6 +10,7 @@ import { storyPaths } from "../storage/paths.js";
 import { normalizeQaText } from "./findings.js";
 import { QaPrerequisiteError } from "./errors.js";
 import type { FreshQaDetection } from "./review.js";
+import { authorizedNarrationNames } from "../narration/naming-preferences.js";
 
 export type AcceptedContinuity = { id: string; entityIds: string[]; explanation: string };
 export type DeterministicQaResult = { detections: FreshQaDetection[]; acceptedContinuity: AcceptedContinuity[] };
@@ -21,37 +22,69 @@ function containsName(text: string, name: string): boolean {
   return new RegExp(`(?<![a-z0-9])${escaped}(?![a-z0-9])`, "i").test(text);
 }
 
-/** Conservative required-rendering violations in narration only. */
-function namingDetections(entities: CanonicalEntity[], narration: string): FreshQaDetection[] {
+function nameOccurrences(text: string, name: string): Array<{ start: number; end: number }> {
+  if (!name.trim()) return [];
+  const pattern = /^[a-z0-9][a-z0-9 .'-]*$/i.test(name)
+    ? new RegExp(`(?<![a-z0-9])${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![a-z0-9])`, "gi")
+    : new RegExp(name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gu");
+  return [...text.matchAll(pattern)].map((match) => ({ start: match.index!, end: match.index! + match[0].length }));
+}
+
+function hasUnauthorizedOccurrence(text: string, written: string, authorized: string[]): boolean {
+  const allowedSpans = authorized.flatMap((name) => nameOccurrences(text, name));
+  return nameOccurrences(text, written).some((occurrence) => !allowedSpans.some((allowed) => allowed.start <= occurrence.start && allowed.end >= occurrence.end));
+}
+
+/** Confirmed violations of explicit narration-facing naming rules. */
+function namingDetections(entities: CanonicalEntity[], translation: string, narration: string): FreshQaDetection[] {
   const detections: FreshQaDetection[] = [];
-  const flag = (entity: CanonicalEntity, written: string, required: string, reason: string, safeToFix: boolean, ruleKey: string) => {
+  const emitted = new Set<string>();
+  const flag = (entity: CanonicalEntity, written: string, required: string, reason: string, safeToFix: boolean) => {
+    const key = `${entity.id}\0${normalizeQaText(written)}\0${normalizeQaText(required)}`;
+    if (emitted.has(key)) return;
+    emitted.add(key);
+    const translatedIdentity = [entity.canonicalName, entity.originalName, ...entity.aliases].find((name) => name && containsName(translation, name));
+    const translationEvidence = translatedIdentity ?? translation.slice(0, 120);
     detections.push({
-      category: "names", severity: "warn", origin: "deterministic", safeToFix, entityIds: [entity.id], ruleKey,
-      message: `Narration uses "${written}" for ${entity.canonicalName}, but the authorized narration rendering is "${required}" (${reason}), which never appears in the narration.`,
-      evidence: `Narration contains "${written}" but never "${required}".`,
+      category: "names", severity: "fail", origin: "deterministic", safeToFix, entityIds: [entity.id],
+      message: `The fault lies in the NARRATION: it uses "${written}" instead of the required "${required}" under the ${reason} rule.`,
+      evidence: `Translation: "${translationEvidence}". Narration: "${written}". Authorized narration rendering: "${required}" (${reason}).`,
     });
   };
   for (const entity of entities) {
     const naming = entity.localizedNaming;
-    // ai_contextual and manual localized naming are model-contextual by design;
-    // deterministic checks must never second-guess them.
     const contextualNaming = naming && (naming.usageMode === "ai_contextual" || naming.usageMode === "manual");
-    if (entity.preferredNarrationName && !contextualNaming) {
-      const preferred = entity.preferredNarrationName;
-      const identity = [entity.canonicalName, entity.originalName].filter((name) => name && normalizeQaText(name) !== normalizeQaText(preferred));
-      const used = identity.find((name) => containsName(narration, name));
-      if (used && !containsName(narration, preferred)) {
-        const unambiguous = !preferred.includes(" ") && !used.includes(" ") && !naming;
-        flag(entity, used, preferred, "Preferred Narration Name", unambiguous, `names:preferred:${normalizeQaText(used)}`);
-        continue;
+    const noOverrideNames = new Set(entity.aliasNarrationRules.filter((rule) => rule.behavior === "no_override").map((rule) => normalizeQaText(rule.alias)));
+    const identityForms = [entity.canonicalName, entity.originalName, naming?.fullName ?? "", naming?.shortName ?? ""]
+      .filter((name) => name.trim() && !noOverrideNames.has(normalizeQaText(name)));
+
+    // Preferred Narration Name and deterministic localization modes define one
+    // required rendering. ai_contextual/manual modes deliberately do not.
+    if (!contextualNaming) {
+      for (const written of identityForms) {
+        const authorized = authorizedNarrationNames(entity, written);
+        const required = authorized[0];
+        if (!required || normalizeQaText(written) === normalizeQaText(required)) continue;
+        if (hasUnauthorizedOccurrence(narration, written, authorized)) {
+          const safe = !naming && entity.preferredNarrationName === required && !required.includes(" ") && !written.includes(" ");
+          flag(entity, written, required, naming ? `localizedNaming ${naming.usageMode}` : "Preferred Narration Name", safe);
+        }
       }
     }
-    for (const rule of entity.aliasNarrationRules) {
-      if (rule.behavior === "no_override") continue;
-      const required = rule.behavior === "custom" ? rule.replacement : entity.preferredNarrationName;
-      if (!required || !containsName(narration, rule.alias)) continue;
-      if (normalizeQaText(rule.alias) === normalizeQaText(required)) continue;
-      if (!containsName(narration, required)) flag(entity, rule.alias, required, rule.behavior === "custom" ? "custom alias rule" : "alias rule prefers the authorized narration name", false, `names:alias:${normalizeQaText(rule.alias)}`);
+
+    // Ordinary aliases follow the configured preferred/deterministic localized
+    // name, while alias-specific rules override that behavior.
+    for (const alias of entity.aliases) {
+      const rule = entity.aliasNarrationRules.find((candidate) => normalizeQaText(candidate.alias) === normalizeQaText(alias));
+      if (rule?.behavior === "no_override") continue;
+      if (contextualNaming && rule?.behavior !== "custom") continue;
+      const authorized = authorizedNarrationNames(entity, alias);
+      const required = rule?.behavior === "custom" ? rule.replacement : authorized[0];
+      if (!required || normalizeQaText(alias) === normalizeQaText(required)) continue;
+      if (hasUnauthorizedOccurrence(narration, alias, authorized)) {
+        const reason = rule?.behavior === "custom" ? "custom alias rule" : rule?.behavior === "use_preferred" ? "use_preferred alias rule" : naming ? `localizedNaming ${naming.usageMode}` : "Preferred Narration Name";
+        flag(entity, alias, required, reason, false);
+      }
     }
   }
   return detections;
@@ -200,7 +233,7 @@ export async function runDeterministicQaChecks(deps: {
     loadAcceptedContinuity(root, story.slug),
   ]);
   const detections: FreshQaDetection[] = [
-    ...namingDetections(namingEntities, narration),
+    ...namingDetections(namingEntities, translation, narration),
     ...duplicateParagraphDetections(translation, narration),
     ...speechReadinessDetections(story, narration),
     ...pronunciationDetections(pronunciationEntities, narration),

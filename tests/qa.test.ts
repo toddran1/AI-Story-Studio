@@ -121,7 +121,7 @@ describe("QA authorized narration naming", () => {
   });
 
   it("records the bumped prompt version", () => {
-    expect(QA_PROMPT_VERSION).toBe("8");
+    expect(QA_PROMPT_VERSION).toBe("9");
   });
 
   it("documents the output contract, severity rubric, and repair-routing phrasing", () => {
@@ -133,6 +133,12 @@ describe("QA authorized narration naming", () => {
     expect(qaInstructions).toContain("both the translation and narration");
     expect(qaInstructions).toContain("both the translation and the narration");
     expect(qaInstructions).toMatch(/length tolerance/i);
+    expect(qaInstructions).toContain("AUTHORITATIVE NARRATION-NAME RULE SEVERITY");
+    expect(qaInstructions).toContain("names-category FAIL");
+    expect(qaInstructions).toContain("each occurrence independently");
+    expect(qaInstructions).toContain("always_full or always_short");
+    expect(qaInstructions).toContain("Do not deterministically fail ai_contextual or manual");
+    expect(qaInstructions).toContain('uses "wrong form" instead of the required "authorized form"');
   });
 
   it("partitions profanity with the same strong/mild lists as the narration prompt", () => {

@@ -7,7 +7,7 @@ import { emptyStoryBible, storyBibleSchema, canonicalEntitySchema } from "../src
 import { pronunciationAttemptInput } from "../src/story-bible/pronunciation.js";
 import { runDeterministicQaChecks } from "../src/qa/deterministic.js";
 import { addQaException, exceptionsPromptSection, filterExceptedFindings, listQaExceptions, removeQaException } from "../src/qa/exceptions.js";
-import { buildQaState } from "../src/qa/review.js";
+import { buildQaState, prepareQaDetections } from "../src/qa/review.js";
 import { qaModeInstructionsFor } from "../src/qa/prompts.js";
 import { validateChapterQuality } from "../src/qa/validator.js";
 import { continuityReviewSchema } from "../src/story-bible/continuity.js";
@@ -36,11 +36,13 @@ describe("deterministic naming checks", () => {
   it("flags a missing preferred narration name and marks unambiguous single-token substitutions safe to fix", async () => {
     const root = await mkdtemp(join(tmpdir(), "qa-det-"));
     const { story } = await setup(root, { entities: [entity({ canonicalName: "Suming", originalName: "", preferredNarrationName: "Asher" })] });
-    const { detections } = await run(root, story, "Suming opened the door and left.");
+    const { detections } = await run(root, story, "Suming opened the door and left.", "Su Ming opened the door and left.");
     const finding = detections.find((detection) => detection.category === "names")!;
     expect(finding.message).toContain('"Suming"');
     expect(finding.message).toContain('"Asher"');
-    expect(finding).toMatchObject({ origin: "deterministic", safeToFix: true, entityIds: ["ent_aaaaaaaaaaaaaaaaaaaaaaaa"] });
+    expect(finding.evidence).toContain('Translation: "Su Ming opened the door and left."');
+    expect(finding.evidence).toContain('Narration: "Suming"');
+    expect(finding).toMatchObject({ severity: "fail", origin: "deterministic", safeToFix: true, entityIds: ["ent_aaaaaaaaaaaaaaaaaaaaaaaa"] });
   });
 
   it("does not flag multi-token substitutions as safe to fix, and passes when the preferred name is used", async () => {
@@ -66,6 +68,85 @@ describe("deterministic naming checks", () => {
     expect(names[0]!.message).toContain('"Ming"');
     expect(names[0]!.message).toContain('"Ash"');
     expect(names[0]!.safeToFix).toBe(false);
+  });
+
+  it("checks each Preferred Narration Name occurrence independently", async () => {
+    const root = await mkdtemp(join(tmpdir(), "qa-det-"));
+    const { story } = await setup(root, { entities: [entity({ canonicalName: "Nong Jiale", originalName: "", preferredNarrationName: "Big Bank Le" })] });
+    const mixed = await run(root, story, "Big Bank Le entered first. Later, Nong Jiale opened the gate.");
+    const findings = mixed.detections.filter((detection) => detection.category === "names");
+    expect(findings).toHaveLength(1);
+    expect(findings[0]).toMatchObject({ severity: "fail", safeToFix: false });
+    expect(findings[0]!.message).toContain('"Nong Jiale" instead of the required "Big Bank Le"');
+    expect((await run(root, story, "Big Bank Le opened the gate.")).detections.filter((detection) => detection.category === "names")).toEqual([]);
+  });
+
+  it("flags mixed Su Ming/Asher narration under an explicit preferred-name rule", async () => {
+    const root = await mkdtemp(join(tmpdir(), "qa-det-"));
+    const { story } = await setup(root, { entities: [entity({ canonicalName: "Su Ming", originalName: "苏明", preferredNarrationName: "Asher" })] });
+    const findings = (await run(root, story, "Asher looked up. Su Ming opened the door.", "Su Ming looked up and opened the door.")).detections.filter((detection) => detection.category === "names");
+    expect(findings).toHaveLength(1);
+    expect(findings[0]).toMatchObject({ severity: "fail", message: expect.stringContaining('"Su Ming" instead of the required "Asher"') });
+  });
+
+  it("flags a custom Brother Su → Brother Ash rule violation even if Brother Ash also appears", async () => {
+    const root = await mkdtemp(join(tmpdir(), "qa-det-"));
+    const { story } = await setup(root, { entities: [entity({ originalName: "", preferredNarrationName: "Asher", aliases: ["Brother Su"], aliasNarrationRules: [{ alias: "Brother Su", behavior: "custom", replacement: "Brother Ash" }] })] });
+    const findings = (await run(root, story, "Brother Ash nodded. Brother Su followed.")).detections.filter((detection) => detection.category === "names");
+    expect(findings).toHaveLength(1);
+    expect(findings[0]).toMatchObject({ severity: "fail", message: expect.stringContaining('"Brother Su" instead of the required "Brother Ash"') });
+    expect((await run(root, story, '"Brother Ash, wait!"')).detections.filter((detection) => detection.category === "names")).toEqual([]);
+  });
+
+  it("coalesces the deterministic and model reports for the same naming rule", async () => {
+    const root = await mkdtemp(join(tmpdir(), "qa-det-"));
+    const localized = entity({ originalName: "", localizedNaming: { locale: "en-US", fullName: "Malakai Sterling", shortName: "Malakai", usageMode: "always_full" } });
+    const { story } = await setup(root, { entities: [localized] });
+    const narration = "Malakai stepped forward.";
+    const deterministic = (await run(root, story, narration)).detections.filter((detection) => detection.category === "names");
+    const entities = storyBibleSchema.parse({ ...emptyStoryBible(), canonicalEntities: [localized] }).canonicalEntities;
+    const model = [{
+      category: "names" as const, severity: "warn" as const,
+      message: 'The fault lies in the NARRATION: it uses "Malakai" instead of the required "Malakai Sterling" under the localizedNaming always_full rule.',
+      evidence: 'Translation: "Su Ming stepped forward." Narration: "Malakai stepped forward."',
+    }];
+    const prepared = prepareQaDetections([...deterministic, ...model], { effectiveNamingEntities: entities, translation: "Su Ming stepped forward.", narration });
+    expect(prepared).toHaveLength(1);
+    expect(prepared[0]).toMatchObject({ severity: "fail", origin: "deterministic" });
+    const state = buildQaState(undefined, prepared, { chapter: 1, canonicalEntities: entities, translation: "Su Ming stepped forward.", narration, now: NOW }).state;
+    expect(state.findings).toHaveLength(1);
+    expect(state.findings[0]).toMatchObject({ severity: "fail", origin: "deterministic" });
+  });
+
+  it("flags a required use_preferred alias independently of authorized occurrences", async () => {
+    const root = await mkdtemp(join(tmpdir(), "qa-det-"));
+    const { story } = await setup(root, { entities: [entity({ originalName: "", aliases: ["Brother Su"], preferredNarrationName: "Brother Ash", aliasNarrationRules: [{ alias: "Brother Su", behavior: "use_preferred" }] })] });
+    const mixed = await run(root, story, "Brother Ash waved. Brother Su called after him.");
+    expect(mixed.detections.filter((detection) => detection.category === "names")).toMatchObject([
+      { severity: "fail", message: expect.stringContaining('"Brother Su" instead of the required "Brother Ash"') },
+    ]);
+    expect((await run(root, story, "Brother Ash waved.")).detections.filter((detection) => detection.category === "names")).toEqual([]);
+  });
+
+  it.each([
+    ["always_full", "Malakai Sterling", "Malakai"],
+    ["always_short", "Malakai", "Malakai Sterling"],
+  ] as const)("enforces deterministic localizedNaming mode %s", async (usageMode, required, wrong) => {
+    const root = await mkdtemp(join(tmpdir(), "qa-det-"));
+    const { story } = await setup(root, { entities: [entity({ canonicalName: "Su Ming", originalName: "苏明", localizedNaming: { locale: "en-US", fullName: "Malakai Sterling", shortName: "Malakai", usageMode } })] });
+    const invalid = await run(root, story, `${wrong} stepped forward.`);
+    expect(invalid.detections.filter((detection) => detection.category === "names")).toMatchObject([
+      { severity: "fail", message: expect.stringContaining(`"${wrong}" instead of the required "${required}"`) },
+    ]);
+    expect((await run(root, story, `${required} stepped forward.`)).detections.filter((detection) => detection.category === "names")).toEqual([]);
+  });
+
+  it("does not fail contextual naming variants and does not treat canonical translation text as a narration violation", async () => {
+    const root = await mkdtemp(join(tmpdir(), "qa-det-"));
+    const { story } = await setup(root, { entities: [entity({ canonicalName: "Su Ming", originalName: "苏明", localizedNaming: { locale: "en-US", fullName: "Malakai Sterling", shortName: "Malakai", usageMode: "ai_contextual" } })] });
+    for (const narration of ["Malakai Sterling entered the hall.", "Malakai entered the hall.", "Su Ming entered the hall."]) {
+      expect((await run(root, story, narration, "Su Ming entered the hall.")).detections.filter((detection) => detection.category === "names")).toEqual([]);
+    }
   });
 });
 

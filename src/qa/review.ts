@@ -50,7 +50,7 @@ export function prepareQaDetections(detections: FreshQaDetection[], options: {
   narration: string;
 }): FreshQaDetection[] {
   const paragraphs = combinedQaParagraphs(options.translation, options.narration).map((item) => item.text);
-  return detections.map((detection) => {
+  const anchored = detections.map((detection) => {
     const entities = detection.category === "names" && options.effectiveNamingEntities?.length
       ? options.effectiveNamingEntities : options.canonicalEntities;
     const anchor = anchorFromIssue(detection, { canonicalEntities: entities, paragraphs });
@@ -58,6 +58,27 @@ export function prepareQaDetections(detections: FreshQaDetection[], options: {
     return { ...detection, entityIds: [...new Set([...(detection.entityIds ?? []), ...anchoredIds])],
       ...(detection.entityIds?.length ? {} : anchoredIds.length > 1 ? { entityMatchAmbiguous: true } : {}) };
   });
+  // A deterministic naming-rule violation and the QA model's report of the
+  // same wrong→right mapping share an identity anchor. Keep one effective
+  // finding, retaining the stricter severity and deterministic rule evidence.
+  const namingByIdentity = new Map<string, number>();
+  const result: FreshQaDetection[] = [];
+  for (const detection of anchored) {
+    const relation = detection.category === "names" ? extractNameRelation(detection) : undefined;
+    const identity = relation && detection.entityIds?.length
+      ? `${[...detection.entityIds].sort().join(",")}\0${relation}` : undefined;
+    const existingIndex = identity ? namingByIdentity.get(identity) : undefined;
+    if (existingIndex === undefined) {
+      if (identity) namingByIdentity.set(identity, result.length);
+      result.push(detection);
+      continue;
+    }
+    const existing = result[existingIndex]!;
+    const stronger = existing.severity === "fail" || detection.severity === "fail" ? "fail" : "warn";
+    const preferred = existing.origin === "deterministic" || detection.origin !== "deterministic" ? existing : detection;
+    result[existingIndex] = { ...preferred, severity: stronger, entityIds: [...new Set([...(existing.entityIds ?? []), ...(detection.entityIds ?? [])])] };
+  }
+  return result;
 }
 
 export type ReconcileOutcome = { verified: number; respected: number; reopened: number; newFindings: number; obsoleted: number };

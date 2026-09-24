@@ -19,9 +19,9 @@ import { StructuredLLMRequest } from "../src/llm/types.js";
 
 class CountingAudioProcessor extends CopyingAudioProcessor { calls = 0; override async master(inputs: string[], output: string) { this.calls++; return super.master(inputs, output); } }
 
-const qaWithIssues = (count: number, fail = false) => ({
+const qaWithIssues = (count: number, fail = false, allFail = false) => ({
   status: fail ? "fail" : "warn", score: fail ? 0.2 : 0.7,
-  issues: Array.from({ length: count }, (_, index) => ({ category: "numbers", severity: fail && index >= 3 ? "fail" : "warn", message: `Fresh issue ${index}`, evidence: `Evidence ${index}` })),
+  issues: Array.from({ length: count }, (_, index) => ({ category: "numbers", severity: fail && (allFail || index >= 3) ? "fail" : "warn", message: `Fresh issue ${index}`, evidence: `Evidence ${index}` })),
   checks: { completeness: "pass", names: "pass", numbers: fail ? "fail" : "warn", terminology: "pass", dialogue: "pass", storyConsistency: "pass", narrationFidelity: "pass" },
 });
 
@@ -78,6 +78,17 @@ describe("pipeline QA fresh execution and recovery", () => {
     expect(await readFile(ctx.paths.audioRaw, "utf8")).toBe("keep");
     expect(qaStateSchema.parse(JSON.parse(await readFile(ctx.paths.qa, "utf8"))).findings).toHaveLength(2);
     expect(result.quality?.status).toBe("warn");
+  });
+
+  it("preserves the one-time recovery when five critical QA issues are reported", async () => {
+    const ctx = await fixture([qaWithIssues(5, true, true), qaWithIssues(1)]);
+    const events: string[] = [];
+    await ctx.pipeline.run({ root: ctx.root, story: ctx.story, chapter: 1, inputPath: ctx.input, executionStages: ["qa"], stopAfter: "qa", onStageEvent: (event) => {
+      if (event.status === "started" && !event.detail) events.push(event.stage);
+    } });
+    expect(events).toEqual(["qa", "translation", "narration", "qa"]);
+    expect(ctx.gemini.calls).toHaveLength(2);
+    expect(ctx.openai.qaCalls).toBe(2);
   });
 
   it("stops after the second QA and applies its failure gate", async () => {
