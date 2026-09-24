@@ -1689,12 +1689,12 @@ type CanonicalEntitySheetProps = {
   detail: any;
   slug: string;
   navigate: (path: string) => void;
-  onClose?: () => void;
-  onUndo?: (id: string) => void;
-  onEdit?: () => void;
+  onClose: () => void;
+  onUndo: (id: string) => void;
+  onEdit: () => void;
   onDemote?: () => void;
   onSuppress?: () => void;
-  onMerge?: (item: any) => void;
+  onMerge: (item: any) => void;
   onOpenVisualProfile?: (id: string, name?: string) => void;
   onRevert?: (entry: EntityAuditEntry) => void;
   onManagementOpenChange?: (open: boolean) => void;
