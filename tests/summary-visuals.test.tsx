@@ -461,6 +461,32 @@ describe("summary visual production", () => {
     expect(request.referenceImages).toHaveLength(1); expect(request.referenceImages[0]).toMatchObject({ role: "primary_reference" });
     expect(result.scenePlan!.scenes[0]!.artwork.versions!.at(-1)!.provenance).toMatchObject({ referencesUsed: "images", referenceImageCount: 1, visualCanon: [{ entityId, source: "approved Visual Profile", reference: true, primaryReference: true, profileRevision: 2 }] });
   });
+  it("keeps a fallback character distinct from a referenced character in summary artwork", async () => {
+    const planned = await produce();
+    const entityId = planned.scenePlan!.scenes[0]!.entityIds![0]!;
+    const fallbackId = "ent_333333333333333333333333";
+    const story = testStory(); story.artwork.model = "gpt-image-2.5-flare";
+    await atomicWriteJson(storyPaths(root, "demo-story", 1).storyConfig, story);
+    const bible = await loadStoryBibleWithCanonicalOverlay(root, "demo-story");
+    bible.canonicalEntities.push({ id: fallbackId, type: "character", canonicalName: "Zhang Yongxing", aliases: [], description: "A young rival who betrays Malakai.", firstAppearance: 1, lastKnownAppearance: 1 });
+    await atomicWriteJson(storyPaths(root, "demo-story", 1).bible, bible);
+    const raw = JSON.parse(await readFile(summaryPath(root, "demo-story", id), "utf8"));
+    raw.scenePlan.scenes[0].characters = ["Malakai", "Zhang Yongxing"];
+    raw.scenePlan.scenes[0].summary = "Zhang betrays Malakai.";
+    await atomicWriteJson(summaryPath(root, "demo-story", id), raw);
+    const now = new Date().toISOString();
+    const references = ["su-primary", "su-face"].map((refId) => ({ id: refId, entityId, imagePath: `${refId}.png`, role: "face_portrait" as const, source: "uploaded" as const, approved: true, createdAt: now }));
+    await saveVisualProfiles(root, "demo-story", { [entityId]: { id: "vp-su", entityId, visualType: "character", status: "approved", revision: 2, createdAt: now, updatedAt: now, appearance: "Dark hair and a black robe", visualPrompt: "dark-haired necromancer", notes: "", character: {}, variants: [], references } });
+    for (const reference of references) await atomicWrite(visualProfileRefPath(root, "demo-story", entityId, reference.id, "png"), PNG);
+    images.generate.mockClear();
+    const result = await visuals.artwork("demo-story", id, { force: true, scenes: ["scene-001"], allowUnprofiledEntityIds: [fallbackId] });
+    const request = images.generate.mock.calls[0]![0];
+    expect(request.referenceImages).toHaveLength(1);
+    expect(request.referenceImages[0]).toMatchObject({ entityId, referenceId: "su-primary" });
+    expect(request.prompt).toContain("FINAL CAST IDENTITY LOCK");
+    expect(request.prompt).toContain("Zhang Yongxing: no character reference image");
+    expect(result.scenePlan!.scenes[0]!.artwork.versions!.at(-1)!.provenance).toMatchObject({ characterReferences: [{ entityId, referenceId: "su-primary" }], visualCanon: [{ entityId, source: "approved Visual Profile" }, { entityId: fallbackId, source: "Story Bible fallback (one-time)" }] });
+  });
   it("falls back to deterministic timing when local alignment is unavailable", async () => {
     const fallback = new SummaryVisualService(root, media, images, { version: "fake-video", render }, config);
     const result = await fallback.produce("demo-story", id, { sceneCount: 2 }); expect(result.alignment?.mode).toBe("estimated"); expect(result.scenePlan?.timingMethod).toBe("estimated"); expect(result.scenePlan?.scenes[1]?.startSeconds).toBe(6); expect(result.video?.durationSeconds).toBe(12);

@@ -38,7 +38,22 @@ export const REFERENCE_USAGE_INSTRUCTION =
 
 // Bump when shared Visual Canon prompt semantics change. This intentionally
 // makes old artwork eligible for regeneration without touching story text.
-const VISUAL_CANON_ARTWORK_VERSION = "visual-canon-v3-owned-references";
+const VISUAL_CANON_ARTWORK_VERSION = "visual-canon-v4-mixed-cast";
+
+/** Keep the final instruction close to the provider request's end, where a
+ * mixed cast and a strong single-person reference otherwise invite cloning. */
+export function mixedCastIdentityPrompt(resolved: ResolvedSceneVisualPrompt, images: ImageReferenceImage[]): string {
+  const characters = resolved.resolvedEntities.filter((entity) => entity.type === "character");
+  const fallback = characters.filter((entity) => entity.groundingMode !== "approved_profile");
+  const profiled = characters.filter((entity) => entity.groundingMode === "approved_profile");
+  if (characters.length < 2 || !fallback.length || !profiled.length) return "";
+  const referenced = profiled.filter((entity) => images.some((image) => image.sourceKind === "visual-profile" && image.entityId === entity.entityId));
+  return [
+    "FINAL CAST IDENTITY LOCK: Render each named character as a separate person with one distinct face and body. Do not duplicate a reference person as another cast member.",
+    ...referenced.map((entity) => `${entity.name}: the supplied reference of ${entity.name} applies to this character only.`),
+    ...fallback.map((entity) => `${entity.name}: use this character's Story Bible description and scene role. Give ${entity.name} a visibly different face, facial proportions, hairline, hairstyle, body silhouette, and clothing silhouette from ${profiled.map((item) => item.name).join(" and ")}, except where the scene explicitly establishes a shared trait or uniform. Any unspecified visual choices are scene-local, not persistent canon.`),
+  ].join("\n");
+}
 
 /** Number references from the exact array sent to the provider. */
 export function referenceAssignmentPrompt(resolved: ResolvedSceneVisualPrompt, images: ImageReferenceImage[]): string {
@@ -334,7 +349,7 @@ export async function generateStoredArtwork(options: {
 
     try {
       const references = item.loadedReferences;
-      const providerPrompt = [item.prompt, referenceAssignmentPrompt(item.resolved, references.images), references.images.length ? REFERENCE_USAGE_INSTRUCTION : ""].filter(Boolean).join("\n\n");
+      const providerPrompt = [item.prompt, referenceAssignmentPrompt(item.resolved, references.images), references.images.length ? REFERENCE_USAGE_INSTRUCTION : "", mixedCastIdentityPrompt(item.resolved, references.images)].filter(Boolean).join("\n\n");
       const result = await generateSceneImage(options.provider, options.story, providerPrompt, {
         negativePrompt: item.resolved.negativePrompt || undefined,
         referenceImages: references.images,
@@ -752,12 +767,20 @@ export async function loadApprovedVisualProfileReferences(root: string, story: S
   if (!available) return { images: [], available: 0, mode: "none", loadedEntityIds: [], loadedReferenceIds: [], referenceFingerprints: [] };
   if (!providerSupportsReferenceImages(story.artwork.provider, story.artwork.model)) return { images: [], available, mode: "text-only", loadedEntityIds: [], loadedReferenceIds: [], referenceFingerprints: [] };
   const images: ImageReferenceImage[] = [];
+  const mixedCast = resolved.resolvedEntities.filter((entity) => entity.type === "character").length > 1
+    && resolved.resolvedEntities.some((entity) => entity.type === "character" && entity.groundingMode !== "approved_profile")
+    && resolved.resolvedEntities.some((entity) => entity.type === "character" && entity.groundingMode === "approved_profile");
+  const loadedPerEntity = new Set<string>();
   const loadedEntityIds = new Set<string>();
   const loadedReferenceIds: string[] = [];
   const referenceFingerprints: string[] = [];
   let totalBytes = 0;
   for (const { reference: ref, entityName } of wanted) {
     if (images.length >= MAX_REFERENCE_IMAGES) break;
+    // Multiple portraits of one profiled character can dominate an image-edit
+    // request and be cloned onto an unprofiled cast member. Keep the first
+    // successfully loaded approved reference per owner in mixed scenes.
+    if (mixedCast && loadedPerEntity.has(ref.entityId)) continue;
     const hint = /\.([a-zA-Z0-9]+)$/.exec(ref.imagePath)?.[1];
     const file = await findVisualReferenceFile(root, story.slug, ref.entityId, ref.id, hint);
     if (!file) continue;
@@ -766,6 +789,7 @@ export async function loadApprovedVisualProfileReferences(root: string, story: S
     totalBytes += data.length;
     images.push({ data, mimeType: mimeForVisualReferenceExtension(file.ext), role: ref.role, sourceKind: "visual-profile", entityId: ref.entityId, entityName, referenceId: ref.id });
     loadedEntityIds.add(ref.entityId);
+    loadedPerEntity.add(ref.entityId);
     loadedReferenceIds.push(ref.id);
     referenceFingerprints.push(fingerprint(data.toString("base64")));
   }

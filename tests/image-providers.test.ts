@@ -276,18 +276,21 @@ describe("artwork routing and provenance", () => {
     const loaded = await loadApprovedVisualProfileReferences(root, story, resolved);
     expect(loaded.images.map((image) => ({ entityId: image.entityId, entityName: image.entityName, referenceId: image.referenceId, role: image.role }))).toEqual([
       { entityId: ENTITY_ID, entityName: "Li Chen", referenceId: "ref-1", role: "face_portrait" },
-      { entityId: ENTITY_ID, entityName: "Li Chen", referenceId: "ref-2", role: "front" },
     ]);
-    expect(referenceAssignmentPrompt(resolved, [...loaded.images, { data: PNG_ALT, mimeType: "image/png", sourceKind: "continuity" }])).toContain("Reference image 3 is scene continuity");
+    expect(loaded.available).toBe(2);
+    expect(referenceAssignmentPrompt(resolved, [...loaded.images, { data: PNG_ALT, mimeType: "image/png", sourceKind: "continuity" }])).toContain("Reference image 2 is scene continuity");
     const images = fakeImages("gemini");
     await generateStoredArtwork({ root, story, chapter: 1, provider: images, sceneId: manifest.scenes[0]!.id, allowUnprofiledEntityIds: [fallbackId] });
     const request = images.calls[0]!;
-    expect(request.referenceImages?.map((image) => image.referenceId)).toEqual(["ref-1", "ref-2"]);
+    expect(request.referenceImages?.map((image) => image.referenceId)).toEqual(["ref-1"]);
     expect(request.prompt).toContain("Reference image 1 depicts Li Chen only");
     expect(request.prompt).toContain("Zhang Yongxing: no character reference image");
     expect(request.prompt).toContain("Li Chen and Zhang Yongxing are different people");
+    expect(request.prompt).toContain("FINAL CAST IDENTITY LOCK");
+    expect(request.prompt).toContain("Zhang Yongxing a visibly different face");
+    expect(request.prompt).not.toContain("Reference image 2 depicts Li Chen");
     const after = sceneManifestSchema.parse(JSON.parse(await readFile(paths.scenesManifest, "utf8")));
-    expect(after.scenes[0]!.artwork.versions[0]!.provenance).toMatchObject({ characterReferences: [{ entityId: ENTITY_ID, referenceId: "ref-1" }, { entityId: ENTITY_ID, referenceId: "ref-2" }], visualGrounding: [{ mode: "approved_profile" }, { mode: "story_bible_fallback" }] });
+    expect(after.scenes[0]!.artwork.versions[0]!.provenance).toMatchObject({ characterReferences: [{ entityId: ENTITY_ID, referenceId: "ref-1" }], visualGrounding: [{ mode: "approved_profile" }, { mode: "story_bible_fallback" }] });
     expect(JSON.parse(await readFile(paths.bible, "utf8")).canonicalEntities[1].visualProfilePolicy).toBeUndefined();
     bible.canonicalEntities[1].visualProfilePolicy = { mode: "skip" };
     await atomicWriteJson(paths.bible, bible);

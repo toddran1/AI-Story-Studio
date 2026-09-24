@@ -19,6 +19,7 @@ import {
   REFERENCE_USAGE_INSTRUCTION,
   referenceAssignmentPrompt,
   characterReferenceProvenance,
+  mixedCastIdentityPrompt,
   validPngFingerprint,
   backingArtworkVersion,
   resolveBestProductionAssetForPaths,
@@ -242,7 +243,7 @@ export class SummaryVisualService {
       }
     }
     const bookStyle = effectiveDirection.source === "disabled" ? "" : context.story.artwork.stylePrompt?.trim() ? `BOOK ART STYLE: ${context.story.artwork.stylePrompt.trim()}` : "";
-    const prompt = [resolved.prompt, bookStyle, referenceAssignmentPrompt(resolved, references.images), references.images.length ? REFERENCE_USAGE_INSTRUCTION : ""].filter(Boolean).join("\n\n");
+    const prompt = [resolved.prompt, bookStyle, referenceAssignmentPrompt(resolved, references.images), references.images.length ? REFERENCE_USAGE_INSTRUCTION : "", mixedCastIdentityPrompt(resolved, references.images)].filter(Boolean).join("\n\n");
     const { provider: pName, model, quality, aspectRatio, size, stylePrompt, outputFormat } = context.story.artwork;
     // Provenance keeps the attempted source and diagnostic reason. Fingerprints
     // include only the image actually sent; a text-only fallback has a stable
@@ -272,7 +273,7 @@ export class SummaryVisualService {
         profileRevision: entity.profileRevision,
       })),
       inputFingerprint: fingerprint({
-        version: "summary-visual-canon-v2-owned-references",
+        version: "summary-visual-canon-v3-mixed-cast",
         prompt,
         references: references.loadedReferenceIds.map((id, index) => ({ id, fingerprint: references.referenceFingerprints[index] })),
         continuityReference: effectiveContinuityReference,
