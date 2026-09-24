@@ -50,6 +50,7 @@ import { readEntityAudit } from "../../src/story-bible/entity-audit.js";
 import { normalizeEntitySearch } from "../../src/story-bible/search.js";
 import { cachedStoryRead, fileStamp, filesStampFingerprint, invalidateStoryReadCache } from "../../src/story-bible/read-cache.js";
 import { bumpStoryBibleReadRevision, getStoryBibleReadRevision } from "../../src/story-bible/read-revision.js";
+import { bumpChapterStatusReadRevision, getChapterStatusReadRevision } from "../../src/studio/chapter-status-revision.js";
 
 const slugSchema = z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/);
 export const chapterFilterSchema = z.enum(["all", "unprocessed", "warn", "fail", "complete"]);
@@ -72,7 +73,7 @@ export async function listStories(root: string, warnings: string[] = []) {
     try {
       const paths = storyPaths(root, slug, 1); if (!(await exists(paths.storyConfig))) return undefined;
       const story = await loadStory(paths.storyConfig); const manifestRaw = await readJsonIfExists(paths.sourceManifest); const manifest = manifestRaw ? sourceManifestSchema.safeParse(manifestRaw) : undefined;
-      const chapters = await loadChapterSummaries(root, slug); const processed = chapters.filter((item) => item.audioAvailable || item.audioMastering === "complete");
+      const chapters = await getChapterStatusReadModel(root, slug); const processed = chapters.filter((item) => item.audioAvailable || item.audioMastering === "complete");
       const activity = await readActivity(root, slug, 1); const storage = await cachedStorageUsage(root, slug); const cover = (await Promise.all(["cover.jpg", "cover.jpeg", "cover.png"].map(async (name) => await exists(join(paths.story, name)) ? name : undefined))).find(Boolean); let exportNames: string[] = [];
       try { exportNames = await readdir(join(paths.story, "exports")); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
       const availableExports = await currentExportBadges(root, slug, exportNames, chapters);
@@ -88,7 +89,7 @@ export async function listStories(root: string, warnings: string[] = []) {
 
 export async function getStoryOverview(root: string, slug: string) {
   slugSchema.parse(slug); const story = await loadStory(storyPaths(root, slug, 1).storyConfig);
-  const chapters = await loadChapterSummaries(root, slug);
+  const chapters = await getChapterStatusReadModel(root, slug);
   const env = loadEnvironment();
   const globalDefaults = await loadGlobalSettings(root, env).catch(() => undefined);
   const effectiveRouting = resolveAllModelRoutings(story, globalDefaults, env);
@@ -97,7 +98,7 @@ export async function getStoryOverview(root: string, slug: string) {
 }
 
 export async function getStoryDashboard(root: string, slug: string) {
-  slugSchema.parse(slug); const overview = await getStoryOverview(root, slug); const chapters = await loadChapterSummaries(root, slug); const latest = await loadLatestProduction(root, slug); const sourceRaw = await readJsonIfExists<SourceManifest>(storyPaths(root, slug, 1).sourceManifest); const source = sourceRaw ? sourceManifestSchema.safeParse(sourceRaw) : undefined;
+  slugSchema.parse(slug); const overview = await getStoryOverview(root, slug); const chapters = await getChapterStatusReadModel(root, slug); const latest = await loadLatestProduction(root, slug); const sourceRaw = await readJsonIfExists<SourceManifest>(storyPaths(root, slug, 1).sourceManifest); const source = sourceRaw ? sourceManifestSchema.safeParse(sourceRaw) : undefined;
   const completedStages = chapters.reduce((sum, chapter) => sum + [chapter.translation, chapter.narration, chapter.tts, chapter.audioMastering, chapter.continuity, chapter.alignment, chapter.subtitles, chapter.scenePlanning, chapter.artwork, chapter.video].filter((status) => status === "complete").length, 0);
   const current = latest?.story === slug && latest.storyFingerprint === fingerprint(overview.story) ? publicProductionManifest(latest, slug) : undefined;
   return { ...overview, source: source?.success ? { type: source.data.type, origin: "url" in source.data.origin ? { url: source.data.origin.url } : { name: source.data.origin.name }, importedAt: source.data.importedAt, chapterCount: source.data.chapters.length } : undefined, progress: { processed: chapters.filter((item) => item.translation === "complete").length, audio: chapters.filter((item) => item.audioAvailable || item.audioMastering === "complete").length, artwork: chapters.filter((item) => item.artwork === "complete").length, video: chapters.filter((item) => item.video === "complete").length }, latestProduction: current, currentProfile: current?.options.profile, estimatedRemainingStages: Math.max(0, chapters.length * 10 - completedStages) };
@@ -169,7 +170,7 @@ export async function getChapter(root: string, slug: string, chapter: number) {
 function chapterLink(index: ChapterIndex, chapter: number) { return { chapter, title: index.titles.get(chapter) }; }
 
 export async function getQaDashboard(root: string, slug: string) {
-  const chapters = await loadChapterSummaries(root, slug); const issues: Record<string, number> = {}; const items = [];
+  const chapters = await getChapterStatusReadModel(root, slug); const issues: Record<string, number> = {}; const items = [];
   for (const chapter of chapters) {
     if (!chapter.qa) continue; const qaIssues = chapter.qaIssues ?? [];
     const activeIssues = qaIssues.filter(isQaIssueActive);
@@ -884,13 +885,34 @@ export async function updateStorySettings(root: string, slug: string, input: unk
       },
       pipelineOverrides: { ...(current.pipelineOverrides ?? {}), ...(update.pipelineOverrides ?? {}) },
     });
-    await invalidateStoryForConfigChange(root, slug, current, story); await atomicWriteJson(paths.storyConfig, story); await atomicWriteJson(paths.pipelineConfig, story.pipeline); return story;
+    await invalidateStoryForConfigChange(root, slug, current, story); await atomicWriteJson(paths.storyConfig, story); await atomicWriteJson(paths.pipelineConfig, story.pipeline); await invalidateChapterStatusDerivedReads(root, slug); return story;
   });
 }
 
-export async function loadChapterSummaries(root: string, slug: string): Promise<ChapterSummary[]> {
-  const index = await loadChapterIndex(root, slug); return loadSummaries(root, slug, index.numbers, index);
+const CHAPTER_STATUS_CACHE = "chapter_status";
+export async function invalidateChapterStatusDerivedReads(root: string, slug: string) {
+  const startedAt = Date.now();
+  invalidateStoryReadCache(root, slug, CHAPTER_STATUS_CACHE);
+  await bumpChapterStatusReadRevision(root, slug);
+  logger.debug({ event: "chapter_status.revision_invalidation", story: slug, durationMs: Date.now() - startedAt });
 }
+
+export async function getChapterStatusReadModel(root: string, slug: string): Promise<ChapterSummary[]> {
+  slugSchema.parse(slug);
+  const startedAt = Date.now();
+  const { value, cacheHit } = await cachedStoryRead(CHAPTER_STATUS_CACHE, root, slug,
+    () => getChapterStatusReadRevision(root, slug), async () => {
+      const buildStartedAt = Date.now();
+      const index = await loadChapterIndex(root, slug);
+      const rows = await loadSummaries(root, slug, index.numbers, index);
+      logger.debug({ event: "chapter_status.full_build", story: slug, durationMs: Date.now() - buildStartedAt, chapters: rows.length });
+      return rows;
+    });
+  logger.debug({ event: "chapter_status.read_model", story: slug, cacheHit, durationMs: Date.now() - startedAt, chapters: value.length });
+  return value;
+}
+
+export const loadChapterSummaries = getChapterStatusReadModel;
 
 function countQa(chapters: ChapterSummary[]) {
   return { pass: chapters.filter((item) => item.qa === "pass").length, warn: chapters.filter((item) => item.qa === "warn").length, fail: chapters.filter((item) => item.qa === "fail").length };
@@ -946,7 +968,7 @@ async function loadSummaries(root: string, slug: string, numbers: number[], inde
 }
 
 export async function getAudioDashboard(root: string, slug: string) {
-  slugSchema.parse(slug); const story = await loadStory(storyPaths(root, slug, 1).storyConfig); const chapters = await loadChapterSummaries(root, slug);
+  slugSchema.parse(slug); const story = await loadStory(storyPaths(root, slug, 1).storyConfig); const chapters = await getChapterStatusReadModel(root, slug);
   const exportsDirectory = join(storyPaths(root, slug, 1).story, "exports"); let names: string[] = [];
   try { names = (await readdir(exportsDirectory)).filter((name) => isVisibleManifest(name, ".json")); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
   const exports = (await mapLimit(names, 8, async (name) => {
@@ -992,7 +1014,7 @@ export async function getAudioDashboard(root: string, slug: string) {
 }
 
 export async function getVideoDashboard(root: string, slug: string) {
-  slugSchema.parse(slug); const story = await loadStory(storyPaths(root, slug, 1).storyConfig); const chapters = await loadChapterSummaries(root, slug); const storyRoot = storyPaths(root, slug, 1).story;
+  slugSchema.parse(slug); const story = await loadStory(storyPaths(root, slug, 1).storyConfig); const chapters = await getChapterStatusReadModel(root, slug); const storyRoot = storyPaths(root, slug, 1).story;
   const cover = (await Promise.all(["cover.jpg", "cover.jpeg", "cover.png"].map(async (name) => await exists(join(storyRoot, name)) ? name : undefined))).find(Boolean); let names: string[] = [];
   try { names = (await readdir(join(storyRoot, "exports"))).filter((name) => isVisibleManifest(name, ".mp4.json")); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
   const exports = (await mapLimit(names, 8, async (name) => { const raw = await readJsonIfExists(join(storyRoot, "exports", name)).catch((error) => { logger.warn({ event: "video.export_manifest_ignored", story: slug, manifest: name, error: error instanceof Error ? error.message : String(error) }, "Ignoring unreadable video export manifest"); return undefined; }); const parsed = raw ? videoExportManifestSchema.safeParse(raw) : undefined; if (!parsed?.success || parsed.data.story !== slug || !(await currentVideoExport(root, slug, parsed.data))) return undefined; const { output: _output, ...manifest } = parsed.data; return { ...manifest, downloadUrl: `/api/stories/${slug}/video-exports/${parsed.data.from}-${parsed.data.to}.mp4` }; })).filter((item): item is NonNullable<typeof item> => Boolean(item)).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
@@ -1018,7 +1040,7 @@ export async function getArtDirection(root: string, slug: string) {
 export async function getScenesDashboard(root: string, slug: string, selectedChapter?: number) {
   slugSchema.parse(slug);
   const story = await loadStory(storyPaths(root, slug, 1).storyConfig);
-  const chapters = await loadChapterSummaries(root, slug);
+  const chapters = await getChapterStatusReadModel(root, slug);
   const chapterNumber = selectedChapter ?? chapters[0]?.chapter;
   if (chapterNumber !== undefined && !chapters.some((item) => item.chapter === chapterNumber))
     throw new Error(`Chapter ${chapterNumber} was not found`);

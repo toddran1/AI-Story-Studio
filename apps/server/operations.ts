@@ -80,7 +80,7 @@ import { TTSProvider } from "../../src/tts/provider.js";
 import { TTSProviderRouter } from "../../src/tts/router.js";
 import { CensorAudioService, FfmpegCensorAudioService } from "../../src/tts/censor-audio.js";
 import { addManualBibleEntry, bibleCategorySchema, chapterTextEditSchema, deleteBibleEntry, saveChapterTextEdit, saveVoicePreview, updateManualBibleEntry, voicePreviewSchema } from "../../src/studio/workflow.js";
-import { getContinuityReview, getStoryBible, invalidateCatalogCache, invalidateStoryBibleDerivedReads, loadChapterSummaries, mapLimit } from "./catalog.js";
+import { getContinuityReview, getStoryBible, invalidateCatalogCache, invalidateChapterStatusDerivedReads, invalidateStoryBibleDerivedReads, loadChapterSummaries, mapLimit } from "./catalog.js";
 import { buildStoryBackup, cleanupKindSchema, cleanupStory, createBlankStory, deleteStory, duplicateStory, getStorageUsage, invalidateStoryForConfigChange, loadGlobalSettings, readActivity, recordActivity, restoreStoryBackupFile, saveCover, saveGlobalSettings, systemStatus, updateStoryMetadata } from "../../src/studio/projects.js";
 import { ProductionQueueService } from "../../src/queue/production-service.js";
 import { alignmentConfig, createAlignmentEngine } from "../../src/alignment/config.js";
@@ -250,7 +250,7 @@ export class StudioOperations {
   }
   async markStagesCurrent(slug: string, raw: unknown) {
     const result = await markStagesCurrent(this.root, slug, markCurrentInputSchema.parse(raw));
-    invalidateCatalogCache(this.root, slug); await invalidateStoryBibleDerivedReads(this.root, slug);
+    invalidateCatalogCache(this.root, slug); await invalidateChapterStatusDerivedReads(this.root, slug); await invalidateStoryBibleDerivedReads(this.root, slug);
     return result;
   }
   async planStageExecution(slug: string, raw: unknown) {
@@ -282,7 +282,7 @@ export class StudioOperations {
           results.push({ chapter, status: "failed", plan, error: error instanceof Error ? error.message : String(error) });
         }
       }
-      invalidateCatalogCache(this.root, slug); await invalidateStoryBibleDerivedReads(this.root, slug); return { fingerprint: batchPlan.fingerprint, results, summary: { ...batchPlan.summary, completedOperations: results.filter((item) => item.status === "completed").reduce((count, item) => count + item.plan.runStages.length, 0), completedChapters: results.filter((item) => item.status === "completed").length, reusedChapters: results.filter((item) => item.status === "reused").length, blockedChapters: results.filter((item) => item.status === "blocked").length, failedChapters: results.filter((item) => item.status === "failed").length } };
+      invalidateCatalogCache(this.root, slug); await invalidateChapterStatusDerivedReads(this.root, slug); await invalidateStoryBibleDerivedReads(this.root, slug); return { fingerprint: batchPlan.fingerprint, results, summary: { ...batchPlan.summary, completedOperations: results.filter((item) => item.status === "completed").reduce((count, item) => count + item.plan.runStages.length, 0), completedChapters: results.filter((item) => item.status === "completed").length, reusedChapters: results.filter((item) => item.status === "reused").length, blockedChapters: results.filter((item) => item.status === "blocked").length, failedChapters: results.filter((item) => item.status === "failed").length } };
     }), { chapters: input.chapters, stages: input.stages, mode: input.mode, force: input.force });
   }
 
@@ -359,7 +359,7 @@ export class StudioOperations {
       });
     try { await this.discardInspection(inspectionId); }
     catch (error) { logger.warn({ event: "web.inspection.cleanup_failed", inspectionId, error: error instanceof Error ? error.message : String(error) }); }
-    await recordActivity(this.root, slug, "source.imported", `Imported ${result.added.length} new and updated ${result.modified.length} chapters`); invalidateCatalogCache(this.root, slug); await invalidateStoryBibleDerivedReads(this.root, slug); return result;
+    await recordActivity(this.root, slug, "source.imported", `Imported ${result.added.length} new and updated ${result.modified.length} chapters`); invalidateCatalogCache(this.root, slug); await invalidateChapterStatusDerivedReads(this.root, slug); await invalidateStoryBibleDerivedReads(this.root, slug); return result;
   }
 
   private async applyConfiguredFallbacks(slug: string, primary: SourceInspection, from?: number, to?: number): Promise<SourceInspection> {
@@ -472,7 +472,7 @@ export class StudioOperations {
           runtime: { pipeline: this.pipeline, alignment: { config: this.alignConfig, engine: this.aligner }, scenePlanner: this.scenePlanner ?? this.runtime.router.forStage(story.pipeline.scenePlanner), image: this.image, video: this.video }, onStageEvent: request.onStageEvent });
       } } : this.pipeline;
       return new BatchRunner(processor).run({ root: this.root, story, chapters: selected, state, shutdown, retry: retryConfigSchema.parse({}),
-        onProgress: (event: ProgressEvent) => control.update(event) }).then(async (result) => { await invalidateStoryBibleDerivedReads(this.root, slug); return result; });
+        onProgress: (event: ProgressEvent) => control.update(event) }).then(async (result) => { await invalidateChapterStatusDerivedReads(this.root, slug); await invalidateStoryBibleDerivedReads(this.root, slug); return result; });
     }));
   }
 
@@ -559,7 +559,7 @@ export class StudioOperations {
   }
   deleteSummary(slug: string, id: string) { slugSchema.parse(slug); return withStoryLock(this.root, slug, "summary deletion", async () => { const result = await new SummaryService(this.root, this.llm).delete(slug, id); await recordActivity(this.root, slug, "summary.deleted", `Deleted summary ${id}`); return result; }); }
 
-  async editChapterText(slug: string, chapter: number, raw: unknown) { slugSchema.parse(slug); const input = chapterTextEditSchema.parse(raw); return withStoryLock(this.root, slug, "manual chapter text edit", async () => { const result = await saveChapterTextEdit(this.root, slug, chapter, input); await invalidateStoryBibleDerivedReads(this.root, slug); await recordActivity(this.root, slug, "chapter.edited", `Edited Chapter ${chapter} ${input.field}`); return result; }); }
+  async editChapterText(slug: string, chapter: number, raw: unknown) { slugSchema.parse(slug); const input = chapterTextEditSchema.parse(raw); return withStoryLock(this.root, slug, "manual chapter text edit", async () => { const result = await saveChapterTextEdit(this.root, slug, chapter, input); await invalidateChapterStatusDerivedReads(this.root, slug); await invalidateStoryBibleDerivedReads(this.root, slug); await recordActivity(this.root, slug, "chapter.edited", `Edited Chapter ${chapter} ${input.field}`); return result; }); }
   async dismissQaFindings(slug: string, chapter: number, raw: unknown) {
     slugSchema.parse(slug); if (!Number.isSafeInteger(chapter) || chapter < 1) throw new ConfigurationError("Chapter must be a positive integer");
     const input = qaDismissInputSchema.parse(raw);
@@ -577,7 +577,7 @@ export class StudioOperations {
         stages: { ...prior.stages, qa: { ...prior.stages.qa, outputFingerprint } },
         updatedAt: new Date().toISOString(),
       }));
-      invalidateCatalogCache(this.root, slug);
+      invalidateCatalogCache(this.root, slug); await invalidateChapterStatusDerivedReads(this.root, slug);
       const action = input.disposition === "manually_fixed" ? "Marked manually fixed" : "Dismissed";
       await recordQaActivityBestEffort(this.root, slug, input.disposition === "manually_fixed" ? "chapter.qa_manually_fixed" : "chapter.qa_dismissed", `${action} ${uniqueIndexes.length} QA finding(s) for Chapter ${chapter}`);
       return { chapter, resolved: uniqueIndexes.length, disposition: input.disposition, qa };
@@ -637,7 +637,7 @@ export class StudioOperations {
         if (target === "translation") currentTranslation = result.text; else currentNarration = result.text; repaired.push(target);
         control.update({ type: "qa.repair.completed", chapter, target, completed: repaired.length, total: targets.length });
       }
-      invalidateCatalogCache(this.root, slug); await recordQaActivityBestEffort(this.root, slug, "chapter.qa_repaired", `AI repaired Chapter ${chapter} ${repaired.join(" and ")} for ${findings.length} selected QA finding(s)`);
+      invalidateCatalogCache(this.root, slug); await invalidateChapterStatusDerivedReads(this.root, slug); await recordQaActivityBestEffort(this.root, slug, "chapter.qa_repaired", `AI repaired Chapter ${chapter} ${repaired.join(" and ")} for ${findings.length} selected QA finding(s)`);
       return { chapter, repaired, findingIds: findings.map((finding) => finding.id), requiresQaRecheck: true };
     }), { chapter, findingSelections: snapshots, targetOverridesByFindingId: overridesByFindingId });
   }
@@ -649,7 +649,7 @@ export class StudioOperations {
       control.update({ type: "qa.recheck.started", chapter, stage: "qa", mode: input.mode });
       const result = await withUsageScope({ story: slug, chapter, stage: "qa" }, () => recheckChapterQa({ root: this.root, story, chapter, provider: this.llm.forStage(story.pipeline.qa), mode: input.mode }));
       control.update({ type: "qa.recheck.completed", chapter, stage: "qa", status: result.state.status });
-      invalidateCatalogCache(this.root, slug); await recordQaActivityBestEffort(this.root, slug, "chapter.qa_rechecked", `Rechecked Chapter ${chapter} using its retained translation and narration`);
+      invalidateCatalogCache(this.root, slug); await invalidateChapterStatusDerivedReads(this.root, slug); await recordQaActivityBestEffort(this.root, slug, "chapter.qa_rechecked", `Rechecked Chapter ${chapter} using its retained translation and narration`);
       return { chapter, qa: result.state.status, qaOnly: true, summary: result.summary };
     }));
   }
@@ -688,7 +688,7 @@ export class StudioOperations {
     if (!Number.isSafeInteger(chapter) || chapter < 1) throw new ConfigurationError("Chapter must be a positive integer");
     const result = await resetChapterQa(this.root, slug, chapter);
     if (result.reset) {
-      invalidateCatalogCache(this.root, slug);
+      invalidateCatalogCache(this.root, slug); await invalidateChapterStatusDerivedReads(this.root, slug);
       await recordQaActivityBestEffort(this.root, slug, "chapter.qa_reset", `Reset QA evaluation data for Chapter ${chapter}`);
     }
     return result;
@@ -699,7 +699,7 @@ export class StudioOperations {
     const scope = qaResetScopeSchema.parse(raw);
     const result = await resetChapterQaBatch(this.root, slug, scope);
     if (result.reset > 0) {
-      invalidateCatalogCache(this.root, slug);
+      invalidateCatalogCache(this.root, slug); await invalidateChapterStatusDerivedReads(this.root, slug);
       await recordQaActivityBestEffort(this.root, slug, "qa.batch_reset", `Reset QA evaluation data for ${result.reset} chapter(s)`);
     }
     return result;
@@ -721,7 +721,7 @@ export class StudioOperations {
         stages: { ...prior.stages, qa: { ...prior.stages.qa, ...(options.qaStage ? { ...options.qaStage, status: "complete" as const } : {}), outputFingerprint } },
       updatedAt: new Date().toISOString(),
     }));
-    invalidateCatalogCache(this.root, slug);
+    invalidateCatalogCache(this.root, slug); await invalidateChapterStatusDerivedReads(this.root, slug);
     return { state, finding: state.findings.find((finding) => finding.id === id)! };
   }
 
@@ -770,7 +770,7 @@ export class StudioOperations {
         }
         throw error;
       }
-      if (input.remember) invalidateCatalogCache(this.root, slug);
+      if (input.remember) invalidateCatalogCache(this.root, slug); await invalidateChapterStatusDerivedReads(this.root, slug);
       await recordQaActivityBestEffort(this.root, slug, "chapter.qa_dismissed", `Dismissed QA finding ${id} for Chapter ${chapter}${exception ? " and remembered the decision" : ""}`);
       return { chapter, finding, qa: state, exception, presentation: await this.getChapterQa(slug, chapter) };
     });
@@ -848,13 +848,13 @@ export class StudioOperations {
         recheck = await withUsageScope({ story: slug, chapter, stage: "qa" }, () => recheckChapterQa({ root: this.root, story, chapter, provider: this.llm.forStage(story.pipeline.qa), mode: "full" }));
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        invalidateCatalogCache(this.root, slug);
+        invalidateCatalogCache(this.root, slug); await invalidateChapterStatusDerivedReads(this.root, slug);
         await recordQaActivityBestEffort(this.root, slug, "chapter.qa_repaired", `AI repair saved for Chapter ${chapter} QA finding ${id}; final QA verification failed and is still required`);
         return { chapter, findingId: id, repaired, fixed: true, status: "repair_applied_recheck_failed" as const,
           recheck: { attempted: true as const, success: false as const, error: message }, requiresQaRecheck: true as const };
       }
       const finalFinding = recheck.state.findings.find((candidate) => candidate.id === id);
-      invalidateCatalogCache(this.root, slug); await recordQaActivityBestEffort(this.root, slug, "chapter.qa_repaired", `AI repaired Chapter ${chapter} ${repaired.join(" and ")} for QA finding ${id}`);
+      invalidateCatalogCache(this.root, slug); await invalidateChapterStatusDerivedReads(this.root, slug); await recordQaActivityBestEffort(this.root, slug, "chapter.qa_repaired", `AI repaired Chapter ${chapter} ${repaired.join(" and ")} for QA finding ${id}`);
       return { chapter, findingId: id, repaired, fixed: finalFinding?.status === "fixed_ai", finding: finalFinding, summary: recheck.summary, presentation: await this.getChapterQa(slug, chapter) };
     }), { chapter, findingSelections: [selection], targetOverridesByFindingId: input.target ? { [id]: input.target } : {} });
   }
@@ -906,7 +906,7 @@ export class StudioOperations {
           const recheck = await withUsageScope({ story: slug, chapter, stage: "qa" }, () => recheckChapterQa({ root: this.root, story, chapter, provider: this.llm.forStage(story.pipeline.qa), mode: "full" }));
           summary = recheck.summary;
         } catch (error) {
-          invalidateCatalogCache(this.root, slug);
+          invalidateCatalogCache(this.root, slug); await invalidateChapterStatusDerivedReads(this.root, slug);
           await recordQaActivityBestEffort(this.root, slug, "chapter.qa_repaired", `Saved ${fixed.length} safe QA fix(es) for Chapter ${chapter}; final QA verification failed`);
           return { chapter, status: "repairs_applied_recheck_failed" as const, code: "QA_SAFE_FIX_RECHECK_FAILED" as const, fixed, failed, summary: undefined,
             recheck: { attempted: true as const, success: false as const, error: error instanceof Error ? error.message : String(error) }, requiresQaRecheck: true as const };
@@ -914,7 +914,7 @@ export class StudioOperations {
       }
     }
     if (fixed.length) {
-      invalidateCatalogCache(this.root, slug);
+      invalidateCatalogCache(this.root, slug); await invalidateChapterStatusDerivedReads(this.root, slug);
       await recordQaActivityBestEffort(this.root, slug, "chapter.qa_repaired", `Applied ${fixed.length} safe QA fix(es) for Chapter ${chapter}${failed.length ? `; ${failed.length} failed` : ""}`);
     }
     return { chapter, status: "completed" as const, fixed, failed, summary, recheck: { attempted: fixed.length > 0, success: fixed.length > 0 }, requiresQaRecheck: false };
@@ -930,7 +930,7 @@ export class StudioOperations {
     slugSchema.parse(slug); const input = qaExceptionInputSchema.parse(raw);
     return withStoryLock(this.root, slug, "QA exception add", async () => {
       const result = await addQaException(this.root, slug, input);
-      invalidateCatalogCache(this.root, slug); await recordQaActivityBestEffort(this.root, slug, "chapter.qa_dismissed", `${result.created ? "Added" : "Kept"} QA exception "${input.value}"`);
+      invalidateCatalogCache(this.root, slug); await invalidateChapterStatusDerivedReads(this.root, slug); await recordQaActivityBestEffort(this.root, slug, "chapter.qa_dismissed", `${result.created ? "Added" : "Kept"} QA exception "${input.value}"`);
       return result;
     });
   }
@@ -939,7 +939,7 @@ export class StudioOperations {
     return withStoryLock(this.root, slug, "QA exception remove", async () => {
       const result = await removeQaException(this.root, slug, id);
       if (!result.removed) throw new Error("QA exception was not found");
-      invalidateCatalogCache(this.root, slug); await recordQaActivityBestEffort(this.root, slug, "chapter.qa_dismissed", `Removed QA exception ${id}`);
+      invalidateCatalogCache(this.root, slug); await invalidateChapterStatusDerivedReads(this.root, slug); await recordQaActivityBestEffort(this.root, slug, "chapter.qa_dismissed", `Removed QA exception ${id}`);
       return result;
     });
   }
@@ -983,7 +983,7 @@ export class StudioOperations {
     await appendEntityAudit(this.root, slug, entityPatchAuditEntries(before, entity));
     const changedFields = ENTITY_AUDIT_FIELDS.filter((field) => JSON.stringify(before[field] ?? null) !== JSON.stringify(entity![field] ?? null));
     logger.debug({ event: "story_bible.entity_update", story: slug, entityId: id, changedFields, affectedChapters: invalidation.affectedChapters.length, durationMs: Date.now() - startedAt });
-    invalidateCatalogCache(this.root, slug); await invalidateStoryBibleDerivedReads(this.root, slug); await recordActivity(this.root, slug, "bible.entity.edited", invalidation.affectedChapters.length ? `Updated canonical entity ${id}; marked ${invalidation.affectedChapters.length} chapter(s) affected by narration naming` : `Updated canonical entity ${id}`); return { entity, invalidation, visualProfileReviewRequired };
+    invalidateCatalogCache(this.root, slug); await invalidateChapterStatusDerivedReads(this.root, slug); await invalidateStoryBibleDerivedReads(this.root, slug); await recordActivity(this.root, slug, "bible.entity.edited", invalidation.affectedChapters.length ? `Updated canonical entity ${id}; marked ${invalidation.affectedChapters.length} chapter(s) affected by narration naming` : `Updated canonical entity ${id}`); return { entity, invalidation, visualProfileReviewRequired };
   }
 
   /**
@@ -1186,7 +1186,7 @@ export class StudioOperations {
     slugSchema.parse(slug); z.string().regex(/^ent_[a-f0-9]{24}$/).parse(id);
     return withStoryLock(this.root, slug, "pronunciation suggestion dismiss", async () => {
       await dismissPronunciationSuggestion(this.root, slug, id);
-      invalidateCatalogCache(this.root, slug); await invalidateStoryBibleDerivedReads(this.root, slug);
+      invalidateCatalogCache(this.root, slug); await invalidateChapterStatusDerivedReads(this.root, slug); await invalidateStoryBibleDerivedReads(this.root, slug);
       return { status: "dismissed" };
     });
   }
@@ -1198,7 +1198,7 @@ export class StudioOperations {
       const base = await getStoryBible(this.root, slug);
       if (input.entityId && !base.canonicalEntities.some(entity => entity.id === input.entityId)) throw new Error("Canonical entity was not found");
       const result = await withUsageScope({ story: slug, stage: "pronunciation" }, () => enrichStoryPronunciations(this.root, slug, base, this.llm.forStage(story.pipeline.storyBible), story.pipeline.storyBible, story.sourceLanguage, input.entityId ? [input.entityId] : undefined, input.force || Boolean(input.entityId), input.dryRun));
-      invalidateCatalogCache(this.root, slug); await invalidateStoryBibleDerivedReads(this.root, slug);
+      invalidateCatalogCache(this.root, slug); await invalidateChapterStatusDerivedReads(this.root, slug); await invalidateStoryBibleDerivedReads(this.root, slug);
       return result;
     }));
   }
@@ -1333,7 +1333,7 @@ export class StudioOperations {
       const result = await suppressCanonicalEntity(this.root, slug, base, entityId, reason);
       try { await invalidateCanonicalIdentityChange(this.root, slug, [before], `Canonical entity ${before.canonicalName} was suppressed`); }
       catch (error) { if (priorOverlay) await atomicWrite(overlayPath, priorOverlay); else await rm(overlayPath, { force: true }); throw error; }
-      invalidateCatalogCache(this.root, slug); await invalidateStoryBibleDerivedReads(this.root, slug);
+      invalidateCatalogCache(this.root, slug); await invalidateChapterStatusDerivedReads(this.root, slug); await invalidateStoryBibleDerivedReads(this.root, slug);
       await appendEntityAudit(this.root, slug, [{ entityId, action: "suppressed", before: { canonicalName: before.canonicalName, type: before.type }, reason, source: "manual" }]);
       await recordActivity(this.root, slug, "bible.entity.suppressed", `Suppressed canonical entity ${entityId}: ${reason}`);
       return { status: "suppressed", suppression: result.overlay.suppressions.find((item) => item.entityId === entityId) };
@@ -1349,7 +1349,7 @@ export class StudioOperations {
       const entity = result.bible.canonicalEntities.find((item) => item.id === entityId);
       try { if (entity) await invalidateCanonicalIdentityChange(this.root, slug, [entity], `Canonical entity ${entity.canonicalName} was restored`); }
       catch (error) { await atomicWrite(overlayPath, priorOverlay); throw error; }
-      invalidateCatalogCache(this.root, slug); await invalidateStoryBibleDerivedReads(this.root, slug);
+      invalidateCatalogCache(this.root, slug); await invalidateChapterStatusDerivedReads(this.root, slug); await invalidateStoryBibleDerivedReads(this.root, slug);
       await appendEntityAudit(this.root, slug, [{ entityId, action: "restored", after: entity ? { canonicalName: entity.canonicalName, type: entity.type } : undefined, source: "manual" }]);
       await recordActivity(this.root, slug, "bible.entity.restored", `Restored canonical entity ${entityId}`);
       return { status: "restored", entity: result.bible.canonicalEntities.find((item) => item.id === entityId) };
@@ -1371,7 +1371,7 @@ export class StudioOperations {
         await updateCanonicalEntity(this.root, slug, base, current.entityIds[0]!, { status });
         if (canonicalEntitySchema.shape.id.safeParse(current.entityIds[0]!).success) await appendEntityAudit(this.root, slug, [{ entityId: current.entityIds[0]!, action: "updated", after: { status }, reason: input.note || `Resolved continuity finding ${id}`, source: "manual" }]);
       }
-      const finding = await resolveContinuityFinding(this.root, slug, id, input.resolution, input.note); invalidateCatalogCache(this.root, slug); await invalidateStoryBibleDerivedReads(this.root, slug); await recordActivity(this.root, slug, "continuity.resolved", `Resolved ${finding.type} finding`); return { finding };
+      const finding = await resolveContinuityFinding(this.root, slug, id, input.resolution, input.note); invalidateCatalogCache(this.root, slug); await invalidateChapterStatusDerivedReads(this.root, slug); await invalidateStoryBibleDerivedReads(this.root, slug); await recordActivity(this.root, slug, "continuity.resolved", `Resolved ${finding.type} finding`); return { finding };
     });
   }
 
@@ -1389,7 +1389,7 @@ export class StudioOperations {
     const result = await applyCleanupRecommendations(this.root, slug, input.recommendationIds, {
       highConfidenceOnly: input.highConfidenceOnly,
     });
-    invalidateCatalogCache(this.root, slug); await invalidateStoryBibleDerivedReads(this.root, slug);
+    invalidateCatalogCache(this.root, slug); await invalidateChapterStatusDerivedReads(this.root, slug); await invalidateStoryBibleDerivedReads(this.root, slug);
     await appendEntityAudit(this.root, slug, result.auditTrail.filter((entry) => canonicalEntitySchema.shape.id.safeParse(entry.entityId).success));
     await recordActivity(this.root, slug, "bible.cleanup.applied", `Applied Story Bible cleanup: demoted ${result.appliedDemotionsCount}, merged ${result.appliedMergesCount}`);
     return result;
@@ -1445,7 +1445,7 @@ export class StudioOperations {
       throw visualErr;
     }
 
-    invalidateCatalogCache(this.root, slug);
+    invalidateCatalogCache(this.root, slug); await invalidateChapterStatusDerivedReads(this.root, slug);
     await invalidateStoryBibleDerivedReads(this.root, slug);
     if (result.status === "demoted") await appendEntityAudit(this.root, slug, [{ entityId: id, action: "demoted", after: { referenceId: result.referenceId, parentEntityId: input.parentEntityId ?? null }, reason: input.reason, source: "manual" }]);
     await recordActivity(this.root, slug, "bible.entity.demoted", `Demoted canonical entity ${id} to minor reference`);
@@ -1458,7 +1458,7 @@ export class StudioOperations {
       reason: z.string().optional(),
     }).passthrough().parse(raw ?? {});
     const result = await promoteMinorReference(this.root, slug, id, input);
-    invalidateCatalogCache(this.root, slug); await invalidateStoryBibleDerivedReads(this.root, slug);
+    invalidateCatalogCache(this.root, slug); await invalidateChapterStatusDerivedReads(this.root, slug); await invalidateStoryBibleDerivedReads(this.root, slug);
     if (result.status === "promoted") await appendEntityAudit(this.root, slug, [{ entityId: result.entity.id, action: "promoted", after: { referenceId: id, canonicalName: result.entity.canonicalName }, reason: input.reason, source: "manual" }]);
     await recordActivity(this.root, slug, "bible.reference.promoted", `Promoted minor reference ${id} to canonical entity`);
     return result;
@@ -1474,7 +1474,7 @@ export class StudioOperations {
       contextNotes: z.string().nullable().optional(),
     }).passthrough().parse(raw ?? {});
     const result = await updateMinorReference(this.root, slug, id, input);
-    invalidateCatalogCache(this.root, slug); await invalidateStoryBibleDerivedReads(this.root, slug);
+    invalidateCatalogCache(this.root, slug); await invalidateChapterStatusDerivedReads(this.root, slug); await invalidateStoryBibleDerivedReads(this.root, slug);
     return result;
   }
 
@@ -1483,7 +1483,7 @@ export class StudioOperations {
     bleepStrongProfanity: story.narrationSettings.bleepStrongProfanity,
     speed: request.speed, format: config.format, sampleRate: 44100, bitrate: 192, normalize: true, maxCharsPerRequest: config.maxCharsPerRequest })); const saved = await saveVoicePreview(this.root, slug, result.audio, request); await recordActivity(this.root, slug, "voice.preview", "Generated a voice preview"); return saved; }); }
 
-  startProduction(slug: string, raw: unknown) { slugSchema.parse(slug); const input = productionInputSchema.parse(raw); return this.jobs.create("production", slug, async (control) => withStoryLock(this.root, slug, "end-to-end production", async () => { const story = await loadStory(storyPaths(this.root, slug, 1).storyConfig); const shutdown = new ShutdownController(); control.setPause(() => shutdown.request()); await recordActivity(this.root, slug, "production.started", `Started production for Chapters ${input.from}–${input.to}`); const manifest = (await runProduction({ root: this.root, story, ...input, pause: shutdown, recordedCost: this.usage ? () => this.usage!.recordedCost({ story: slug }) : undefined, onProgress: (event) => control.update(event) }, { pipeline: this.pipeline, loadChapters: async () => (await loadImportedChapters(this.root, slug)).chapters, refresh: (from, to) => refreshProductionRange({ root: this.root, story, from, to, registry: this.registry }), scenePlanner: this.scenePlanner ?? this.runtime.router.forStage(story.pipeline.scenePlanner), image: this.image, video: this.video, videoExport: this.videoExport, audiobook: this.audiobook, alignmentConfig: this.alignConfig, alignmentEngine: this.aligner })).manifest; await invalidateStoryBibleDerivedReads(this.root, slug); await recordActivity(this.root, slug, `production.${manifest.status}`, `${manifest.status === "completed" ? "Completed" : "Stopped"} production for Chapters ${input.from}–${input.to}`); return manifest; })); }
+  startProduction(slug: string, raw: unknown) { slugSchema.parse(slug); const input = productionInputSchema.parse(raw); return this.jobs.create("production", slug, async (control) => withStoryLock(this.root, slug, "end-to-end production", async () => { const story = await loadStory(storyPaths(this.root, slug, 1).storyConfig); const shutdown = new ShutdownController(); control.setPause(() => shutdown.request()); await recordActivity(this.root, slug, "production.started", `Started production for Chapters ${input.from}–${input.to}`); const manifest = (await runProduction({ root: this.root, story, ...input, pause: shutdown, recordedCost: this.usage ? () => this.usage!.recordedCost({ story: slug }) : undefined, onProgress: (event) => control.update(event) }, { pipeline: this.pipeline, loadChapters: async () => (await loadImportedChapters(this.root, slug)).chapters, refresh: (from, to) => refreshProductionRange({ root: this.root, story, from, to, registry: this.registry }), scenePlanner: this.scenePlanner ?? this.runtime.router.forStage(story.pipeline.scenePlanner), image: this.image, video: this.video, videoExport: this.videoExport, audiobook: this.audiobook, alignmentConfig: this.alignConfig, alignmentEngine: this.aligner })).manifest; await invalidateChapterStatusDerivedReads(this.root, slug); await invalidateStoryBibleDerivedReads(this.root, slug); await recordActivity(this.root, slug, `production.${manifest.status}`, `${manifest.status === "completed" ? "Completed" : "Stopped"} production for Chapters ${input.from}–${input.to}`); return manifest; })); }
   async submitProduction(slug:string,raw:unknown){if(this.queue)return this.queue.submit(slug,raw);return this.startProduction(slug,raw);}
 
   startPreview(slug: string, raw: unknown) {
@@ -1510,13 +1510,14 @@ export class StudioOperations {
           const chapterWarnings: string[] = [];
           if (audioArtifact.freshness === "stale") chapterWarnings.push(stalePrerequisiteWarning("audioMastering"));
           warnings.push(...chapterWarnings);
-          control.update({ type: "audio.chapter.completed", chapter, index: index + 1, total: selected.length, reused: true, retained: true, warnings: chapterWarnings });
+          await invalidateChapterStatusDerivedReads(this.root, slug); control.update({ type: "audio.chapter.completed", chapter, index: index + 1, total: selected.length, reused: true, retained: true, warnings: chapterWarnings });
           continue;
         }
         const result = await masterStoredChapter({ root: this.root, story, chapter, processor: this.audio, force: input.force }); result.reused ? reused++ : mastered++;
         warnings.push(...(result.warnings ?? []));
-        control.update({ type: "audio.chapter.completed", chapter, index: index + 1, total: selected.length, reused: result.reused, durationSeconds: result.probe.durationSeconds, warnings: result.warnings });
+        await invalidateChapterStatusDerivedReads(this.root, slug); control.update({ type: "audio.chapter.completed", chapter, index: index + 1, total: selected.length, reused: result.reused, durationSeconds: result.probe.durationSeconds, warnings: result.warnings });
       }
+      await invalidateChapterStatusDerivedReads(this.root, slug);
       return { status: "completed", mastered, reused, total: selected.length, warnings: [...new Set(warnings)] };
     }));
   }
@@ -1580,31 +1581,31 @@ export class StudioOperations {
           const chapterWarnings: string[] = [];
           if (audioArtifact.freshness === "stale") chapterWarnings.push(stalePrerequisiteWarning("audioMastering"));
           warnings.push(...chapterWarnings);
-          control.update({ type: "audio.chapter.completed", chapter, index: index + 1, total: selected.length, reused: true, retained: true, warnings: chapterWarnings });
+          await invalidateChapterStatusDerivedReads(this.root, slug); control.update({ type: "audio.chapter.completed", chapter, index: index + 1, total: selected.length, reused: true, retained: true, warnings: chapterWarnings });
           continue;
         }
         const result = await masterStoredChapter({ root: this.root, story, chapter, processor: this.audio });
         warnings.push(...(result.warnings ?? []));
-        control.update({ type: "audio.chapter.completed", chapter, index: index + 1, total: selected.length, reused: result.reused, warnings: result.warnings });
+        await invalidateChapterStatusDerivedReads(this.root, slug); control.update({ type: "audio.chapter.completed", chapter, index: index + 1, total: selected.length, reused: result.reused, warnings: result.warnings });
       }
       const assembled = await assembleAudiobook({ root: this.root, story, from: selected[0]!.chapter, to: selected.at(-1)!.chapter, format: input.format as AudiobookFormat,
         processor: this.audiobook, force: input.force, onProgress: (event) => control.update(event) });
-      return { ...assembled, warnings: [...new Set(warnings)] };
+      await invalidateChapterStatusDerivedReads(this.root, slug); return { ...assembled, warnings: [...new Set(warnings)] };
     }));
   }
 
-  startAlignment(slug: string, raw: unknown) { slugSchema.parse(slug); const input = alignmentJobSchema.parse(raw); return this.jobs.create("alignment", slug, async (control) => withStoryLock(this.root, slug, "web chapter alignment", async () => { const story = await loadStory(storyPaths(this.root, slug, input.chapter).storyConfig); control.update({ type: "alignment.chapter.started", chapter: input.chapter }); return alignStoredChapter({ root: this.root, storySlug: slug, chapter: input.chapter, language: story.outputLanguage, config: this.alignConfig, engine: this.aligner, force: input.force, forceEstimated: input.forceEstimated, requireAligned: input.requireAligned, onEvent: (event) => control.update({ type: `alignment.${event.status}`, chapter: input.chapter, mode: event.mode }) }); })); }
+  startAlignment(slug: string, raw: unknown) { slugSchema.parse(slug); const input = alignmentJobSchema.parse(raw); return this.jobs.create("alignment", slug, async (control) => withStoryLock(this.root, slug, "web chapter alignment", async () => { const story = await loadStory(storyPaths(this.root, slug, input.chapter).storyConfig); control.update({ type: "alignment.chapter.started", chapter: input.chapter }); const result = await alignStoredChapter({ root: this.root, storySlug: slug, chapter: input.chapter, language: story.outputLanguage, config: this.alignConfig, engine: this.aligner, force: input.force, forceEstimated: input.forceEstimated, requireAligned: input.requireAligned, onEvent: (event) => control.update({ type: `alignment.${event.status}`, chapter: input.chapter, mode: event.mode }) }); await invalidateChapterStatusDerivedReads(this.root, slug); return result; })); }
 
-  startSubtitles(slug: string, raw: unknown) { slugSchema.parse(slug); const input = rangeJobSchema.parse(raw); return this.jobs.create("subtitles", slug, async (control) => withStoryLock(this.root, slug, "web subtitle generation", async () => { const story = await loadStory(storyPaths(this.root, slug, 1).storyConfig); const selected = selectChapterRange((await loadImportedChapters(this.root, slug)).chapters, input.from, input.to); const shutdown = new ShutdownController(); control.setPause(() => shutdown.request()); let generated = 0; let reused = 0; const warnings: string[] = []; for (let index = 0; index < selected.length; index++) { if (shutdown.isRequested) return { status: "paused", generated, reused, warnings: [...new Set(warnings)] }; const chapter = selected[index]!.chapter; control.update({ type: "subtitles.chapter.started", chapter, index: index + 1, total: selected.length }); if (!input.forceEstimated) { const alignment = await alignStoredChapter({ root: this.root, storySlug: slug, chapter, language: story.outputLanguage, config: this.alignConfig, engine: this.aligner }); warnings.push(...(alignment.warnings ?? [])); } const result = await generateStoredSubtitles({ root: this.root, story, chapter, force: input.force, forceEstimated: input.forceEstimated }); result.reused ? reused++ : generated++; warnings.push(...(result.warnings ?? [])); control.update({ type: "subtitles.chapter.completed", chapter, index: index + 1, total: selected.length, reused: result.reused, warnings: result.warnings }); } return { generated, reused, total: selected.length, warnings: [...new Set(warnings)] }; })); }
+  startSubtitles(slug: string, raw: unknown) { slugSchema.parse(slug); const input = rangeJobSchema.parse(raw); return this.jobs.create("subtitles", slug, async (control) => withStoryLock(this.root, slug, "web subtitle generation", async () => { const story = await loadStory(storyPaths(this.root, slug, 1).storyConfig); const selected = selectChapterRange((await loadImportedChapters(this.root, slug)).chapters, input.from, input.to); const shutdown = new ShutdownController(); control.setPause(() => shutdown.request()); let generated = 0; let reused = 0; const warnings: string[] = []; for (let index = 0; index < selected.length; index++) { if (shutdown.isRequested) return { status: "paused", generated, reused, warnings: [...new Set(warnings)] }; const chapter = selected[index]!.chapter; control.update({ type: "subtitles.chapter.started", chapter, index: index + 1, total: selected.length }); if (!input.forceEstimated) { const alignment = await alignStoredChapter({ root: this.root, storySlug: slug, chapter, language: story.outputLanguage, config: this.alignConfig, engine: this.aligner }); warnings.push(...(alignment.warnings ?? [])); } const result = await generateStoredSubtitles({ root: this.root, story, chapter, force: input.force, forceEstimated: input.forceEstimated }); result.reused ? reused++ : generated++; warnings.push(...(result.warnings ?? [])); await invalidateChapterStatusDerivedReads(this.root, slug); control.update({ type: "subtitles.chapter.completed", chapter, index: index + 1, total: selected.length, reused: result.reused, warnings: result.warnings }); } await invalidateChapterStatusDerivedReads(this.root, slug); return { generated, reused, total: selected.length, warnings: [...new Set(warnings)] }; })); }
 
   async editSubtitles(slug: string, chapter: number, raw: unknown) { slugSchema.parse(slug); const input = z.object({ cues: z.array(z.unknown()).min(1).max(10_000) }).strict().parse(raw); return withStoryLock(this.root, slug, "manual subtitle edit", () => saveManualSubtitles(this.root, slug, chapter, input.cues)); }
   async resetSubtitles(slug: string, chapter: number) { slugSchema.parse(slug); return withStoryLock(this.root, slug, "discard manual subtitles", async () => { await discardManualSubtitles(this.root, slug, chapter); const story = await loadStory(storyPaths(this.root, slug, chapter).storyConfig); return generateStoredSubtitles({ root: this.root, story, chapter, force: true }); }); }
 
-  startVideo(slug: string, raw: unknown) { slugSchema.parse(slug); const input = videoJobSchema.parse(raw); return this.jobs.create("video", slug, async (control) => withStoryLock(this.root, slug, "web chapter video rendering", async () => { let story = await loadStory(storyPaths(this.root, slug, 1).storyConfig); if (input.subtitleMode) story = { ...story, video: { ...story.video, subtitleMode: input.subtitleMode } }; const selected = selectChapterRange((await loadImportedChapters(this.root, slug)).chapters, input.from, input.to); const shutdown = new ShutdownController(); control.setPause(() => shutdown.request()); let rendered = 0; let reused = 0; const warnings: string[] = []; for (let index = 0; index < selected.length; index++) { if (shutdown.isRequested) return { status: "paused", rendered, reused, warnings: [...new Set(warnings)] }; const chapter = selected[index]!.chapter; if (story.video.subtitleMode !== "none") { const alignment = await alignStoredChapter({ root: this.root, storySlug: slug, chapter, language: story.outputLanguage, config: this.alignConfig, engine: this.aligner }); const subtitles = await generateStoredSubtitles({ root: this.root, story, chapter }); warnings.push(...(alignment.warnings ?? []), ...(subtitles.warnings ?? [])); } control.update({ type: "video.chapter.started", chapter, index: index + 1, total: selected.length }); const result = await renderStoredChapterVideo({ root: this.root, story, chapter, processor: this.video, force: input.force }); result.reused ? reused++ : rendered++; warnings.push(...(result.warnings ?? [])); control.update({ type: "video.chapter.completed", chapter, index: index + 1, total: selected.length, reused: result.reused, warnings: result.warnings }); } return { rendered, reused, total: selected.length, warnings: [...new Set(warnings)] }; })); }
+  startVideo(slug: string, raw: unknown) { slugSchema.parse(slug); const input = videoJobSchema.parse(raw); return this.jobs.create("video", slug, async (control) => withStoryLock(this.root, slug, "web chapter video rendering", async () => { let story = await loadStory(storyPaths(this.root, slug, 1).storyConfig); if (input.subtitleMode) story = { ...story, video: { ...story.video, subtitleMode: input.subtitleMode } }; const selected = selectChapterRange((await loadImportedChapters(this.root, slug)).chapters, input.from, input.to); const shutdown = new ShutdownController(); control.setPause(() => shutdown.request()); let rendered = 0; let reused = 0; const warnings: string[] = []; for (let index = 0; index < selected.length; index++) { if (shutdown.isRequested) return { status: "paused", rendered, reused, warnings: [...new Set(warnings)] }; const chapter = selected[index]!.chapter; if (story.video.subtitleMode !== "none") { const alignment = await alignStoredChapter({ root: this.root, storySlug: slug, chapter, language: story.outputLanguage, config: this.alignConfig, engine: this.aligner }); const subtitles = await generateStoredSubtitles({ root: this.root, story, chapter }); warnings.push(...(alignment.warnings ?? []), ...(subtitles.warnings ?? [])); } control.update({ type: "video.chapter.started", chapter, index: index + 1, total: selected.length }); const result = await renderStoredChapterVideo({ root: this.root, story, chapter, processor: this.video, force: input.force }); result.reused ? reused++ : rendered++; warnings.push(...(result.warnings ?? [])); await invalidateChapterStatusDerivedReads(this.root, slug); control.update({ type: "video.chapter.completed", chapter, index: index + 1, total: selected.length, reused: result.reused, warnings: result.warnings }); } await invalidateChapterStatusDerivedReads(this.root, slug); return { rendered, reused, total: selected.length, warnings: [...new Set(warnings)] }; })); }
 
-  startVideoExport(slug: string, raw: unknown) { slugSchema.parse(slug); const input = rangeJobSchema.parse(raw); return this.jobs.create("videoExport", slug, async (control) => withStoryLock(this.root, slug, "web combined video export", async () => { const story = await loadStory(storyPaths(this.root, slug, 1).storyConfig); const selected = selectChapterRange((await loadImportedChapters(this.root, slug)).chapters, input.from, input.to); const warnings: string[] = []; for (let index = 0; index < selected.length; index++) { const chapter = selected[index]!.chapter; if (story.video.subtitleMode !== "none") { const alignment = await alignStoredChapter({ root: this.root, storySlug: slug, chapter, language: story.outputLanguage, config: this.alignConfig, engine: this.aligner }); const subtitles = await generateStoredSubtitles({ root: this.root, story, chapter }); warnings.push(...(alignment.warnings ?? []), ...(subtitles.warnings ?? [])); } const rendered = await renderStoredChapterVideo({ root: this.root, story, chapter, processor: this.video }); warnings.push(...(rendered.warnings ?? [])); control.update({ type: "video.chapter.completed", chapter, index: index + 1, total: selected.length, reused: rendered.reused, warnings: rendered.warnings }); } const assembled = await assembleVideoExport({ root: this.root, story, from: selected[0]!.chapter, to: selected.at(-1)!.chapter, processor: this.videoExport, force: input.force, onProgress: (event) => control.update(event) }); return { ...assembled, warnings: [...new Set(warnings)] }; })); }
+  startVideoExport(slug: string, raw: unknown) { slugSchema.parse(slug); const input = rangeJobSchema.parse(raw); return this.jobs.create("videoExport", slug, async (control) => withStoryLock(this.root, slug, "web combined video export", async () => { const story = await loadStory(storyPaths(this.root, slug, 1).storyConfig); const selected = selectChapterRange((await loadImportedChapters(this.root, slug)).chapters, input.from, input.to); const warnings: string[] = []; for (let index = 0; index < selected.length; index++) { const chapter = selected[index]!.chapter; if (story.video.subtitleMode !== "none") { const alignment = await alignStoredChapter({ root: this.root, storySlug: slug, chapter, language: story.outputLanguage, config: this.alignConfig, engine: this.aligner }); const subtitles = await generateStoredSubtitles({ root: this.root, story, chapter }); warnings.push(...(alignment.warnings ?? []), ...(subtitles.warnings ?? [])); } const rendered = await renderStoredChapterVideo({ root: this.root, story, chapter, processor: this.video }); warnings.push(...(rendered.warnings ?? [])); await invalidateChapterStatusDerivedReads(this.root, slug); control.update({ type: "video.chapter.completed", chapter, index: index + 1, total: selected.length, reused: rendered.reused, warnings: rendered.warnings }); } const assembled = await assembleVideoExport({ root: this.root, story, from: selected[0]!.chapter, to: selected.at(-1)!.chapter, processor: this.videoExport, force: input.force, onProgress: (event) => control.update(event) }); await invalidateChapterStatusDerivedReads(this.root, slug); return { ...assembled, warnings: [...new Set(warnings)] }; })); }
 
-  startScenes(slug: string, raw: unknown) { slugSchema.parse(slug); const input = explicitRangeJobSchema.parse(raw); return this.jobs.create("scenes", slug, async (control) => withStoryLock(this.root, slug, "web scene planning", async () => { const story = await loadStory(storyPaths(this.root, slug, 1).storyConfig); const selected = selectChapterRange((await loadImportedChapters(this.root, slug)).chapters, input.from, input.to); const shutdown = new ShutdownController(); control.setPause(() => shutdown.request()); let planned = 0; let reused = 0; const warnings: string[] = []; for (let index = 0; index < selected.length; index++) { if (shutdown.isRequested) return { status: "paused", planned, reused, warnings: [...new Set(warnings)] }; const chapter = selected[index]!.chapter; control.update({ type: "scenes.chapter.started", chapter, index: index + 1, total: selected.length }); const provider = this.scenePlanner ?? this.runtime.router.forStage(story.pipeline.scenePlanner); const result = await withUsageScope({story:slug,chapter,stage:"scenePlanning"},()=>planStoredScenes({ root: this.root, story, chapter, provider, force: input.force })); result.reused ? reused++ : planned++; warnings.push(...(result.warnings ?? [])); control.update({ type: "scenes.chapter.completed", chapter, index: index + 1, total: selected.length, scenes: result.manifest.scenes.length, reused: result.reused, warnings: result.warnings }); } return { planned, reused, total: selected.length, warnings: [...new Set(warnings)] }; }), raw); }
+  startScenes(slug: string, raw: unknown) { slugSchema.parse(slug); const input = explicitRangeJobSchema.parse(raw); return this.jobs.create("scenes", slug, async (control) => withStoryLock(this.root, slug, "web scene planning", async () => { const story = await loadStory(storyPaths(this.root, slug, 1).storyConfig); const selected = selectChapterRange((await loadImportedChapters(this.root, slug)).chapters, input.from, input.to); const shutdown = new ShutdownController(); control.setPause(() => shutdown.request()); let planned = 0; let reused = 0; const warnings: string[] = []; for (let index = 0; index < selected.length; index++) { if (shutdown.isRequested) return { status: "paused", planned, reused, warnings: [...new Set(warnings)] }; const chapter = selected[index]!.chapter; control.update({ type: "scenes.chapter.started", chapter, index: index + 1, total: selected.length }); const provider = this.scenePlanner ?? this.runtime.router.forStage(story.pipeline.scenePlanner); const result = await withUsageScope({story:slug,chapter,stage:"scenePlanning"},()=>planStoredScenes({ root: this.root, story, chapter, provider, force: input.force })); result.reused ? reused++ : planned++; warnings.push(...(result.warnings ?? [])); await invalidateChapterStatusDerivedReads(this.root, slug); control.update({ type: "scenes.chapter.completed", chapter, index: index + 1, total: selected.length, scenes: result.manifest.scenes.length, reused: result.reused, warnings: result.warnings }); } await invalidateChapterStatusDerivedReads(this.root, slug); return { planned, reused, total: selected.length, warnings: [...new Set(warnings)] }; }), raw); }
 
   async inspectArtworkVisualPreflight(slug: string, raw: unknown) {
     slugSchema.parse(slug);
@@ -1654,7 +1655,7 @@ export class StudioOperations {
     return { mode: entity.visualProfilePolicy?.mode ?? "prompt" };
   }
 
-  startArtwork(slug: string, raw: unknown) { slugSchema.parse(slug); const input = artworkJobSchema.parse(raw); return this.jobs.create("artwork", slug, async (control) => withStoryLock(this.root, slug, "web artwork generation", async () => { const story = await loadStory(storyPaths(this.root, slug, 1).storyConfig); const selected = selectChapterRange((await loadImportedChapters(this.root, slug)).chapters, input.from, input.to); const shutdown = new ShutdownController(); control.setPause(() => shutdown.request()); let generated = 0; let estimate = 0; const warnings: string[] = []; for (let index = 0; index < selected.length; index++) { if (shutdown.isRequested) return { status: "paused", generated, estimate, warnings: [...new Set(warnings)] }; const chapter = selected[index]!.chapter; const result = await withUsageScope({story:slug,chapter,stage:"artwork"},()=>generateStoredArtwork({ root: this.root, story, chapter, provider: resolveImageProvider(this.image, story), sceneId: input.scene, sceneIds: input.scenes, force: input.force, dryRun: input.dryRun, allowUnprofiledEntityIds: input.allowUnprofiledEntityIds, onProgress: (event) => control.update({ ...event, chapterIndex: index + 1, chapterTotal: selected.length }) })); generated += "generated" in result ? result.generated ?? 0 : 0; estimate += result.imagesToGenerate; warnings.push(...(result.warnings ?? [])); } return { dryRun: input.dryRun, generated, imageCountEstimate: estimate, chapters: selected.length, provider: story.artwork.provider, model: story.artwork.model, warnings: [...new Set(warnings)] }; }), raw); }
+  startArtwork(slug: string, raw: unknown) { slugSchema.parse(slug); const input = artworkJobSchema.parse(raw); return this.jobs.create("artwork", slug, async (control) => withStoryLock(this.root, slug, "web artwork generation", async () => { const story = await loadStory(storyPaths(this.root, slug, 1).storyConfig); const selected = selectChapterRange((await loadImportedChapters(this.root, slug)).chapters, input.from, input.to); const shutdown = new ShutdownController(); control.setPause(() => shutdown.request()); let generated = 0; let estimate = 0; const warnings: string[] = []; for (let index = 0; index < selected.length; index++) { if (shutdown.isRequested) return { status: "paused", generated, estimate, warnings: [...new Set(warnings)] }; const chapter = selected[index]!.chapter; const result = await withUsageScope({story:slug,chapter,stage:"artwork"},()=>generateStoredArtwork({ root: this.root, story, chapter, provider: resolveImageProvider(this.image, story), sceneId: input.scene, sceneIds: input.scenes, force: input.force, dryRun: input.dryRun, allowUnprofiledEntityIds: input.allowUnprofiledEntityIds, onProgress: (event) => control.update({ ...event, chapterIndex: index + 1, chapterTotal: selected.length }) })); generated += "generated" in result ? result.generated ?? 0 : 0; if (!input.dryRun && "generated" in result && result.generated) await invalidateChapterStatusDerivedReads(this.root, slug); estimate += result.imagesToGenerate; warnings.push(...(result.warnings ?? [])); } await invalidateChapterStatusDerivedReads(this.root, slug); return { dryRun: input.dryRun, generated, imageCountEstimate: estimate, chapters: selected.length, provider: story.artwork.provider, model: story.artwork.model, warnings: [...new Set(warnings)] }; }), raw); }
 
   getActiveStoryJob(slug: string) {
     slugSchema.parse(slug);

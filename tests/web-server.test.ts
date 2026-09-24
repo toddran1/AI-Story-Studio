@@ -3,7 +3,7 @@ import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import { getAudioDashboard, getChapter, getChapterPage, getQaDashboard, getScenesDashboard, getStoryDashboard, getStoryOverview, getVideoDashboard, listStories, updateStorySettings } from "../apps/server/catalog.js";
+import { getAudioDashboard, getChapter, getChapterPage, getQaDashboard, getScenesDashboard, getStoryDashboard, getStoryOverview, getVideoDashboard, invalidateChapterStatusDerivedReads, listStories, updateStorySettings } from "../apps/server/catalog.js";
 import { Job, JobManager } from "../apps/server/job-manager.js";
 import { StudioOperations } from "../apps/server/operations.js";
 import { loadEnvironment } from "../src/config/env.js";
@@ -312,7 +312,7 @@ describe("web service layer", () => {
     expect((await waitForJob(jobs, operations.startSubtitles(imported.story.slug, { from: 1, to: 1 }).id)).status).toBe("completed"); expect((await waitForJob(jobs, operations.startVideo(imported.story.slug, { from: 1, to: 1 }).id)).status).toBe("completed"); expect((await waitForJob(jobs, operations.startVideoExport(imported.story.slug, { from: 1, to: 1 }).id)).status).toBe("completed"); const videoDashboard = await getVideoDashboard(root, imported.story.slug); expect(videoDashboard.counts).toMatchObject({ subtitles: 1, videos: 1 }); expect(videoDashboard.exports[0]?.downloadUrl).toBe("/api/stories/audio-story/video-exports/1-1.mp4");
     expect((await waitForJob(jobs, operations.startScenes(imported.story.slug, { from: 1, to: 1 }).id)).status).toBe("completed"); const estimate = await waitForJob(jobs, operations.startArtwork(imported.story.slug, { from: 1, to: 1, dryRun: true }).id); expect(estimate.result).toMatchObject({ dryRun: true, imageCountEstimate: 1 }); expect((await waitForJob(jobs, operations.startArtwork(imported.story.slug, { from: 1, to: 1 }).id)).status).toBe("completed"); const scenes = await getScenesDashboard(root, imported.story.slug, 1); expect(scenes.manifest?.scenes[0]).toMatchObject({ summary: "The lantern wakes.", imageUrl: "/api/stories/audio-story/chapters/1/scenes/scene-001.png" });
     const staleMetadata = chapterSchema.parse(JSON.parse(await readFile(paths.chapterMeta, "utf8")));
-    staleMetadata.stages.audioMastering = { status: "pending", staleReason: "Narration settings changed" }; await atomicWriteJson(paths.chapterMeta, staleMetadata);
+    staleMetadata.stages.audioMastering = { status: "pending", staleReason: "Narration settings changed" }; await atomicWriteJson(paths.chapterMeta, staleMetadata); await invalidateChapterStatusDerivedReads(root, imported.story.slug);
     const staleDashboard = await getAudioDashboard(root, imported.story.slug);
     expect(staleDashboard.counts).toMatchObject({ mastered: 1, current: 0, stale: 1 }); expect(staleDashboard.exports).toHaveLength(1);
     expect((await waitForJob(jobs, operations.startAudiobook(imported.story.slug, { from: 1, to: 1, format: "m4b" }).id)).status).toBe("completed");
