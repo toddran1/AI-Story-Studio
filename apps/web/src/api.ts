@@ -14,6 +14,8 @@ export async function api<T>(path: string, options?: RequestInit): Promise<T> {
   catch (cause) { if ((cause as { name?: string } | undefined)?.name === "AbortError") throw cause; throw new ApiError("Cannot reach the local Story Studio service. Confirm `npm run web` is running, then try again.", undefined, undefined); }
   const value = await response.json().catch(() => ({}));
   if (!response.ok) throw new ApiError(typeof value.error === "string" ? value.error : `Request failed (${response.status})`, value.diagnostic, parseValidationIssues(value.validation), typeof value.code === "string" ? value.code : undefined);
+  const refreshStories = options?.method && ((options.method === "POST" && (path === "/stories" || path === "/stories/from-inspection" || /^\/stories\/[a-z0-9-]+\/duplicate$/.test(path))) || (options.method === "DELETE" && /^\/stories\/[a-z0-9-]+$/.test(path)) || (options.method === "PUT" && /^\/stories\/[a-z0-9-]+\/(metadata|settings)$/.test(path)));
+  if (refreshStories && typeof window !== "undefined") window.dispatchEvent(new Event("stories:changed"));
   return value as T;
 }
 

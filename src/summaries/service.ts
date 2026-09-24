@@ -12,6 +12,9 @@ import { atomicWriteJson } from "../storage/atomic-write.js";
 import { storyPaths } from "../storage/paths.js";
 import { readJsonIfExists, readTextIfExists } from "../storage/story-files.js";
 import { fingerprint } from "../utils/hash.js";
+import { cachedStoryRead } from "../story-bible/read-cache.js";
+import { getSummaryReadRevision, invalidateSummaryReads } from "./read-revision.js";
+import { logger } from "../utils/logger.js";
 import { SUMMARY_PROMPT_VERSION, summaryInstructions } from "./prompts.js";
 import { contiguousRange, normalizeSummaryChapters, StorySummary, SummaryGenerationInput, summaryGenerationInputSchema, summaryIdSchema, summarySchema, SummaryProgress, summarySourceModeSchema, summaryTypeSchema } from "./types.js";
 
@@ -22,18 +25,35 @@ const COMBINE_GROUP_SIZE = 12;
 export class SummaryService {
   constructor(private readonly root: string, private readonly llms: LLMRouter) {}
 
+  private async records(story: string): Promise<StorySummary[]> {
+    return (await cachedStoryRead("summary-index", this.root, story, () => getSummaryReadRevision(this.root, story), async () => {
+      const records: StorySummary[] = [];
+      for (const name of await readdir(summaryDirectory(this.root, story)).catch((error: NodeJS.ErrnoException) => error.code === "ENOENT" ? [] : Promise.reject(error))) {
+        if (!name.endsWith(".json") || name.startsWith(".")) continue;
+        const parsed = summarySchema.safeParse(await readJsonIfExists(join(summaryDirectory(this.root, story), name)).catch(() => undefined));
+        if (parsed.success) records.push(parsed.data);
+      }
+      return records;
+    })).value;
+  }
+
   async list(story: string, options: { query?: string; type?: string; status?: string; sort?: "coverage" | "created" | "updated" } = {}) {
     const filters = listOptionsSchema.parse(options);
-    const records: StorySummary[] = [];
-    for (const name of await readdir(summaryDirectory(this.root, story)).catch((error: NodeJS.ErrnoException) => error.code === "ENOENT" ? [] : Promise.reject(error))) {
-      if (!name.endsWith(".json") || name.startsWith(".")) continue;
-      const parsed = summarySchema.safeParse(await readJsonIfExists(join(summaryDirectory(this.root, story), name)).catch(() => undefined));
-      if (parsed.success) records.push(parsed.data);
-    }
+    const records = await this.records(story);
     const query = filters.query?.trim().toLocaleLowerCase();
     const filtered = records.filter((item) => (!query || `${item.title}\n${item.text}`.toLocaleLowerCase().includes(query)) && (!filters.type || item.summaryType === filters.type) && (!filters.status || item.status === filters.status));
     filtered.sort(filters.sort === "coverage" ? (a, b) => a.chapters[0]! - b.chapters[0]! : filters.sort === "created" ? (a, b) => b.createdAt.localeCompare(a.createdAt) : (a, b) => b.updatedAt.localeCompare(a.updatedAt));
     return filtered;
+  }
+
+  async page(story: string, options: { query?: string; type?: string; status?: string; sort?: "coverage" | "created" | "updated"; page: number; pageSize: number }) {
+    const startedAt = Date.now();
+    const rows = await this.list(story, { query: options.query, type: options.type, status: options.status, sort: options.sort });
+    const pageSize = Math.min(100, Math.max(1, Math.floor(options.pageSize)));
+    const total = rows.length; const pages = Math.max(1, Math.ceil(total / pageSize)); const page = Math.min(Math.max(1, Math.floor(options.page)), pages);
+    const items = rows.slice((page - 1) * pageSize, page * pageSize).map(({ id, title, summaryType, sourceMode, status, chapters, updatedAt, createdAt, manuallyEdited, text }) => ({ id, title, summaryType, sourceMode, status, chapters, updatedAt, createdAt, manuallyEdited, wordCount: text.trim() ? text.trim().split(/\s+/).length : 0 }));
+    logger.debug({ event: "summaries.page", story, page, pageSize, total, queryActive: Boolean(options.query), durationMs: Date.now() - startedAt });
+    return { items, page, pageSize, pages, total };
   }
 
   async get(story: string, id: string) {
@@ -48,7 +68,7 @@ export class SummaryService {
     const model: StageModelConfig = input.model ?? story.pipeline.narration; const now = new Date().toISOString();
     let record = summarySchema.parse({ id, storyId: story.id, title: input.title, chapters, chapterRange: contiguousRange(chapters), summaryType: input.summaryType, sourceMode: input.sourceMode, targetLength: { words: input.targetWords }, focus: input.focus, instructions: input.instructions, text: previous?.text ?? "", status: "generating", origin: "generated", manuallyEdited: false, contextEligible: input.contextEligible, createdAt: previous?.createdAt ?? now, updatedAt: now, provenance: { model, promptVersion: SUMMARY_PROMPT_VERSION, chapterSources: [], levels: [] } });
     if (previous) record = summarySchema.parse({ ...record, origin: previous.origin, manuallyEdited: previous.manuallyEdited, narration: previous.narration, tts: previous.tts, audio: previous.audio, scenes: previous.scenes, scenePlan: previous.scenePlan, scenePacing: previous.scenePacing, artDirectionOverride: previous.artDirectionOverride, artwork: previous.artwork, video: previous.video, alignment: previous.alignment });
-    await atomicWriteJson(summaryPath(this.root, storySlug, id), record);
+    await atomicWriteJson(summaryPath(this.root, storySlug, id), record); await invalidateSummaryReads(this.root, storySlug);
     try {
       progress?.({ phase: "preparing", completed: 0, total: chapters.length });
       const sources = await this.loadSources(storySlug, chapters, input.sourceMode);
@@ -73,17 +93,17 @@ export class SummaryService {
         record.provenance.levels.push({ level, batches: groups.map((group, index) => ({ batch: index + 1, chapters: group.flatMap((item) => item.chapters), inputCharacters: group.reduce((sum, item) => sum + item.inputCharacters, 0) })) });
         segments = combined; level++;
       }
-      record = summarySchema.parse({ ...record, ...staleSummaryDerivatives(previous), text: segments[0]!.text, status: "complete", origin: "generated", manuallyEdited: false, error: undefined, updatedAt: new Date().toISOString() }); await atomicWriteJson(summaryPath(this.root, storySlug, id), record);
+      record = summarySchema.parse({ ...record, ...staleSummaryDerivatives(previous), text: segments[0]!.text, status: "complete", origin: "generated", manuallyEdited: false, error: undefined, updatedAt: new Date().toISOString() }); await atomicWriteJson(summaryPath(this.root, storySlug, id), record); await invalidateSummaryReads(this.root, storySlug);
       progress?.({ phase: "complete", completed: chapters.length, total: chapters.length }); return record;
     } catch (error) {
-      record = summarySchema.parse({ ...record, ...(previous ?? {}), status: "failed", error: error instanceof Error ? error.message : String(error), updatedAt: new Date().toISOString() }); await atomicWriteJson(summaryPath(this.root, storySlug, id), record); throw error;
+      record = summarySchema.parse({ ...record, ...(previous ?? {}), status: "failed", error: error instanceof Error ? error.message : String(error), updatedAt: new Date().toISOString() }); await atomicWriteJson(summaryPath(this.root, storySlug, id), record); await invalidateSummaryReads(this.root, storySlug); throw error;
     }
   }
 
   async update(story: string, id: string, raw: unknown) {
     const patch = updateSchema.parse(raw); const current = await this.get(story, id); const textChanged = patch.text !== undefined && patch.text !== current.text;
     const updated = summarySchema.parse({ ...current, ...(textChanged ? staleSummaryDerivatives(current) : {}), ...patch, origin: textChanged ? "manual" : current.origin, manuallyEdited: current.manuallyEdited || textChanged, updatedAt: new Date().toISOString() });
-    await atomicWriteJson(summaryPath(this.root, story, id), updated); return updated;
+    await atomicWriteJson(summaryPath(this.root, story, id), updated); await invalidateSummaryReads(this.root, story); return updated;
   }
 
   async regenerate(story: string, id: string, overrides: unknown, progress?: (event: SummaryProgress) => void) {
@@ -91,7 +111,7 @@ export class SummaryService {
     return this.generate(story, { title: patch.title ?? current.title, chapters: current.chapters, summaryType: patch.summaryType ?? current.summaryType, sourceMode: patch.sourceMode ?? current.sourceMode, targetWords: patch.targetWords ?? current.targetLength.words, instructions: patch.instructions ?? current.instructions, focus: patch.focus ?? current.focus, model: patch.model ?? current.provenance.model, chunkSize: patch.chunkSize ?? 25, contextEligible: patch.contextEligible ?? current.contextEligible }, progress, id);
   }
 
-  async delete(story: string, id: string) { await this.get(story, id); const path = summaryPath(this.root, story, id); await rm(path.slice(0, -5), { recursive: true, force: true }); await rm(path); return { id, deleted: true }; }
+  async delete(story: string, id: string) { await this.get(story, id); const path = summaryPath(this.root, story, id); await rm(path.slice(0, -5), { recursive: true, force: true }); await rm(path); await invalidateSummaryReads(this.root, story); return { id, deleted: true }; }
 
   private async loadSources(story: string, chapters: number[], mode: SummaryGenerationInput["sourceMode"]): Promise<SourceChapter[]> {
     const bibleRaw = mode === "chapter-summaries" ? await readJsonIfExists(storyPaths(this.root, story, 1).bible) : undefined;

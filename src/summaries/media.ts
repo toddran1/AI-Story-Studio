@@ -24,6 +24,7 @@ import { readJsonIfExists } from "../storage/story-files.js";
 import { fileFingerprint } from "../utils/file-fingerprint.js";
 import { fingerprint } from "../utils/hash.js";
 import { SummaryService, summaryPath } from "./service.js";
+import { invalidateSummaryReads } from "./read-revision.js";
 import { summarySchema, type StorySummary } from "./types.js";
 import { planVisualScenes } from "../scenes/planner.js";
 import { normalizeProductionSceneTiming } from "../scenes/timing.js";
@@ -124,7 +125,7 @@ export class SummaryMediaService {
 
   private async save(slug: string, summary: StorySummary) {
     const record = summarySchema.parse({ ...summary, updatedAt: new Date().toISOString() });
-    await atomicWriteJson(summaryPath(this.root, slug, record.id), record); return record;
+    await atomicWriteJson(summaryPath(this.root, slug, record.id), record); await invalidateSummaryReads(this.root, slug); return record;
   }
 
   async scenes(slug: string, id: string, raw: unknown = {}) {

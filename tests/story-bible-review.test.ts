@@ -5,7 +5,7 @@ import { PassThrough, Readable } from "node:stream";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { describe, expect, it, vi } from "vitest";
 import { createApiHandler } from "../apps/server/api.js";
-import { getCanonicalEntitiesPage, getCanonicalEntityDetail, getStoryBibleHealth, getStoryBibleReview } from "../apps/server/catalog.js";
+import { getCanonicalEntitiesPage, getCanonicalEntityDetail, getContinuityPage, getContinuitySummary, getStoryBibleHealth, getStoryBibleReview } from "../apps/server/catalog.js";
 import { StudioOperations } from "../apps/server/operations.js";
 import { loadEnvironment } from "../src/config/env.js";
 import { defaultStory } from "../src/config/load-config.js";
@@ -101,6 +101,18 @@ describe("story bible review queue", () => {
     await atomicWriteJson(paths.continuityReview, continuityReviewSchema.parse({ version: 1, analyzedThroughChapter: 3, inputFingerprint: "x", updatedAt: new Date(0).toISOString(), findings: [finding("e1", [a.id], "open"), finding("e2", [b.id], "dismissed")] }));
     return { root, story, paths, a, b };
   }
+
+  it("filters and paginates continuity findings with names limited to the current page", async () => {
+    const { root, story, a, b } = await seeded();
+    const first = await getContinuityPage(root, story.slug, { status: "all", page: 1, pageSize: 1 });
+    expect(first).toMatchObject({ page: 1, pages: 2, total: 2, counts: { open: 1, resolved: 1, dismissed: 1 } });
+    expect(Object.keys(first.names)).toEqual([a.id]);
+    const filtered = await getContinuityPage(root, story.slug, { status: "dismissed", entity: b.id, page: 1, pageSize: 25 });
+    expect(filtered.items).toHaveLength(1);
+    expect(Object.keys(filtered.names)).toEqual([b.id]);
+    expect((await getContinuityPage(root, story.slug, { status: "open", entity: b.id, page: 1, pageSize: 25 })).total).toBe(0);
+    expect((await getContinuitySummary(root, story.slug)).counts.dismissed).toBe(1);
+  });
 
   it("aggregates duplicates and open continuity without duplicating resolved findings", async () => {
     const { root, story, a, b } = await seeded();

@@ -90,6 +90,21 @@ describe("story summaries", () => {
     await expect(service.get("demo-story", summary.id)).rejects.toThrow(/not found/);
   });
 
+  it("pages lightweight search results and invalidates rows after edits and deletion", async () => {
+    await chapter(1, "原始", "Translation");
+    const first = await service.generate("demo-story", { title: "First", chapters: [1] });
+    const second = await service.generate("demo-story", { title: "Second", chapters: [1] });
+    const page = await service.page("demo-story", { page: 1, pageSize: 1, sort: "created" });
+    expect(page).toMatchObject({ page: 1, pageSize: 1, pages: 2, total: 2 });
+    expect(page.items).toHaveLength(1);
+    expect(page.items[0]).not.toHaveProperty("text");
+    expect(page.items[0]).toHaveProperty("wordCount");
+    await service.update("demo-story", first.id, { title: "Renamed", text: "Distinct search phrase" });
+    expect((await service.page("demo-story", { query: "distinct", page: 1, pageSize: 25 })).items.map((item) => item.id)).toEqual([first.id]);
+    await service.delete("demo-story", second.id);
+    expect((await service.page("demo-story", { page: 1, pageSize: 25 })).total).toBe(1);
+  });
+
   it("retrieves only opted-in, complete, earlier summaries under a strict bound", async () => {
     await chapter(1, "原始", "Misty enters the arena.");
     const summary = await service.generate("demo-story", { title: "Misty arc", chapters: [1], contextEligible: true });

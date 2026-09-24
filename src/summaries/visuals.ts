@@ -1,3 +1,4 @@
+import { invalidateSummaryReads } from "./read-revision.js";
 import { randomUUID } from "node:crypto";
 import { readFile, rename, rm } from "node:fs/promises";
 import { join } from "node:path";
@@ -121,7 +122,7 @@ export class SummaryVisualService {
       },
     };
   }
-  private save(slug: string, summary: StorySummary) { summary.updatedAt = new Date().toISOString(); return atomicWriteJson(summaryPath(this.root, slug, summary.id), summarySchema.parse(summary)).then(() => summary); }
+  private save(slug: string, summary: StorySummary) { summary.updatedAt = new Date().toISOString(); return atomicWriteJson(summaryPath(this.root, slug, summary.id), summarySchema.parse(summary)).then(async () => { await invalidateSummaryReads(this.root, slug); return summary; }); }
   private async context(slug: string) {
     const story = await loadStory(storyPaths(this.root, slug, 1).storyConfig);
     const [bible, visualProfiles, artDirection] = await Promise.all([

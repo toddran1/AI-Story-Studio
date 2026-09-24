@@ -195,3 +195,5 @@
   line-height: 1.4;
 }
 
+.output-group > button:first-child { display: flex; align-items: center; gap: 10px; width: 100%; padding: 0; color: inherit; background: none; border: 0; border-bottom: 1px solid var(--line); text-align: left; cursor: pointer; }
+.output-group > button:first-child span { color: var(--muted); font: 9px var(--mono); }

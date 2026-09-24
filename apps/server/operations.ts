@@ -482,6 +482,7 @@ export class StudioOperations {
   async appCostAnalytics(filters: Parameters<PostgresUsageRepository["summary"]>[0]) { if (!this.usage) throw new Error("Cost analytics requires DATABASE_URL"); return this.usage.summary(filters); }
 
   listSummaries(slug: string, options?: Parameters<SummaryService["list"]>[1]) { slugSchema.parse(slug); return new SummaryService(this.root, this.llm).list(slug, options); }
+  listSummaryPage(slug: string, options: Parameters<SummaryService["page"]>[1]) { slugSchema.parse(slug); return new SummaryService(this.root, this.llm).page(slug, options); }
   summaryMedia() { return new SummaryMediaService(this.root, this.llm, this.tts, this.censor, this.audio); }
   summaryJobsDirectory() { return join(this.root, ".data", "summary-jobs"); }
   summaryVisuals() { return new SummaryVisualService(this.root, this.summaryMedia(), this.summaryImages, this.video, this.alignConfig, this.aligner); }

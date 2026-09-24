@@ -2045,15 +2045,15 @@ describe("TTS quality guard UI", () => {
       expect(paginationBaseMatches?.length).toBe(1);
 
       // App.tsx has no hand-written <div className="pagination">
-      // App.tsx: 5 collections (chapters, canonical entities, minor refs, audio masters, bible review queue)
-      // Exactly 1 top Pagination and 1 bottom Pagination per collection (10 total)
+      // App.tsx: 8 collections with top and bottom pagination, plus Outputs bottom pagination
+      // 17 Pagination uses total
       const appTsx = fs.readFileSync(path.resolve(process.cwd(), "apps/web/src/App.tsx"), "utf8");
       expect(appTsx).not.toContain('className="pagination"');
       expect(appTsx).not.toContain('className="localization-pagination"');
       expect(appTsx).not.toContain('className="queue-mini-pages"');
-      expect(appTsx.match(/<Pagination\b/g)?.length).toBe(10);
-      expect(appTsx.match(/<Pagination[^>]*position="top"/g)?.length).toBe(5);
-      expect(appTsx.match(/<Pagination[^>]*position="bottom"/g)?.length).toBe(5);
+      expect(appTsx.match(/<Pagination\b/g)?.length).toBe(17);
+      expect(appTsx.match(/<Pagination[^>]*position="top"/g)?.length).toBe(8);
+      expect(appTsx.match(/<Pagination[^>]*position="bottom"/g)?.length).toBe(9);
 
       // NamesLocalizationPage.tsx has no hand-written <div className="localization-pagination">
       // NamesLocalizationPage.tsx: exactly 1 top Pagination and 1 bottom Pagination

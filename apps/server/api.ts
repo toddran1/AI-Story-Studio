@@ -6,7 +6,7 @@ import { mkdir, open, rm, stat } from "node:fs/promises";
 import { isAbsolute, join } from "node:path";
 import { IncomingMessage, ServerResponse } from "node:http";
 import { z } from "zod";
-import { getAudioDashboard, getCanonicalEntitiesPage, getCanonicalEntityAudit, getCanonicalEntityDetail, getCanonicalEntityHistory, getCanonicalEntityUsage, getChapter, getChapterPage, getContinuityReview, getMinorReferencesPage, getOutputsLibrary, getQaDashboard, getScenesDashboard, getStoryBibleView, getStoryDashboard, getStoryOverview, getStoryBibleHealth, getStoryBibleReview, getStoryBibleReviewSummary, getSuppressedCanonicalEntities, getVideoDashboard, listStories, updateStorySettings, chapterFilterSchema, entityReadinessFilterSchema, bibleReviewKindSchema, bibleReviewStatusSchema } from "./catalog.js";
+import { getAudioDashboard, getAudioSummary, getAudioChapterPage, getCanonicalEntitiesPage, getCanonicalEntityAudit, getCanonicalEntityDetail, getCanonicalEntityHistory, getCanonicalEntityUsage, getChapter, getChapterPage, getContinuityReview, getContinuityPage, getContinuitySummary, getMinorReferencesPage, getOutputsLibrary, getOutputsSummary, getOutputsPage, outputGroupSchema, getQaDashboard, getQaPage, getQaSummary, qaStatusFilterSchema, getScenesDashboard, getScenesIndex, getScenesChapter, getStoryBibleView, getStoryDashboard, getProductionStatus, getStoryOverview, getSummariesContext, getStoryBibleHealth, getStoryBibleReview, getStoryBibleReviewSummary, getSuppressedCanonicalEntities, getVideoDashboard, getVideoSummary, getVideoChapterPage, listStories, updateStorySettings, chapterFilterSchema, entityReadinessFilterSchema, bibleReviewKindSchema, bibleReviewStatusSchema } from "./catalog.js";
 import { JobConflictError } from "./job-manager.js";
 import { StudioOperations } from "./operations.js";
 import { exportPaths, mediaDownloadName, padChapterNumber, previewPaths, rangeMediaDownloadName, sanitizeFilenamePart, sceneImagePath, sceneVersionImagePath, storyPaths, videoExportPaths, visualProfileRefPath, voicePreviewPaths } from "../../src/storage/paths.js";
@@ -113,10 +113,12 @@ export function createApiHandler(operations: StudioOperations) {
       const activityMatch = /^\/api\/stories\/([a-z0-9-]+)\/activity$/.exec(url.pathname);
       if (activityMatch && request.method === "GET") return send(response, 200, { activity: await operations.recentActivity(activityMatch[1]!, optionalInteger(url.searchParams.get("limit"))) });
       const summariesMatch = /^\/api\/stories\/([a-z0-9-]+)\/summaries$/.exec(url.pathname);
-      if (summariesMatch && request.method === "GET") return send(response, 200, { summaries: await operations.listSummaries(summariesMatch[1]!, { query: optionalString(url.searchParams.get("q")), type: optionalString(url.searchParams.get("type")), status: optionalString(url.searchParams.get("status")), sort: z.enum(["coverage", "created", "updated"]).default("updated").parse(url.searchParams.get("sort") ?? undefined) }) });
+      const summariesContextMatch = /^\/api\/stories\/([a-z0-9-]+)\/summaries\/context$/.exec(url.pathname);
+      if (summariesContextMatch && request.method === "GET") return send(response, 200, await getSummariesContext(operations.root, summariesContextMatch[1]!));
+      if (summariesMatch && request.method === "GET") return send(response, 200, await operations.listSummaryPage(summariesMatch[1]!, { query: optionalString(url.searchParams.get("q")), type: optionalString(url.searchParams.get("type")), status: optionalString(url.searchParams.get("status")), sort: z.enum(["coverage", "created", "updated"]).default("updated").parse(url.searchParams.get("sort") ?? undefined), page: integerParam(url.searchParams.get("page"), 1), pageSize: integerParam(url.searchParams.get("pageSize"), 25) }));
       if (summariesMatch && request.method === "POST") return send(response, 202, operations.startSummary(summariesMatch[1]!, await jsonBody(request)));
       const summaryMatch = /^\/api\/stories\/([a-z0-9-]+)\/summaries\/(sum_[a-f0-9-]{36})$/.exec(url.pathname);
-      if (summaryMatch && request.method === "GET") return send(response, 200, { summary: await operations.getSummary(summaryMatch[1]!, summaryMatch[2]!) });
+      if (summaryMatch && request.method === "GET") { const startedAt = Date.now(); const summary = await operations.getSummary(summaryMatch[1]!, summaryMatch[2]!); logger.debug({ event: "summary.detail", story: summaryMatch[1], summaryId: summaryMatch[2], durationMs: Date.now() - startedAt }); return send(response, 200, { summary }); }
       if (summaryMatch && request.method === "PUT") return send(response, 200, { summary: await operations.updateSummary(summaryMatch[1]!, summaryMatch[2]!, await jsonBody(request)) });
       if (summaryMatch && request.method === "DELETE") { await jsonBody(request); return send(response, 200, await operations.deleteSummary(summaryMatch[1]!, summaryMatch[2]!)); }
       const summarySpeechMatch = /^\/api\/stories\/([a-z0-9-]+)\/summaries\/(sum_[a-f0-9-]{36})\/spoken-text$/.exec(url.pathname);
@@ -164,6 +166,10 @@ export function createApiHandler(operations: StudioOperations) {
       }
       const dashboardMatch = /^\/api\/stories\/([a-z0-9-]+)\/dashboard$/.exec(url.pathname);
       if (dashboardMatch && request.method === "GET") return send(response, 200, await getStoryDashboard(operations.root, dashboardMatch[1]!));
+      const outputsSummaryMatch = /^\/api\/stories\/([a-z0-9-]+)\/outputs\/summary$/.exec(url.pathname);
+      if (outputsSummaryMatch && request.method === "GET") return send(response, 200, await getOutputsSummary(operations.root, outputsSummaryMatch[1]!));
+      const outputsPageMatch = /^\/api\/stories\/([a-z0-9-]+)\/outputs\/page$/.exec(url.pathname);
+      if (outputsPageMatch && request.method === "GET") return send(response, 200, await getOutputsPage(operations.root, outputsPageMatch[1]!, outputGroupSchema.parse(url.searchParams.get("group")), integerParam(url.searchParams.get("page"), 1), integerParam(url.searchParams.get("pageSize"), 50)));
       const outputsMatch = /^\/api\/stories\/([a-z0-9-]+)\/outputs$/.exec(url.pathname);
       if (outputsMatch && request.method === "GET") return send(response, 200, await getOutputsLibrary(operations.root, outputsMatch[1]!));
       const chapterList = /^\/api\/stories\/([a-z0-9-]+)\/chapters$/.exec(url.pathname);
@@ -313,16 +319,30 @@ export function createApiHandler(operations: StudioOperations) {
       const qaResetMatch = /^\/api\/stories\/([a-z0-9-]+)\/qa\/reset$/.exec(url.pathname);
       if (qaResetMatch && request.method === "POST") return send(response, 200, await operations.resetQaBatch(qaResetMatch[1]!, await jsonBody(request)));
       const qaMatch = /^\/api\/stories\/([a-z0-9-]+)\/qa$/.exec(url.pathname);
-      if (qaMatch && request.method === "GET") return send(response, 200, await getQaDashboard(operations.root, qaMatch[1]!));
+      const qaSummaryMatch = /^\/api\/stories\/([a-z0-9-]+)\/qa\/summary$/.exec(url.pathname);
+      if (qaSummaryMatch && request.method === "GET") return send(response, 200, await getQaSummary(operations.root, qaSummaryMatch[1]!));
+      if (qaMatch && request.method === "GET") return send(response, 200, await getQaPage(operations.root, qaMatch[1]!, { page: integerParam(url.searchParams.get("page"), 1), pageSize: integerParam(url.searchParams.get("pageSize"), 50), status: qaStatusFilterSchema.parse(url.searchParams.get("status") ?? "all") }));
       const qaExceptionsMatch = /^\/api\/stories\/([a-z0-9-]+)\/qa-exceptions$/.exec(url.pathname);
       if (qaExceptionsMatch && request.method === "GET") return send(response, 200, await operations.listQaExceptions(qaExceptionsMatch[1]!));
       if (qaExceptionsMatch && request.method === "POST") return send(response, 201, await operations.addQaException(qaExceptionsMatch[1]!, await jsonBody(request)));
       const qaExceptionMatch = /^\/api\/stories\/([a-z0-9-]+)\/qa-exceptions\/(qax_[a-f0-9]{24})$/.exec(url.pathname);
       if (qaExceptionMatch && request.method === "DELETE") return send(response, 200, await operations.removeQaException(qaExceptionMatch[1]!, qaExceptionMatch[2]!));
+      const audioSummaryMatch = /^\/api\/stories\/([a-z0-9-]+)\/audio\/summary$/.exec(url.pathname);
+      if (audioSummaryMatch && request.method === "GET") return send(response, 200, await getAudioSummary(operations.root, audioSummaryMatch[1]!));
+      const audioPageMatch = /^\/api\/stories\/([a-z0-9-]+)\/audio\/chapters$/.exec(url.pathname);
+      if (audioPageMatch && request.method === "GET") return send(response, 200, await getAudioChapterPage(operations.root, audioPageMatch[1]!, integerParam(url.searchParams.get("page"), 1), integerParam(url.searchParams.get("pageSize"), 25)));
       const audioDashboardMatch = /^\/api\/stories\/([a-z0-9-]+)\/audio$/.exec(url.pathname);
       if (audioDashboardMatch && request.method === "GET") return send(response, 200, await getAudioDashboard(operations.root, audioDashboardMatch[1]!));
+      const videoSummaryMatch = /^\/api\/stories\/([a-z0-9-]+)\/video\/summary$/.exec(url.pathname);
+      if (videoSummaryMatch && request.method === "GET") return send(response, 200, await getVideoSummary(operations.root, videoSummaryMatch[1]!));
+      const videoPageMatch = /^\/api\/stories\/([a-z0-9-]+)\/video\/chapters$/.exec(url.pathname);
+      if (videoPageMatch && request.method === "GET") return send(response, 200, await getVideoChapterPage(operations.root, videoPageMatch[1]!, integerParam(url.searchParams.get("page"), 1), integerParam(url.searchParams.get("pageSize"), 25)));
       const videoDashboardMatch = /^\/api\/stories\/([a-z0-9-]+)\/video$/.exec(url.pathname);
       if (videoDashboardMatch && request.method === "GET") return send(response, 200, await getVideoDashboard(operations.root, videoDashboardMatch[1]!));
+      const scenesIndexMatch = /^\/api\/stories\/([a-z0-9-]+)\/scenes\/index$/.exec(url.pathname);
+      if (scenesIndexMatch && request.method === "GET") return send(response, 200, await getScenesIndex(operations.root, scenesIndexMatch[1]!));
+      const scenesChapterMatch = /^\/api\/stories\/([a-z0-9-]+)\/scenes\/(\d+)$/.exec(url.pathname);
+      if (scenesChapterMatch && request.method === "GET") return send(response, 200, await getScenesChapter(operations.root, scenesChapterMatch[1]!, chapterParam(scenesChapterMatch[2]!)));
       const scenesDashboardMatch = /^\/api\/stories\/([a-z0-9-]+)\/scenes$/.exec(url.pathname);
       if (scenesDashboardMatch && request.method === "GET") return send(response, 200, await getScenesDashboard(operations.root, scenesDashboardMatch[1]!, optionalInteger(url.searchParams.get("chapter"))));
       const visualProfilesMatch = /^\/api\/stories\/([a-z0-9-]+)\/visual-profiles$/.exec(url.pathname);
@@ -416,7 +436,9 @@ export function createApiHandler(operations: StudioOperations) {
         return send(response, 200, await operations.deleteArtDirectionPreset(artDirectionPresetMatch[1]!, artDirectionPresetMatch[2]!));
       }
       const productionMatch = /^\/api\/stories\/([a-z0-9-]+)\/production$/.exec(url.pathname);
-      if (productionMatch && request.method === "GET") return send(response, 200, { latest: (await getStoryDashboard(operations.root, productionMatch[1]!)).latestProduction });
+      const productionStatusMatch = /^\/api\/stories\/([a-z0-9-]+)\/production\/status$/.exec(url.pathname);
+      if (productionStatusMatch && request.method === "GET") return send(response, 200, await getProductionStatus(operations.root, productionStatusMatch[1]!));
+      if (productionMatch && request.method === "GET") return send(response, 200, await getProductionStatus(operations.root, productionMatch[1]!));
       const costsMatch = /^\/api\/stories\/([a-z0-9-]+)\/costs$/.exec(url.pathname);
       if (costsMatch && request.method === "GET") return send(response, 200, await operations.costAnalytics(costsMatch[1]!, costFilters(url)));
       const costRecordsMatch = /^\/api\/stories\/([a-z0-9-]+)\/costs\/records$/.exec(url.pathname);
@@ -546,7 +568,9 @@ export function createApiHandler(operations: StudioOperations) {
       const bibleMergeUndoMatch = /^\/api\/stories\/([a-z0-9-]+)\/story-bible\/merges\/([a-f0-9-]{36})\/undo$/.exec(url.pathname);
       if (bibleMergeUndoMatch && request.method === "POST") return send(response, 200, await operations.undoCanonicalMerge(bibleMergeUndoMatch[1]!, bibleMergeUndoMatch[2]!));
       const continuityMatch = /^\/api\/stories\/([a-z0-9-]+)\/continuity$/.exec(url.pathname);
-      if (continuityMatch && request.method === "GET") return send(response, 200, await getContinuityReview(operations.root, continuityMatch[1]!, continuityStatusFilter(url.searchParams.get("status"))));
+      const continuitySummaryMatch = /^\/api\/stories\/([a-z0-9-]+)\/continuity\/summary$/.exec(url.pathname);
+      if (continuitySummaryMatch && request.method === "GET") return send(response, 200, await getContinuitySummary(operations.root, continuitySummaryMatch[1]!));
+      if (continuityMatch && request.method === "GET") return send(response, 200, await getContinuityPage(operations.root, continuityMatch[1]!, { status: continuityStatusFilter(url.searchParams.get("status")), entity: optionalString(url.searchParams.get("entity")), page: integerParam(url.searchParams.get("page"), 1), pageSize: integerParam(url.searchParams.get("pageSize"), 25) }));
       const continuityFindingMatch = /^\/api\/stories\/([a-z0-9-]+)\/continuity\/(ctf_[a-f0-9]{24})$/.exec(url.pathname);
       if (continuityFindingMatch && request.method === "PUT") return send(response, 200, await operations.resolveContinuity(continuityFindingMatch[1]!, continuityFindingMatch[2]!, await jsonBody(request)));
       const bibleEntryMatch = /^\/api\/stories\/([a-z0-9-]+)\/story-bible\/([a-f0-9-]+|auto-[a-f0-9]+)$/.exec(url.pathname);

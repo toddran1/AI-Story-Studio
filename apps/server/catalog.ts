@@ -17,7 +17,6 @@ import { loadVisualProfiles, getVisualProfile as loadSingleVisualProfile } from 
 import { loadStoryArtDirection } from "../../src/visual-canon/art-direction.js";
 import { rebuildStoryBibleBeforeChapter, computeStaleExtractionChapters } from "../../src/story-bible/rebuild.js";
 import { exportManifestSchema } from "../../src/audio/audiobook.js";
-import { FfmpegTools } from "../../src/audio/ffmpeg.js";
 import { videoExportManifestSchema } from "../../src/video/video-export.js";
 import { SceneManifest, artworkSettingsSchema, sceneManifestSchema, sceneSettingsSchema } from "../../src/scenes/types.js";
 import { sceneContentFingerprint } from "../../src/scenes/manifest.js";
@@ -65,6 +64,7 @@ export type ChapterSummary = {
 };
 
 export async function listStories(root: string, warnings: string[] = []) {
+  const startedAt = Date.now();
   const storiesRoot = join(root, "stories"); let directories: string[] = [];
   try { directories = (await readdir(storiesRoot, { withFileTypes: true })).filter((entry) => entry.isDirectory()).map((entry) => entry.name); }
   catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
@@ -84,12 +84,13 @@ export async function listStories(root: string, warnings: string[] = []) {
         hasAudiobook: availableExports.audio, hasVideo: availableExports.video }; storyCardCache.set(cacheKey, { value: card, expiresAt: Date.now() + 5_000 }); return card;
     } catch (error) { const detail = error instanceof Error ? error.message : String(error); warnings.push(`Project '${slug}' could not be loaded: ${detail}`); logger.warn({ event: "library.story_skipped", slug, error: detail }); return undefined; }
   });
-  return cards.filter((card): card is NonNullable<typeof card> => Boolean(card)).sort((a, b) => a.title.localeCompare(b.title));
+  const result = cards.filter((card): card is NonNullable<typeof card> => Boolean(card)).sort((a, b) => a.title.localeCompare(b.title));
+  logger.debug({ event: "story.list", durationMs: Date.now() - startedAt, total: result.length });
+  return result;
 }
 
-export async function getStoryOverview(root: string, slug: string) {
-  slugSchema.parse(slug); const story = await loadStory(storyPaths(root, slug, 1).storyConfig);
-  const chapters = await getChapterStatusReadModel(root, slug);
+async function storyOverviewFromRows(root: string, slug: string, chapters: ChapterSummary[]) {
+  const story = await loadStory(storyPaths(root, slug, 1).storyConfig);
   const env = loadEnvironment();
   const globalDefaults = await loadGlobalSettings(root, env).catch(() => undefined);
   const effectiveRouting = resolveAllModelRoutings(story, globalDefaults, env);
@@ -97,28 +98,51 @@ export async function getStoryOverview(root: string, slug: string) {
     ...countQa(chapters), complete: chapters.filter((item) => item.audioAvailable || item.audioMastering === "complete").length } };
 }
 
+export async function getStoryOverview(root: string, slug: string) {
+  slugSchema.parse(slug);
+  return storyOverviewFromRows(root, slug, await getChapterStatusReadModel(root, slug));
+}
+
 export async function getStoryDashboard(root: string, slug: string) {
-  slugSchema.parse(slug); const overview = await getStoryOverview(root, slug); const chapters = await getChapterStatusReadModel(root, slug); const latest = await loadLatestProduction(root, slug); const sourceRaw = await readJsonIfExists<SourceManifest>(storyPaths(root, slug, 1).sourceManifest); const source = sourceRaw ? sourceManifestSchema.safeParse(sourceRaw) : undefined;
+  const startedAt = Date.now(); slugSchema.parse(slug); const chapters = await getChapterStatusReadModel(root, slug); const overview = await storyOverviewFromRows(root, slug, chapters); const latest = await loadLatestProduction(root, slug); const sourceRaw = await readJsonIfExists<SourceManifest>(storyPaths(root, slug, 1).sourceManifest); const source = sourceRaw ? sourceManifestSchema.safeParse(sourceRaw) : undefined;
   const completedStages = chapters.reduce((sum, chapter) => sum + [chapter.translation, chapter.narration, chapter.tts, chapter.audioMastering, chapter.continuity, chapter.alignment, chapter.subtitles, chapter.scenePlanning, chapter.artwork, chapter.video].filter((status) => status === "complete").length, 0);
   const current = latest?.story === slug && latest.storyFingerprint === fingerprint(overview.story) ? publicProductionManifest(latest, slug) : undefined;
+  logger.debug({ event: "story.dashboard", story: slug, durationMs: Date.now() - startedAt, chapters: chapters.length });
   return { ...overview, source: source?.success ? { type: source.data.type, origin: "url" in source.data.origin ? { url: source.data.origin.url } : { name: source.data.origin.name }, importedAt: source.data.importedAt, chapterCount: source.data.chapters.length } : undefined, progress: { processed: chapters.filter((item) => item.translation === "complete").length, audio: chapters.filter((item) => item.audioAvailable || item.audioMastering === "complete").length, artwork: chapters.filter((item) => item.artwork === "complete").length, video: chapters.filter((item) => item.video === "complete").length }, latestProduction: current, currentProfile: current?.options.profile, estimatedRemainingStages: Math.max(0, chapters.length * 10 - completedStages) };
 }
 
+export function normalizeChapterSearch(value: string): string {
+  return value.normalize("NFKC").toLocaleLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim().replace(/\s+/g, " ");
+}
+
+export async function getSummariesContext(root: string, slug: string) {
+  const startedAt = Date.now();
+  const chapters = await getChapterStatusReadModel(root, slug);
+  const result = { minChapter: chapters[0]?.chapter, maxChapter: chapters.at(-1)?.chapter };
+  logger.debug({ event: "summaries.context", story: slug, durationMs: Date.now() - startedAt });
+  return result;
+}
+
+export async function getProductionStatus(root: string, slug: string) {
+  const startedAt = Date.now();
+  slugSchema.parse(slug);
+  const [story, latest] = await Promise.all([loadStory(storyPaths(root, slug, 1).storyConfig), loadLatestProduction(root, slug)]);
+  const current = latest?.story === slug && latest.storyFingerprint === fingerprint(story) ? publicProductionManifest(latest, slug) : undefined;
+  logger.debug({ event: "production.status", story: slug, durationMs: Date.now() - startedAt });
+  return { latest: current };
+}
+
 export async function getChapterPage(root: string, slug: string, options: { page: number; pageSize: number; filter: z.infer<typeof chapterFilterSchema>; query?: string }) {
+  const startedAt = Date.now();
   slugSchema.parse(slug); const page = Math.max(1, Math.floor(options.page)); const pageSize = Math.min(100, Math.max(1, Math.floor(options.pageSize)));
-  const index = await loadChapterIndex(root, slug); const query = options.query?.trim().toLocaleLowerCase();
-  let numbers = index.numbers;
-  if (query) numbers = numbers.filter((chapter) => String(chapter).includes(query) || index.titles.get(chapter)?.toLocaleLowerCase().includes(query));
-  if (options.filter === "all") {
-    const total = numbers.length; const pages = Math.max(1, Math.ceil(total / pageSize)); const safePage = Math.min(page, pages);
-    const selected = numbers.slice((safePage - 1) * pageSize, safePage * pageSize);
-    return { items: await loadSummaries(root, slug, selected, index), page: safePage, pageSize, total, pages };
-  }
-  let chapters = await loadSummaries(root, slug, numbers, index);
+  let chapters = await getChapterStatusReadModel(root, slug);
+  const query = normalizeChapterSearch(options.query ?? "");
+  if (query) chapters = chapters.filter((item) => normalizeChapterSearch(`${item.chapter} ${item.originalTitle ?? ""}`).includes(query));
   if (options.filter === "unprocessed") chapters = chapters.filter((item) => item.translation !== "complete");
   else if (options.filter === "warn" || options.filter === "fail") chapters = chapters.filter((item) => item.qa === options.filter);
   else if (options.filter === "complete") chapters = chapters.filter((item) => item.audioAvailable || item.audioMastering === "complete");
   const total = chapters.length; const pages = Math.max(1, Math.ceil(total / pageSize)); const safePage = Math.min(page, pages);
+  logger.debug({ event: "chapter.page", story: slug, page: safePage, pageSize, total, durationMs: Date.now() - startedAt });
   return { items: chapters.slice((safePage - 1) * pageSize, safePage * pageSize), page: safePage, pageSize, total, pages };
 }
 
@@ -169,20 +193,46 @@ export async function getChapter(root: string, slug: string, chapter: number) {
 
 function chapterLink(index: ChapterIndex, chapter: number) { return { chapter, title: index.titles.get(chapter) }; }
 
-export async function getQaDashboard(root: string, slug: string) {
-  const chapters = await getChapterStatusReadModel(root, slug); const issues: Record<string, number> = {}; const items = [];
+export const qaStatusFilterSchema = z.enum(["all", "pass", "warn", "fail", "needs-verification"]);
+export type QaStatusFilter = z.infer<typeof qaStatusFilterSchema>;
+
+function qaRow(chapter: ChapterSummary) {
+  const issues = (chapter.qaIssues ?? []).filter(isQaIssueActive);
+  return { chapter: chapter.chapter, title: chapter.originalTitle, status: chapter.qa!, score: chapter.qaScore,
+    issues, stale: chapter.qaStale, needsVerification: chapter.qaNeedsVerification ?? 0 };
+}
+
+export async function getQaSummary(root: string, slug: string) {
+  const startedAt = Date.now();
+  const chapters = await getChapterStatusReadModel(root, slug);
+  const categories: Record<string, number> = {};
+  let needsVerification = 0; let totalEvaluated = 0;
   for (const chapter of chapters) {
-    if (!chapter.qa) continue; const qaIssues = chapter.qaIssues ?? [];
-    const activeIssues = qaIssues.filter(isQaIssueActive);
-    items.push({
-      chapter: chapter.chapter, title: chapter.originalTitle, status: chapter.qa, score: chapter.qaScore,
-      // Current gating issues; when stale, needsVerification carries how many
-      // previous findings still await verification against current inputs.
-      issues: activeIssues, stale: chapter.qaStale, needsVerification: chapter.qaNeedsVerification ?? 0,
-    });
-    if (!chapter.qaStale) for (const category of new Set(activeIssues.map((issue) => issue.category))) issues[category] = (issues[category] ?? 0) + 1;
+    if (!chapter.qa) continue;
+    totalEvaluated++; needsVerification += chapter.qaNeedsVerification ?? 0;
+    if (!chapter.qaStale) for (const category of new Set((chapter.qaIssues ?? []).filter(isQaIssueActive).map((issue) => issue.category))) categories[category] = (categories[category] ?? 0) + 1;
   }
-  return { counts: { ...countQa(chapters), needsVerification: items.reduce((sum, item) => sum + item.needsVerification, 0) }, categories: issues, chapters: items };
+  const result = { counts: { ...countQa(chapters), needsVerification, totalEvaluated, chapterCount: chapters.length, minChapter: chapters[0]?.chapter, maxChapter: chapters.at(-1)?.chapter }, categories };
+  logger.debug({ event: "qa.summary", story: slug, durationMs: Date.now() - startedAt, total: totalEvaluated });
+  return result;
+}
+
+export async function getQaPage(root: string, slug: string, options: { page: number; pageSize: number; status: QaStatusFilter }) {
+  const startedAt = Date.now();
+  const page = Math.max(1, Math.floor(options.page)); const pageSize = Math.min(100, Math.max(1, Math.floor(options.pageSize)));
+  let chapters = (await getChapterStatusReadModel(root, slug)).filter((item) => Boolean(item.qa));
+  if (options.status === "needs-verification") chapters = chapters.filter((item) => item.qaStale || (item.qaNeedsVerification ?? 0) > 0);
+  else if (options.status !== "all") chapters = chapters.filter((item) => item.qa === options.status);
+  const total = chapters.length; const pages = Math.max(1, Math.ceil(total / pageSize)); const safePage = Math.min(page, pages);
+  const items = chapters.slice((safePage - 1) * pageSize, safePage * pageSize).map(qaRow);
+  logger.debug({ event: "qa.page", story: slug, page: safePage, pageSize, total, durationMs: Date.now() - startedAt });
+  return { items, page: safePage, pageSize, pages, total };
+}
+
+/** Compatibility read for internal callers that need the entire QA dashboard. */
+export async function getQaDashboard(root: string, slug: string) {
+  const [summary, chapters] = await Promise.all([getQaSummary(root, slug), getChapterStatusReadModel(root, slug)]);
+  return { counts: { pass: summary.counts.pass, warn: summary.counts.warn, fail: summary.counts.fail, needsVerification: summary.counts.needsVerification }, categories: summary.categories, chapters: chapters.filter((item) => Boolean(item.qa)).map(qaRow) };
 }
 
 export async function getStoryBible(root: string, slug: string, options: { includeCanonicalOverlay?: boolean } = {}): Promise<StoryBible> {
@@ -809,24 +859,101 @@ export async function getStoryBibleAnalysis(root: string, slug: string) {
   return analyzeStoryBible(root, slug);
 }
 
-export async function getContinuityReview(root: string, slug: string, status?: string) { const raw = await readJsonIfExists(storyPaths(root, slug, 1).continuityReview); const parsed = raw ? continuityReviewSchema.parse(raw) : continuityReviewSchema.parse({ version: 1, analyzedThroughChapter: 0, inputFingerprint: "none", updatedAt: new Date(0).toISOString(), findings: [] }); const bible = await getStoryBible(root, slug); const activeIds = new Set(bible.canonicalEntities.map((item) => item.id)); const activeFindings = parsed.findings.filter((item) => item.entityIds.every((id) => activeIds.has(id))); const findings = status && status !== "all" ? activeFindings.filter((item) => item.status === status) : activeFindings; const names = Object.fromEntries(bible.canonicalEntities.map((item) => [item.id, item.canonicalName])); const needsReanalysis = parsed.inputFingerprint !== fingerprint({ version: 1, entities: bible.canonicalEntities, timeline: bible.entityTimeline, relationships: bible.canonicalRelationships }); return { ...parsed, needsReanalysis, findings, names, counts: { open: activeFindings.filter((item) => item.status === "open").length, resolved: activeFindings.filter((item) => item.status !== "open").length } }; }
-
-export async function getOutputsLibrary(root: string, slug: string) {
-  slugSchema.parse(slug); const [audio, video] = await Promise.all([getAudioDashboard(root, slug), getVideoDashboard(root, slug)]); const items: Array<Record<string, unknown>> = [];
-  for (const chapter of audio.chapters) if (chapter.audioAvailable) {
-    const paths = storyPaths(root, slug, chapter.chapter);
-    const audioPath = (await exists(paths.audio)) ? paths.audio : paths.audioRaw;
-    items.push(await outputItem(audioPath, { id: `chapter-audio-${chapter.chapter}`, group: "chapterAudio", chapter: chapter.chapter, format: "mp3", url: `/api/stories/${slug}/chapters/${chapter.chapter}/audio`, downloadUrl: `/api/stories/${slug}/chapters/${chapter.chapter}/audio?download=1` }));
-  }
-  for (const item of audio.exports) items.push(await outputItem(exportPaths(root, slug, item.from, item.to, item.format).output, { id: `audiobook-${item.fingerprint}`, group: "audiobooks", from: item.from, to: item.to, format: item.format, createdAt: item.createdAt, durationSeconds: item.durationSeconds, url: item.downloadUrl, downloadUrl: item.downloadUrl }));
-  for (const chapter of video.chapters) if (chapter.videoAvailable) items.push(await outputItem(storyPaths(root, slug, chapter.chapter).video, { id: `chapter-video-${chapter.chapter}`, group: "chapterVideos", chapter: chapter.chapter, format: "mp4", url: `/api/stories/${slug}/chapters/${chapter.chapter}/video`, downloadUrl: `/api/stories/${slug}/chapters/${chapter.chapter}/video?download=1` }));
-  for (const item of video.exports) items.push(await outputItem(videoExportPaths(root, slug, item.from, item.to).output, { id: `video-${item.fingerprint}`, group: "combinedVideos", from: item.from, to: item.to, format: "mp4", createdAt: item.createdAt, durationSeconds: item.durationSeconds, url: item.downloadUrl, downloadUrl: item.downloadUrl }));
-  for (const chapter of video.chapters) if (chapter.subtitleStatus === "complete") for (const format of ["srt", "vtt"] as const) items.push(await outputItem(format === "srt" ? storyPaths(root, slug, chapter.chapter).subtitlesSrt : storyPaths(root, slug, chapter.chapter).subtitlesVtt, { id: `subtitle-${format}-${chapter.chapter}`, group: "subtitles", chapter: chapter.chapter, format, url: `/api/stories/${slug}/chapters/${chapter.chapter}/subtitles.${format}`, downloadUrl: `/api/stories/${slug}/chapters/${chapter.chapter}/subtitles.${format}?download=1` }));
-  for (const chapter of video.chapters) { const raw = await readJsonIfExists<SceneManifest>(storyPaths(root, slug, chapter.chapter).scenesManifest); const manifest = raw ? sceneManifestSchema.safeParse(raw) : undefined; if (!manifest?.success) continue; for (const scene of manifest.data.scenes) { const path = sceneImagePath(root, slug, chapter.chapter, scene.id); if (scene.artwork.status === "complete" && await exists(path)) items.push(await outputItem(path, { id: `artwork-${chapter.chapter}-${scene.id}`, group: "artwork", chapter: chapter.chapter, format: "png", url: `/api/stories/${slug}/chapters/${chapter.chapter}/scenes/${scene.id}.png` })); } }
-  return { items: items.filter((item) => !item.missing) };
+async function continuityReadContext(root: string, slug: string) {
+  const { value } = await cachedStoryRead("continuity-read", root, slug, async () => {
+    const paths = storyPaths(root, slug, 1);
+    return `${await getStoryBibleReadRevision(root, slug)}:${await filesStampFingerprint([paths.continuityReview, paths.bible, paths.bibleManual, paths.bibleCanonicalManual])}`;
+  }, async () => {
+    const raw = await readJsonIfExists(storyPaths(root, slug, 1).continuityReview);
+    const parsed = raw ? continuityReviewSchema.parse(raw) : continuityReviewSchema.parse({ version: 1, analyzedThroughChapter: 0, inputFingerprint: "none", updatedAt: new Date(0).toISOString(), findings: [] });
+    const bible = await getStoryBible(root, slug);
+    const activeIds = new Set(bible.canonicalEntities.map((item) => item.id));
+    const findings = parsed.findings.filter((item) => item.entityIds.every((id) => activeIds.has(id)));
+    const names = new Map(bible.canonicalEntities.map((item) => [item.id, item.canonicalName]));
+    const needsReanalysis = parsed.inputFingerprint !== fingerprint({ version: 1, entities: bible.canonicalEntities, timeline: bible.entityTimeline, relationships: bible.canonicalRelationships });
+    const counts = { open: findings.filter((item) => item.status === "open").length, resolved: findings.filter((item) => item.status !== "open").length, dismissed: findings.filter((item) => item.status === "dismissed").length };
+    return { parsed, findings, names, needsReanalysis, counts };
+  });
+  return value;
 }
 
-async function outputItem(path: string, value: Record<string, unknown>) { try { const info = await stat(path); return { ...value, bytes: info.size, createdAt: value.createdAt ?? info.mtime.toISOString() }; } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return { ...value, bytes: 0, missing: true }; throw error; } }
+export async function getContinuitySummary(root: string, slug: string) {
+  const startedAt = Date.now(); const context = await continuityReadContext(root, slug);
+  logger.debug({ event: "continuity.summary", story: slug, durationMs: Date.now() - startedAt });
+  return { counts: context.counts, analyzedThroughChapter: context.parsed.analyzedThroughChapter, needsReanalysis: context.needsReanalysis };
+}
+
+export async function getContinuityPage(root: string, slug: string, options: { status?: string; entity?: string; page: number; pageSize: number }) {
+  const startedAt = Date.now(); const context = await continuityReadContext(root, slug);
+  const filtered = context.findings.filter((item) => (!options.status || options.status === "all" || item.status === options.status) && (!options.entity || item.entityIds.includes(options.entity)));
+  const pageSize = Math.min(100, Math.max(1, Math.floor(options.pageSize)));
+  const total = filtered.length; const pages = Math.max(1, Math.ceil(total / pageSize)); const page = Math.min(Math.max(1, Math.floor(options.page)), pages);
+  const items = filtered.slice((page - 1) * pageSize, page * pageSize);
+  const names = Object.fromEntries([...new Set(items.flatMap((item) => item.entityIds))].map((id) => [id, context.names.get(id) ?? id]));
+  logger.debug({ event: "continuity.page", story: slug, page, pageSize, total, durationMs: Date.now() - startedAt });
+  return { items, page, pageSize, pages, total, counts: context.counts, analyzedThroughChapter: context.parsed.analyzedThroughChapter, needsReanalysis: context.needsReanalysis, names };
+}
+
+/** Compatibility shape for existing internal callers. */
+export async function getContinuityReview(root: string, slug: string, status?: string) {
+  const context = await continuityReadContext(root, slug);
+  const findings = status && status !== "all" ? context.findings.filter((item) => item.status === status) : context.findings;
+  const names = Object.fromEntries(context.names);
+  return { ...context.parsed, findings, names, needsReanalysis: context.needsReanalysis, counts: { open: context.counts.open, resolved: context.counts.resolved } };
+}
+
+export const outputGroupSchema = z.enum(["chapterAudio", "audiobooks", "chapterVideos", "combinedVideos", "subtitles", "artwork"]);
+export type OutputGroup = z.infer<typeof outputGroupSchema>;
+
+export async function getOutputsSummary(root: string, slug: string) {
+  const startedAt = Date.now();
+  const [chapters, audio, video] = await Promise.all([getChapterStatusReadModel(root, slug), getAudioSummary(root, slug), getVideoSummary(root, slug)]);
+  const counts = { chapterAudio: chapters.filter((item) => item.audioAvailable).length, audiobooks: audio.exports.length,
+    chapterVideos: chapters.filter((item) => item.videoAvailable).length, combinedVideos: video.exports.length,
+    subtitles: chapters.filter((item) => item.subtitles === "complete").length * 2 };
+  logger.debug({ event: "outputs.summary", story: slug, durationMs: Date.now() - startedAt });
+  return { counts };
+}
+
+export async function getOutputsPage(root: string, slug: string, group: OutputGroup, page: number, pageSize: number) {
+  const startedAt = Date.now(); slugSchema.parse(slug);
+  const chapters = await getChapterStatusReadModel(root, slug);
+  const entries: Array<{ path: string; fallbackPath?: string; value: OutputValue }> = [];
+  if (group === "chapterAudio") for (const item of chapters) if (item.audioAvailable) {
+    const paths = storyPaths(root, slug, item.chapter);
+    entries.push({ path: paths.audio, fallbackPath: paths.audioRaw, value: { id: `chapter-audio-${item.chapter}`, group, chapter: item.chapter, format: "mp3", url: `/api/stories/${slug}/chapters/${item.chapter}/audio`, downloadUrl: `/api/stories/${slug}/chapters/${item.chapter}/audio?download=1` } });
+  }
+  if (group === "chapterVideos") for (const item of chapters) if (item.videoAvailable) entries.push({ path: storyPaths(root, slug, item.chapter).video, value: { id: `chapter-video-${item.chapter}`, group, chapter: item.chapter, format: "mp4", url: `/api/stories/${slug}/chapters/${item.chapter}/video`, downloadUrl: `/api/stories/${slug}/chapters/${item.chapter}/video?download=1` } });
+  if (group === "subtitles") for (const item of chapters) if (item.subtitles === "complete") for (const format of ["srt", "vtt"] as const) entries.push({ path: format === "srt" ? storyPaths(root, slug, item.chapter).subtitlesSrt : storyPaths(root, slug, item.chapter).subtitlesVtt, value: { id: `subtitle-${format}-${item.chapter}`, group, chapter: item.chapter, format, url: `/api/stories/${slug}/chapters/${item.chapter}/subtitles.${format}`, downloadUrl: `/api/stories/${slug}/chapters/${item.chapter}/subtitles.${format}?download=1` } });
+  if (group === "audiobooks") for (const item of (await getAudioSummary(root, slug)).exports) entries.push({ path: exportPaths(root, slug, item.from, item.to, item.format).output, value: { id: `audiobook-${item.fingerprint}`, group, from: item.from, to: item.to, format: item.format, createdAt: item.createdAt, durationSeconds: item.durationSeconds, url: item.downloadUrl, downloadUrl: item.downloadUrl } });
+  if (group === "combinedVideos") for (const item of (await getVideoSummary(root, slug)).exports) entries.push({ path: videoExportPaths(root, slug, item.from, item.to).output, value: { id: `video-${item.fingerprint}`, group, from: item.from, to: item.to, format: "mp4", createdAt: item.createdAt, durationSeconds: item.durationSeconds, url: item.downloadUrl, downloadUrl: item.downloadUrl } });
+  if (group === "artwork") {
+    const manifests = await mapLimit(chapters, 8, async (item) => {
+      const raw = await readJsonIfExists<SceneManifest>(storyPaths(root, slug, item.chapter).scenesManifest);
+      const parsed = raw ? sceneManifestSchema.safeParse(raw) : undefined;
+      return parsed?.success ? { chapter: item.chapter, scenes: parsed.data.scenes.filter((scene) => scene.artwork.status === "complete") } : undefined;
+    });
+    for (const manifest of manifests) if (manifest) for (const scene of manifest.scenes) entries.push({ path: sceneImagePath(root, slug, manifest.chapter, scene.id), value: { id: `artwork-${manifest.chapter}-${scene.id}`, group, chapter: manifest.chapter, format: "png", url: `/api/stories/${slug}/chapters/${manifest.chapter}/scenes/${scene.id}.png` } });
+  }
+  const slice = mediaPage(entries, page, pageSize);
+  const items = (await mapLimit(slice.items, 8, async (entry) => { const item = await outputItem(entry.path, entry.value); return item.missing && entry.fallbackPath ? outputItem(entry.fallbackPath, entry.value) : item; })).filter((item) => !item.missing);
+  logger.debug({ event: "outputs.page", story: slug, group, page: slice.page, pageSize: slice.pageSize, total: slice.total, durationMs: Date.now() - startedAt });
+  return { ...slice, items };
+}
+
+/** Compatibility read used by existing callers. The browser uses grouped pages. */
+export async function getOutputsLibrary(root: string, slug: string) {
+  const groups = outputGroupSchema.options;
+  const pages = await mapLimit(groups, 2, async (group) => {
+    const first = await getOutputsPage(root, slug, group, 1, 100);
+    const rest = await mapLimit(Array.from({ length: first.pages - 1 }, (_, index) => index + 2), 2, (page) => getOutputsPage(root, slug, group, page, 100));
+    return [first, ...rest].flatMap((page) => page.items);
+  });
+  return { items: pages.flat() };
+}
+
+type OutputValue = { id: string; group: OutputGroup; format: string; url: string; downloadUrl?: string; chapter?: number; from?: number; to?: number; createdAt?: string; durationSeconds?: number };
+async function outputItem(path: string, value: OutputValue) { try { const info = await stat(path); return { ...value, bytes: info.size, createdAt: value.createdAt ?? info.mtime.toISOString(), missing: false }; } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return { ...value, bytes: 0, missing: true }; throw error; } }
 
 export const settingsUpdateSchema = z.object({
   title: z.string().trim().min(1), author: z.string().trim().optional(), description: z.string().max(10_000).default(""), tags: z.array(z.string()).max(30).default([]), notes: z.string().max(20_000).default(""), sourceLanguage: z.string().trim().min(2), outputLanguage: z.string().trim().min(2),
@@ -967,7 +1094,8 @@ async function loadSummaries(root: string, slug: string, numbers: number[], inde
   });
 }
 
-export async function getAudioDashboard(root: string, slug: string) {
+export async function getAudioSummary(root: string, slug: string) {
+  const startedAt = Date.now();
   slugSchema.parse(slug); const story = await loadStory(storyPaths(root, slug, 1).storyConfig); const chapters = await getChapterStatusReadModel(root, slug);
   const exportsDirectory = join(storyPaths(root, slug, 1).story, "exports"); let names: string[] = [];
   try { names = (await readdir(exportsDirectory)).filter((name) => isVisibleManifest(name, ".json")); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
@@ -986,39 +1114,55 @@ export async function getAudioDashboard(root: string, slug: string) {
     return { ...manifest, downloadUrl: `/api/stories/${slug}/exports/${parsed.data.from}-${parsed.data.to}.${parsed.data.format}` };
   }))
     .filter((item): item is NonNullable<typeof item> => Boolean(item)).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-  const unprobed = chapters.filter((item) => item.audioAvailable && !item.durationSeconds);
-  if (unprobed.length > 0) {
-    const tools = new FfmpegTools();
-    await mapLimit(unprobed, 4, async (item) => {
-      try {
-        const paths = storyPaths(root, slug, item.chapter);
-        const filePath = (await exists(paths.audio)) ? paths.audio : paths.audioRaw;
-        const probe = await tools.probe(filePath);
-        item.durationSeconds = probe.durationSeconds;
-        const raw = await readJsonIfExists<Chapter>(paths.chapterMeta);
-        if (raw) {
-          const meta = chapterSchema.parse(raw);
-          meta.audio = probe;
-          await atomicWriteJson(paths.chapterMeta, meta).catch(() => {});
-        }
-      } catch {
-        // ignore probe failure for dashboard listing
-      }
-    });
-  }
   const available = chapters.filter((item) => item.audioAvailable);
   const current = available.filter((item) => !item.audioStale);
-  return { settings: story.audio, chapters: chapters.map(({ chapter, originalTitle, audioMastering, durationSeconds, audioAvailable, audioStale }) => ({ chapter, title: originalTitle, status: audioStale ? "stale" : audioMastering, durationSeconds, audioAvailable, audioStale })),
-    counts: { total: chapters.length, mastered: available.length, current: current.length, stale: available.length - current.length },
+  const summary = { settings: story.audio, minChapter: chapters[0]?.chapter, maxChapter: chapters.at(-1)?.chapter, counts: { total: chapters.length, mastered: available.length, current: current.length, stale: available.length - current.length },
     totalDurationSeconds: available.reduce((sum, item) => sum + (item.durationSeconds ?? 0), 0) + story.audio.chapterGapSeconds * Math.max(0, available.filter((item) => (item.durationSeconds ?? 0) > 0).length - 1), exports };
+  logger.debug({ event: "audio.summary", story: slug, durationMs: Date.now() - startedAt, total: chapters.length });
+  return summary;
 }
 
-export async function getVideoDashboard(root: string, slug: string) {
+export async function getVideoSummary(root: string, slug: string) {
+  const startedAt = Date.now();
   slugSchema.parse(slug); const story = await loadStory(storyPaths(root, slug, 1).storyConfig); const chapters = await getChapterStatusReadModel(root, slug); const storyRoot = storyPaths(root, slug, 1).story;
   const cover = (await Promise.all(["cover.jpg", "cover.jpeg", "cover.png"].map(async (name) => await exists(join(storyRoot, name)) ? name : undefined))).find(Boolean); let names: string[] = [];
   try { names = (await readdir(join(storyRoot, "exports"))).filter((name) => isVisibleManifest(name, ".mp4.json")); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
   const exports = (await mapLimit(names, 8, async (name) => { const raw = await readJsonIfExists(join(storyRoot, "exports", name)).catch((error) => { logger.warn({ event: "video.export_manifest_ignored", story: slug, manifest: name, error: error instanceof Error ? error.message : String(error) }, "Ignoring unreadable video export manifest"); return undefined; }); const parsed = raw ? videoExportManifestSchema.safeParse(raw) : undefined; if (!parsed?.success || parsed.data.story !== slug || !(await currentVideoExport(root, slug, parsed.data))) return undefined; const { output: _output, ...manifest } = parsed.data; return { ...manifest, downloadUrl: `/api/stories/${slug}/video-exports/${parsed.data.from}-${parsed.data.to}.mp4` }; })).filter((item): item is NonNullable<typeof item> => Boolean(item)).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-  return { settings: story.video, subtitleSettings: story.subtitles, background: { coverAvailable: Boolean(cover), coverName: cover, effectiveMode: story.video.backgroundMode === "gradient" || !cover ? "fallback" : story.video.backgroundMode }, counts: { total: chapters.length, mastered: chapters.filter((item) => item.audioAvailable || item.audioMastering === "complete").length, subtitles: chapters.filter((item) => item.subtitles === "complete").length, videos: chapters.filter((item) => item.video === "complete").length }, chapters: chapters.map((item) => ({ chapter: item.chapter, title: item.originalTitle, durationSeconds: item.durationSeconds, subtitleStatus: item.subtitles, videoStatus: item.video, videoAvailable: item.videoAvailable })), exports };
+  const summary = { minChapter: chapters[0]?.chapter, maxChapter: chapters.at(-1)?.chapter, settings: story.video, subtitleSettings: story.subtitles, background: { coverAvailable: Boolean(cover), coverName: cover, effectiveMode: story.video.backgroundMode === "gradient" || !cover ? "fallback" : story.video.backgroundMode }, counts: { total: chapters.length, mastered: chapters.filter((item) => item.audioAvailable || item.audioMastering === "complete").length, subtitles: chapters.filter((item) => item.subtitles === "complete").length, videos: chapters.filter((item) => item.video === "complete").length }, exports };
+  logger.debug({ event: "video.summary", story: slug, durationMs: Date.now() - startedAt, total: chapters.length });
+  return summary;
+}
+
+function mediaPage<T>(rows: T[], pageInput: number, sizeInput: number) {
+  const pageSize = Math.min(100, Math.max(1, Math.floor(sizeInput)));
+  const total = rows.length; const pages = Math.max(1, Math.ceil(total / pageSize)); const page = Math.min(Math.max(1, Math.floor(pageInput)), pages);
+  return { items: rows.slice((page - 1) * pageSize, page * pageSize), page, pageSize, pages, total };
+}
+
+export async function getAudioChapterPage(root: string, slug: string, page: number, pageSize: number) {
+  const startedAt = Date.now(); const chapters = await getChapterStatusReadModel(root, slug);
+  const result = mediaPage(chapters, page, pageSize);
+  const items = result.items.map(({ chapter, originalTitle, audioMastering, durationSeconds, audioAvailable, audioStale }) => ({ chapter, title: originalTitle, status: audioStale ? "stale" : audioMastering, durationSeconds, audioAvailable, audioStale }));
+  logger.debug({ event: "audio.page", story: slug, page: result.page, pageSize: result.pageSize, total: result.total, durationMs: Date.now() - startedAt });
+  return { ...result, items };
+}
+
+export async function getVideoChapterPage(root: string, slug: string, page: number, pageSize: number) {
+  const startedAt = Date.now(); const chapters = await getChapterStatusReadModel(root, slug);
+  const result = mediaPage(chapters, page, pageSize);
+  const items = result.items.map((item) => ({ chapter: item.chapter, title: item.originalTitle, durationSeconds: item.durationSeconds, subtitleStatus: item.subtitles, videoStatus: item.video, videoAvailable: item.videoAvailable, videoStale: item.videoStale }));
+  logger.debug({ event: "video.page", story: slug, page: result.page, pageSize: result.pageSize, total: result.total, durationMs: Date.now() - startedAt });
+  return { ...result, items };
+}
+
+/** Compatibility shape for internal callers; media pages use summary and page endpoints. */
+export async function getAudioDashboard(root: string, slug: string) {
+  const [summary, page] = await Promise.all([getAudioSummary(root, slug), getChapterStatusReadModel(root, slug)]);
+  return { ...summary, chapters: page.map(({ chapter, originalTitle, audioMastering, durationSeconds, audioAvailable, audioStale }) => ({ chapter, title: originalTitle, status: audioStale ? "stale" : audioMastering, durationSeconds, audioAvailable, audioStale })) };
+}
+export async function getVideoDashboard(root: string, slug: string) {
+  const [summary, page] = await Promise.all([getVideoSummary(root, slug), getChapterStatusReadModel(root, slug)]);
+  return { ...summary, chapters: page.map((item) => ({ chapter: item.chapter, title: item.originalTitle, durationSeconds: item.durationSeconds, subtitleStatus: item.subtitles, videoStatus: item.video, videoAvailable: item.videoAvailable, videoStale: item.videoStale })) };
 }
 
 export async function getVisualProfiles(root: string, slug: string) {
@@ -1037,7 +1181,8 @@ export async function getArtDirection(root: string, slug: string) {
   return await loadStoryArtDirection(root, slug);
 }
 
-export async function getScenesDashboard(root: string, slug: string, selectedChapter?: number) {
+export async function getScenesDashboard(root: string, slug: string, selectedChapter?: number, mode: "full" | "index" | "chapter" = "full") {
+  const startedAt = Date.now();
   slugSchema.parse(slug);
   const story = await loadStory(storyPaths(root, slug, 1).storyConfig);
   const chapters = await getChapterStatusReadModel(root, slug);
@@ -1045,16 +1190,16 @@ export async function getScenesDashboard(root: string, slug: string, selectedCha
   if (chapterNumber !== undefined && !chapters.some((item) => item.chapter === chapterNumber))
     throw new Error(`Chapter ${chapterNumber} was not found`);
   const env = loadEnvironment();
-  const globalDefaults = await loadGlobalSettings(root, env).catch(() => undefined);
-  const scenePlannerRouting = resolveModelRouting({
+  const globalDefaults = mode === "chapter" ? undefined : await loadGlobalSettings(root, env).catch(() => undefined);
+  const scenePlannerRouting = mode === "chapter" ? undefined : resolveModelRouting({
     stage: "scenePlanner",
     story,
     globalSettings: globalDefaults,
     env,
     requiredCapability: "structured_output",
   });
-  const artDirection = await loadStoryArtDirection(root, slug);
-  const visualProfiles = await loadVisualProfiles(root, slug);
+  const artDirection = mode === "chapter" ? undefined : await loadStoryArtDirection(root, slug);
+  const visualProfiles = (await cachedStoryRead("scenes-profiles", root, slug, () => fileStamp(storyPaths(root, slug, 1).visualProfiles), () => loadVisualProfiles(root, slug))).value;
 
   let manifest:
     | (Omit<SceneManifest, "scenes"> & {
@@ -1086,11 +1231,14 @@ export async function getScenesDashboard(root: string, slug: string, selectedCha
     | { chapter: number; sceneId: string; stateFingerprint: string; hasApprovedArtwork: boolean; usedAsReference: boolean; origin: string }
     | undefined;
 
-  if (chapterNumber !== undefined) {
+  if (mode !== "index" && chapterNumber !== undefined) {
     const raw = await readJsonIfExists<SceneManifest>(storyPaths(root, slug, chapterNumber).scenesManifest);
     const parsed = raw ? sceneManifestSchema.safeParse(raw) : undefined;
     if (parsed?.success) {
-      const bible = await getStoryBible(root, slug).catch(() => undefined);
+      const bible = await cachedStoryRead("scenes-bible", root, slug, async () => {
+        const paths = storyPaths(root, slug, 1);
+        return `${await getStoryBibleReadRevision(root, slug)}:${await filesStampFingerprint([paths.bible, paths.bibleManual, paths.bibleCanonicalManual])}`;
+      }, () => getStoryBible(root, slug)).then((result) => result.value).catch(() => undefined);
       // Recompute-on-read visual continuity for the loaded chapter (bounded:
       // manifest deltas + previous handoff + manual overlay).
       const continuity = await resolveChapterVisualContinuity({
@@ -1164,6 +1312,7 @@ export async function getScenesDashboard(root: string, slug: string, selectedCha
     }
   }
 
+  logger.debug({ event: mode === "chapter" ? "scenes.chapter" : "scenes.index", story: slug, chapter: chapterNumber, durationMs: Date.now() - startedAt });
   return {
     settings: story.scenes,
     artwork: story.artwork,
@@ -1181,7 +1330,7 @@ export async function getScenesDashboard(root: string, slug: string, selectedCha
     scenePlannerRouting,
     selectedChapter: chapterNumber,
     videoSubtitleMode: story.video.subtitleMode,
-    chapters: chapters.map((item) => ({
+    chapters: (mode === "chapter" ? [] : chapters).map((item) => ({
       chapter: item.chapter,
       title: item.originalTitle,
       durationSeconds: item.durationSeconds,
@@ -1207,6 +1356,14 @@ export async function getScenesDashboard(root: string, slug: string, selectedCha
     artDirection,
     visualProfiles: Object.values(visualProfiles),
   };
+}
+
+export async function getScenesIndex(root: string, slug: string) {
+  return getScenesDashboard(root, slug, undefined, "index");
+}
+export async function getScenesChapter(root: string, slug: string, chapter: number) {
+  const detail = await getScenesDashboard(root, slug, chapter, "chapter");
+  return { selectedChapter: detail.selectedChapter, manifest: detail.manifest, previousHandoff: detail.previousHandoff };
 }
 
 /** Pre-generation resolution behavior estimate, derived only from catalog
