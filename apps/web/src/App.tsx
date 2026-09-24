@@ -1694,7 +1694,7 @@ type CanonicalEntitySheetProps = {
   onEdit: () => void;
   onDemote?: () => void;
   onSuppress?: () => void;
-  onMerge: (item: any) => void;
+  onMerge?: (item: any) => void;
   onOpenVisualProfile?: (id: string, name?: string) => void;
   onRevert?: (entry: EntityAuditEntry) => void;
   onManagementOpenChange?: (open: boolean) => void;
@@ -2016,7 +2016,7 @@ export function CanonicalEntitySheet({ detail, slug, navigate, onClose, onUndo, 
                   <b>{candidate?.name ?? "Unknown entity"}</b>
                   <small>{candidate ? `${candidate.type ? pretty(candidate.type) : "Entity"} · ${item.reason ?? "Matching identity evidence"}` : (item.reason ?? "Matching identity evidence")}</small>
                   {item.confidence !== undefined && <small>{Math.round(item.confidence * 100)}% match confidence</small>}
-                  <button type="button" className="button" onClick={() => onMerge(item)}>Compare &amp; merge</button>
+                  {onMerge && <button type="button" className="button" onClick={() => onMerge(item)}>Compare &amp; merge</button>}
                 </article>;
               })}</div>
             </section>}
