@@ -49,6 +49,7 @@ import { findNamingCollisions } from "../../src/story-bible/naming-collisions.js
 import { readEntityAudit } from "../../src/story-bible/entity-audit.js";
 import { normalizeEntitySearch } from "../../src/story-bible/search.js";
 import { cachedStoryRead, fileStamp, filesStampFingerprint, invalidateStoryReadCache } from "../../src/story-bible/read-cache.js";
+import { bumpStoryBibleReadRevision, getStoryBibleReadRevision } from "../../src/story-bible/read-revision.js";
 
 const slugSchema = z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/);
 export const chapterFilterSchema = z.enum(["all", "unprocessed", "warn", "fail", "complete"]);
@@ -265,6 +266,7 @@ type BibleReviewContext = Awaited<ReturnType<typeof loadBibleReviewContext>>;
 const REVIEW_CONTEXT_CACHE = "story-bible-review-context";
 const STALE_EXTRACTION_CACHE = "story-bible-stale-extraction";
 const HEALTH_CACHE = "story-bible-health";
+const REVIEW_DERIVED_CACHE = "story-bible-review-derived";
 
 /** Artifacts whose content determines the derived review context. */
 function reviewContextInputFiles(root: string, slug: string) {
@@ -274,6 +276,21 @@ function reviewContextInputFiles(root: string, slug: string) {
 
 function reviewContextFingerprint(root: string, slug: string) {
   return filesStampFingerprint(reviewContextInputFiles(root, slug));
+}
+
+/**
+ * Cheap O(1) fingerprint for every derived Story Bible read: the review
+ * context's root-file stamps plus the app-mutation read revision. A warm
+ * health/review request stats a handful of story-root files and reads one
+ * tiny revision file — it never walks per-chapter artifacts.
+ */
+async function derivedReadFingerprint(root: string, slug: string) {
+  const paths = storyPaths(root, slug, 1);
+  return fingerprint({
+    context: await reviewContextFingerprint(root, slug),
+    source: await fileStamp(paths.sourceManifest),
+    revision: await getStoryBibleReadRevision(root, slug),
+  });
 }
 
 /**
@@ -287,21 +304,17 @@ export async function getBibleReviewContext(root: string, slug: string): Promise
   return value;
 }
 
-/** Fingerprint of every input the stale-extraction walk reads. */
+/**
+ * Cheap fingerprint for the stale-extraction walk: the read revision (bumped
+ * by every app mutation of chapter Story Bible state) plus the source
+ * manifest stamp. Per-chapter stats only happen inside the full walk itself.
+ */
 async function staleExtractionFingerprint(root: string, slug: string) {
   const paths = storyPaths(root, slug, 1);
-  let numbers: number[] = [];
-  try {
-    numbers = (await readdir(join(paths.story, "chapters"), { withFileTypes: true })).filter((entry) => entry.isDirectory() && /^\d+$/.test(entry.name)).map((entry) => Number(entry.name));
-  } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
-  const chapterStamps = await mapLimit(numbers, 16, async (number) => {
-    const chapterPaths = storyPaths(root, slug, number);
-    return `${number}:${await fileStamp(chapterPaths.chapterMeta)}:${await fileStamp(chapterPaths.bibleUpdate)}`;
-  });
-  return fingerprint({ source: await fileStamp(paths.sourceManifest), chapters: chapterStamps });
+  return fingerprint({ source: await fileStamp(paths.sourceManifest), revision: await getStoryBibleReadRevision(root, slug) });
 }
 
-/** Cached stale-extraction chapter list: stat-only revalidation, full walk on miss. */
+/** Cached stale-extraction chapter list: O(1) revalidation, full bounded walk on miss. */
 async function getStaleExtractionChapters(root: string, slug: string): Promise<number[]> {
   const { value } = await cachedStoryRead(STALE_EXTRACTION_CACHE, root, slug, () => staleExtractionFingerprint(root, slug), () => computeStaleExtractionChapters(root, slug));
   return value;
@@ -309,6 +322,17 @@ async function getStaleExtractionChapters(root: string, slug: string): Promise<n
 
 /** Drop all derived Story Bible read caches for a story after a mutation. */
 export function invalidateStoryBibleReadCache(root: string, slug: string) {
+  invalidateStoryReadCache(root, slug);
+}
+
+/**
+ * Combined invalidation for Story Bible-derived reads: bumps the on-disk read
+ * revision (so cheap fingerprints change) AND drops the in-memory caches.
+ * Every mutation path that previously called invalidateStoryBibleReadCache
+ * must call this instead so no caller can forget half of the protocol.
+ */
+export async function invalidateStoryBibleDerivedReads(root: string, slug: string) {
+  await bumpStoryBibleReadRevision(root, slug);
   invalidateStoryReadCache(root, slug);
 }
 
@@ -556,15 +580,15 @@ export async function getStoryBibleHealth(root: string, slug: string) {
   const startedAt = Date.now();
   const context = await getBibleReviewContext(root, slug);
   const { value, cacheHit } = await cachedStoryRead(HEALTH_CACHE, root, slug,
-    async () => fingerprint({ context: await reviewContextFingerprint(root, slug), stale: await staleExtractionFingerprint(root, slug) }),
+    () => derivedReadFingerprint(root, slug),
     async () => {
       const { bible } = context;
+      // Shared per-revision derivation: the stale walk and cleanup analysis
+      // are computed once and reused by the review endpoints, never scanned
+      // twice on a cold health build.
       const staleExtractionChapters = await getStaleExtractionChapters(root, slug);
-      // No provider is passed: classifyEntityPersistence falls back to its
-      // deterministic result, so this analysis is free and reproducible. The
-      // review context's duplicate suggestions are reused for this revision.
-      const analysis = await analyzeStoryBible(root, slug, { duplicateSuggestions: context.duplicateSuggestions });
-      const cleanupRecommendations = analysis.recommendations.filter((item) => item.recommendation !== "keep_canonical").length;
+      const derived = await getBibleReviewDerived(root, slug);
+      const cleanupRecommendations = derived.items.filter((item) => item.kind === "cleanup").length;
       const visualProfileIssues = Object.values(context.visualProfiles).filter((profile) => (profile.conflicts ?? []).some((conflict) => conflict.status === "needs_review")).length;
       const pronunciationNeedsReview = bible.canonicalEntities.filter((entity) => hasActivePronunciation(entity.pronunciation) && entity.pronunciation?.needsReview).length;
       const needsAttention = bible.canonicalEntities.filter((entity) => readinessNeedsAttention(context.readinessOf(entity))).length;
@@ -601,12 +625,14 @@ export type BibleReviewItem = {
   action: { label: string; href: string };
 };
 
+type BibleReviewDerived = { items: BibleReviewItem[]; openTotal: number; counts: Record<string, number> };
+
 /**
- * Unified derived review queue: aggregates existing issue sources into one
- * paginated list without copying anything into a second store. Only sources
- * with real resolution state (continuity) respond to the status filter.
+ * Derived review data (all items, openTotal, open counts per kind), built
+ * once per read revision and shared by the review list, the review summary
+ * badge, and health. Read only; no provider calls.
  */
-export async function getStoryBibleReview(root: string, slug: string, options: { kind?: z.infer<typeof bibleReviewKindSchema>; status?: z.infer<typeof bibleReviewStatusSchema>; entityId?: string; page: number; pageSize: number }) {
+async function buildBibleReviewDerived(root: string, slug: string): Promise<BibleReviewDerived> {
   const context = await getBibleReviewContext(root, slug);
   const { bible } = context;
   const names = new Map(bible.canonicalEntities.map((entity) => [entity.id, entity.canonicalName]));
@@ -681,6 +707,9 @@ export async function getStoryBibleReview(root: string, slug: string, options: {
     action: { label: "Open cleanup", href: `/stories/${slug}/bible?tab=cleanup` },
   });
 
+  // No provider is passed: classifyEntityPersistence falls back to its
+  // deterministic result, so this analysis is free and reproducible. The
+  // review context's duplicate suggestions are reused for this revision.
   const analysis = await analyzeStoryBible(root, slug, { duplicateSuggestions: context.duplicateSuggestions });
   for (const recommendation of analysis.recommendations) {
     if (recommendation.recommendation === "keep_canonical") continue;
@@ -695,6 +724,32 @@ export async function getStoryBibleReview(root: string, slug: string, options: {
   }
 
   const openTotal = items.filter((item) => item.status === "open").length;
+  const counts: Record<string, number> = {};
+  for (const item of items) if (item.status === "open") counts[item.kind] = (counts[item.kind] ?? 0) + 1;
+  return { items, openTotal, counts };
+}
+
+async function getBibleReviewDerived(root: string, slug: string): Promise<BibleReviewDerived> {
+  const { value } = await cachedStoryRead(REVIEW_DERIVED_CACHE, root, slug, () => derivedReadFingerprint(root, slug), () => buildBibleReviewDerived(root, slug));
+  return value;
+}
+
+/** Lightweight badge data: open review total and per-kind open counts. */
+export async function getStoryBibleReviewSummary(root: string, slug: string) {
+  slugSchema.parse(slug);
+  const derived = await getBibleReviewDerived(root, slug);
+  return { openTotal: derived.openTotal, counts: derived.counts };
+}
+
+/**
+ * Unified derived review queue: aggregates existing issue sources into one
+ * paginated list without copying anything into a second store. Only sources
+ * with real resolution state (continuity) respond to the status filter.
+ */
+export async function getStoryBibleReview(root: string, slug: string, options: { kind?: z.infer<typeof bibleReviewKindSchema>; status?: z.infer<typeof bibleReviewStatusSchema>; entityId?: string; page: number; pageSize: number }) {
+  const derived = await getBibleReviewDerived(root, slug);
+  const items = derived.items;
+  const openTotal = derived.openTotal;
   const status = options.status ?? "open";
   const statusItems = status === "all" ? items : items.filter((item) => item.status === status);
   const counts: Record<string, number> = {};

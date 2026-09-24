@@ -1382,10 +1382,17 @@ export function BiblePage({ slug, navigate, locationSearch }: { slug: string; na
       if (listGate.current.isCurrent(requestId)) setEntitiesLoading(false);
     }
   };
-  useEffect(() => { void loadEntities(); }, [slug, page, type, sort, readiness, debouncedQuery]);
+  useEffect(() => {
+    // While a search debounce is pending, query.trim() is newer than
+    // debouncedQuery. Suppress the list request so a page reset caused by
+    // typing doesn't fire a request with the stale query; the debounce commit
+    // flips debouncedQuery and issues exactly one request.
+    if (query.trim() !== debouncedQuery) return;
+    void loadEntities();
+  }, [slug, page, type, sort, readiness, debouncedQuery, query]);
   const loadSuppressions = async () => { try { setSuppressedEntities(await api<any[]>(`/stories/${slug}/story-bible/suppressions`)); } catch { /* non-critical: the suppression audit strip simply stays absent/stale */ } };
   const loadHealth = async () => { try { setHealth(await api<any>(`/stories/${slug}/story-bible/health`)); setHealthError(""); } catch (value) { setHealthError(message(value)); } };
-  const loadReviewSummary = async () => { try { const summary = await api<any>(`/stories/${slug}/story-bible/review?page=1&pageSize=1&status=open`); setOpenReviewTotal(summary.openTotal); } catch { /* non-critical: the review count badge stays unset */ } };
+  const loadReviewSummary = async () => { try { const summary = await api<any>(`/stories/${slug}/story-bible/review/summary`); setOpenReviewTotal(summary.openTotal); } catch { /* non-critical: the review count badge stays unset */ } };
   useEffect(() => { void loadSuppressions(); void loadHealth(); void loadReviewSummary(); }, [slug]);
   // Post-mutation refresh: the entity list is awaited (it drives what is on
   // screen); health/review/suppressions recompute in the background.

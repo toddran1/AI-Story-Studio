@@ -80,7 +80,7 @@ import { TTSProvider } from "../../src/tts/provider.js";
 import { TTSProviderRouter } from "../../src/tts/router.js";
 import { CensorAudioService, FfmpegCensorAudioService } from "../../src/tts/censor-audio.js";
 import { addManualBibleEntry, bibleCategorySchema, chapterTextEditSchema, deleteBibleEntry, saveChapterTextEdit, saveVoicePreview, updateManualBibleEntry, voicePreviewSchema } from "../../src/studio/workflow.js";
-import { getContinuityReview, getStoryBible, invalidateCatalogCache, invalidateStoryBibleReadCache, loadChapterSummaries, mapLimit } from "./catalog.js";
+import { getContinuityReview, getStoryBible, invalidateCatalogCache, invalidateStoryBibleDerivedReads, loadChapterSummaries, mapLimit } from "./catalog.js";
 import { buildStoryBackup, cleanupKindSchema, cleanupStory, createBlankStory, deleteStory, duplicateStory, getStorageUsage, invalidateStoryForConfigChange, loadGlobalSettings, readActivity, recordActivity, restoreStoryBackupFile, saveCover, saveGlobalSettings, systemStatus, updateStoryMetadata } from "../../src/studio/projects.js";
 import { ProductionQueueService } from "../../src/queue/production-service.js";
 import { alignmentConfig, createAlignmentEngine } from "../../src/alignment/config.js";
@@ -250,7 +250,7 @@ export class StudioOperations {
   }
   async markStagesCurrent(slug: string, raw: unknown) {
     const result = await markStagesCurrent(this.root, slug, markCurrentInputSchema.parse(raw));
-    invalidateCatalogCache(this.root, slug); invalidateStoryBibleReadCache(this.root, slug);
+    invalidateCatalogCache(this.root, slug); await invalidateStoryBibleDerivedReads(this.root, slug);
     return result;
   }
   async planStageExecution(slug: string, raw: unknown) {
@@ -282,7 +282,7 @@ export class StudioOperations {
           results.push({ chapter, status: "failed", plan, error: error instanceof Error ? error.message : String(error) });
         }
       }
-      invalidateCatalogCache(this.root, slug); invalidateStoryBibleReadCache(this.root, slug); return { fingerprint: batchPlan.fingerprint, results, summary: { ...batchPlan.summary, completedOperations: results.filter((item) => item.status === "completed").reduce((count, item) => count + item.plan.runStages.length, 0), completedChapters: results.filter((item) => item.status === "completed").length, reusedChapters: results.filter((item) => item.status === "reused").length, blockedChapters: results.filter((item) => item.status === "blocked").length, failedChapters: results.filter((item) => item.status === "failed").length } };
+      invalidateCatalogCache(this.root, slug); await invalidateStoryBibleDerivedReads(this.root, slug); return { fingerprint: batchPlan.fingerprint, results, summary: { ...batchPlan.summary, completedOperations: results.filter((item) => item.status === "completed").reduce((count, item) => count + item.plan.runStages.length, 0), completedChapters: results.filter((item) => item.status === "completed").length, reusedChapters: results.filter((item) => item.status === "reused").length, blockedChapters: results.filter((item) => item.status === "blocked").length, failedChapters: results.filter((item) => item.status === "failed").length } };
     }), { chapters: input.chapters, stages: input.stages, mode: input.mode, force: input.force });
   }
 
@@ -359,7 +359,7 @@ export class StudioOperations {
       });
     try { await this.discardInspection(inspectionId); }
     catch (error) { logger.warn({ event: "web.inspection.cleanup_failed", inspectionId, error: error instanceof Error ? error.message : String(error) }); }
-    await recordActivity(this.root, slug, "source.imported", `Imported ${result.added.length} new and updated ${result.modified.length} chapters`); invalidateCatalogCache(this.root, slug); invalidateStoryBibleReadCache(this.root, slug); return result;
+    await recordActivity(this.root, slug, "source.imported", `Imported ${result.added.length} new and updated ${result.modified.length} chapters`); invalidateCatalogCache(this.root, slug); await invalidateStoryBibleDerivedReads(this.root, slug); return result;
   }
 
   private async applyConfiguredFallbacks(slug: string, primary: SourceInspection, from?: number, to?: number): Promise<SourceInspection> {
@@ -472,7 +472,7 @@ export class StudioOperations {
           runtime: { pipeline: this.pipeline, alignment: { config: this.alignConfig, engine: this.aligner }, scenePlanner: this.scenePlanner ?? this.runtime.router.forStage(story.pipeline.scenePlanner), image: this.image, video: this.video }, onStageEvent: request.onStageEvent });
       } } : this.pipeline;
       return new BatchRunner(processor).run({ root: this.root, story, chapters: selected, state, shutdown, retry: retryConfigSchema.parse({}),
-        onProgress: (event: ProgressEvent) => control.update(event) }).then((result) => { invalidateStoryBibleReadCache(this.root, slug); return result; });
+        onProgress: (event: ProgressEvent) => control.update(event) }).then(async (result) => { await invalidateStoryBibleDerivedReads(this.root, slug); return result; });
     }));
   }
 
@@ -559,7 +559,7 @@ export class StudioOperations {
   }
   deleteSummary(slug: string, id: string) { slugSchema.parse(slug); return withStoryLock(this.root, slug, "summary deletion", async () => { const result = await new SummaryService(this.root, this.llm).delete(slug, id); await recordActivity(this.root, slug, "summary.deleted", `Deleted summary ${id}`); return result; }); }
 
-  async editChapterText(slug: string, chapter: number, raw: unknown) { slugSchema.parse(slug); const input = chapterTextEditSchema.parse(raw); return withStoryLock(this.root, slug, "manual chapter text edit", async () => { const result = await saveChapterTextEdit(this.root, slug, chapter, input); invalidateStoryBibleReadCache(this.root, slug); await recordActivity(this.root, slug, "chapter.edited", `Edited Chapter ${chapter} ${input.field}`); return result; }); }
+  async editChapterText(slug: string, chapter: number, raw: unknown) { slugSchema.parse(slug); const input = chapterTextEditSchema.parse(raw); return withStoryLock(this.root, slug, "manual chapter text edit", async () => { const result = await saveChapterTextEdit(this.root, slug, chapter, input); await invalidateStoryBibleDerivedReads(this.root, slug); await recordActivity(this.root, slug, "chapter.edited", `Edited Chapter ${chapter} ${input.field}`); return result; }); }
   async dismissQaFindings(slug: string, chapter: number, raw: unknown) {
     slugSchema.parse(slug); if (!Number.isSafeInteger(chapter) || chapter < 1) throw new ConfigurationError("Chapter must be a positive integer");
     const input = qaDismissInputSchema.parse(raw);
@@ -943,9 +943,9 @@ export class StudioOperations {
       return result;
     });
   }
-  async addBibleEntry(slug: string, raw: unknown) { slugSchema.parse(slug); const input = z.object({ category: bibleCategorySchema, value: z.record(z.string(), z.unknown()), replacementKey: z.string().optional() }).strict().parse(raw); return withStoryLock(this.root, slug, "manual Story Bible add", async () => { const base = await getStoryBible(this.root, slug); const id = await addManualBibleEntry(this.root, slug, base, input.category, input.value, input.replacementKey); invalidateStoryBibleReadCache(this.root, slug); await recordActivity(this.root, slug, "bible.edited", `Added or corrected ${input.category} entry`); return { id }; }); }
-  async updateBibleEntry(slug: string, id: string, raw: unknown) { slugSchema.parse(slug); const input = z.object({ value: z.record(z.string(), z.unknown()) }).strict().parse(raw); return withStoryLock(this.root, slug, "manual Story Bible edit", async () => { const base = await getStoryBible(this.root, slug); await updateManualBibleEntry(this.root, slug, base, id, input.value); invalidateStoryBibleReadCache(this.root, slug); await recordActivity(this.root, slug, "bible.edited", "Updated a Story Bible entry"); return { status: "updated" }; }); }
-  async deleteBibleEntry(slug: string, id: string) { slugSchema.parse(slug); return withStoryLock(this.root, slug, "manual Story Bible delete", async () => { const base = await getStoryBible(this.root, slug); await deleteBibleEntry(this.root, slug, base, id); invalidateStoryBibleReadCache(this.root, slug); await recordActivity(this.root, slug, "bible.edited", "Deleted a manual Story Bible entry"); return { status: "deleted" }; }); }
+  async addBibleEntry(slug: string, raw: unknown) { slugSchema.parse(slug); const input = z.object({ category: bibleCategorySchema, value: z.record(z.string(), z.unknown()), replacementKey: z.string().optional() }).strict().parse(raw); return withStoryLock(this.root, slug, "manual Story Bible add", async () => { const base = await getStoryBible(this.root, slug); const id = await addManualBibleEntry(this.root, slug, base, input.category, input.value, input.replacementKey); await invalidateStoryBibleDerivedReads(this.root, slug); await recordActivity(this.root, slug, "bible.edited", `Added or corrected ${input.category} entry`); return { id }; }); }
+  async updateBibleEntry(slug: string, id: string, raw: unknown) { slugSchema.parse(slug); const input = z.object({ value: z.record(z.string(), z.unknown()) }).strict().parse(raw); return withStoryLock(this.root, slug, "manual Story Bible edit", async () => { const base = await getStoryBible(this.root, slug); await updateManualBibleEntry(this.root, slug, base, id, input.value); await invalidateStoryBibleDerivedReads(this.root, slug); await recordActivity(this.root, slug, "bible.edited", "Updated a Story Bible entry"); return { status: "updated" }; }); }
+  async deleteBibleEntry(slug: string, id: string) { slugSchema.parse(slug); return withStoryLock(this.root, slug, "manual Story Bible delete", async () => { const base = await getStoryBible(this.root, slug); await deleteBibleEntry(this.root, slug, base, id); await invalidateStoryBibleDerivedReads(this.root, slug); await recordActivity(this.root, slug, "bible.edited", "Deleted a manual Story Bible entry"); return { status: "deleted" }; }); }
   async updateCanonicalEntity(slug: string, id: string, raw: unknown) { slugSchema.parse(slug); return withStoryLock(this.root, slug, "canonical entity edit", () => this.applyCanonicalEntityPatch(slug, id, raw)); }
 
   /** Core of a canonical entity edit: overlay update plus invalidations. Caller holds the story lock. */
@@ -983,7 +983,7 @@ export class StudioOperations {
     await appendEntityAudit(this.root, slug, entityPatchAuditEntries(before, entity));
     const changedFields = ENTITY_AUDIT_FIELDS.filter((field) => JSON.stringify(before[field] ?? null) !== JSON.stringify(entity![field] ?? null));
     logger.debug({ event: "story_bible.entity_update", story: slug, entityId: id, changedFields, affectedChapters: invalidation.affectedChapters.length, durationMs: Date.now() - startedAt });
-    invalidateCatalogCache(this.root, slug); invalidateStoryBibleReadCache(this.root, slug); await recordActivity(this.root, slug, "bible.entity.edited", invalidation.affectedChapters.length ? `Updated canonical entity ${id}; marked ${invalidation.affectedChapters.length} chapter(s) affected by narration naming` : `Updated canonical entity ${id}`); return { entity, invalidation, visualProfileReviewRequired };
+    invalidateCatalogCache(this.root, slug); await invalidateStoryBibleDerivedReads(this.root, slug); await recordActivity(this.root, slug, "bible.entity.edited", invalidation.affectedChapters.length ? `Updated canonical entity ${id}; marked ${invalidation.affectedChapters.length} chapter(s) affected by narration naming` : `Updated canonical entity ${id}`); return { entity, invalidation, visualProfileReviewRequired };
   }
 
   /**
@@ -1186,7 +1186,7 @@ export class StudioOperations {
     slugSchema.parse(slug); z.string().regex(/^ent_[a-f0-9]{24}$/).parse(id);
     return withStoryLock(this.root, slug, "pronunciation suggestion dismiss", async () => {
       await dismissPronunciationSuggestion(this.root, slug, id);
-      invalidateCatalogCache(this.root, slug); invalidateStoryBibleReadCache(this.root, slug);
+      invalidateCatalogCache(this.root, slug); await invalidateStoryBibleDerivedReads(this.root, slug);
       return { status: "dismissed" };
     });
   }
@@ -1198,7 +1198,7 @@ export class StudioOperations {
       const base = await getStoryBible(this.root, slug);
       if (input.entityId && !base.canonicalEntities.some(entity => entity.id === input.entityId)) throw new Error("Canonical entity was not found");
       const result = await withUsageScope({ story: slug, stage: "pronunciation" }, () => enrichStoryPronunciations(this.root, slug, base, this.llm.forStage(story.pipeline.storyBible), story.pipeline.storyBible, story.sourceLanguage, input.entityId ? [input.entityId] : undefined, input.force || Boolean(input.entityId), input.dryRun));
-      invalidateCatalogCache(this.root, slug); invalidateStoryBibleReadCache(this.root, slug);
+      invalidateCatalogCache(this.root, slug); await invalidateStoryBibleDerivedReads(this.root, slug);
       return result;
     }));
   }
@@ -1292,7 +1292,7 @@ export class StudioOperations {
     const cleanup = await finalizeVisualCanonMerge(prepared);
     try { await invalidateCanonicalIdentityChange(this.root, slug, changedEntities, "Canonical entities were merged"); }
     catch (error) { cleanup.errors.push(`Could not mark affected chapter reviews stale after merge: ${error instanceof Error ? error.message : String(error)}`); }
-    invalidateStoryBibleReadCache(this.root, slug);
+    await invalidateStoryBibleDerivedReads(this.root, slug);
     await appendEntityAudit(this.root, slug, [
       { entityId: targetEntityId, action: "merged", after: { mergeId, mergedSourceIds: sourceEntityIds, reason }, reason, source: "manual" },
       ...sourceEntityIds.map((sourceEntityId): EntityAuditInput => ({ entityId: sourceEntityId, action: "merged", after: { mergeId, mergedInto: targetEntityId, reason }, reason, source: "manual" })),
@@ -1320,7 +1320,7 @@ export class StudioOperations {
       };
     });
   }
-  async undoCanonicalMerge(slug: string, mergeId: string) { slugSchema.parse(slug); return withStoryLock(this.root, slug, "undo canonical entity merge", async () => { const base = await getStoryBible(this.root, slug, { includeCanonicalOverlay: false }); const result = await undoCanonicalMerge(this.root, slug, base, mergeId); const merge = result.overlay.merges.find((item) => item.id === mergeId); if (merge) { const entries: EntityAuditInput[] = [{ entityId: merge.targetEntityId, action: "merge_undone", after: { mergeId, mergedSourceIds: merge.sourceEntityIds }, source: "manual" }, ...merge.sourceEntityIds.map((id): EntityAuditInput => ({ entityId: id, action: "merge_undone", after: { mergeId, unmergedFrom: merge.targetEntityId }, source: "manual" }))]; await appendEntityAudit(this.root, slug, entries.filter((entry) => canonicalEntitySchema.shape.id.safeParse(entry.entityId).success)); } invalidateStoryBibleReadCache(this.root, slug); await recordActivity(this.root, slug, "bible.merge.undone", "Undid a canonical entity merge"); return { status: "undone" }; }); }
+  async undoCanonicalMerge(slug: string, mergeId: string) { slugSchema.parse(slug); return withStoryLock(this.root, slug, "undo canonical entity merge", async () => { const base = await getStoryBible(this.root, slug, { includeCanonicalOverlay: false }); const result = await undoCanonicalMerge(this.root, slug, base, mergeId); const merge = result.overlay.merges.find((item) => item.id === mergeId); if (merge) { const entries: EntityAuditInput[] = [{ entityId: merge.targetEntityId, action: "merge_undone", after: { mergeId, mergedSourceIds: merge.sourceEntityIds }, source: "manual" }, ...merge.sourceEntityIds.map((id): EntityAuditInput => ({ entityId: id, action: "merge_undone", after: { mergeId, unmergedFrom: merge.targetEntityId }, source: "manual" }))]; await appendEntityAudit(this.root, slug, entries.filter((entry) => canonicalEntitySchema.shape.id.safeParse(entry.entityId).success)); } await invalidateStoryBibleDerivedReads(this.root, slug); await recordActivity(this.root, slug, "bible.merge.undone", "Undid a canonical entity merge"); return { status: "undone" }; }); }
   async suppressCanonicalEntity(slug: string, entityId: string, raw: unknown) {
     slugSchema.parse(slug);
     const { reason } = z.object({ reason: z.string().trim().min(1).max(1000) }).strict().parse(raw);
@@ -1333,7 +1333,7 @@ export class StudioOperations {
       const result = await suppressCanonicalEntity(this.root, slug, base, entityId, reason);
       try { await invalidateCanonicalIdentityChange(this.root, slug, [before], `Canonical entity ${before.canonicalName} was suppressed`); }
       catch (error) { if (priorOverlay) await atomicWrite(overlayPath, priorOverlay); else await rm(overlayPath, { force: true }); throw error; }
-      invalidateCatalogCache(this.root, slug); invalidateStoryBibleReadCache(this.root, slug);
+      invalidateCatalogCache(this.root, slug); await invalidateStoryBibleDerivedReads(this.root, slug);
       await appendEntityAudit(this.root, slug, [{ entityId, action: "suppressed", before: { canonicalName: before.canonicalName, type: before.type }, reason, source: "manual" }]);
       await recordActivity(this.root, slug, "bible.entity.suppressed", `Suppressed canonical entity ${entityId}: ${reason}`);
       return { status: "suppressed", suppression: result.overlay.suppressions.find((item) => item.entityId === entityId) };
@@ -1349,7 +1349,7 @@ export class StudioOperations {
       const entity = result.bible.canonicalEntities.find((item) => item.id === entityId);
       try { if (entity) await invalidateCanonicalIdentityChange(this.root, slug, [entity], `Canonical entity ${entity.canonicalName} was restored`); }
       catch (error) { await atomicWrite(overlayPath, priorOverlay); throw error; }
-      invalidateCatalogCache(this.root, slug); invalidateStoryBibleReadCache(this.root, slug);
+      invalidateCatalogCache(this.root, slug); await invalidateStoryBibleDerivedReads(this.root, slug);
       await appendEntityAudit(this.root, slug, [{ entityId, action: "restored", after: entity ? { canonicalName: entity.canonicalName, type: entity.type } : undefined, source: "manual" }]);
       await recordActivity(this.root, slug, "bible.entity.restored", `Restored canonical entity ${entityId}`);
       return { status: "restored", entity: result.bible.canonicalEntities.find((item) => item.id === entityId) };
@@ -1371,7 +1371,7 @@ export class StudioOperations {
         await updateCanonicalEntity(this.root, slug, base, current.entityIds[0]!, { status });
         if (canonicalEntitySchema.shape.id.safeParse(current.entityIds[0]!).success) await appendEntityAudit(this.root, slug, [{ entityId: current.entityIds[0]!, action: "updated", after: { status }, reason: input.note || `Resolved continuity finding ${id}`, source: "manual" }]);
       }
-      const finding = await resolveContinuityFinding(this.root, slug, id, input.resolution, input.note); invalidateCatalogCache(this.root, slug); invalidateStoryBibleReadCache(this.root, slug); await recordActivity(this.root, slug, "continuity.resolved", `Resolved ${finding.type} finding`); return { finding };
+      const finding = await resolveContinuityFinding(this.root, slug, id, input.resolution, input.note); invalidateCatalogCache(this.root, slug); await invalidateStoryBibleDerivedReads(this.root, slug); await recordActivity(this.root, slug, "continuity.resolved", `Resolved ${finding.type} finding`); return { finding };
     });
   }
 
@@ -1389,7 +1389,7 @@ export class StudioOperations {
     const result = await applyCleanupRecommendations(this.root, slug, input.recommendationIds, {
       highConfidenceOnly: input.highConfidenceOnly,
     });
-    invalidateCatalogCache(this.root, slug); invalidateStoryBibleReadCache(this.root, slug);
+    invalidateCatalogCache(this.root, slug); await invalidateStoryBibleDerivedReads(this.root, slug);
     await appendEntityAudit(this.root, slug, result.auditTrail.filter((entry) => canonicalEntitySchema.shape.id.safeParse(entry.entityId).success));
     await recordActivity(this.root, slug, "bible.cleanup.applied", `Applied Story Bible cleanup: demoted ${result.appliedDemotionsCount}, merged ${result.appliedMergesCount}`);
     return result;
@@ -1446,7 +1446,7 @@ export class StudioOperations {
     }
 
     invalidateCatalogCache(this.root, slug);
-    invalidateStoryBibleReadCache(this.root, slug);
+    await invalidateStoryBibleDerivedReads(this.root, slug);
     if (result.status === "demoted") await appendEntityAudit(this.root, slug, [{ entityId: id, action: "demoted", after: { referenceId: result.referenceId, parentEntityId: input.parentEntityId ?? null }, reason: input.reason, source: "manual" }]);
     await recordActivity(this.root, slug, "bible.entity.demoted", `Demoted canonical entity ${id} to minor reference`);
     return result;
@@ -1458,7 +1458,7 @@ export class StudioOperations {
       reason: z.string().optional(),
     }).passthrough().parse(raw ?? {});
     const result = await promoteMinorReference(this.root, slug, id, input);
-    invalidateCatalogCache(this.root, slug); invalidateStoryBibleReadCache(this.root, slug);
+    invalidateCatalogCache(this.root, slug); await invalidateStoryBibleDerivedReads(this.root, slug);
     if (result.status === "promoted") await appendEntityAudit(this.root, slug, [{ entityId: result.entity.id, action: "promoted", after: { referenceId: id, canonicalName: result.entity.canonicalName }, reason: input.reason, source: "manual" }]);
     await recordActivity(this.root, slug, "bible.reference.promoted", `Promoted minor reference ${id} to canonical entity`);
     return result;
@@ -1474,7 +1474,7 @@ export class StudioOperations {
       contextNotes: z.string().nullable().optional(),
     }).passthrough().parse(raw ?? {});
     const result = await updateMinorReference(this.root, slug, id, input);
-    invalidateCatalogCache(this.root, slug); invalidateStoryBibleReadCache(this.root, slug);
+    invalidateCatalogCache(this.root, slug); await invalidateStoryBibleDerivedReads(this.root, slug);
     return result;
   }
 
@@ -1483,7 +1483,7 @@ export class StudioOperations {
     bleepStrongProfanity: story.narrationSettings.bleepStrongProfanity,
     speed: request.speed, format: config.format, sampleRate: 44100, bitrate: 192, normalize: true, maxCharsPerRequest: config.maxCharsPerRequest })); const saved = await saveVoicePreview(this.root, slug, result.audio, request); await recordActivity(this.root, slug, "voice.preview", "Generated a voice preview"); return saved; }); }
 
-  startProduction(slug: string, raw: unknown) { slugSchema.parse(slug); const input = productionInputSchema.parse(raw); return this.jobs.create("production", slug, async (control) => withStoryLock(this.root, slug, "end-to-end production", async () => { const story = await loadStory(storyPaths(this.root, slug, 1).storyConfig); const shutdown = new ShutdownController(); control.setPause(() => shutdown.request()); await recordActivity(this.root, slug, "production.started", `Started production for Chapters ${input.from}–${input.to}`); const manifest = (await runProduction({ root: this.root, story, ...input, pause: shutdown, recordedCost: this.usage ? () => this.usage!.recordedCost({ story: slug }) : undefined, onProgress: (event) => control.update(event) }, { pipeline: this.pipeline, loadChapters: async () => (await loadImportedChapters(this.root, slug)).chapters, refresh: (from, to) => refreshProductionRange({ root: this.root, story, from, to, registry: this.registry }), scenePlanner: this.scenePlanner ?? this.runtime.router.forStage(story.pipeline.scenePlanner), image: this.image, video: this.video, videoExport: this.videoExport, audiobook: this.audiobook, alignmentConfig: this.alignConfig, alignmentEngine: this.aligner })).manifest; invalidateStoryBibleReadCache(this.root, slug); await recordActivity(this.root, slug, `production.${manifest.status}`, `${manifest.status === "completed" ? "Completed" : "Stopped"} production for Chapters ${input.from}–${input.to}`); return manifest; })); }
+  startProduction(slug: string, raw: unknown) { slugSchema.parse(slug); const input = productionInputSchema.parse(raw); return this.jobs.create("production", slug, async (control) => withStoryLock(this.root, slug, "end-to-end production", async () => { const story = await loadStory(storyPaths(this.root, slug, 1).storyConfig); const shutdown = new ShutdownController(); control.setPause(() => shutdown.request()); await recordActivity(this.root, slug, "production.started", `Started production for Chapters ${input.from}–${input.to}`); const manifest = (await runProduction({ root: this.root, story, ...input, pause: shutdown, recordedCost: this.usage ? () => this.usage!.recordedCost({ story: slug }) : undefined, onProgress: (event) => control.update(event) }, { pipeline: this.pipeline, loadChapters: async () => (await loadImportedChapters(this.root, slug)).chapters, refresh: (from, to) => refreshProductionRange({ root: this.root, story, from, to, registry: this.registry }), scenePlanner: this.scenePlanner ?? this.runtime.router.forStage(story.pipeline.scenePlanner), image: this.image, video: this.video, videoExport: this.videoExport, audiobook: this.audiobook, alignmentConfig: this.alignConfig, alignmentEngine: this.aligner })).manifest; await invalidateStoryBibleDerivedReads(this.root, slug); await recordActivity(this.root, slug, `production.${manifest.status}`, `${manifest.status === "completed" ? "Completed" : "Stopped"} production for Chapters ${input.from}–${input.to}`); return manifest; })); }
   async submitProduction(slug:string,raw:unknown){if(this.queue)return this.queue.submit(slug,raw);return this.startProduction(slug,raw);}
 
   startPreview(slug: string, raw: unknown) {
@@ -1784,7 +1784,7 @@ export class StudioOperations {
       const rawProfile = (typeof input === "object" && input !== null && "profile" in input) ? (input as any).profile : input;
       const parsed = visualProfileSchema.parse({ ...rawProfile, entityId });
       const updated = await updateVisualProfile(this.root, slug, entityId, parsed);
-      invalidateStoryBibleReadCache(this.root, slug);
+      await invalidateStoryBibleDerivedReads(this.root, slug);
       // An approved profile supersedes an earlier opt-out. Keep the policy
       // explicit, but never let a stale skip hide newly approved visual canon.
       if (updated.status === "approved" && entity.visualProfilePolicy?.mode === "skip") {
@@ -1800,7 +1800,7 @@ export class StudioOperations {
     canonicalEntitySchema.shape.id.parse(entityId);
     return withStoryLock(this.root, slug, "delete visual profile", async () => {
       const result = await deleteVisualProfile(this.root, slug, entityId);
-      invalidateStoryBibleReadCache(this.root, slug);
+      await invalidateStoryBibleDerivedReads(this.root, slug);
       return result;
     });
   }
@@ -1841,7 +1841,7 @@ export class StudioOperations {
     canonicalEntitySchema.shape.id.parse(entityId);
     return withStoryLock(this.root, slug, "inspect visual profile", async () => {
       const result = await synchronizeVisualProfileConflicts(this.root, slug, await getStoryBible(this.root, slug), entityId);
-      invalidateStoryBibleReadCache(this.root, slug);
+      await invalidateStoryBibleDerivedReads(this.root, slug);
       return result;
     });
   }
@@ -1863,7 +1863,7 @@ export class StudioOperations {
     if (parsed.proposal.entityId !== entityId) throw new Error("Visual profile proposal belongs to a different entity");
     return withStoryLock(this.root, slug, "apply visual profile proposal", async () => {
       const result = await applyVisualProfileProposal(this.root, slug, await getStoryBible(this.root, slug), parsed.proposal, parsed.selectedFields);
-      invalidateStoryBibleReadCache(this.root, slug);
+      await invalidateStoryBibleDerivedReads(this.root, slug);
       return result;
     });
   }
@@ -1874,7 +1874,7 @@ export class StudioOperations {
     const parsed = z.object({ primary: z.boolean().optional() }).strict().parse(input ?? {});
     return withStoryLock(this.root, slug, "approve visual reference", async () => {
       const result = await approveVisualReference(this.root, slug, entityId, refId, parsed.primary);
-      invalidateStoryBibleReadCache(this.root, slug);
+      await invalidateStoryBibleDerivedReads(this.root, slug);
       return result;
     });
   }
@@ -1885,7 +1885,7 @@ export class StudioOperations {
     const parsed = z.object({ action: z.enum(["accept_canonical", "retain_manual_override"]) }).strict().parse(input);
     return withStoryLock(this.root, slug, "resolve visual profile conflict", async () => {
       const result = await resolveVisualProfileConflict(this.root, slug, await getStoryBible(this.root, slug), entityId, conflictId, parsed.action);
-      invalidateStoryBibleReadCache(this.root, slug);
+      await invalidateStoryBibleDerivedReads(this.root, slug);
       return result;
     });
   }
@@ -1974,7 +1974,7 @@ export class StudioOperations {
       if (importNew && comparison.added.length) {
         if (comparison.removed.length || comparison.reordered.length) throw new SourceConflictError("Cannot import automatically because existing chapters were removed or reordered");
         const inspection = await this.registry.inspect(provider, manifest.origin.url, { chapters: comparison.added.map((item) => item.chapter) }); const result = await importSource(this.root, slug, inspection); imported = result.added;
-        invalidateStoryBibleReadCache(this.root, slug);
+        await invalidateStoryBibleDerivedReads(this.root, slug);
       }
       return { ...comparison, previousImportedCount: manifest.chapters.length, imported };
     });

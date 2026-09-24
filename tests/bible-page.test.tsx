@@ -206,15 +206,88 @@ describe("Story Bible page loading", () => {
     expect(entityRequests(calls)[0].url).toContain("page=2");
 
     await typeSearch("anything");
+    // The debounce is still pending: no intermediate page=1 request with the
+    // stale query may fire.
+    await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+    expect(entityRequests(calls)).toHaveLength(1);
+
     await act(async () => { await vi.advanceTimersByTimeAsync(400); });
     const searches = entityRequests(calls);
-    // Typing resets the page immediately (an intermediate page=1 request with
-    // the old query may fire and be superseded); every post-typing request is page=1.
-    expect(searches.length).toBeGreaterThanOrEqual(2);
-    for (const request of searches.slice(1)) expect(request.url).toContain("page=1");
-    const latest = searches[searches.length - 1];
-    expect(latest.url).toContain("page=1");
-    expect(latest.url).toContain("q=anything");
+    // Exactly one post-debounce request: page=1 plus the newest query.
+    expect(searches).toHaveLength(2);
+    expect(searches[1].url).toContain("page=1");
+    expect(searches[1].url).toContain("q=anything");
+  });
+
+  it("issues a prompt entity request for type, readiness, and sort changes", async () => {
+    const calls = installFetch((url) => {
+      if (url.includes("/story-bible/entities?")) return json(entitiesPayload([entityRow("e1", "Alpha")]));
+      if (url.includes("/story-bible/health")) return json(healthPayload());
+      if (url.includes("/story-bible/review")) return json({ openTotal: 0 });
+      if (url.includes("/story-bible/suppressions")) return json([]);
+      if (url.includes("/pronunciation")) return json({ entities: [], suggestions: {} });
+      return json({});
+    });
+    await renderBible();
+    expect(entityRequests(calls)).toHaveLength(1);
+
+    const changeSelect = async (select: HTMLSelectElement, value: string) => {
+      const setter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value")!.set!;
+      await act(async () => {
+        setter.call(select, value);
+        select.dispatchEvent(new Event("change", { bubbles: true }));
+      });
+    };
+
+    const selects = [...host!.querySelectorAll<HTMLSelectElement>(".canonical-toolbar select")];
+    expect(selects.length).toBeGreaterThanOrEqual(3);
+    // No debounce is pending (query is empty), so each filter change fires
+    // an entity request immediately, without advancing timers.
+    await changeSelect(selects[0], "character");
+    expect(entityRequests(calls)).toHaveLength(2);
+    expect(entityRequests(calls)[1].url).toContain("type=character");
+
+    await changeSelect(host!.querySelector<HTMLSelectElement>("select[aria-label='Readiness filter']")!, "needs-attention");
+    expect(entityRequests(calls)).toHaveLength(3);
+    expect(entityRequests(calls)[2].url).toContain("readiness=needs-attention");
+
+    await changeSelect(selects[2], "name");
+    expect(entityRequests(calls)).toHaveLength(4);
+    expect(entityRequests(calls)[3].url).toContain("sort=name");
+  });
+
+  it("loads the review badge from /review/summary and tolerates its failure", async () => {
+    const calls = installFetch((url) => {
+      if (url.includes("/story-bible/entities?")) return json(entitiesPayload([entityRow("e1", "Qain Yi")]));
+      if (url.includes("/story-bible/health")) return json(healthPayload());
+      if (url.includes("/story-bible/review/summary")) return json({ openTotal: 7, counts: { merge: 4, conflict: 3 } });
+      if (url.includes("/story-bible/review")) return json({ openTotal: 7 });
+      if (url.includes("/story-bible/suppressions")) return json([]);
+      if (url.includes("/pronunciation")) return json({ entities: [], suggestions: {} });
+      return json({});
+    });
+    await renderBible();
+    const summaries = calls.filter((call) => call.url.includes("/story-bible/review/summary"));
+    expect(summaries).toHaveLength(1);
+    expect(summaries[0].url).toContain("/stories/story/story-bible/review/summary");
+    expect(host!.textContent).toContain("Review (7)");
+    act(() => root!.unmount());
+    root = undefined;
+    host!.remove();
+    host = undefined;
+
+    // A 503 on the summary endpoint leaves the entity rows rendered.
+    installFetch((url) => {
+      if (url.includes("/story-bible/entities?")) return json(entitiesPayload([entityRow("e1", "Qain Yi")]));
+      if (url.includes("/story-bible/health")) return json(healthPayload());
+      if (url.includes("/story-bible/review")) return json({ error: "boom" }, 503);
+      if (url.includes("/story-bible/suppressions")) return json([]);
+      if (url.includes("/pronunciation")) return json({ entities: [], suggestions: {} });
+      return json({});
+    });
+    await renderBible();
+    expect(host!.textContent).toContain("Qain Yi");
+    expect(host!.textContent).not.toContain("Review (");
   });
 
   it("hides the duplicate strip while a canonical search is active and restores it when cleared", async () => {
