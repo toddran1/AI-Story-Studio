@@ -274,8 +274,10 @@ export class StudioOperations {
         if (input.executionPolicy === "chapter-stage") {
           const plan = batchPlan.chapters[0]!;
           const problem = plan.entries.find((entry) => entry.action === "blocked" && entry.stage !== input.stages[0]);
-          const label = ({ storyBible: "Context", audioMastering: "Audio", scenePlanning: "Scenes" } as Record<string, string>)[input.stages[0]!] ?? input.stages[0]!;
-          throw new ConfigurationError(`${label} cannot run because ${problem?.stage === "qa" && problem.reason.startsWith("QA status") ? problem.reason : `${problem?.stage ?? "required"} data is ${problem?.availability ?? "unavailable"}.`}`);
+          const labels: Record<string, string> = { storyBible: "Context", audioMastering: "Audio", scenePlanning: "Scenes", artwork: "Artwork", video: "Video", subtitles: "Subtitles" };
+          const label = labels[input.stages[0]!] ?? input.stages[0]!;
+          const prerequisite = labels[problem?.stage ?? ""] ?? problem?.stage ?? "required";
+          throw new ConfigurationError(`${label} cannot run because ${problem?.stage === "qa" && problem.reason.startsWith("QA status") ? problem.reason : `${prerequisite} data is ${problem?.availability ?? "unavailable"}.`}`);
         }
         throw new ConfigurationError(`${batchPlan.summary.blockedOperations} stage operation${batchPlan.summary.blockedOperations === 1 ? " is" : "s are"} blocked by unavailable prerequisites. Select prerequisite mode and preview again.`);
       }
@@ -296,7 +298,7 @@ export class StudioOperations {
         }
       }
       invalidateCatalogCache(this.root, slug); await invalidateChapterStatusDerivedReads(this.root, slug); await invalidateStoryBibleDerivedReads(this.root, slug); return { fingerprint: batchPlan.fingerprint, results, summary: { ...batchPlan.summary, completedOperations: results.filter((item) => item.status === "completed").reduce((count, item) => count + item.plan.runStages.length, 0), completedChapters: results.filter((item) => item.status === "completed").length, reusedChapters: results.filter((item) => item.status === "reused").length, blockedChapters: results.filter((item) => item.status === "blocked").length, failedChapters: results.filter((item) => item.status === "failed").length } };
-    }), { chapters: input.chapters, stages: input.stages, mode: input.mode, force: input.force });
+    }), input);
   }
 
   novelProviders() { return this.registry.listNovelProviders(); }
@@ -1680,6 +1682,11 @@ export class StudioOperations {
     const job = this.jobs.get(id);
     if (!job) throw new Error(`Job '${id}' was not found`);
     switch (job.type) {
+      case "stageExecution": {
+        const input = stageExecutionInputSchema.parse(job.payload);
+        const { expectedPlanFingerprint: _previousFingerprint, ...retryInput } = input;
+        return this.startStageExecution(job.story, retryInput);
+      }
       case "scenes": return this.startScenes(job.story, job.payload ?? {});
       case "artwork": return this.startArtwork(job.story, job.payload ?? {});
       case "batch": return this.startBatch(job.story, job.payload ?? {});

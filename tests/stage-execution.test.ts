@@ -5,10 +5,11 @@ import { describe, expect, it } from "vitest";
 import { ChapterPipeline } from "../src/pipeline/chapter-pipeline.js";
 import { CopyingAudioProcessor } from "../src/audio/chapter-audio.js";
 import { LLMRouter } from "../src/llm/router.js";
-import { storyPaths } from "../src/storage/paths.js";
+import { sceneImagePath, storyPaths } from "../src/storage/paths.js";
 import { atomicWriteJson } from "../src/storage/atomic-write.js";
 import { executeStagePlan, pipelineStopAfterForStages, planStageExecution, planStageExecutionBatch, requiredStageNodes, stageExecutionInputSchema } from "../src/studio/stage-execution.js";
 import { inspectStageArtifact } from "../src/studio/artifact-state.js";
+import { fileFingerprint } from "../src/utils/file-fingerprint.js";
 import { MockLLM, MockTTS, testStory } from "./helpers.js";
 
 async function setup() {
@@ -17,6 +18,15 @@ async function setup() {
   const pipeline = new ChapterPipeline(new LLMRouter(new Map([["gemini", new MockLLM("gemini", ["Translation"])], ["openai", new MockLLM("openai", ["Narration"])]])), new MockTTS(), new CopyingAudioProcessor());
   await pipeline.run({ root, story, chapter: 1, inputPath: input });
   return { root, story, paths: storyPaths(root, story.slug, 1) };
+}
+
+async function addSceneArtwork(ctx: Awaited<ReturnType<typeof setup>>) {
+  const image = sceneImagePath(ctx.root, ctx.story.slug, 1, "scene-001");
+  await mkdir(ctx.paths.scenesDirectory, { recursive: true }); await writeFile(image, "image test artwork");
+  const imageFingerprint = await fileFingerprint(image);
+  const chapter = JSON.parse(await readFile(ctx.paths.chapterMeta, "utf8"));
+  const now = new Date().toISOString();
+  await atomicWriteJson(ctx.paths.scenesManifest, { version: 1, chapter: 1, durationSeconds: chapter.audio.durationSeconds, planningFingerprint: "test", planner: { provider: "mock", model: "mock", promptVersion: "test" }, createdAt: now, updatedAt: now, scenes: [{ id: "scene-001", summary: "A lantern lights up", startSeconds: 0, endSeconds: chapter.audio.durationSeconds, visualPrompt: "A lantern", artwork: { status: "complete", review: "approved", imageFingerprint } }] });
 }
 
 describe("manual stage execution planner", () => {
@@ -97,12 +107,50 @@ describe("manual stage execution planner", () => {
     await rm(ctx.root, { recursive: true, force: true });
   });
 
-  it("requires subtitles for video only when configured", async () => {
+  it("keeps subtitles optional for Chapter Video in burn and none modes", async () => {
     const ctx = await setup();
     const withSubtitles = await chapterPlan(ctx, "video");
-    expect(withSubtitles.artifacts.map((item) => item.stage)).toContain("subtitles");
+    expect(withSubtitles.artifacts.map((item) => item.stage)).not.toContain("subtitles");
     const withoutSubtitles = await planStageExecution({ root: ctx.root, story: ctx.story.slug, chapter: 1, selectedStages: ["video"], executionPolicy: "chapter-stage", storyConfig: { ...ctx.story, video: { ...ctx.story.video, subtitleMode: "none" } } });
     expect(withoutSubtitles.artifacts.map((item) => item.stage)).not.toContain("subtitles");
+    await rm(ctx.root, { recursive: true, force: true });
+  });
+  it("requires mastered Audio for Scenes and downstream Artwork before execution", async () => {
+    const ctx = await setup(); await addSceneArtwork(ctx); await rm(ctx.paths.audio);
+    for (const stage of ["scenePlanning", "artwork", "video"] as const) {
+      const plan = await chapterPlan(ctx, stage);
+      expect(plan.runStages).toEqual([]);
+      expect(plan.entries.find((entry) => entry.stage === "audioMastering")?.action).toBe("blocked");
+    }
+    expect(requiredStageNodes("scenePlanning")).toContain("audioMastering");
+    await rm(ctx.root, { recursive: true, force: true });
+  });
+  it.each(["missing", "invalid"] as const)("blocks Subtitles and Scenes when Audio is %s", async (availability) => {
+    const ctx = await setup();
+    if (availability === "missing") await rm(ctx.paths.audio);
+    else await writeFile(ctx.paths.audio, "corrupt audio");
+    for (const stage of ["subtitles", "scenePlanning"] as const) {
+      const plan = await chapterPlan(ctx, stage);
+      expect(plan.runStages).toEqual([]);
+      expect(plan.entries.find((entry) => entry.stage === "audioMastering")).toMatchObject({ action: "blocked", availability });
+    }
+    await rm(ctx.root, { recursive: true, force: true });
+  });
+  it("runs Scenes, Artwork, and Video with stale Audio and no Subtitles", async () => {
+    const ctx = await setup(); await addSceneArtwork(ctx); await rm(ctx.paths.subtitlesDocument, { force: true }); await rm(ctx.paths.subtitlesSrt, { force: true });
+    const metadata = JSON.parse(await readFile(ctx.paths.chapterMeta, "utf8"));
+    for (const stage of ["audioMastering", "narration", "storyBible", "scenePlanning", "artwork", "qa"]) metadata.stages[stage].staleReason = "Older input";
+    await atomicWriteJson(ctx.paths.chapterMeta, metadata);
+    for (const [stage, expected] of [["scenePlanning", ["scenePlanning"]], ["artwork", ["artwork"]], ["video", ["video"]]] as const) {
+      const plan = await chapterPlan(ctx, stage);
+      expect(plan.runStages).toEqual(expected);
+      expect(plan.artifacts.map((item) => item.stage)).not.toContain("subtitles");
+      expect(plan.reusedStages).toContainEqual({ stage: "audioMastering", state: "stale" });
+    }
+    const video = await chapterPlan(ctx, "video");
+    let renderedSubtitles: string | undefined; let renderedMode: string | undefined;
+    await executeStagePlan({ root: ctx.root, story: ctx.story, chapter: 1, inputPath: join(ctx.root, "chapter.txt"), plan: video, runtime: { pipeline: { run: async () => undefined }, alignment: { config: {} as any }, video: { version: "test", render: async (input, output, settings) => { renderedSubtitles = input.subtitles; renderedMode = settings.subtitleMode; await writeFile(output, "video test"); return { durationSeconds: 1, videoCodec: "h264", audioCodec: "aac", width: settings.width, height: settings.height, container: "mp4" }; } } } });
+    expect(renderedSubtitles).toBeUndefined(); expect(renderedMode).toBe("none");
     await rm(ctx.root, { recursive: true, force: true });
   });
   it("blocks missing scenes for Artwork and Video without adding scene generation", async () => {

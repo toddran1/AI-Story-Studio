@@ -46,6 +46,7 @@ export const stageExecutionInputSchema = z.preprocess((value) => {
 export type { ArtifactAvailability, ArtifactFreshness, StageArtifactState } from "./artifact-state.js";
 import type { ArtifactAvailability, ArtifactFreshness, StageArtifactState } from "./artifact-state.js";
 export type StageExecutionPlan = {
+  executionPolicy: StageExecutionPolicy;
   selectedStages: BatchStage[];
   mode: StageExecutionMode;
   force: boolean;
@@ -86,7 +87,7 @@ const dependencies: Record<StageExecutionNode, StageExecutionNode[]> = {
   audioMastering: ["tts"],
   alignment: ["audioMastering"],
   subtitles: ["alignment"],
-  scenePlanning: ["narration", "context"],
+  scenePlanning: ["narration", "context", "audioMastering"],
   artwork: ["scenePlanning"],
   video: ["audioMastering", "subtitles", "artwork"],
 };
@@ -145,7 +146,7 @@ export async function planStageExecution(options: { root: string; story: string;
   const selectedNodes: StageExecutionNode[] = chapterPolicy && target === "audioMastering" ? ["tts", "audioMastering"]
     : chapterPolicy && target === "subtitles" ? ["alignment", "subtitles"]
     : chapterPolicy && target === "storyBible" ? ["storyBible", "context"] : selectedStages;
-  const stageDependencies = (stage: StageExecutionNode): StageExecutionNode[] => chapterPolicy && stage === "video" && options.storyConfig?.video.subtitleMode === "none"
+  const stageDependencies = (stage: StageExecutionNode): StageExecutionNode[] => chapterPolicy && stage === "video"
     ? dependencies.video.filter((dependency) => dependency !== "subtitles") : dependencies[stage];
   const requiredFor = (stage: StageExecutionNode): StageExecutionNode[] => {
     const found = new Set<StageExecutionNode>();
@@ -209,7 +210,7 @@ export async function planStageExecution(options: { root: string; story: string;
   const blockedStages = orderedEntries.filter((item) => item.action === "blocked").map((item) => item.stage);
   const prerequisitesComplete = blockedStages.length === 0;
   const reason = blockedStages.length ? "One or more selected operations are blocked by unavailable prerequisites." : mode === "selected" ? "Only selected stages will run; usable prerequisites are reused." : "Missing prerequisites are included explicitly; usable prerequisites are reused.";
-  return { selectedStages, mode, force, prerequisitesComplete, runStages, reusedStages, missingStages, blockedStages, entries: orderedEntries, artifacts, reason };
+  return { executionPolicy: options.executionPolicy ?? "standard", selectedStages, mode, force, prerequisitesComplete, runStages, reusedStages, missingStages, blockedStages, entries: orderedEntries, artifacts, reason };
 }
 
 export async function planStageExecutionBatch(options: { root: string; story: string; chapters: readonly number[]; selectedStages: readonly BatchStage[]; mode?: StageExecutionMode; force?: boolean; executionPolicy?: StageExecutionPolicy; storyConfig?: Story }): Promise<StageExecutionBatchPlan> {
@@ -279,6 +280,6 @@ export async function executeStagePlan(options: {
       if (!options.runtime.image) throw new Error("Artwork provider is not configured");
       await generateStoredArtwork({ root: options.root, story: options.story, chapter: options.chapter, provider: resolveImageProvider(options.runtime.image, options.story), force: true });
     }
-    if (stage === "video") await renderStoredChapterVideo({ root: options.root, story: options.story, chapter: options.chapter, processor: options.runtime.video, force: true });
+    if (stage === "video") await renderStoredChapterVideo({ root: options.root, story: options.story, chapter: options.chapter, processor: options.runtime.video, force: true, allowMissingSubtitles: options.plan.executionPolicy === "chapter-stage" });
   }
 }

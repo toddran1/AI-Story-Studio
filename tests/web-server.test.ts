@@ -287,6 +287,31 @@ describe("web service layer", () => {
     expect(finished.status).toBe("completed"); expect((finished.result as any).summary.complete).toBe(1); expect((finished.result as any).options.continueOnError).toBe(true);
   });
 
+  it("retries stageExecution with its Chapter policy and target, without the old plan fingerprint", async () => {
+    const root = await mkdtemp(join(tmpdir(), "story-stage-retry-")); const jobs = new JobManager();
+    const calls: Array<{ executionStages?: readonly string[] }> = [];
+    const operations = new StudioOperations(root, env, jobs, { pipeline: { run: async (options) => { calls.push(options); return undefined; } } });
+    const inspection = await operations.inspectSource({ filename: "chapter.txt", file: Buffer.from("A chapter."), chapter: 1 });
+    const imported = await operations.importInspection("stage-retry-story", inspection.id);
+    const paths = storyPaths(root, imported.story.slug, 1); await atomicWrite(paths.original, "A chapter.");
+    const input = { chapters: [1], stages: ["translation"], mode: "prerequisites", force: false, executionPolicy: "chapter-stage", continueOnError: false, expectedPlanFingerprint: "0".repeat(64) };
+    const failed = await waitForJob(jobs, (operations.startStageExecution(imported.story.slug, input) as Job).id);
+    expect(failed.status).toBe("failed"); expect(failed.payload).toMatchObject(input);
+    const retried = await waitForJob(jobs, (await operations.retryJob(failed.id) as Job).id);
+    expect(retried.status).toBe("completed");
+    expect(retried.payload).toMatchObject({ chapters: [1], stages: ["translation"], executionPolicy: "chapter-stage", mode: "prerequisites" });
+    expect(retried.payload).not.toHaveProperty("expectedPlanFingerprint");
+    expect((retried.result as any).results[0].plan).toMatchObject({ executionPolicy: "chapter-stage", mode: "selected", runStages: ["translation"] });
+    expect(calls).toHaveLength(1); expect(calls[0]!.executionStages).toEqual(["translation"]);
+    const blocked = await waitForJob(jobs, (operations.startStageExecution(imported.story.slug, { chapters: [1], stage: "scenePlanning", executionPolicy: "chapter-stage" }) as Job).id);
+    expect(blocked.status).toBe("failed");
+    const blockedRetry = await waitForJob(jobs, (await operations.retryJob(blocked.id) as Job).id);
+    expect(blockedRetry.status).toBe("failed"); expect(blockedRetry.error).toBe(blocked.error);
+    expect(blockedRetry.payload).toMatchObject({ stages: ["scenePlanning"], executionPolicy: "chapter-stage" });
+    expect(calls).toHaveLength(1);
+    await operations.close(); await rm(root, { recursive: true, force: true });
+  });
+
   it("plans and runs a no-cost production job through the web job boundary", async () => {
     const root = await mkdtemp(join(tmpdir(), "story-web-production-")); const jobs = new JobManager(); const operations = new StudioOperations(root, env, jobs, { pipeline: { run: async ({ chapter }) => ({ chapter, quality: { status: "pass", score: 1, issueCategories: [] } }) } });
     const inspection = await operations.inspectSource({ filename: "chapter.txt", file: Buffer.from("A chapter."), chapter: 1 }); await operations.importInspection("production-story", inspection.id);
