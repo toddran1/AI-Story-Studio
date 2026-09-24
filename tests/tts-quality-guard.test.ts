@@ -85,6 +85,55 @@ describe("tts quality guard verification", () => {
     expect(inner.calls).toHaveLength(1);
   });
 
+  it("detects replaced, missing, and prefixed opening phrases without rejecting minor ASR variation", () => {
+    const replacedExpected = "In the blink of an eye eighty million E X P had evaporated and the room fell silent.";
+    const replacedHeard = "walking beneath the silver moon eighty million E X P had evaporated and the room fell silent.";
+    expect(compareSpokenText(replacedExpected, say(replacedHeard)).issues.map((issue) => issue.type)).toContain("segment_start_mismatch");
+    const missingExpected = "That's true! They've all grown up, and it's time for them to learn independence.";
+    const missingHeard = "They've all grown up, and it's time for them to learn independence.";
+    expect(compareSpokenText(missingExpected, say(missingHeard)).issues.map((issue) => issue.type)).toContain("segment_start_mismatch");
+    expect(compareSpokenText("As expected, these extra abilities were pure bottomless pits.", say("welcome everybody As expected these extra abilities were pure bottomless pits.")).issues.map((issue) => issue.type)).toContain("segment_start_mismatch");
+    expect(compareSpokenText("That's true! They've all grown up.", say("Thats true they have all grown up.")).issues.map((issue) => issue.type)).not.toContain("segment_start_mismatch");
+  });
+
+  it("detects an unauthorized laugh but accepts a cue or a literal narration word", async () => {
+    const expected = "Now that he had found an excuse he pointed her down a separate path.";
+    const heard = "Now that he had found an excuse haha he pointed her down a separate path.";
+    expect(compareSpokenText(expected, say(heard)).issues.map((issue) => issue.type)).toContain("unexpected_vocalization");
+    expect(compareSpokenText(expected, [...say(expected), { text: "♪", start: 9, end: 9.2 }]).issues.map((issue) => issue.type)).toContain("unexpected_vocalization");
+    expect(compareSpokenText("He heard laughter in the hall.", say("He heard laughter in the hall.")).issues.map((issue) => issue.type)).not.toContain("unexpected_vocalization");
+    const inner = new ScriptedTTS(() => singleSegment("[laugh] He walked away.", "ok"));
+    const transcriber = new FakeTranscriber(() => say("laughter He walked away."));
+    const result = await guard(inner, transcriber).synthesize(request({ text: "[laugh] He walked away." }));
+    expect(result.quality?.segments[0]?.issues.map((issue) => issue.type)).not.toContain("unexpected_vocalization");
+  });
+
+  it("retries only the segment with an opening hallucination and marks persistent failure for review", async () => {
+    const first = "The first segment was clear and complete.";
+    const second = "In the blink of an eye eighty million E X P had evaporated.";
+    const third = "The final segment was also clear.";
+    const original = [bytes("aa"), bytes("bb"), bytes("cc")];
+    const inner = new ScriptedTTS((req, call) => call === 1
+      ? { audio: new Uint8Array(original.flatMap((part) => [...part])), segments: original, segmentTexts: [first, second, third], providerRequests: 3 }
+      : singleSegment(req.text, "fixed"));
+    const transcriber = new FakeTranscriber((audio) => {
+      const marker = String.fromCharCode(audio[0]!, audio[1]!);
+      return say(marker === "aa" ? first : marker === "cc" ? third : marker === "bb" ? "walking beneath the silver moon eighty million E X P had evaporated." : second);
+    });
+    const result = await guard(inner, transcriber).synthesize(request({ text: `${first} ${second} ${third}` }));
+    expect(inner.calls).toHaveLength(2);
+    expect(inner.calls[1]).toMatchObject({ text: second, exactChunk: true });
+    expect(result.quality?.segments.map((segment) => segment.status)).toEqual(["verified", "verified", "verified"]);
+    expect(result.segments[0]).toEqual(original[0]);
+    expect(result.segments[2]).toEqual(original[2]);
+    const persistent = new ScriptedTTS((_req, call) => singleSegment(second, `bad${call}`));
+    const alwaysBad = new FakeTranscriber(() => say("walking beneath the silver moon eighty million E X P had evaporated."));
+    const exhausted = await guard(persistent, alwaysBad, 2).synthesize(request({ text: second }));
+    expect(persistent.calls).toHaveLength(3);
+    expect(exhausted.quality?.status).toBe("needs_review");
+    expect(exhausted.quality?.segments[0]?.issues.map((issue) => issue.type)).toContain("segment_start_mismatch");
+  });
+
   it("flags a short inserted phrase and a contiguous hallucination inside longer speech", async () => {
     const short = compareSpokenText("He understood how difficult life was.", say("He understood how difficult life was welcome everybody."));
     expect(short.issues.map((issue) => issue.type)).toContain("unexpected_speech");

@@ -12,10 +12,10 @@ import type { TTSProvider } from "./provider.js";
 import type { TTSRequest, TTSResult } from "./types.js";
 import { scanVocalizations } from "./vocalizations.js";
 
-export const TTS_QUALITY_GUARD_VERSION = "tts-quality-guard-v1";
+export const TTS_QUALITY_GUARD_VERSION = "tts-quality-guard-v2";
 
 export const ttsQualityIssueTypeSchema = z.enum([
-  "unexpected_speech", "missing_speech", "repetition", "truncated", "suspected_gibberish",
+  "unexpected_speech", "unexpected_vocalization", "segment_start_mismatch", "missing_speech", "repetition", "truncated", "suspected_gibberish",
   "abnormal_duration", "unexpected_silence", "invalid_audio", "transcription_failed",
 ]);
 export type TtsQualityIssueType = z.infer<typeof ttsQualityIssueTypeSchema>;
@@ -97,6 +97,8 @@ export type QualityThresholds = {
   unexpectedRatio: number;
   unexpectedAbsoluteTokens: number;
   unexpectedRunTokens: number;
+  segmentStartExpectedTokens: number;
+  segmentStartMinimumMatches: number;
   /** Small absolute ASR slips at or below this token count are always tolerated. */
   toleratedTokenMistakes: number;
   repetitionRatio: number;
@@ -110,7 +112,8 @@ export type QualityThresholds = {
 };
 
 export const defaultQualityThresholds: QualityThresholds = {
-  passScore: 0.9, missingRatio: 0.1, unexpectedRatio: 0.05, unexpectedAbsoluteTokens: 2, unexpectedRunTokens: 3, toleratedTokenMistakes: 1,
+  passScore: 0.9, missingRatio: 0.1, unexpectedRatio: 0.05, unexpectedAbsoluteTokens: 2, unexpectedRunTokens: 3,
+  segmentStartExpectedTokens: 6, segmentStartMinimumMatches: 4, toleratedTokenMistakes: 1,
   repetitionRatio: 0.05, truncationSuffixRatio: 0.2, expectedWordsPerSecond: 3,
   durationRatioLow: 0.4, durationRatioHigh: 2.5, silenceGapSeconds: 6,
   gibberishConfidence: 0.5, gibberishRatio: 0.2,
@@ -120,12 +123,14 @@ export type CompareOptions = {
   thresholds?: Partial<QualityThresholds>;
   /** True when the expected speech intentionally contains rendered vocalizations. */
   expectedVocalizations?: boolean;
+  authorizedVocalizations?: ReadonlySet<string>;
   /** Active pronunciation custom/phonetic renderings: either form may be transcribed. */
   toleratedTerms?: Array<{ surface: string; spoken: string }>;
   durationSeconds?: number;
 };
 
-export type SpokenComparison = { score: number; metrics: TtsQualityMetrics; issues: TtsQualityIssue[] };
+export type SpokenComparison = { score: number; metrics: TtsQualityMetrics; issues: TtsQualityIssue[];
+  diagnostics: { firstExpectedTokens: string[]; firstTranscribedTokens: string[]; segmentStartMatchRatio: number; unexpectedCount: number; unexpectedRun: number; unexpectedVocalization?: string } };
 
 /** Retry sampling policy: the neutral control is delivery intensity; the Fish
  * adapter alone maps intensity to sampling parameters. Attempt 1 keeps the
@@ -163,6 +168,25 @@ export function isKnownFishControlCue(cue: string): boolean {
 
 export function hasFishControlCues(text: string): boolean {
   return /\[([^\]]+)\]/.test(text) && Array.from(text.matchAll(/\[([^\]]+)\]/g)).some((m) => isKnownFishControlCue(m[1]!));
+}
+
+function authorizedVocalizations(text: string): Set<string> {
+  const allowed = new Set<string>();
+  for (const match of text.matchAll(/\[([^\]]+)\]/g)) {
+    const cue = match[1]!.toLowerCase();
+    if (cue === "laugh" || cue === "laughing") allowed.add("laughter");
+    if (cue === "clears throat") allowed.add("throat clear");
+    if (cue === "gasp") allowed.add("gasp");
+    if (cue === "sigh") allowed.add("sigh");
+  }
+  for (const item of scanVocalizations(text)) {
+    if (item.vocalization === "laugh" || item.vocalization === "chuckle") allowed.add("laughter");
+    if (item.vocalization === "throat_clear") allowed.add("throat clear");
+    if (item.vocalization === "gasp") allowed.add("gasp");
+    if (item.vocalization === "sigh") allowed.add("sigh");
+    if (item.vocalization === "groan") allowed.add("groan");
+  }
+  return allowed;
 }
 
 /** Normalizes both sides the same way: lowercase, contraction expansion,
@@ -217,6 +241,7 @@ export function compareSpokenText(expected: string, observations: AlignmentObser
   // each expected token claims the first equivalent unmatched transcription token.
   const matchedTranscribed = new Set<number>();
   const matchedExpected = new Set<number>();
+  const matchedPositions = new Map<number, number>();
   let cursor = 0;
   for (let index = 0; index < expectedTokens.length; index++) {
     let best = -1;
@@ -224,7 +249,15 @@ export function compareSpokenText(expected: string, observations: AlignmentObser
       if (matchedTranscribed.has(candidate)) continue;
       if (tokensEquivalent(expectedTokens[index]!, transcribedTokens[candidate]!, tolerated)) { best = candidate; break; }
     }
-    if (best >= 0) { matchedExpected.add(index); matchedTranscribed.add(best); cursor = best + 1; }
+    if (best >= 0) { matchedExpected.add(index); matchedTranscribed.add(best); matchedPositions.set(index, best); cursor = best + 1; }
+  }
+  if (opts.authorizedVocalizations?.size) {
+    let offset = 0;
+    for (const word of words) {
+      if (opts.authorizedVocalizations.has(vocalizationKind(word.tokens.join(" ")) ?? ""))
+        for (let index = 0; index < word.tokens.length; index++) matchedTranscribed.add(offset + index);
+      offset += word.tokens.length;
+    }
   }
 
   const expectedCount = Math.max(1, expectedTokens.length);
@@ -243,6 +276,18 @@ export function compareSpokenText(expected: string, observations: AlignmentObser
     unexpectedRun = Math.max(unexpectedRun, currentUnexpectedRun);
   }
   const similarity = matchedExpected.size / expectedCount;
+  const openingSize = Math.min(expectedTokens.length, thresholds.segmentStartExpectedTokens);
+  const openingMatches = [...Array(openingSize).keys()].filter((index) => matchedExpected.has(index)).length;
+  const openingMinimum = Math.min(openingSize, Math.ceil(thresholds.segmentStartMinimumMatches * openingSize / thresholds.segmentStartExpectedTokens));
+  const openingPrefix = matchedPositions.get(0);
+  const segmentStartMismatch = openingSize >= 3 && (openingMatches < openingMinimum
+    || (!matchedExpected.has(0) && !matchedExpected.has(1))
+    || (openingPrefix !== undefined && openingPrefix >= 2));
+  const segmentStartMatchRatio = openingSize ? openingMatches / openingSize : 1;
+  const firstExpectedTokens = expectedTokens.slice(0, openingSize);
+  const firstTranscribedTokens = transcribedTokens.slice(0, openingSize);
+  const authorized = opts.authorizedVocalizations ?? new Set<string>();
+  const unexpectedVocalization = wordSpansForVocalization(words, matchedTranscribed, authorized, opts.expectedVocalizations === true);
 
   // Consecutive n-gram duplication present in the transcription but not in the
   // expected text (intentional written repetition stays tolerated). Larger
@@ -294,6 +339,10 @@ export function compareSpokenText(expected: string, observations: AlignmentObser
     issues.push({ type: "missing_speech", severity: Math.min(1, missingRatio), detail: `${missing} of ${expectedTokens.length} expected tokens were not transcribed` });
   if (unexpected > thresholds.toleratedTokenMistakes && (unexpected > thresholds.unexpectedAbsoluteTokens || unexpectedRatio > thresholds.unexpectedRatio || unexpectedRun >= thresholds.unexpectedRunTokens))
     issues.push({ type: "unexpected_speech", severity: Math.min(1, Math.max(unexpectedRatio, unexpectedRun / expectedCount)), detail: `${unexpected} transcribed tokens were not in the expected text (longest contiguous run: ${unexpectedRun})` });
+  if (segmentStartMismatch) issues.push({ type: "segment_start_mismatch", severity: 0.8,
+    detail: `Opening mismatch: expected "${firstExpectedTokens.join(" ")}" but heard "${firstTranscribedTokens.join(" ")}"` });
+  if (unexpectedVocalization) issues.push({ type: "unexpected_vocalization", severity: 0.8,
+    detail: `Unexpected ${unexpectedVocalization} without a matching narration cue` });
   if (repetitionRatio >= thresholds.repetitionRatio)
     issues.push({ type: "repetition", severity: Math.min(1, repetitionRatio * 4), detail: `${repeated.size} transcribed tokens are consecutive duplicates not present in the expected text` });
   if (truncated) issues.push({ type: "truncated", severity: Math.min(1, suffixMissing / expectedCount), detail: `The final ${suffixMissing} expected tokens were not transcribed` });
@@ -307,6 +356,8 @@ export function compareSpokenText(expected: string, observations: AlignmentObser
   let score = 1;
   if (issues.some((issue) => issue.type === "missing_speech")) score -= Math.min(0.7, missingRatio * 1.5);
   if (issues.some((issue) => issue.type === "unexpected_speech")) score -= Math.min(0.6, unexpectedRatio);
+  if (segmentStartMismatch) score -= 0.35;
+  if (unexpectedVocalization) score -= 0.35;
   if (issues.some((issue) => issue.type === "repetition")) score -= 0.25;
   if (issues.some((issue) => issue.type === "truncated")) score -= 0.3;
   if (issues.some((issue) => issue.type === "abnormal_duration")) score -= 0.1;
@@ -314,7 +365,29 @@ export function compareSpokenText(expected: string, observations: AlignmentObser
   if (issues.some((issue) => issue.type === "suspected_gibberish")) score -= 0.25;
   if (issues.some((issue) => issue.type === "invalid_audio")) score = 0;
 
-  return { score: roundScore(score), issues, metrics: { similarity, missingRatio, unexpectedRatio, repetitionRatio, ...(durationRatio === undefined ? {} : { durationRatio }) } };
+  return { score: roundScore(score), issues, metrics: { similarity, missingRatio, unexpectedRatio, repetitionRatio, ...(durationRatio === undefined ? {} : { durationRatio }) },
+    diagnostics: { firstExpectedTokens, firstTranscribedTokens, segmentStartMatchRatio, unexpectedCount: unexpected, unexpectedRun,
+      ...(unexpectedVocalization ? { unexpectedVocalization } : {}) } };
+}
+
+function wordSpansForVocalization(words: Array<{ observation: AlignmentObservation; tokens: string[]; sound: boolean }>, matched: Set<number>, authorized: ReadonlySet<string>, allowSoundOnly: boolean): string | undefined {
+  let offset = 0;
+  for (const word of words) {
+    const token = word.tokens.join(" ");
+    const kind = vocalizationKind(token) ?? (word.sound && /[♪♫♬]/u.test(word.observation.text) ? "nonverbal sound" : undefined);
+    const unmatched = word.tokens.some((_token, index) => !matched.has(offset + index));
+    offset += word.tokens.length;
+    if (kind && (unmatched || word.sound) && !authorized.has(kind) && !(kind === "nonverbal sound" && allowSoundOnly)) return kind;
+  }
+  return undefined;
+}
+
+function vocalizationKind(token: string): string | undefined {
+  return /^(?:ha\s*ha|haha+|hehe+|laugh(?:ter|ing)?|chuckle|chuckling)$/iu.test(token) ? "laughter"
+    : /^(?:cough|coughing|ahem|throat clear)$/iu.test(token) ? "throat clear"
+    : /^(?:gasp|gasping)$/iu.test(token) ? "gasp"
+    : /^(?:sigh|sighing)$/iu.test(token) ? "sigh"
+    : /^(?:groan|groaning)$/iu.test(token) ? "groan" : undefined;
 }
 
 function consecutiveRun(tokens: string[], at: number, size: number) {
@@ -326,7 +399,7 @@ function consecutiveRun(tokens: string[], at: number, size: number) {
 
 const roundScore = (value: number) => Math.round(Math.max(0, Math.min(1, value)) * 10_000) / 10_000;
 
-const criticalIssue = (issue: TtsQualityIssue) => ["unexpected_speech", "missing_speech", "repetition", "truncated", "suspected_gibberish", "invalid_audio", "transcription_failed"].includes(issue.type);
+const criticalIssue = (issue: TtsQualityIssue) => ["unexpected_speech", "unexpected_vocalization", "segment_start_mismatch", "missing_speech", "repetition", "truncated", "suspected_gibberish", "invalid_audio", "transcription_failed"].includes(issue.type);
 
 export function summarizeQuality(segments: Array<Pick<TtsSegmentQuality, "status" | "attempts">>): { status: TtsQualitySummaryStatus; needsReview: number; retried: number; manuallyAccepted: number } {
   const needsReview = segments.filter((segment) => segment.status === "needs_review").length;
@@ -429,14 +502,16 @@ export class QualityGuardTTSProvider implements TTSProvider {
         return { index, expectedText, audioFingerprint: fingerprint(Buffer.from(finalAudio).toString("base64")), transcription: best.transcription, score: best.score >= 0 ? best.score : undefined, status: "unverified", issues: attempts.at(-1)!.issues, attempts, finalAttempt: attempt };
       }
       const durationSeconds = this.options.durationProbe ? await this.options.durationProbe(path).catch(() => undefined) : undefined;
+      const allowedVocalizations = authorizedVocalizations(expectedText);
       const comparison = compareSpokenText(expectedText, observations, {
         thresholds: this.options.thresholds, durationSeconds,
-        expectedVocalizations: scanVocalizations(expectedText).length > 0 || hasFishControlCues(expectedText),
+        expectedVocalizations: allowedVocalizations.size > 0, authorizedVocalizations: allowedVocalizations,
         toleratedTerms: this.options.toleratedTerms?.(expectedText),
       });
       const transcription = observations.map((observation) => observation.text).join(" ").trim() || undefined;
       logger.debug({ event: "tts.quality.segment_comparison", segment: index + 1, attempt, expectedText, transcription,
-        score: comparison.score, issues: comparison.issues.map((issue) => issue.type) });
+        score: comparison.score, issues: comparison.issues.map((issue) => issue.type), ...comparison.diagnostics,
+        deliveryIntensity: deliveryIntensityForAttempt(request.deliveryIntensity, attempt) });
       if (comparison.score > best.score) best = { audio: current, score: comparison.score, transcription, issues: comparison.issues };
       const settings = { deliveryIntensity: deliveryIntensityForAttempt(request.deliveryIntensity, attempt) };
       if (comparison.score >= (this.options.thresholds?.passScore ?? defaultQualityThresholds.passScore) && !comparison.issues.some(criticalIssue)) {
@@ -446,6 +521,8 @@ export class QualityGuardTTSProvider implements TTSProvider {
       }
       if (attempt >= maxAttempts) {
         attempts.push({ attempt, settings, status: "needs_review", score: comparison.score, issues: comparison.issues });
+        logger.warn({ event: "tts.quality.segment_needs_review", segment: index + 1, attempts: attempt,
+          issues: best.issues.map((issue) => issue.type), expectedText, transcription: best.transcription }, "TTS segment could not be verified after bounded retries");
         // Retry exhaustion keeps the best-scoring audio; usable work is never deleted.
         segments[index] = best.audio;
         return { index, expectedText, audioFingerprint: fingerprint(Buffer.from(best.audio).toString("base64")), transcription: best.transcription, score: best.score >= 0 ? best.score : undefined, status: "needs_review", issues: best.issues, attempts, finalAttempt: attempt };
@@ -458,6 +535,8 @@ export class QualityGuardTTSProvider implements TTSProvider {
         maxCharsPerRequest: request.maxCharsPerRequest,
       });
       const requestId = retried.requestIds?.join(",");
+      logger.debug({ event: "tts.quality.segment_retry", segment: index + 1, attempt: attempt + 1,
+        deliveryIntensity: deliveryIntensityForAttempt(request.deliveryIntensity, attempt + 1), requestId, expectedText });
       attempts.push({ attempt, settings, status: "retry", score: comparison.score, issues: comparison.issues, ...(requestId ? { requestId } : {}) });
       const replacement = retried.segments.length === 1 ? retried.segments[0]! : retried.audio;
       if (!replacement.byteLength) {

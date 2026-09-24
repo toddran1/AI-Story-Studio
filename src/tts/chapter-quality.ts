@@ -144,7 +144,7 @@ export async function verifyStoredChapterTts(options: {
         thresholds,
         expectedVocalizations: scanVocalizations(segment.expectedText).length > 0 || hasFishControlCues(segment.expectedText),
       });
-      const passed = comparison.score >= thresholds.passScore && !comparison.issues.some((issue) => ["unexpected_speech", "missing_speech", "repetition", "truncated", "suspected_gibberish", "invalid_audio"].includes(issue.type));
+      const passed = comparison.score >= thresholds.passScore && !comparison.issues.some((issue) => ["unexpected_speech", "unexpected_vocalization", "segment_start_mismatch", "missing_speech", "repetition", "truncated", "suspected_gibberish", "invalid_audio"].includes(issue.type));
       segments.push({
         ...segment,
         audioFingerprint: diskFingerprint,

@@ -94,6 +94,27 @@ describe("pronunciation batch enrichment resilience", () => {
     { entity: { ...entity, id: "ent_223456789012345678901234", canonicalName: "Mo Xie", pronunciation: undefined }, evidence: [] },
   ];
   const single = (id: string) => ({ pronunciation: { mode: "automatic" as const, phoneticHint: `hint-${id}`, confidence: .8, source: "ai" as const } });
+  it("accepts OpenAI nulls for optional pronunciation fields and saves canonical data", async () => {
+    const wire = { mode: "automatic", sourceLanguage: "zh-CN", originalText: null, romanization: null, ipa: null,
+      phoneticHint: null, customPronunciation: null, locked: null, confidence: .2, needsReview: true,
+      evidence: null, source: "ai", updatedAt: null };
+    const provider = { name: "openai", generateStructured: async (request: { schemaName: string; schema: { parse(value: unknown): unknown } }) => ({
+      value: request.schema.parse(request.schemaName === "entity_pronunciation_batch"
+        ? { results: candidates.map(item => ({ entityId: item.entity.id, pronunciation: wire })) }
+        : { pronunciation: wire }),
+    }) } as unknown as LLMProvider;
+    const one = await enrichPronunciation(provider, config, candidates[0]!.entity, "zh-CN");
+    expect(one.pronunciation).toMatchObject({ mode: "automatic", sourceLanguage: "zh-CN", confidence: .2 });
+    expect(one.pronunciation).not.toHaveProperty("originalText");
+    const batch = await enrichPronunciationBatch(provider, config, candidates, "zh-CN");
+    expect(batch.pronunciations.get(candidates[1]!.entity.id)).not.toHaveProperty("phoneticHint");
+  });
+  it("skips a malformed optional suggestion but still propagates real provider failures", async () => {
+    const malformed = { name: "openai", generateStructured: async (request: { schema: { parse(value: unknown): unknown } }) => ({ value: request.schema.parse({ pronunciation: { mode: "invalid" } }) }) } as unknown as LLMProvider;
+    expect((await enrichPronunciation(malformed, config, candidates[0]!.entity, "zh-CN")).pronunciation).toBeUndefined();
+    const unavailable = { name: "openai", generateStructured: async () => { throw new ProviderError("OpenAI rate limit", { category: "rate_limited" }); } } as unknown as LLMProvider;
+    await expect(enrichPronunciation(unavailable, config, candidates[0]!.entity, "zh-CN")).rejects.toThrow("rate limit");
+  });
   it("falls back to per-entity enrichment when the batch response shape is invalid", async () => {
     const provider = {
       generateStructured: async (request: { schemaName: string; schema: { parse(value: unknown): unknown } }) => {

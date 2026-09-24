@@ -1,5 +1,6 @@
-import { disambiguateFishS2Brackets } from "./control-cues.js";
+import { disambiguateFishS2Brackets, isFishS2Model } from "./control-cues.js";
 import { normalizeStructuredSpeechBlock, normalizeSystemMetadataText, speakInteger } from "../speech-normalization.js";
+import { scanVocalizations } from "../vocalizations.js";
 
 const TITLE_REPLACEMENTS: ReadonlyArray<readonly [RegExp, string]> = [
   [/\bMr\.(?=\s+\p{L})/gu, "Mister"],
@@ -84,10 +85,10 @@ function replaceAll(text: string, replacements: ReadonlyArray<readonly [RegExp, 
  * of uppercase words and ambiguous forms (for example St.) so names, ranks, and
  * fictional terminology are not silently changed.
  */
-export function normalizeFishSpeechText(text: string, model?: string): string {
+export function normalizeFishSpeechText(text: string, model?: string, options: { tskRendering?: "preserve" | "direction" } = {}): string {
   const structured = text.replace(/【[^【】\n]{1,500}】/gu, normalizeStructuredSpeechBlock)
     .replace(/(?<![\p{L}\p{N}])([A-Z][\p{L}\p{N} -]{1,80})\s+\((Passive|Active)\)\s+\((Level [^()\n]{1,30}|Rank [^()\n]{1,30})\)/gu, normalizeSystemMetadataText);
-  const withoutMarkup = disambiguateFishS2Brackets(stripFishMarkdownEmphasis(stripEmojiForSpeech(stripMarkdownForSpeech(structured))), model)
+  const withoutMarkup = renderFishVocalizations(disambiguateFishS2Brackets(stripFishMarkdownEmphasis(stripEmojiForSpeech(stripMarkdownForSpeech(structured))), model), model, options)
     .replace(/(?<![\p{L}\p{N}])(EXP|XP|HP|MP)\s*\/\s*(\d{1,6})?(?![\p{L}\p{N}])/giu, (_match, label: string, number?: string) =>
       number ? `${label.toUpperCase()}: ${speakInteger(Number(number))}` : label.toUpperCase());
   const normalizedValues = withoutMarkup
@@ -120,6 +121,21 @@ export function normalizeFishSpeechText(text: string, model?: string): string {
     .replace(/[ \t]+\n/g, "\n")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
+}
+
+/** Experimental tsk direction is opt-in; the production fallback speaks the text. */
+export function renderFishVocalizations(text: string, model?: string, options: { tskRendering?: "preserve" | "direction" } = {}): string {
+  if (!isFishS2Model(model)) return text;
+  let result = text;
+  for (const item of scanVocalizations(text).reverse()) {
+    const before = text.slice(Math.max(0, item.start - 45), item.start);
+    if (/\b(?:word|text|transcript|term|wrote|spelled|literal(?:ly)?)\b[^.!?\n]{0,35}$/iu.test(before)) continue;
+    const replacement = item.vocalization === "throat_clear" ? "[clears throat]"
+      : item.vocalization === "scoff" && /^tsk\b/iu.test(item.sourceText) && options.tskRendering === "direction" ? "[clicks tongue disapprovingly]"
+      : undefined;
+    if (replacement) result = result.slice(0, item.start) + replacement + result.slice(item.end);
+  }
+  return result;
 }
 
 /** Removes paired Markdown emphasis without consuming literal multiplication. */

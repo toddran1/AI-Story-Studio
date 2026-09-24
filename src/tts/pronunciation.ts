@@ -7,6 +7,28 @@ import { logger } from "../utils/logger.js";
 import type { TTSProvider } from "./provider.js";
 
 export const PRONUNCIATION_VERSION = "pronunciation-v1";
+// OpenAI strict structured outputs represent optional fields as required,
+// nullable fields. Accept that wire shape, then restore the canonical record.
+const pronunciationSuggestionSchema = z.object({
+  ...pronunciationSchema.shape,
+  sourceLanguage: pronunciationSchema.shape.sourceLanguage.nullable(),
+  originalText: pronunciationSchema.shape.originalText.nullable(),
+  romanization: pronunciationSchema.shape.romanization.nullable(),
+  ipa: pronunciationSchema.shape.ipa.nullable(),
+  phoneticHint: pronunciationSchema.shape.phoneticHint.nullable(),
+  customPronunciation: pronunciationSchema.shape.customPronunciation.nullable(),
+  locked: pronunciationSchema.shape.locked.nullable(),
+  confidence: pronunciationSchema.shape.confidence.nullable(),
+  needsReview: pronunciationSchema.shape.needsReview.nullable(),
+  evidence: pronunciationSchema.shape.evidence.nullable(),
+  source: pronunciationSchema.shape.source.nullable(),
+  updatedAt: pronunciationSchema.shape.updatedAt.nullable(),
+}).strict();
+
+function canonicalPronunciation(value: z.infer<typeof pronunciationSuggestionSchema> | null): EntityPronunciation | undefined {
+  if (value === null) return undefined;
+  return pronunciationSchema.parse(Object.fromEntries(Object.entries(value).filter(([, field]) => field !== null)));
+}
 export type PronunciationSourceEvidence = { chapter: number; sourceText: string; reason: string };
 export type PronunciationOccurrence = {
   entityId: string; surfaceText: string; start: number; end: number;
@@ -102,15 +124,24 @@ export function adaptPronunciationText(text: string, occurrences: readonly Pronu
 
 export async function enrichPronunciation(provider: LLMProvider, config: StageModelConfig, entity: CanonicalEntity, sourceLanguage: string, evidence: PronunciationSourceEvidence[] = []) {
   if (entity.pronunciation?.locked || entity.pronunciation?.source === "manual" || (entity.pronunciation && entity.pronunciation.mode !== "automatic")) return { pronunciation: entity.pronunciation };
-  const result = await provider.generateStructured({ model: config.model, schemaName: "entity_pronunciation", schema: z.object({ pronunciation: pronunciationSchema.nullable() }),
-    instructions: "Enrich one foreign story entity for pronunciation inside English narration. Source evidence is authoritative: identify original-language spelling only when the supplied novel evidence establishes it; never guess characters from a romanized name. Return null for ordinary translated English terms. For uncertain identity, return automatic mode with low confidence, needsReview true, and omit originalText/romanization/phoneticHint rather than inventing data. For Mandarin use tone-marked Hanyu Pinyin. Infer the actual source language from script and evidence; do not assume all names are Mandarin. Provide a practical English-readable phoneticHint only when confident. Use original_language mode for a confident source-language identity, otherwise automatic mode. Keep identity and localized display names unchanged. Use ai source. Never put provider-specific control tags in metadata.",
-    input: JSON.stringify({ entity, storySourceLanguage: sourceLanguage, sourceEvidence: evidence }) });
-  return { pronunciation: result.value.pronunciation ?? undefined, usage: result.usage };
+  try {
+    const result = await provider.generateStructured({ model: config.model, schemaName: "entity_pronunciation", schema: z.object({ pronunciation: pronunciationSuggestionSchema.nullable() }),
+      instructions: "Enrich one foreign story entity for pronunciation inside English narration. Source evidence is authoritative: identify original-language spelling only when the supplied novel evidence establishes it; never guess characters from a romanized name. Return null for ordinary translated English terms. For uncertain identity, return automatic mode with low confidence, needsReview true, and omit originalText/romanization/phoneticHint rather than inventing data. For Mandarin use tone-marked Hanyu Pinyin. Infer the actual source language from script and evidence; do not assume all names are Mandarin. Provide a practical English-readable phoneticHint only when confident. Use original_language mode for a confident source-language identity, otherwise automatic mode. Keep identity and localized display names unchanged. Use ai source. Never put provider-specific control tags in metadata.",
+      input: JSON.stringify({ entity, storySourceLanguage: sourceLanguage, sourceEvidence: evidence }) });
+    return { pronunciation: canonicalPronunciation(result.value.pronunciation), usage: result.usage };
+  } catch (error) {
+    // Pronunciation enrichment creates reviewable suggestions, not a prerequisite
+    // for synthesis. A malformed suggestion must not block otherwise valid audio.
+    if (!isStructuredShapeError(error)) throw error;
+    logger.warn({ event: "tts.pronunciation.invalid_suggestion", provider: provider.name, model: config.model, entityId: entity.id,
+      err: error instanceof Error ? error.message : String(error) }, "Skipping invalid optional pronunciation suggestion");
+    return { pronunciation: undefined };
+  }
 }
 
 /** Batch compatible automatic entities to reduce provider calls while retaining per-entity evidence. */
 export async function enrichPronunciationBatch(provider: LLMProvider, config: StageModelConfig, entities: Array<{ entity: CanonicalEntity; evidence: PronunciationSourceEvidence[] }>, sourceLanguage: string) {
-  const schema = z.object({ results: z.array(z.object({ entityId: z.string(), pronunciation: pronunciationSchema.nullable() })).max(entities.length) });
+  const schema = z.object({ results: z.array(z.object({ entityId: z.string(), pronunciation: pronunciationSuggestionSchema.nullable() })).max(entities.length) });
   try {
     const result = await provider.generateStructured({ model: config.model, schemaName: "entity_pronunciation_batch", schema,
       instructions: "Enrich these foreign story entities for English narration. Each entity has evidence from its own source novel. Never infer original script from an English transliteration alone. For each item, use original-language spelling only when its supplied evidence establishes it. Return null for ordinary English terms. For unresolved identity, return automatic mode, low confidence, needsReview true, and no guessed originalText, romanization, or phoneticHint. Mandarin romanization must use tone-marked Hanyu Pinyin. Use original_language mode for a confident source-language identity. Keep each entity ID exactly as supplied; do not return an item for a different ID.",
@@ -118,7 +149,7 @@ export async function enrichPronunciationBatch(provider: LLMProvider, config: St
     const allowed = new Set(entities.map(item => item.entity.id));
     // null marks an explicit "ordinary translated term, no guidance needed"
     // answer; only an entity missing from the results is unresolved.
-    return { pronunciations: new Map(result.value.results.filter(item => allowed.has(item.entityId)).map(item => [item.entityId, item.pronunciation ?? null])), usage: result.usage };
+    return { pronunciations: new Map(result.value.results.filter(item => allowed.has(item.entityId)).map(item => [item.entityId, canonicalPronunciation(item.pronunciation) ?? null])), usage: result.usage };
   } catch (error) {
     // A malformed batch response (e.g. the model omitted the results array)
     // must not abort the whole job: retry the same entities one at a time.

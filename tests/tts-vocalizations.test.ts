@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { FishAudioProvider } from "../src/tts/fish/fish-audio.provider.js";
+import { FishAudioProvider, normalizeFishSpeechText } from "../src/tts/fish/fish-audio.provider.js";
 import { disambiguateFishS2Brackets } from "../src/tts/fish/control-cues.js";
 import { normalizeSpeechText } from "../src/tts/speech-normalization.js";
 import { adaptPronunciationText, resolvePronunciations } from "../src/tts/pronunciation.js";
@@ -10,7 +10,7 @@ describe("Fish vocalization strategy", () => {
 
   it.each(["s2-pro", "s2.1-pro", "s2.1-pro-free"])("uses verified native tags for %s", (model) => {
     const strategy = provider.vocalizationStrategy(model);
-    expect(strategy).toEqual({ kind: "native_tags", tags: { laugh: "[laugh]", chuckle: "[laugh]", sigh: "[sigh]", gasp: "[gasp]" } });
+    expect(strategy).toEqual({ kind: "native_tags", tags: { laugh: "[laugh]", chuckle: "[laugh]", throat_clear: "[clears throat]", sigh: "[sigh]", gasp: "[gasp]" } });
   });
 
   it.each(["s1", "s1-mini", "unknown-model", undefined])("falls back to safe_normalize for %s", (model) => {
@@ -18,7 +18,7 @@ describe("Fish vocalization strategy", () => {
   });
 
   it("advertises expressive tags for the supported subset only", () => {
-    expect(provider.vocalizationCapabilities).toEqual({ expressiveTags: true, supportedTypes: ["laugh", "chuckle", "sigh", "gasp"], separateSegments: false });
+    expect(provider.vocalizationCapabilities).toEqual({ expressiveTags: true, supportedTypes: ["laugh", "chuckle", "throat_clear", "sigh", "gasp"], separateSegments: false });
   });
 
   it("strategy tags survive the S2 bracket disambiguator, and guessed tags never leak", () => {
@@ -29,6 +29,23 @@ describe("Fish vocalization strategy", () => {
     }
     // Safety net: a hallucinated tag is stripped to ordinary spoken words.
     expect(disambiguateFishS2Brackets("[laughs] he said [cackling]", "s2-pro")).toBe("laughs he said cackling");
+  });
+
+  it("renders a standalone ahem reaction as a throat clear without changing literal mentions", () => {
+    const original = "“Ahem, ahem, ahem… You’re right. That makes sense!”";
+    const spoken = normalizeSpeechText(original, "en-US", {}, provider.vocalizationStrategy("s2-pro"));
+    expect(spoken.text).toContain("[clears throat] You’re right");
+    expect(spoken.transformations).toContainEqual(expect.objectContaining({ kind: "vocalization", spoken: "[clears throat]" }));
+    expect(normalizeFishSpeechText("Ahem... excuse me.", "s2-pro")).toBe("[clears throat] excuse me.");
+    expect(normalizeFishSpeechText("He wrote the word “ahem” in the margin.", "s2-pro")).toContain("“ahem”");
+    expect(original).toContain("Ahem, ahem, ahem");
+  });
+
+  it("keeps tsk text by default and offers an explicit Fish direction", () => {
+    const original = "“Tsk, tsk, tsk. You lose your temper too easily.”";
+    expect(normalizeFishSpeechText(original, "s2-pro")).toContain("Tsk, tsk, tsk.");
+    expect(normalizeFishSpeechText(original, "s2-pro", { tskRendering: "direction" })).toContain("[clicks tongue disapprovingly] You lose");
+    expect(normalizeFishSpeechText("The transcript literally contained “tsk, tsk.”", "s2-pro", { tskRendering: "direction" })).toContain("“tsk, tsk.”");
   });
 });
 

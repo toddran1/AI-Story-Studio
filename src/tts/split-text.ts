@@ -9,7 +9,9 @@ export function splitForTTS(text: string, maxChars: number): string[] {
   };
   for (const paragraph of paragraphs) {
     if (paragraph.length <= maxChars) { push(paragraph); continue; }
-    for (const sentence of paragraph.match(/[^.!?。！？]+[.!?。！？]+|[^.!?。！？]+$/g) ?? [paragraph]) {
+    // Closing quotes belong to the preceding sentence; never begin a Fish
+    // request with a detached closing quote after a boundary.
+    for (const sentence of paragraph.match(/[^.!?。！？]+[.!?。！？]+[”"'’)]*|[^.!?。！？]+$/g) ?? [paragraph]) {
       const trimmed = sentence.trim();
       if (trimmed.length <= maxChars) push(trimmed);
       else for (let start = 0; start < trimmed.length;) {

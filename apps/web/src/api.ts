@@ -526,7 +526,7 @@ export type ChapterDetail = {
   [key: string]: any;
 };
 export type TtsDeliveryIntensity = "none" | "restrained" | "expressive";
-export type TtsQualityIssueType = "unexpected_speech" | "missing_speech" | "repetition" | "truncated" | "suspected_gibberish" | "abnormal_duration" | "unexpected_silence" | "invalid_audio" | "transcription_failed";
+export type TtsQualityIssueType = "unexpected_speech" | "unexpected_vocalization" | "segment_start_mismatch" | "missing_speech" | "repetition" | "truncated" | "suspected_gibberish" | "abnormal_duration" | "unexpected_silence" | "invalid_audio" | "transcription_failed";
 export type TtsQualityIssue = { type: TtsQualityIssueType; severity: number; detail?: string };
 export type TtsQualityAttempt = { attempt: number; settings: { deliveryIntensity: TtsDeliveryIntensity }; status: "pass" | "retry" | "needs_review" | "unverified"; score?: number; issues: TtsQualityIssue[]; requestId?: string };
 export type TtsSegmentStatus = "verified" | "needs_review" | "unverified" | "manually_accepted";

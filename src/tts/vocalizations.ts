@@ -1,4 +1,4 @@
-export type VocalizationType = "laugh" | "chuckle" | "scoff" | "sigh" | "gasp" | "grunt" | "groan" | "sob" | "cry" | "growl" | "thinking" | "hesitation" | "exclamation" | "other";
+export type VocalizationType = "laugh" | "chuckle" | "scoff" | "throat_clear" | "sigh" | "gasp" | "grunt" | "groan" | "sob" | "cry" | "growl" | "thinking" | "hesitation" | "exclamation" | "other";
 export type VocalizationIntensity = "light" | "medium" | "strong";
 export interface VocalizationInstruction {
   type: "vocalization";
@@ -46,13 +46,14 @@ const lexicon: LexemeEntry[] = [
   { pattern: "ha(?:[ \\t]+ha)+", vocalization: "laugh", confidence: .85, spoken: fixed("hahaha") },
   { pattern: "he(?:he)+", vocalization: "laugh", confidence: .85, spoken: fixed("hehehe") },
   { pattern: "heh", vocalization: "chuckle", confidence: .7, spoken: fixed("heh") },
+  { pattern: "ahem(?:[, \\t]+ahem){0,2}", vocalization: "throat_clear", confidence: .9, spoken: fixed("ahem") },
   { pattern: "hmp[hf]", vocalization: "scoff", confidence: .85, spoken: fixed("hmph") },
   { pattern: "hm{2,}", vocalization: "thinking", confidence: .75, spoken: collapsed() },
   { pattern: "mm{2,}", vocalization: "thinking", confidence: .75, spoken: collapsed() },
   { pattern: "urgh", vocalization: "groan", confidence: .8, spoken: fixed("urgh") },
   { pattern: "ugh", vocalization: "groan", confidence: .8, spoken: fixed("ugh") },
   { pattern: "gr+", vocalization: "growl", confidence: .85, spoken: collapsed() },
-  { pattern: "tsk(?:[ \\t-]?tsk)?", vocalization: "scoff", confidence: .75, spoken: fixed("tsk") },
+  { pattern: "tsk(?:[, \\t-]+tsk){0,2}", vocalization: "scoff", confidence: .75, spoken: fixed("tsk") },
   { pattern: "pf+t+", vocalization: "scoff", confidence: .8, spoken: collapsed() },
   { pattern: "sigh", vocalization: "sigh", confidence: .8, spoken: fixed("sigh") },
   { pattern: "sob(?:[ \\t-]?sob)?", vocalization: "sob", confidence: .8, spoken: fixed("sob") },
@@ -85,6 +86,12 @@ export function scanVocalizations(text: string): ScannedVocalization[] {
     if (!entry) continue;
     const start = match.index!;
     const sourceText = match[0];
+    if (entry.vocalization === "throat_clear") {
+      const before = text.slice(Math.max(0, start - 45), start);
+      // A quoted lexical mention is prose, not a performed reaction.
+      if (/\b(?:word|text|transcript|term|wrote|spelled|literal(?:ly)?)\b[^.!?\n]{0,35}$/iu.test(before)) continue;
+      if (!/(?:^|[.!?…\n“"‘']\s*)$/u.test(before)) continue;
+    }
     const punctuation = match[2] ?? "";
     results.push({
       type: "vocalization", vocalization: entry.vocalization, sourceText,

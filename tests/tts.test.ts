@@ -10,6 +10,12 @@ describe("Fish TTS", () => {
     expect(chunks.every((chunk) => chunk.length <= 500)).toBe(true);
   });
 
+  it("keeps closing dialogue quotes attached at a Fish segment boundary", () => {
+    const chunks = splitForTTS('"That is true!" She stepped back. "They have grown up." He nodded.', 30);
+    expect(chunks.every((chunk) => !/^[”’)]|^["'](?:[.!?]|$)/u.test(chunk))).toBe(true);
+    expect(chunks.join(" ")).toContain('"That is true!"');
+  });
+
   it("uses mocked Fish responses and combines segments", async () => {
     const fetcher = vi.fn(async () => new Response(new Uint8Array([1, 2, 3]), { status: 200, headers: { "x-request-id": "req", "content-type": "audio/mpeg" } }));
     const provider = new FishAudioProvider("test-key", fetcher as typeof fetch);
@@ -46,7 +52,7 @@ describe("Fish TTS", () => {
     await provider.synthesize({ text: "**Important:** *whisper this.* [sad] 2 * 2", model: "s2.1-pro", speed: 1, format: "mp3", sampleRate: 44100, bitrate: 128, normalize: true, maxCharsPerRequest: 500 });
     const body = JSON.parse(String((fetcher.mock.calls[0]?.[1] as RequestInit).body));
     expect(body.text).toBe("Important: whisper this. [sad] 2 * 2");
-    expect(provider.inputNormalizationVersion).toBe("fish-speech-normalization-v6");
+    expect(provider.inputNormalizationVersion).toBe("fish-speech-normalization-v7");
   });
 
   it("does not turn profanity into the literal word bleep inside Fish", async () => {
@@ -135,6 +141,19 @@ describe("Fish TTS", () => {
     await provider.synthesize({ text: "[sad] [Goblin Undead Information Extraction Complete] [pause]", model: "s2.1-pro-free", speed: 1, format: "mp3", sampleRate: 44100, bitrate: 128, normalize: true, maxCharsPerRequest: 500 });
     const body = JSON.parse(String((fetcher.mock.calls[0]?.[1] as RequestInit).body));
     expect(body.text).toBe("[sad] Goblin Undead Information Extraction Complete [pause]");
+  });
+
+  it("posts the opt-in tsk direction only when explicitly enabled", async () => {
+    const posted: string[] = [];
+    const fetcher = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      posted.push(JSON.parse(String(init?.body)).text);
+      return new Response(new Uint8Array([1]), { headers: { "content-type": "audio/mpeg" } });
+    });
+    const request: TTSRequest = { text: "Tsk, tsk, tsk. You lose your temper.", model: "s2-pro", speed: 1, format: "mp3", sampleRate: 44100, bitrate: 128, normalize: true, maxCharsPerRequest: 500 };
+    await new FishAudioProvider("test-key", fetcher as typeof fetch).synthesize(request);
+    await new FishAudioProvider("test-key", fetcher as typeof fetch, 120_000, undefined, { tskRendering: "direction" }).synthesize(request);
+    expect(posted[0]).toContain("Tsk, tsk, tsk.");
+    expect(posted[1]).toContain("[clicks tongue disapprovingly] You lose");
   });
 
   it("sends structured panels as safe speech while keeping approved S2 cues", async () => {

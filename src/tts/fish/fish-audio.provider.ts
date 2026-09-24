@@ -15,16 +15,17 @@ export class FishAudioProvider implements TTSProvider {
   // Fish docs (docs.fish.audio TTS): S2 models support natural-language expression
   // control. Tags are limited to the verified FISH_S2_CONTROL_CUES allowlist subset
   // that maps to vocalization types; disambiguateFishS2Brackets strips anything else.
-  readonly vocalizationCapabilities: VocalizationCapabilities = { expressiveTags: true, supportedTypes: ["laugh", "chuckle", "sigh", "gasp"], separateSegments: false };
+  readonly vocalizationCapabilities: VocalizationCapabilities = { expressiveTags: true, supportedTypes: ["laugh", "chuckle", "throat_clear", "sigh", "gasp"], separateSegments: false };
   // Included in the TTS fingerprint so audio made before normalization or
   // deterministic dialogue casting changes is never silently reused.
-  readonly inputNormalizationVersion = "fish-speech-normalization-v6";
+  readonly inputNormalizationVersion: string;
   constructor(
     private readonly apiKey?: string,
     private readonly fetcher: typeof fetch = fetch,
     private readonly timeoutMs = 120_000,
     private readonly defaultReferenceId?: string,
-  ) {}
+    private readonly speechOptions: { tskRendering?: "preserve" | "direction" } = {},
+  ) { this.inputNormalizationVersion = speechOptions.tskRendering === "direction" ? "fish-speech-normalization-v7-tsk-direction" : "fish-speech-normalization-v7"; }
 
   resolveReferenceId(referenceId?: string): string | undefined {
     return normalizeFishReferenceId(referenceId) ?? normalizeFishReferenceId(this.defaultReferenceId);
@@ -34,7 +35,7 @@ export class FishAudioProvider implements TTSProvider {
    * unknown models fall back to canonical short spoken forms. No guessed tags. */
   vocalizationStrategy(model?: string): VocalizationRenderStrategy {
     if (!isFishS2Model(model)) return { kind: "safe_normalize" };
-    return { kind: "native_tags", tags: { laugh: "[laugh]", chuckle: "[laugh]", sigh: "[sigh]", gasp: "[gasp]" } };
+    return { kind: "native_tags", tags: { laugh: "[laugh]", chuckle: "[laugh]", throat_clear: "[clears throat]", sigh: "[sigh]", gasp: "[gasp]" } };
   }
 
   async validateConfiguration(): Promise<void> { if (!this.apiKey) throw new ConfigurationError("Missing required fish credential (FISH_AUDIO_API_KEY). Add it to .env."); }
@@ -48,7 +49,7 @@ export class FishAudioProvider implements TTSProvider {
     const chunks = request.exactChunk
       ? [request.text]
       : (() => {
-          const speechText = normalizeFishSpeechText(adaptPronunciationText(request.text, request.pronunciation ?? [], this.pronunciationCapabilities), request.model);
+          const speechText = normalizeFishSpeechText(adaptPronunciationText(request.text, request.pronunciation ?? [], this.pronunciationCapabilities), request.model, this.speechOptions);
           if (!speechText) throw new ProviderError("Fish Audio narration is empty after speech normalization");
           const castText = multiSpeaker ? castQuotedDialogue(speechText) : directedSingleVoice ? directQuotedDialogue(speechText) : speechText;
           // Keep coherent paragraphs, but cap S2 requests below the general

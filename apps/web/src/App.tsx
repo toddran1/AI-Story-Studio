@@ -865,6 +865,8 @@ export function chunkPresetFor(value: number): "conservative" | "balanced" | "lo
 
 export const TTS_ISSUE_LABELS: Record<TtsQualityIssueType, string> = {
   unexpected_speech: "Speech not present in the narration",
+  unexpected_vocalization: "Unexpected vocal sound",
+  segment_start_mismatch: "Opening words do not match",
   missing_speech: "Narration missing from the audio",
   repetition: "Repeated phrase",
   truncated: "Audio cut off early",
