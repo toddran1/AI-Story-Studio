@@ -47,6 +47,8 @@ import { loadPronunciationSuggestions } from "../../src/story-bible/pronunciatio
 import { entityReadiness, readinessNeedsAttention, type EntityReadinessRow } from "../../src/story-bible/readiness.js";
 import { findNamingCollisions } from "../../src/story-bible/naming-collisions.js";
 import { readEntityAudit } from "../../src/story-bible/entity-audit.js";
+import { normalizeEntitySearch } from "../../src/story-bible/search.js";
+import { cachedStoryRead, fileStamp, filesStampFingerprint, invalidateStoryReadCache } from "../../src/story-bible/read-cache.js";
 
 const slugSchema = z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/);
 export const chapterFilterSchema = z.enum(["all", "unprocessed", "warn", "fail", "complete"]);
@@ -186,7 +188,7 @@ export async function getStoryBible(root: string, slug: string, options: { inclu
   return loadStoryBibleWithCanonicalOverlay(root, slug, options);
 }
 
-export async function getStoryBibleView(root: string, slug: string) { const bible = await getStoryBible(root, slug); const view = await applyManualBibleOverlay(root, slug, bible); return { ...view, staleExtractionChapters: await computeStaleExtractionChapters(root, slug) }; }
+export async function getStoryBibleView(root: string, slug: string) { const bible = await getStoryBible(root, slug); const view = await applyManualBibleOverlay(root, slug, bible); return { ...view, staleExtractionChapters: await getStaleExtractionChapters(root, slug) }; }
 
 export async function getSuppressedCanonicalEntities(root: string, slug: string) {
   slugSchema.parse(slug);
@@ -258,14 +260,67 @@ async function loadBibleReviewContext(root: string, slug: string) {
   return { bible, findings, openCounts, duplicateSuggestions, namingCollisions, visualProfiles, pronunciationSuggestions, readinessOf, overlay: parsedOverlay?.success ? parsedOverlay.data : undefined };
 }
 
+type BibleReviewContext = Awaited<ReturnType<typeof loadBibleReviewContext>>;
+
+const REVIEW_CONTEXT_CACHE = "story-bible-review-context";
+const STALE_EXTRACTION_CACHE = "story-bible-stale-extraction";
+const HEALTH_CACHE = "story-bible-health";
+
+/** Artifacts whose content determines the derived review context. */
+function reviewContextInputFiles(root: string, slug: string) {
+  const paths = storyPaths(root, slug, 1);
+  return [paths.bible, paths.bibleManual, paths.bibleCanonicalManual, paths.continuityReview, paths.visualProfiles, join(paths.story, "pronunciation-enrichment.json")];
+}
+
+function reviewContextFingerprint(root: string, slug: string) {
+  return filesStampFingerprint(reviewContextInputFiles(root, slug));
+}
+
+/**
+ * Shared cached access to the review context. Correctness comes from the
+ * artifact fingerprint; concurrent callers share a single in-flight build.
+ */
+export async function getBibleReviewContext(root: string, slug: string): Promise<BibleReviewContext> {
+  const startedAt = Date.now();
+  const { value, cacheHit } = await cachedStoryRead(REVIEW_CONTEXT_CACHE, root, slug, () => reviewContextFingerprint(root, slug), () => loadBibleReviewContext(root, slug));
+  logger.debug({ event: "story_bible.read_context", story: slug, cacheHit, durationMs: Date.now() - startedAt });
+  return value;
+}
+
+/** Fingerprint of every input the stale-extraction walk reads. */
+async function staleExtractionFingerprint(root: string, slug: string) {
+  const paths = storyPaths(root, slug, 1);
+  let numbers: number[] = [];
+  try {
+    numbers = (await readdir(join(paths.story, "chapters"), { withFileTypes: true })).filter((entry) => entry.isDirectory() && /^\d+$/.test(entry.name)).map((entry) => Number(entry.name));
+  } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+  const chapterStamps = await mapLimit(numbers, 16, async (number) => {
+    const chapterPaths = storyPaths(root, slug, number);
+    return `${number}:${await fileStamp(chapterPaths.chapterMeta)}:${await fileStamp(chapterPaths.bibleUpdate)}`;
+  });
+  return fingerprint({ source: await fileStamp(paths.sourceManifest), chapters: chapterStamps });
+}
+
+/** Cached stale-extraction chapter list: stat-only revalidation, full walk on miss. */
+async function getStaleExtractionChapters(root: string, slug: string): Promise<number[]> {
+  const { value } = await cachedStoryRead(STALE_EXTRACTION_CACHE, root, slug, () => staleExtractionFingerprint(root, slug), () => computeStaleExtractionChapters(root, slug));
+  return value;
+}
+
+/** Drop all derived Story Bible read caches for a story after a mutation. */
+export function invalidateStoryBibleReadCache(root: string, slug: string) {
+  invalidateStoryReadCache(root, slug);
+}
+
 export async function getCanonicalEntitiesPage(root: string, slug: string, options: { page: number; pageSize: number; type?: string; query?: string; sort?: string; readiness?: EntityReadinessFilter }) {
-  const context = await loadBibleReviewContext(root, slug);
+  const startedAt = Date.now();
+  const context = await getBibleReviewContext(root, slug);
   const { bible } = context;
   let entities = bible.canonicalEntities;
-  const query = options.query?.trim().toLocaleLowerCase();
-  const tokens = query ? query.split(/\s+/).filter(Boolean) : [];
+  const query = options.query ? normalizeEntitySearch(options.query) : "";
+  const tokens = query.split(" ").filter(Boolean);
   if (options.type && options.type !== "all") entities = entities.filter((item) => item.type === options.type);
-  if (tokens.length) entities = entities.filter((item) => { const searchable = [item.canonicalName, item.originalName, item.preferredNarrationName ?? "", item.localizedNaming?.fullName ?? "", item.localizedNaming?.shortName ?? "", item.localizedNaming?.notes ?? "", item.description, item.notes, ...item.aliases, ...item.aliasNarrationRules.flatMap((rule) => [rule.alias, rule.replacement ?? ""])].join("\n").toLocaleLowerCase(); return tokens.every((token) => searchable.includes(token)); });
+  if (tokens.length) entities = entities.filter((item) => { const searchable = normalizeEntitySearch([item.canonicalName, item.originalName, item.preferredNarrationName ?? "", item.localizedNaming?.fullName ?? "", item.localizedNaming?.shortName ?? "", item.localizedNaming?.notes ?? "", item.description, item.notes, ...item.aliases, ...item.aliasNarrationRules.flatMap((rule) => [rule.alias, rule.replacement ?? ""])].join(" ")); return tokens.every((token) => searchable.includes(token)); });
   const readinessOf = context.readinessOf;
   if (options.readiness) { const predicate = readinessFilterPredicate(options.readiness); entities = entities.filter((item) => predicate(readinessOf(item))); }
   const direction = options.sort === "last" ? (a: typeof entities[number], b: typeof entities[number]) => b.lastKnownAppearance - a.lastKnownAppearance : options.sort === "first" ? (a: typeof entities[number], b: typeof entities[number]) => a.firstAppearance - b.firstAppearance : (a: typeof entities[number], b: typeof entities[number]) => a.canonicalName.localeCompare(b.canonicalName);
@@ -273,11 +328,13 @@ export async function getCanonicalEntitiesPage(root: string, slug: string, optio
   const pageSize = Math.min(100, Math.max(1, Math.floor(options.pageSize)));
   const pages = Math.max(1, Math.ceil(entities.length / pageSize));
   const page = Math.min(pages, Math.max(1, Math.floor(options.page)));
+  logger.debug({ event: "story_bible.entities_page", story: slug, total: entities.length, filtered: tokens.length > 0 || Boolean(options.type && options.type !== "all") || Boolean(options.readiness), durationMs: Date.now() - startedAt });
   return { items: entities.slice((page - 1) * pageSize, page * pageSize).map((item) => ({ ...item, conflictCount: context.openCounts.get(item.id) ?? 0, readiness: readinessOf(item) })), page, pageSize, pages, total: entities.length, counts: Object.fromEntries(["character", "location", "organization", "ability", "item", "concept", "other"].map((type) => [type, bible.canonicalEntities.filter((item) => item.type === type).length])), duplicateSuggestions: context.duplicateSuggestions.slice(0, 50) };
 }
 
 export async function getCanonicalEntityDetail(root: string, slug: string, id: string) {
-  const context = await loadBibleReviewContext(root, slug);
+  const startedAt = Date.now();
+  const context = await getBibleReviewContext(root, slug);
   const bible = context.bible;
   const entity = bible.canonicalEntities.find((item) => item.id === id);
   if (!entity) throw new Error("Canonical entity was not found");
@@ -286,6 +343,7 @@ export async function getCanonicalEntityDetail(root: string, slug: string, id: s
   const names = Object.fromEntries(bible.canonicalEntities.filter((item) => relatedIds.has(item.id)).map((item) => [item.id, item.canonicalName]));
   const relatedReferences = (bible.minorReferences ?? []).filter((ref) => ref.parentEntityId === id);
   const duplicateSuggestions = context.duplicateSuggestions.filter((item) => item.entityIds.includes(id)).slice(0, 20);
+  logger.debug({ event: "story_bible.entity_detail", story: slug, entityId: id, durationMs: Date.now() - startedAt });
   return {
     entity,
     timeline: bible.entityTimeline.filter((item) => item.entityId === id).sort((a, b) => a.chapter - b.chapter),
@@ -314,7 +372,7 @@ export async function getCanonicalEntityDetail(root: string, slug: string, id: s
 export async function getCanonicalEntityHistory(root: string, slug: string, id: string, chapter: number) {
   slugSchema.parse(slug); canonicalEntitySchema.shape.id.parse(id);
   if (!Number.isSafeInteger(chapter) || chapter < 1) throw new Error("Chapter must be a positive integer");
-  const context = await loadBibleReviewContext(root, slug);
+  const context = await getBibleReviewContext(root, slug);
   const current = context.bible.canonicalEntities.find((item) => item.id === id);
   if (!current) throw new Error("Canonical entity was not found");
   const index = await loadChapterIndex(root, slug);
@@ -403,7 +461,7 @@ export type EntityUsageKind = "provenance" | "qa" | "continuity" | "scene" | "vi
 /** Where a canonical entity is used, derived on read from existing artifacts. No provider calls. */
 export async function getCanonicalEntityUsage(root: string, slug: string, id: string, options: { page: number; pageSize: number }) {
   slugSchema.parse(slug); canonicalEntitySchema.shape.id.parse(id);
-  const context = await loadBibleReviewContext(root, slug);
+  const context = await getBibleReviewContext(root, slug);
   const entity = context.bible.canonicalEntities.find((item) => item.id === id);
   if (!entity) throw new Error("Canonical entity was not found");
   const chapters = await loadChapterUsageIndex(root, slug);
@@ -495,28 +553,36 @@ export async function getCanonicalEntityAudit(root: string, slug: string, id: st
  * analysis) — no provider calls, no persistence.
  */
 export async function getStoryBibleHealth(root: string, slug: string) {
-  const context = await loadBibleReviewContext(root, slug);
-  const { bible } = context;
-  const staleExtractionChapters = await computeStaleExtractionChapters(root, slug);
-  // No provider is passed: classifyEntityPersistence falls back to its
-  // deterministic result, so this analysis is free and reproducible.
-  const analysis = await analyzeStoryBible(root, slug);
-  const cleanupRecommendations = analysis.recommendations.filter((item) => item.recommendation !== "keep_canonical").length;
-  const visualProfileIssues = Object.values(context.visualProfiles).filter((profile) => (profile.conflicts ?? []).some((conflict) => conflict.status === "needs_review")).length;
-  const pronunciationNeedsReview = bible.canonicalEntities.filter((entity) => hasActivePronunciation(entity.pronunciation) && entity.pronunciation?.needsReview).length;
-  const needsAttention = bible.canonicalEntities.filter((entity) => readinessNeedsAttention(context.readinessOf(entity))).length;
-  return {
-    totals: { canonicalEntities: bible.canonicalEntities.length, minorReferences: (bible.minorReferences ?? []).length, needsAttention },
-    issues: {
-      duplicateCandidates: context.duplicateSuggestions.length,
-      continuityOpen: context.findings.filter((item) => item.status === "open").length,
-      visualProfileIssues,
-      pronunciationNeedsReview,
-      staleExtractionChapters: staleExtractionChapters.length,
-      cleanupRecommendations,
-      namingCollisions: context.namingCollisions.filter((item) => !item.hasMergeRelationship).length,
-    },
-  };
+  const startedAt = Date.now();
+  const context = await getBibleReviewContext(root, slug);
+  const { value, cacheHit } = await cachedStoryRead(HEALTH_CACHE, root, slug,
+    async () => fingerprint({ context: await reviewContextFingerprint(root, slug), stale: await staleExtractionFingerprint(root, slug) }),
+    async () => {
+      const { bible } = context;
+      const staleExtractionChapters = await getStaleExtractionChapters(root, slug);
+      // No provider is passed: classifyEntityPersistence falls back to its
+      // deterministic result, so this analysis is free and reproducible. The
+      // review context's duplicate suggestions are reused for this revision.
+      const analysis = await analyzeStoryBible(root, slug, { duplicateSuggestions: context.duplicateSuggestions });
+      const cleanupRecommendations = analysis.recommendations.filter((item) => item.recommendation !== "keep_canonical").length;
+      const visualProfileIssues = Object.values(context.visualProfiles).filter((profile) => (profile.conflicts ?? []).some((conflict) => conflict.status === "needs_review")).length;
+      const pronunciationNeedsReview = bible.canonicalEntities.filter((entity) => hasActivePronunciation(entity.pronunciation) && entity.pronunciation?.needsReview).length;
+      const needsAttention = bible.canonicalEntities.filter((entity) => readinessNeedsAttention(context.readinessOf(entity))).length;
+      return {
+        totals: { canonicalEntities: bible.canonicalEntities.length, minorReferences: (bible.minorReferences ?? []).length, needsAttention },
+        issues: {
+          duplicateCandidates: context.duplicateSuggestions.length,
+          continuityOpen: context.findings.filter((item) => item.status === "open").length,
+          visualProfileIssues,
+          pronunciationNeedsReview,
+          staleExtractionChapters: staleExtractionChapters.length,
+          cleanupRecommendations,
+          namingCollisions: context.namingCollisions.filter((item) => !item.hasMergeRelationship).length,
+        },
+      };
+    });
+  logger.debug({ event: "story_bible.health", story: slug, cacheHit, durationMs: Date.now() - startedAt });
+  return value;
 }
 
 export const bibleReviewKindSchema = z.enum(["duplicate", "pronunciation", "continuity", "visual-profile", "stale-extraction", "cleanup", "naming"]);
@@ -541,7 +607,7 @@ export type BibleReviewItem = {
  * with real resolution state (continuity) respond to the status filter.
  */
 export async function getStoryBibleReview(root: string, slug: string, options: { kind?: z.infer<typeof bibleReviewKindSchema>; status?: z.infer<typeof bibleReviewStatusSchema>; entityId?: string; page: number; pageSize: number }) {
-  const context = await loadBibleReviewContext(root, slug);
+  const context = await getBibleReviewContext(root, slug);
   const { bible } = context;
   const names = new Map(bible.canonicalEntities.map((entity) => [entity.id, entity.canonicalName]));
   const nameOf = (id: string) => names.get(id) ?? id;
@@ -606,7 +672,7 @@ export async function getStoryBibleReview(root: string, slug: string, options: {
     });
   }
 
-  const staleExtractionChapters = await computeStaleExtractionChapters(root, slug);
+  const staleExtractionChapters = await getStaleExtractionChapters(root, slug);
   if (staleExtractionChapters.length) items.push({
     id: "stale-extraction", kind: "stale-extraction",
     title: `${staleExtractionChapters.length} chapter${staleExtractionChapters.length === 1 ? " has" : "s have"} stale Story Bible extraction`,
@@ -615,7 +681,7 @@ export async function getStoryBibleReview(root: string, slug: string, options: {
     action: { label: "Open cleanup", href: `/stories/${slug}/bible?tab=cleanup` },
   });
 
-  const analysis = await analyzeStoryBible(root, slug);
+  const analysis = await analyzeStoryBible(root, slug, { duplicateSuggestions: context.duplicateSuggestions });
   for (const recommendation of analysis.recommendations) {
     if (recommendation.recommendation === "keep_canonical") continue;
     items.push({

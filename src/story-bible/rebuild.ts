@@ -8,6 +8,8 @@ import { canonicalOverlaySchema } from "./canonical.js";
 import { mergeStoryBible, normalizeStoryBibleUpdate } from "./updater.js";
 import { SourceManifest, sourceManifestSchema } from "../source/types.js";
 import { applyManualBibleOverlay } from "../studio/workflow.js";
+import { mapLimit } from "../utils/map-limit.js";
+import { logger } from "../utils/logger.js";
 
 /** Rebuilds canonical context solely from chronological per-chapter updates. */
 export async function rebuildStoryBibleBeforeChapter(root: string, slug: string, chapter: number, options: { includeCanonicalOverlay?: boolean; chapterOverride?: { chapter: number; update: StoryBibleUpdate } } = {}): Promise<StoryBible> {
@@ -45,6 +47,7 @@ export async function rebuildStoryBibleBeforeChapter(root: string, slug: string,
  * still contribute canon; callers surface them as stale evidence.
  */
 export async function computeStaleExtractionChapters(root: string, slug: string): Promise<number[]> {
+  const startedAt = Date.now();
   const paths = storyPaths(root, slug, 1); const chaptersDir = join(paths.story, "chapters");
   const manifestRaw = await readJsonIfExists<SourceManifest>(paths.sourceManifest);
   const manifest = manifestRaw ? sourceManifestSchema.safeParse(manifestRaw) : undefined;
@@ -54,13 +57,15 @@ export async function computeStaleExtractionChapters(root: string, slug: string)
     numbers = (await readdir(chaptersDir, { withFileTypes: true })).filter((entry) => entry.isDirectory() && /^\d+$/.test(entry.name))
       .map((entry) => Number(entry.name)).filter((number) => Number.isSafeInteger(number) && number > 0);
   } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
-  const stale: number[] = [];
-  for (const number of numbers) {
+  const stale = await mapLimit(numbers, 16, async (number) => {
     const metadata = await readJsonIfExists<Chapter>(storyPaths(root, slug, number).chapterMeta);
-    if (!metadata || !(await readJsonIfExists(storyPaths(root, slug, number).bibleUpdate))) continue;
+    if (!metadata || !(await readJsonIfExists(storyPaths(root, slug, number).bibleUpdate))) return undefined;
     const state = metadata.stages?.storyBible;
-    if (state?.status === "failed" && !state.outputFingerprint && !state.completedAt) continue;
-    if (state?.status !== "complete" || state.staleReason || (currentSources && metadata.source?.fingerprint !== currentSources.get(number))) stale.push(number);
-  }
-  return stale.sort((a, b) => a - b);
+    if (state?.status === "failed" && !state.outputFingerprint && !state.completedAt) return undefined;
+    if (state?.status !== "complete" || state.staleReason || (currentSources && metadata.source?.fingerprint !== currentSources.get(number))) return number;
+    return undefined;
+  });
+  const result = stale.filter((number): number is number => number !== undefined).sort((a, b) => a - b);
+  logger.debug({ event: "story_bible.stale_extraction", story: slug, chapters: numbers.length, stale: result.length, durationMs: Date.now() - startedAt });
+  return result;
 }

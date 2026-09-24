@@ -529,7 +529,7 @@ export interface BibleAnalysisReport {
 export async function analyzeStoryBible(
   root: string,
   slug: string,
-  options: { provider?: LLMProvider; config?: StageModelConfig } = {},
+  options: { provider?: LLMProvider; config?: StageModelConfig; duplicateSuggestions?: ReturnType<typeof findDuplicateSuggestions> } = {},
 ): Promise<BibleAnalysisReport> {
   const paths = storyPaths(root, slug, 1);
   const rawBible = await readJsonIfExists(paths.bible);
@@ -550,7 +550,10 @@ export async function analyzeStoryBible(
   const overlayRaw = await readJsonIfExists(paths.bibleCanonicalManual);
   const overlay = overlayRaw ? canonicalOverlaySchema.safeParse(overlayRaw) : undefined;
   const manualOverrides = overlay?.success ? overlay.data.overrides : {};
-  const duplicateSuggestions = findDuplicateSuggestions(bible.canonicalEntities, { bible });
+  // Callers that already derived suggestions for this same revision (e.g. the
+  // shared review context) pass them in so detection never runs twice; the
+  // scoring itself is unchanged.
+  const duplicateSuggestions = options.duplicateSuggestions ?? findDuplicateSuggestions(bible.canonicalEntities, { bible });
   const duplicatePairs = new Map<
     string,
     {

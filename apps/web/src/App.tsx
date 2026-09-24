@@ -118,6 +118,14 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
 
 type Route = { page: string; story?: string; chapter?: number };
 
+export type NavigateOptions = { scroll?: "top" | "preserve" };
+
+/** Scroll side effect of navigation: everything except "preserve" resets to the top. */
+export function performNavigateScroll(scroll: "top" | "preserve" = "top") {
+  if (scroll === "preserve") return;
+  if (typeof window !== "undefined") window.scrollTo({ top: 0, behavior: "smooth" });
+}
+
 export function App({ initialJob, initialRoute }: { initialJob?: Job; initialRoute?: Route } = {}) {
   const [route, setRoute] = useState<Route>(() => initialRoute ?? parseRoute(location.pathname));
   const [stories, setStories] = useState<StoryCard[]>([]);
@@ -174,7 +182,7 @@ export function App({ initialJob, initialRoute }: { initialJob?: Job; initialRou
     latestJob.current = next;
     setJob(next);
   };
-  const navigate = (path: string) => { history.pushState({}, "", path); setRoute(parseRoute(path)); window.scrollTo({ top: 0, behavior: "smooth" }); };
+  const navigate = (path: string, options?: NavigateOptions) => { history.pushState({}, "", path); setRoute(parseRoute(path)); performNavigateScroll(options?.scroll); };
   const active = route.story ? stories.find((story) => story.slug === route.story) : undefined;
   return <div className="studio-shell">
     <Sidebar stories={stories} active={route.story} navigate={navigate} />
@@ -1198,6 +1206,23 @@ function LegacyBiblePage({ slug }: { slug: string }) { const [view, setView] = u
 export type BibleTab = "canonical" | "references" | "review" | "cleanup";
 export type BibleQueryState = { tab?: BibleTab; type?: string; q?: string; sort?: string; readiness?: string; entity?: string; section?: "management"; page?: number };
 
+export const BIBLE_SEARCH_DEBOUNCE_MS = 300;
+
+/** Monotonic gate for overlapping list requests: only the most recently issued id is current. */
+export function createRequestGate() {
+  let latest = 0;
+  return {
+    next: () => ++latest,
+    isCurrent: (id: number) => id === latest,
+    invalidate: () => { latest += 1; },
+  };
+}
+
+/** The global duplicate-suggestion strip is hidden while a canonical search is active. */
+export function shouldShowDuplicateStrip(query: string, suggestions?: readonly unknown[]): boolean {
+  return !query.trim() && (suggestions?.length ?? 0) > 0;
+}
+
 export function parseBibleQuery(search: string): BibleQueryState {
   const params = new URLSearchParams(search);
   const tab = params.get("tab");
@@ -1300,10 +1325,10 @@ export function BibleReviewQueue({ view, kind, status, onKind, onStatus, onPage,
   </div>;
 }
 
-function BiblePage({ slug, navigate, locationSearch }: { slug: string; navigate: (path: string) => void; locationSearch: string }) {
+export function BiblePage({ slug, navigate, locationSearch }: { slug: string; navigate: (path: string, options?: NavigateOptions) => void; locationSearch: string }) {
   const initial = parseBibleQuery(locationSearch);
   const locationKey = `${location.pathname}${locationSearch}`;
-  const [view, setView] = useState<any>(); const [detail, setDetail] = useState<any>(); const [editing, setEditing] = useState<any>(); const [error, setError] = useState(""); const [notice, setNotice] = useState(""); const [query, setQuery] = useState(initial.q ?? ""); const deferred = useDeferredValue(query); const [type, setType] = useState(initial.type ?? "all"); const [sort, setSort] = useState(initial.sort ?? "last"); const [page, setPage] = useState(initial.page ?? 1); const [readiness, setReadiness] = useState(initial.readiness ?? "all");
+  const [view, setView] = useState<any>(); const [detail, setDetail] = useState<any>(); const [editing, setEditing] = useState<any>(); const [error, setError] = useState(""); const [notice, setNotice] = useState(""); const [query, setQuery] = useState(initial.q ?? ""); const [debouncedQuery, setDebouncedQuery] = useState((initial.q ?? "").trim()); const [type, setType] = useState(initial.type ?? "all"); const [sort, setSort] = useState(initial.sort ?? "last"); const [page, setPage] = useState(initial.page ?? 1); const [readiness, setReadiness] = useState(initial.readiness ?? "all");
   const [tab, setTab] = useState<BibleTab>(initial.tab ?? "canonical");
   const [health, setHealth] = useState<any>();
   const [openReviewTotal, setOpenReviewTotal] = useState<number>();
@@ -1333,7 +1358,38 @@ function BiblePage({ slug, navigate, locationSearch }: { slug: string; navigate:
     catch (value) { setError(message(value)); }
   };
   const runImpactApply = async () => { if (!impactPreview) return; try { setImpactBusy(true); setError(""); await impactPreview.apply(); setImpactPreview(null); } catch (value) { setError(message(value)); } finally { setImpactBusy(false); } };
-  const load = async () => { const [entities, suppressions, healthSummary, reviewSummary] = await Promise.all([api<any>(`/stories/${slug}/story-bible/entities?page=${page}&pageSize=50&type=${type}&sort=${sort}${readiness === "all" ? "" : `&readiness=${readiness}`}&q=${encodeURIComponent(deferred)}`), api<any[]>(`/stories/${slug}/story-bible/suppressions`), api<any>(`/stories/${slug}/story-bible/health`), api<any>(`/stories/${slug}/story-bible/review?page=1&pageSize=1&status=open`)]); setView(entities); setSuppressedEntities(suppressions); setHealth(healthSummary); setOpenReviewTotal(reviewSummary.openTotal); }; useEffect(() => { void load().catch((value) => setError(message(value))); }, [slug, page, type, sort, readiness, deferred]);
+  const [entitiesLoading, setEntitiesLoading] = useState(true); const [listError, setListError] = useState(""); const [healthError, setHealthError] = useState("");
+  const listGate = useRef(createRequestGate()); const listAbort = useRef<AbortController | undefined>(undefined);
+  useEffect(() => {
+    const timer = setTimeout(() => setDebouncedQuery(query.trim()), BIBLE_SEARCH_DEBOUNCE_MS);
+    return () => clearTimeout(timer);
+  }, [query]);
+  const loadEntities = async () => {
+    const requestId = listGate.current.next();
+    listAbort.current?.abort();
+    const controller = new AbortController();
+    listAbort.current = controller;
+    setEntitiesLoading(true);
+    try {
+      const entities = await api<any>(`/stories/${slug}/story-bible/entities?page=${page}&pageSize=50&type=${type}&sort=${sort}${readiness === "all" ? "" : `&readiness=${readiness}`}&q=${encodeURIComponent(debouncedQuery)}`, { signal: controller.signal });
+      if (!listGate.current.isCurrent(requestId)) return;
+      setView(entities);
+      setListError("");
+    } catch (value) {
+      if (!listGate.current.isCurrent(requestId) || controller.signal.aborted) return;
+      setListError(message(value));
+    } finally {
+      if (listGate.current.isCurrent(requestId)) setEntitiesLoading(false);
+    }
+  };
+  useEffect(() => { void loadEntities(); }, [slug, page, type, sort, readiness, debouncedQuery]);
+  const loadSuppressions = async () => { try { setSuppressedEntities(await api<any[]>(`/stories/${slug}/story-bible/suppressions`)); } catch { /* non-critical: the suppression audit strip simply stays absent/stale */ } };
+  const loadHealth = async () => { try { setHealth(await api<any>(`/stories/${slug}/story-bible/health`)); setHealthError(""); } catch (value) { setHealthError(message(value)); } };
+  const loadReviewSummary = async () => { try { const summary = await api<any>(`/stories/${slug}/story-bible/review?page=1&pageSize=1&status=open`); setOpenReviewTotal(summary.openTotal); } catch { /* non-critical: the review count badge stays unset */ } };
+  useEffect(() => { void loadSuppressions(); void loadHealth(); void loadReviewSummary(); }, [slug]);
+  // Post-mutation refresh: the entity list is awaited (it drives what is on
+  // screen); health/review/suppressions recompute in the background.
+  const load = async () => { await loadEntities(); void loadHealth(); void loadReviewSummary(); void loadSuppressions(); };
   const loadReferences = () => api<any>(`/stories/${slug}/story-bible/references?page=${refsPage}&pageSize=50&type=${refsType}&q=${encodeURIComponent(deferredRefs)}`).then(setRefsView);
   useEffect(() => { if (tab === "references") void loadReferences().catch((value) => setError(message(value))); }, [slug, tab, refsPage, refsType, deferredRefs]);
   const loadAnalysis = async () => { try { setLoadingAnalysis(true); const res = await api<any>(`/stories/${slug}/story-bible/analysis`); setAnalysis(res); setCheckedRecs(defaultCleanupSelection(res.recommendations ?? [])); } catch (value) { setError(message(value)); } finally { setLoadingAnalysis(false); } };
@@ -1359,8 +1415,8 @@ function BiblePage({ slug, navigate, locationSearch }: { slug: string; navigate:
     setManagementEntityId(undefined);
   };
   const navigateToEntity = (id: string, management = false) => {
-    const href = `/stories/${slug}/bible${bibleQueryString({ tab, type, q: deferred, sort, readiness, page, entity: id, section: management ? "management" : undefined })}`;
-    if (`${location.pathname}${location.search}` !== href) navigate(href);
+    const href = `/stories/${slug}/bible${bibleQueryString({ tab, type, q: debouncedQuery, sort, readiness, page, entity: id, section: management ? "management" : undefined })}`;
+    if (`${location.pathname}${location.search}` !== href) navigate(href, { scroll: "preserve" });
     else {
       setRequestedEntityId(id);
       setManagementEntityId(management ? id : undefined);
@@ -1386,8 +1442,8 @@ function BiblePage({ slug, navigate, locationSearch }: { slug: string; navigate:
     const next = parseBibleQuery(locationSearch);
     setTab(next.tab ?? "canonical");
     setType(next.type ?? "all");
-    // Don't clobber in-progress typing; the URL q only reflects the deferred value.
-    if (deferred === query) setQuery(next.q ?? "");
+    // Don't clobber in-progress typing; the URL q only reflects the debounced value.
+    if (debouncedQuery === query.trim()) setQuery(next.q ?? "");
     setSort(next.sort ?? "last");
     setReadiness(next.readiness ?? "all");
     setPage(next.page ?? 1);
@@ -1403,15 +1459,15 @@ function BiblePage({ slug, navigate, locationSearch }: { slug: string; navigate:
   }, [locationKey]);
   useEffect(() => {
     // A changed browser location must first be reconciled into component state.
-    // Also wait for useDeferredValue to catch up after restoring a URL query.
-    if (syncedLocationKey !== locationKey || deferred !== query) return;
-    const desired = `/stories/${slug}/bible${bibleQueryString({ tab, type, q: deferred, sort, readiness, page, entity: requestedEntityId, section: managementEntityId === requestedEntityId ? "management" : undefined })}`;
+    // Also wait for the debounced search value to catch up after restoring a URL query.
+    if (syncedLocationKey !== locationKey || debouncedQuery !== query.trim()) return;
+    const desired = `/stories/${slug}/bible${bibleQueryString({ tab, type, q: debouncedQuery, sort, readiness, page, entity: requestedEntityId, section: managementEntityId === requestedEntityId ? "management" : undefined })}`;
     const current = `${location.pathname}${location.search}`;
     if (desired !== current) {
       history.replaceState({}, "", desired);
       selfWrittenLocationKey.current = desired;
     }
-  }, [slug, tab, type, query, deferred, sort, readiness, page, requestedEntityId, managementEntityId, locationKey, syncedLocationKey]);
+  }, [slug, tab, type, query, debouncedQuery, sort, readiness, page, requestedEntityId, managementEntityId, locationKey, syncedLocationKey]);
   const persistEdit = async (payload: any) => { const response = await put<any>(`/stories/${slug}/story-bible/entities/${editing.id}`, payload); const affected = response.invalidation?.affectedChapters?.length ?? 0; const manual = response.invalidation?.manualNarrationChapters?.length ?? 0; setNotice(affected ? `${affected} chapter${affected === 1 ? "" : "s"} marked affected.${manual ? ` ${manual} manual narration edit${manual === 1 ? " was" : "s were"} preserved for review.` : ""}` : "Protected record saved."); if (response.visualProfileReviewRequired) setNotice("Entity type saved. Existing Visual Profile was preserved; review it before regenerating visual canon."); setEditing(undefined); closeEntitySheet(editing.id); await load(); };
   const save = async () => { try { setError(""); const aliases = editing.aliasDrafts.map((item: any) => item.alias.trim()).filter(Boolean); const aliasNarrationRules = editing.aliasDrafts.filter((item: any) => item.alias.trim()).map((item: any) => ({ alias: item.alias.trim(), behavior: item.behavior, ...(item.behavior === "custom" ? { replacement: item.replacement.trim() } : {}) })); const payload = { canonicalName: editing.canonicalName, type: editing.type, aliases, canonicalNameLocked: editing.canonicalNameLocked, preferredNarrationName: editing.preferredNarrationName.trim() || null, aliasNarrationRules, pronunciation: editing.pronunciation ?? null, notes: editing.notes, status: editing.status }; const base = detail?.entity; if (base && canonicalEntityPatchImpact(base, payload).impactful) { await requestImpact(editing.id, { action: "update", patch: payload }, { title: `Edit ${base.canonicalName}`, diff: canonicalEntityDiff(base, payload), apply: () => persistEdit(payload) }); return; } await persistEdit(payload); } catch (value) { setError(message(value)); } };
   const merge = async (item: any) => { try { const [a, b] = await Promise.all(item.entities.map((entity: any) => api<any>(`/stories/${slug}/story-bible/entities/${entity.id}`))); setMergeReview({ target: a, source: b, reason: item.reason }); } catch (value) { setError(message(value)); } };
@@ -1499,8 +1555,8 @@ function BiblePage({ slug, navigate, locationSearch }: { slug: string; navigate:
       if (requestedEntityId && result.applied.includes(requestedEntityId) && parseBibleQuery(location.search).entity === requestedEntityId) await loadEntityDetail(requestedEntityId, true);
     } catch (value) { setError(message(value)); } finally { setBulkBusy(false); }
   };
-  if (!view) return error ? <LoadFailure error={error} /> : <Loading />;
-  return <section className="page canonical-page"><div className="section-heading"><div><span className="eyebrow">Long-form memory</span><h2>Story Bible</h2><p>Canonical identities, aliases, history, relationships, and traceable evidence.</p></div><div className="production-head-actions"><button className="button" onClick={() => navigate(`/stories/${slug}/names`)}>Names / Localization</button><button className="button" onClick={() => navigate(`/stories/${slug}/continuity`)}>Continuity review</button></div></div>{error && <ErrorBox text={error} />}{notice && <div className="naming-notice">{notice}</div>}{health && <StoryBibleHealthCard health={health} onReviewAll={() => setTab("review")} onOpenCleanup={() => setTab("cleanup")} />}
+  if (!view) return listError ? <section className="page"><ErrorBox text={listError} /><button className="button" onClick={() => void loadEntities()}>Retry</button></section> : <Loading />;
+  return <section className="page canonical-page"><div className="section-heading"><div><span className="eyebrow">Long-form memory</span><h2>Story Bible</h2><p>Canonical identities, aliases, history, relationships, and traceable evidence.</p></div><div className="production-head-actions"><button className="button" onClick={() => navigate(`/stories/${slug}/names`)}>Names / Localization</button><button className="button" onClick={() => navigate(`/stories/${slug}/continuity`)}>Continuity review</button></div></div>{error && <ErrorBox text={error} />}{notice && <div className="naming-notice">{notice}</div>}{health ? <StoryBibleHealthCard health={health} onReviewAll={() => setTab("review")} onOpenCleanup={() => setTab("cleanup")} /> : healthError ? <section className="bible-health" aria-label="Story Bible Health"><div className="bible-health-head"><div><span className="eyebrow">Story Bible Health</span><b>Health summary unavailable</b></div><button className="button" onClick={() => void loadHealth()}>Retry</button></div></section> : null}
     <div className="segmented" style={{ marginBottom: "18px" }}>
       <button className={tab === "canonical" ? "active" : ""} onClick={() => setTab("canonical")}>Canonical entities ({view.total})</button>
       <button className={tab === "references" ? "active" : ""} onClick={() => setTab("references")}>Minor references</button>
@@ -1508,11 +1564,13 @@ function BiblePage({ slug, navigate, locationSearch }: { slug: string; navigate:
       <button className={tab === "cleanup" ? "active" : ""} onClick={() => setTab("cleanup")}>Analyzer &amp; Cleanup</button>
     </div>
     {tab === "canonical" && <>
-      <div className="canonical-toolbar"><input className="search" placeholder="Search canonical names, aliases, narration names, or localized names" value={query} onChange={(event) => { setQuery(event.target.value); setPage(1); }} /><select value={type} onChange={(event) => { setType(event.target.value); setPage(1); }}><option value="all">All entity types</option>{Object.keys(view.counts).map((value) => <option value={value} key={value}>{pretty(value)} · {view.counts[value]}</option>)}</select><select aria-label="Readiness filter" value={readiness} onChange={(event) => { setReadiness(event.target.value); setPage(1); }}><option value="all">Any readiness</option>{READINESS_FILTERS.map((filter) => <option key={filter.value} value={filter.value}>{filter.label}</option>)}</select><select value={sort} onChange={(event) => setSort(event.target.value)}><option value="last">Most recently seen</option><option value="first">First appearance</option><option value="name">Canonical name</option></select></div>
-      {view.duplicateSuggestions?.length > 0 && <div className="duplicate-strip"><div><span className="eyebrow">Possible duplicates</span><b>{view.duplicateSuggestions.length} suggestions need approval</b></div>{view.duplicateSuggestions.slice(0, 3).map((item: any) => <article key={item.id}><div><b>{item.entities[0].name}</b><span>↔</span><b>{item.entities[1].name}</b></div><small>{Math.round(item.confidence * 100)}% · {item.reason} · Ch. {item.supportingChapters.join(", ")}</small><button onClick={() => merge(item)}>Compare & merge…</button></article>)}</div>}
+      {listError && <div className="naming-notice">Entity list failed to load: {listError} <button className="inline-action-link" onClick={() => void loadEntities()}>Retry</button></div>}
+      <div className="canonical-toolbar"><input className="search" placeholder="Search canonical names, aliases, narration names, or localized names" value={query} onChange={(event) => { setQuery(event.target.value); setPage(1); }} /><select value={type} onChange={(event) => { setType(event.target.value); setPage(1); }}><option value="all">All entity types</option>{Object.keys(view.counts).map((value) => <option value={value} key={value}>{pretty(value)} · {view.counts[value]}</option>)}</select><select aria-label="Readiness filter" value={readiness} onChange={(event) => { setReadiness(event.target.value); setPage(1); }}><option value="all">Any readiness</option>{READINESS_FILTERS.map((filter) => <option key={filter.value} value={filter.value}>{filter.label}</option>)}</select><select value={sort} onChange={(event) => { setSort(event.target.value); setPage(1); }}><option value="last">Most recently seen</option><option value="first">First appearance</option><option value="name">Canonical name</option></select></div>
+      {query.trim() && (entitiesLoading || debouncedQuery !== query.trim()) && <p className="searching-indicator" role="status">Searching…</p>}
+      {shouldShowDuplicateStrip(debouncedQuery, view.duplicateSuggestions) && <div className="duplicate-strip"><div><span className="eyebrow">Possible duplicates</span><b>{view.duplicateSuggestions.length} suggestions need approval</b></div>{view.duplicateSuggestions.slice(0, 3).map((item: any) => <article key={item.id}><div><b>{item.entities[0].name}</b><span>↔</span><b>{item.entities[1].name}</b></div><small>{Math.round(item.confidence * 100)}% · {item.reason} · Ch. {item.supportingChapters.join(", ")}</small><button onClick={() => merge(item)}>Compare & merge…</button></article>)}</div>}
       <Pagination position="top" page={view.page} pages={view.pages} total={view.total} itemLabel="entities" onPrevious={() => setPage(page - 1)} onNext={() => setPage(page + 1)} />
       {selected.length > 0 && <div className="bulk-toolbar"><b>{selected.length} selected</b><select aria-label="Bulk action" value={bulkAction} onChange={(event) => { setBulkAction(event.target.value as typeof bulkAction); setBulkValue(event.target.value === "set-visual-policy" ? "prompt" : "character"); }}><option value="lock">Lock canonical names</option><option value="unlock">Unlock canonical names</option><option value="set-type">Set entity type</option><option value="set-visual-policy">Set Visual Profile policy</option></select>{bulkAction === "set-type" && <select aria-label="Bulk entity type" value={bulkValue} onChange={(event) => setBulkValue(event.target.value)}>{["character", "location", "organization", "ability", "item", "concept", "other"].map((value) => <option key={value} value={value}>{pretty(value)}</option>)}</select>}{bulkAction === "set-visual-policy" && <select aria-label="Bulk Visual Profile policy" value={bulkValue} onChange={(event) => setBulkValue(event.target.value)}><option value="prompt">Prompt for a Visual Profile</option><option value="skip">Skip Visual Profile</option></select>}<button className="button primary" disabled={bulkBusy} onClick={reviewBulk}>Review &amp; apply</button><button className="button" onClick={() => setSelected([])}>Clear</button></div>}
-    <div className="entity-table"><div className="entity-row heading selectable"><span><input type="checkbox" aria-label="Select all on this page" checked={view.items.length > 0 && pageSelectionState(view.items.map((entity: any) => entity.id), selected) === "all"} ref={(input) => { if (input) input.indeterminate = pageSelectionState(view.items.map((entity: any) => entity.id), selected) === "some"; }} onChange={(event) => { const ids = view.items.map((entity: any) => entity.id); setSelected(event.target.checked ? [...new Set([...selected, ...ids])] : selected.filter((id) => !ids.includes(id))); }} /></span><span>Canonical entity</span><span>Type</span><span>Appearances</span><span>Origin</span><span>Issues</span><span>Readiness</span></div>{view.items.map((entity: any) => <div className="entity-row selectable" key={entity.id} onClick={() => navigateToEntity(entity.id)}><span onClick={(event) => event.stopPropagation()}><input type="checkbox" aria-label={`Select ${entity.canonicalName}`} checked={selected.includes(entity.id)} onChange={(event) => setSelected(toggleEntitySelection(selected, entity.id, event.target.checked))} /></span><span><b>{entity.canonicalName}</b>{view.duplicateSuggestions?.some((item: any) => item.entityIds.includes(entity.id)) && <i className="lock-dot">Possible duplicate</i>}<small>{entity.aliases.length ? entity.aliases.join(" · ") : entity.originalName}</small></span><span>{pretty(entity.type)}</span><span className="mono">{entity.firstAppearance}—{entity.lastKnownAppearance}</span><span>{entity.canonicalNameLocked && <i className="lock-dot">Locked</i>} {pretty(entity.origin)}</span><span className={entity.conflictCount ? "issue-count" : ""}>{entity.conflictCount || "—"}</span><span><ReadinessStrip rows={entity.readiness} /></span></div>)}</div>{!view.items.length && <Empty title="No matching canonical entities" text="Run Story Bible extraction or change the filters." />}
+    <div className="entity-table"><div className="entity-row heading selectable"><span><input type="checkbox" aria-label="Select all on this page" checked={view.items.length > 0 && pageSelectionState(view.items.map((entity: any) => entity.id), selected) === "all"} ref={(input) => { if (input) input.indeterminate = pageSelectionState(view.items.map((entity: any) => entity.id), selected) === "some"; }} onChange={(event) => { const ids = view.items.map((entity: any) => entity.id); setSelected(event.target.checked ? [...new Set([...selected, ...ids])] : selected.filter((id) => !ids.includes(id))); }} /></span><span>Canonical entity</span><span>Type</span><span>Appearances</span><span>Origin</span><span>Issues</span><span>Readiness</span></div>{view.items.map((entity: any) => <div className="entity-row selectable" key={entity.id} onClick={() => navigateToEntity(entity.id)}><span onClick={(event) => event.stopPropagation()}><input type="checkbox" aria-label={`Select ${entity.canonicalName}`} checked={selected.includes(entity.id)} onChange={(event) => setSelected(toggleEntitySelection(selected, entity.id, event.target.checked))} /></span><span><b>{entity.canonicalName}</b>{view.duplicateSuggestions?.some((item: any) => item.entityIds.includes(entity.id)) && <i className="lock-dot">Possible duplicate</i>}<small>{entity.aliases.length ? entity.aliases.join(" · ") : entity.originalName}</small></span><span>{pretty(entity.type)}</span><span className="mono">{entity.firstAppearance}—{entity.lastKnownAppearance}</span><span>{entity.canonicalNameLocked && <i className="lock-dot">Locked</i>} {pretty(entity.origin)}</span><span className={entity.conflictCount ? "issue-count" : ""}>{entity.conflictCount || "—"}</span><span><ReadinessStrip rows={entity.readiness} /></span></div>)}</div>{!view.items.length && !entitiesLoading && <Empty title="No matching canonical entities" text="Run Story Bible extraction or change the filters." />}
       <Pagination position="bottom" page={view.page} pages={view.pages} total={view.total} itemLabel="entities" onPrevious={() => setPage(page - 1)} onNext={() => setPage(page + 1)} />
     </>}
     {tab === "references" && <>

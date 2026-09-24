@@ -11,7 +11,7 @@ export async function api<T>(path: string, options?: RequestInit): Promise<T> {
   const binary = options?.body instanceof ArrayBuffer || (typeof Blob !== "undefined" && options?.body instanceof Blob);
   let response: Response;
   try { response = await fetch(`/api${path}`, { ...options, headers: { ...(binary ? {} : { "content-type": "application/json" }), ...options?.headers } }); }
-  catch (cause) { throw new ApiError("Cannot reach the local Story Studio service. Confirm `npm run web` is running, then try again.", undefined, undefined); }
+  catch (cause) { if ((cause as { name?: string } | undefined)?.name === "AbortError") throw cause; throw new ApiError("Cannot reach the local Story Studio service. Confirm `npm run web` is running, then try again.", undefined, undefined); }
   const value = await response.json().catch(() => ({}));
   if (!response.ok) throw new ApiError(typeof value.error === "string" ? value.error : `Request failed (${response.status})`, value.diagnostic, parseValidationIssues(value.validation), typeof value.code === "string" ? value.code : undefined);
   return value as T;
