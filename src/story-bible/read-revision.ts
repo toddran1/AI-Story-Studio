@@ -20,9 +20,15 @@ export function storyBibleReadRevisionPath(root: string, slug: string): string {
   return join(storyPaths(root, slug, 1).story, "story-bible-read-revision.json");
 }
 
-/** Missing or unreadable revision files share a stable pre-mutation fingerprint. */
+/** Missing or invalid revision files share a stable pre-mutation fingerprint. */
 export async function getStoryBibleReadRevision(root: string, slug: string): Promise<string> {
-  const raw = await readJsonIfExists(storyBibleReadRevisionPath(root, slug));
+  let raw: unknown;
+  try {
+    raw = await readJsonIfExists(storyBibleReadRevisionPath(root, slug));
+  } catch (error) {
+    if (error instanceof SyntaxError) return "missing";
+    throw error;
+  }
   if (!raw) return "missing";
   const token = tokenReadRevisionSchema.safeParse(raw);
   if (token.success) return token.data.revision;

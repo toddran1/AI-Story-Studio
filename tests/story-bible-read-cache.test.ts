@@ -1,4 +1,4 @@
-import { mkdtemp } from "node:fs/promises";
+import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -178,6 +178,30 @@ describe("story bible read revision", () => {
     const stored = await readJsonIfExists(path);
     expect(stored).toMatchObject({ version: 2, revision });
     expect(await getStoryBibleReadRevision(root, story.slug)).toBe(revision);
+  });
+
+  it("treats malformed JSON as missing and self-heals on the next bump", async () => {
+    const { root, story } = await storyFixture();
+    const path = storyBibleReadRevisionPath(root, story.slug);
+    await writeFile(path, "{ definitely-not-valid-json", "utf8");
+    expect(await getStoryBibleReadRevision(root, story.slug)).toBe("missing");
+
+    const revision = await bumpStoryBibleReadRevision(root, story.slug);
+    expect(revision).toMatch(/^[0-9a-f-]{36}$/i);
+    expect(await readJsonIfExists(path)).toMatchObject({ version: 2, revision });
+    expect(await getStoryBibleReadRevision(root, story.slug)).toBe(revision);
+  });
+
+  it("treats valid JSON with an invalid revision schema as missing", async () => {
+    const { root, story } = await storyFixture();
+    await atomicWriteJson(storyBibleReadRevisionPath(root, story.slug), { version: 99, revision: "bad" });
+    expect(await getStoryBibleReadRevision(root, story.slug)).toBe("missing");
+  });
+
+  it("propagates non-JSON filesystem read errors", async () => {
+    const { root, story } = await storyFixture();
+    await mkdir(storyBibleReadRevisionPath(root, story.slug));
+    await expect(getStoryBibleReadRevision(root, story.slug)).rejects.toMatchObject({ code: "EISDIR" });
   });
 
   it("generates distinct tokens for concurrent revision bumps", async () => {
