@@ -12,6 +12,8 @@ import { bumpStoryBibleReadRevision, getStoryBibleReadRevision } from "../src/st
 import { computeStaleExtractionChapters } from "../src/story-bible/rebuild.js";
 import { atomicWriteJson } from "../src/storage/atomic-write.js";
 import { storyPaths } from "../src/storage/paths.js";
+import { readJsonIfExists } from "../src/storage/story-files.js";
+import { storyBibleReadRevisionPath } from "../src/story-bible/read-revision.js";
 
 const env = loadEnvironment({});
 const id = (hex: string) => `ent_${hex.padEnd(24, "0")}`;
@@ -113,16 +115,19 @@ describe("read cache generations", () => {
 });
 
 describe("story bible read revision", () => {
-  it("defaults to 0, advances on bump, and a changed revision forces one rebuild", async () => {
+  it("uses a stable missing fingerprint and token bumps force one rebuild", async () => {
     const { root, story, paths } = await storyFixture();
     await seedBible(paths, [entity("f1")]);
-    expect(await getStoryBibleReadRevision(root, story.slug)).toBe(0);
+    expect(await getStoryBibleReadRevision(root, story.slug)).toBe("missing");
+    expect(await getStoryBibleReadRevision(root, story.slug)).toBe("missing");
+    expect(await readJsonIfExists(storyBibleReadRevisionPath(root, story.slug))).toBeUndefined();
     await getStoryBibleHealth(root, story.slug);
     expect(healthBuilds(root, story.slug)).toBe(1);
     await getStoryBibleHealth(root, story.slug); // unchanged revision: warm hit
     expect(healthBuilds(root, story.slug)).toBe(1);
-    expect(await bumpStoryBibleReadRevision(root, story.slug)).toBe(1);
-    expect(await getStoryBibleReadRevision(root, story.slug)).toBe(1);
+    const revision = await bumpStoryBibleReadRevision(root, story.slug);
+    expect(revision).toMatch(/^[0-9a-f-]{36}$/i);
+    expect(await getStoryBibleReadRevision(root, story.slug)).toBe(revision);
     await getStoryBibleHealth(root, story.slug);
     expect(healthBuilds(root, story.slug)).toBe(2);
     await getStoryBibleHealth(root, story.slug);
@@ -135,9 +140,54 @@ describe("story bible read revision", () => {
     await getStoryBibleHealth(root, story.slug);
     expect(healthBuilds(root, story.slug)).toBe(1);
     await invalidateStoryBibleDerivedReads(root, story.slug);
-    expect(await getStoryBibleReadRevision(root, story.slug)).toBe(1);
+    expect(await getStoryBibleReadRevision(root, story.slug)).toMatch(/^[0-9a-f-]{36}$/i);
     await getStoryBibleHealth(root, story.slug);
     expect(healthBuilds(root, story.slug)).toBe(2);
+  });
+
+  it("invalidates cached values before a delayed revision write can finish", async () => {
+    const { root, story } = await storyFixture();
+    let current = "A";
+    const read = () => cachedStoryRead("story-bible-delayed-revision", root, story.slug, async () => "same-input-stamp", async () => current);
+    expect((await read()).value).toBe("A");
+    current = "B";
+    const writeStarted = deferred<void>();
+    const finishWrite = deferred<void>();
+    const invalidation = invalidateStoryBibleDerivedReads(root, story.slug, async () => {
+      writeStarted.resolve();
+      await finishWrite.promise;
+      return "new-revision";
+    });
+    await writeStarted.promise;
+
+    const duringWrite = await read();
+    expect(duringWrite.value).toBe("B");
+    expect(duringWrite.cacheHit).toBe(false);
+
+    finishWrite.resolve();
+    await invalidation;
+  });
+
+  it("reads legacy numeric revisions and upgrades them to opaque tokens on the next bump", async () => {
+    const { root, story } = await storyFixture();
+    const path = storyBibleReadRevisionPath(root, story.slug);
+    await atomicWriteJson(path, { version: 1, revision: 41, updatedAt: new Date(0).toISOString() });
+    expect(await getStoryBibleReadRevision(root, story.slug)).toBe("legacy:41");
+
+    const revision = await bumpStoryBibleReadRevision(root, story.slug);
+    const stored = await readJsonIfExists(path);
+    expect(stored).toMatchObject({ version: 2, revision });
+    expect(await getStoryBibleReadRevision(root, story.slug)).toBe(revision);
+  });
+
+  it("generates distinct tokens for concurrent revision bumps", async () => {
+    const { root, story } = await storyFixture();
+    const [first, second] = await Promise.all([
+      bumpStoryBibleReadRevision(root, story.slug),
+      bumpStoryBibleReadRevision(root, story.slug),
+    ]);
+    expect(first).not.toBe(second);
+    expect(await getStoryBibleReadRevision(root, story.slug)).toMatch(/^[0-9a-f-]{36}$/i);
   });
 });
 

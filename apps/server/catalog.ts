@@ -326,14 +326,20 @@ export function invalidateStoryBibleReadCache(root: string, slug: string) {
 }
 
 /**
- * Combined invalidation for Story Bible-derived reads: bumps the on-disk read
- * revision (so cheap fingerprints change) AND drops the in-memory caches.
+ * Combined invalidation for Story Bible-derived reads: synchronously drops
+ * in-memory caches before writing a new on-disk revision token (so cheap
+ * fingerprints change). The memory-first order closes the post-mutation read
+ * window while the atomic revision write is pending.
  * Every mutation path that previously called invalidateStoryBibleReadCache
  * must call this instead so no caller can forget half of the protocol.
  */
-export async function invalidateStoryBibleDerivedReads(root: string, slug: string) {
-  await bumpStoryBibleReadRevision(root, slug);
+export async function invalidateStoryBibleDerivedReads(
+  root: string,
+  slug: string,
+  writeRevision: typeof bumpStoryBibleReadRevision = bumpStoryBibleReadRevision,
+) {
   invalidateStoryReadCache(root, slug);
+  await writeRevision(root, slug);
 }
 
 export async function getCanonicalEntitiesPage(root: string, slug: string, options: { page: number; pageSize: number; type?: string; query?: string; sort?: string; readiness?: EntityReadinessFilter }) {
