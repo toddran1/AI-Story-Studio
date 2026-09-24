@@ -76,7 +76,7 @@ describe("pronunciation persistence and production boundary", () => {
     const tts = new MockTTS(), pipeline = new ChapterPipeline(new LLMRouter(new Map([["gemini", gemini], ["openai", openai]])), tts, new CopyingAudioProcessor());
     await updateCanonicalEntity(root, story.slug, bible, entity.id, { pronunciation: { mode: "custom", customPronunciation: "Jyang Yweh", source: "manual" } });
     await pipeline.run({ root, story, chapter: 1, inputPath: input });
-    expect(tts.requests[0]?.text).toContain("Jiang Yue activates its Worry-Free E-X-P feature.");
+    expect(tts.requests[0]?.text).toContain("Jiang Yue activates its Worry-Free E X P feature.");
     expect(tts.requests[0]?.pronunciation?.[0]?.surfaceText).toBe("Jiang Yue");
   });
   it("preserves manual/locked pronunciation through stale reconstruction and identity reconciliation", async () => {

@@ -46,7 +46,7 @@ describe("Fish TTS", () => {
     await provider.synthesize({ text: "**Important:** *whisper this.* [sad] 2 * 2", model: "s2.1-pro", speed: 1, format: "mp3", sampleRate: 44100, bitrate: 128, normalize: true, maxCharsPerRequest: 500 });
     const body = JSON.parse(String((fetcher.mock.calls[0]?.[1] as RequestInit).body));
     expect(body.text).toBe("Important: whisper this. [sad] 2 * 2");
-    expect(provider.inputNormalizationVersion).toBe("fish-speech-normalization-v5");
+    expect(provider.inputNormalizationVersion).toBe("fish-speech-normalization-v6");
   });
 
   it("does not turn profanity into the literal word bleep inside Fish", async () => {
@@ -137,9 +137,22 @@ describe("Fish TTS", () => {
     expect(body.text).toBe("[sad] Goblin Undead Information Extraction Complete [pause]");
   });
 
+  it("sends structured panels as safe speech while keeping approved S2 cues", async () => {
+    const posted: string[] = [];
+    const fetcher = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      posted.push(JSON.parse(String(init?.body)).text);
+      return new Response(new Uint8Array([1]), { headers: { "content-type": "audio/mpeg" } });
+    });
+    const provider = new FishAudioProvider("test-key", fetcher as typeof fetch);
+    const result = await provider.synthesize({ text: "[sad] 【Level: Level 50 (EXP/)】 [Level 50] [pause]", model: "s2-pro", speed: 1, format: "mp3", sampleRate: 44100, bitrate: 128, normalize: true, maxCharsPerRequest: 500 });
+    expect(posted[0]).toBe("[sad] Level: Level fifty. E X P. Level 50 [pause]");
+    expect(result.segmentTexts).toEqual(posted);
+  });
+
   it("normalizes fiction abbreviations, titles, values, and units for speech", () => {
     const script = normalizeFishSpeechText("**Dr. Lin** reached Lv. 12 with 80% HP at 8:00 PM. The NPC gained 5 EXP in 30°C heat.");
-    expect(script).toBe("Doctor Lin reached Level 12 with 80 percent H.P. at 8 o'clock P.M. The N.P.C. gained 5 E.X.P. in 30 degrees Celsius heat.");
+    expect(script).toBe("Doctor Lin reached Level 12 with 80 percent H P at 8 o'clock P.M. The N P C gained 5 E X P in 30 degrees Celsius heat.");
+    expect(normalizeFishSpeechText("EXP/ EXP / EXP/100 EXP / 100")).toBe("E X P E X P E X P: one hundred E X P: one hundred");
   });
 
   it("removes speech-hostile markup, links, and emoji while preserving Fish cues and ambiguous names", () => {
@@ -152,7 +165,7 @@ describe("Fish TTS", () => {
     const fetcher = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => new Response(new Uint8Array([1]), { headers: { "content-type": "audio/mpeg" } }));
     const provider = new FishAudioProvider("test-key", fetcher as typeof fetch);
     await provider.synthesize({ text: narration, model: "s2.1-pro", speed: 1, format: "mp3", sampleRate: 44100, bitrate: 128, normalize: true, maxCharsPerRequest: 500 });
-    expect(JSON.parse(String((fetcher.mock.calls[0]?.[1] as RequestInit).body)).text).toBe("Captain Rao has 50 percent H.P.");
+    expect(JSON.parse(String((fetcher.mock.calls[0]?.[1] as RequestInit).body)).text).toBe("Captain Rao has 50 percent H P.");
     expect(narration).toBe("Capt. Rao has 50% HP.");
   });
 
@@ -178,5 +191,18 @@ describe("Fish TTS", () => {
     expect(result.segments.length).toBeGreaterThan(1);
     expect(result.segmentTexts).toEqual(posted);
     expect(result.segmentTexts).toHaveLength(result.segments.length);
+  });
+
+  it("caps S2 chunks at a preferred size even when the configured limit is larger", async () => {
+    const posted: string[] = [];
+    const fetcher = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      posted.push(JSON.parse(String(init?.body)).text);
+      return new Response(new Uint8Array([1]), { headers: { "content-type": "audio/mpeg" } });
+    });
+    const provider = new FishAudioProvider("test-key", fetcher as typeof fetch);
+    await provider.synthesize({ text: `${"A coherent sentence with several words. ".repeat(20)}\n\n${"Another paragraph stays together. ".repeat(20)}`, model: "s2-pro", speed: 1, format: "mp3", sampleRate: 44100, bitrate: 128, normalize: true, maxCharsPerRequest: 1750 });
+    expect(posted.length).toBeGreaterThan(1);
+    expect(posted.every((chunk) => chunk.length <= 900)).toBe(true);
+    expect(posted.some((chunk) => chunk.includes("Another paragraph stays together."))).toBe(true);
   });
 });

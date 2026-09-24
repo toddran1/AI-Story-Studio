@@ -85,6 +85,31 @@ describe("tts quality guard verification", () => {
     expect(inner.calls).toHaveLength(1);
   });
 
+  it("flags a short inserted phrase and a contiguous hallucination inside longer speech", async () => {
+    const short = compareSpokenText("He understood how difficult life was.", say("He understood how difficult life was welcome everybody."));
+    expect(short.issues.map((issue) => issue.type)).toContain("unexpected_speech");
+    const expected = `${"The crystals rang out and everyone froze. ".repeat(12)}At that instant they moved.`;
+    const heard = `${"The crystals rang out and everyone froze. ".repeat(6)}dancing through the silver moon tonight ${"The crystals rang out and everyone froze. ".repeat(6)}At that instant they moved.`;
+    const comparison = compareSpokenText(expected, say(heard));
+    expect(comparison.issues.map((issue) => issue.type)).toContain("unexpected_speech");
+    expect(comparison.issues.find((issue) => issue.type === "unexpected_speech")?.detail).toContain("contiguous run");
+  });
+
+  it("compares against the final normalized segment text and retries only hallucinated audio", async () => {
+    const spoken = "Damage Transfer. Passive. Level Max.";
+    const clean = "The second segment stays clean.";
+    const inner = new ScriptedTTS((req, call) => {
+      if (call === 1) return { audio: new Uint8Array([...bytes("bad"), ...bytes("good")]), segments: [bytes("bad"), bytes("good")], segmentTexts: [spoken, clean], providerRequests: 2 };
+      return singleSegment(req.text, "fixed");
+    });
+    const transcriber = new FakeTranscriber((audio) => say(String.fromCharCode(...audio.slice(0, 3)) === "bad" ? `${spoken} dancing through the silver moon tonight` : String.fromCharCode(...audio.slice(0, 4)) === "good" ? clean : spoken));
+    const result = await guard(inner, transcriber).synthesize(request({ text: "【Damage Transfer (Passive) (Level Max)】" }));
+    expect(inner.calls).toHaveLength(2);
+    expect(inner.calls[1]?.text).toBe(spoken);
+    expect(result.quality?.segments.map((segment) => segment.status)).toEqual(["verified", "verified"]);
+    expect(result.segments[1]).toEqual(bytes("good"));
+  });
+
   it("retries gibberish output and succeeds on a later attempt", async () => {
     const text = "The rain stopped outside the station and Mara opened the gate.";
     let attemptAudio = "a";

@@ -32,8 +32,8 @@ describe("provider-neutral pronunciation foundation", () => {
     const written = 'Jiang Yue activates its "Worry-Free EXP" feature.';
     const spoken = normalizeSpeechText(written, "en-US").text;
     const occurrences = resolvePronunciations(spoken, [entity]);
-    expect(spoken).toBe("Jiang Yue activates its Worry-Free E-X-P feature.");
-    expect(adaptPronunciationText(spoken, occurrences, { phoneticText: true })).toBe("Jyang Yweh activates its Worry-Free E-X-P feature.");
+    expect(spoken).toBe("Jiang Yue activates its Worry-Free E X P feature.");
+    expect(adaptPronunciationText(spoken, occurrences, { phoneticText: true })).toBe("Jyang Yweh activates its Worry-Free E X P feature.");
     expect(written).toContain('"Worry-Free EXP"');
   });
   it.each(["character", "location", "organization", "ability", "item", "concept"] as const)("supports %s identities", type => {

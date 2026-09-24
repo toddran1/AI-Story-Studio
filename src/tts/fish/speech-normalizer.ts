@@ -1,4 +1,5 @@
 import { disambiguateFishS2Brackets } from "./control-cues.js";
+import { normalizeStructuredSpeechBlock, normalizeSystemMetadataText, speakInteger } from "../speech-normalization.js";
 
 const TITLE_REPLACEMENTS: ReadonlyArray<readonly [RegExp, string]> = [
   [/\bMr\.(?=\s+\p{L})/gu, "Mister"],
@@ -25,11 +26,11 @@ const INITIALISM_REPLACEMENTS: ReadonlyArray<readonly [RegExp, string]> = [
   [/\bPDF\b/g, "P.D.F."],
   [/\bCEO\b/g, "C.E.O."],
   [/\bVIP\b/g, "V.I.P."],
-  [/\bEXP\b/g, "E.X.P."],
-  [/\bXP\b/g, "X.P."],
-  [/\bHP\b/g, "H.P."],
-  [/\bMP\b/g, "M.P."],
-  [/\bNPC\b/g, "N.P.C."],
+  [/\bEXP\b/g, "E X P"],
+  [/\bXP\b/g, "X P"],
+  [/\bHP\b/g, "H P"],
+  [/\bMP\b/g, "M P"],
+  [/\bNPC\b/g, "N P C"],
   [/\bRPG\b/g, "R.P.G."],
   [/\bMMORPG\b/g, "M.M.O.R.P.G."],
   [/\bVR\b/g, "V.R."],
@@ -84,7 +85,11 @@ function replaceAll(text: string, replacements: ReadonlyArray<readonly [RegExp, 
  * fictional terminology are not silently changed.
  */
 export function normalizeFishSpeechText(text: string, model?: string): string {
-  const withoutMarkup = disambiguateFishS2Brackets(stripFishMarkdownEmphasis(stripEmojiForSpeech(stripMarkdownForSpeech(text))), model);
+  const structured = text.replace(/【[^【】\n]{1,500}】/gu, normalizeStructuredSpeechBlock)
+    .replace(/(?<![\p{L}\p{N}])([A-Z][\p{L}\p{N} -]{1,80})\s+\((Passive|Active)\)\s+\((Level [^()\n]{1,30}|Rank [^()\n]{1,30})\)/gu, normalizeSystemMetadataText);
+  const withoutMarkup = disambiguateFishS2Brackets(stripFishMarkdownEmphasis(stripEmojiForSpeech(stripMarkdownForSpeech(structured))), model)
+    .replace(/(?<![\p{L}\p{N}])(EXP|XP|HP|MP)\s*\/\s*(\d{1,6})?(?![\p{L}\p{N}])/giu, (_match, label: string, number?: string) =>
+      number ? `${label.toUpperCase()}: ${speakInteger(Number(number))}` : label.toUpperCase());
   const normalizedValues = withoutMarkup
     .replace(/\$(\d+(?:,\d{3})*(?:\.\d+)?)([KMBT])\b/gi, (_match, amount: string, suffix: string) => {
       const scale = ({ K: "thousand", M: "million", B: "billion", T: "trillion" } as const)[suffix.toUpperCase() as "K" | "M" | "B" | "T"];

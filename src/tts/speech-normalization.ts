@@ -2,19 +2,19 @@ import { fingerprint } from "../utils/hash.js";
 import { scanVocalizations, type VocalizationRenderStrategy } from "./vocalizations.js";
 import type { TTSProvider } from "./provider.js";
 
-export const SPEECH_NORMALIZATION_VERSION = "speech-normalization-v3";
+export const SPEECH_NORMALIZATION_VERSION = "speech-normalization-v4";
 export type SpeechNormalizationMode = "automatic" | "enabled" | "disabled";
 export type TimeSpeechMode = "natural_12h" | "natural_24h" | "preserve";
 export type VocalizationMode = "automatic" | "preserve" | "disabled";
 export type VocalizationFallback = "safe_normalize" | "omit_unsupported" | "preserve";
 export type VocalizationSettings = { mode?: VocalizationMode; fallback?: VocalizationFallback };
 export type SpeechNormalizationSettings = { mode?: SpeechNormalizationMode; timeSpeechMode?: TimeSpeechMode; speechAbbreviations?: Record<string, string>; vocalizations?: VocalizationSettings };
-export type SpeechTransformation = { kind: "time" | "percentage" | "currency" | "measurement" | "number" | "chapter" | "quoted-label" | "abbreviation" | "vocalization"; written: string; spoken: string; start: number; end: number };
+export type SpeechTransformation = { kind: "time" | "percentage" | "currency" | "measurement" | "number" | "chapter" | "quoted-label" | "abbreviation" | "vocalization" | "structured-block"; written: string; spoken: string; start: number; end: number };
 export type SpeechNormalizationResult = { text: string; transformations: SpeechTransformation[]; warnings: string[] };
 
 const small = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen", "eighteen", "nineteen"];
 const tens = ["", "", "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety"];
-const defaultAbbreviations: Record<string, string> = { EXP: "E-X-P", XP: "X-P", HP: "H-P", MP: "M-P", NPC: "N-P-C" };
+const defaultAbbreviations: Record<string, string> = { EXP: "E X P", XP: "X P", HP: "H P", MP: "M P", NPC: "N P C" };
 const labelNouns = "feature|skill|ability|class|talent|dungeon|item|system(?:\u0020term)?|title|rank|job|profession|technique|artifact|weapon|spell";
 
 /** A conservative, provider-neutral spoken form. It intentionally leaves ambiguous IDs,
@@ -36,12 +36,23 @@ export function normalizeSpeechText(text: string, language: string, settings: Sp
   // Quotation marks around a named game/story term can make some TTS engines
   // insert a dialogue-sized pause. Only remove them when the surrounding grammar
   // clearly identifies the quote as a label within an ongoing noun phrase.
+  replace("structured-block", /【([^【】\n]{1,500})】/gu, (written) => normalizeStructuredSpeechBlock(written));
+  replace("structured-block", /(?<![\p{L}\p{N}])([A-Z][\p{L}\p{N} -]{1,80})\s+\((Passive|Active)\)\s+\((Level [^()\n]{1,30}|Rank [^()\n]{1,30})\)/gu,
+    (written) => normalizeSystemMetadataText(written));
   replace("quoted-label", new RegExp(`\\b((?:the|an?|his|her|its|their)\\s+)"([^"\\n]{1,120})"\\s+(${labelNouns})\\b`, "giu"), written => {
     const match = /^(.*)"([^"\n]+)"\s+(.+)$/u.exec(written);
     return match ? `${match[1]}${match[2]} ${match[3]}` : undefined;
   });
   const configuredAbbreviations = canonicalAbbreviations(settings.speechAbbreviations);
   const abbreviations = { ...defaultAbbreviations, ...configuredAbbreviations };
+  // Consume the slash together with the stat label before abbreviation expansion.
+  // A bare slash is malformed UI punctuation; a numeric suffix is a value.
+  replace("abbreviation", /(?<![\p{L}\p{N}])(EXP|XP|HP|MP)\s*\/\s*(\d{1,6})?(?![\p{L}\p{N}])/giu, (written) => {
+    const match = /^(EXP|XP|HP|MP)\s*\/\s*(\d{1,6})?$/iu.exec(written);
+    if (!match) return undefined;
+    const spoken = abbreviations[match[1]!.toUpperCase()] ?? match[1]!.split("").join(" ");
+    return match[2] ? `${spoken}: ${speakInteger(Number(match[2]))}` : spoken;
+  });
   for (const [written, spoken] of Object.entries(abbreviations).sort(([left], [right]) => right.length - left.length || left.localeCompare(right))) {
     if (!written || !spoken.trim()) continue;
     replace("abbreviation", new RegExp(`(?<![\\p{L}\\p{N}])${escapeRegExp(written)}(?![\\p{L}\\p{N}])`, "giu"), () => spoken.trim());
@@ -64,6 +75,24 @@ export function normalizeSpeechText(text: string, language: string, settings: Sp
   replace("number", /(?<![\p{L}\p{N}])\d{1,3}(?:,\d{3})+(?![\p{L}\p{N}])/gu, written => speakInteger(Number(written.replaceAll(",", ""))));
   output = applyVocalizations(output, settings, vocalizationRendering, transformations);
   return { text: output, transformations, warnings: [] };
+}
+
+/** Converts bounded game UI panels into speech without touching prose parentheses. */
+export function normalizeStructuredSpeechBlock(written: string): string {
+  const content = written.slice(1, -1).trim();
+  if (!content) return written;
+  return content
+    .replace(/\s*\(([^()]{1,80})\)/gu, (_match, label: string) => `. ${label.trim()}`)
+    .replace(/(?<![\p{L}\p{N}])(EXP|XP|HP|MP)\s*\/\s*(\d{1,6})(?![\p{L}\p{N}])/giu,
+      (_match, label: string, number: string) => `${label.toUpperCase()}: ${speakInteger(Number(number))}`)
+    .replace(/(?<![\p{L}\p{N}])(EXP|XP|HP|MP)\s*\/\s*(?=\.|$)/giu, "$1")
+    .replace(/(?<![\p{L}\p{N}])\d{1,6}(?![\p{L}\p{N}])/gu, (number) => speakInteger(Number(number)))
+    .replace(/\s*\.\s*/gu, ". ")
+    .trim().replace(/[\s.]+$/u, "") + ".";
+}
+
+export function normalizeSystemMetadataText(written: string): string {
+  return written.replace(/\s*\(([^()]+)\)/gu, (_match, label: string) => `. ${label.trim()}`) + ".";
 }
 
 function applyVocalizations(text: string, settings: SpeechNormalizationSettings, rendering: VocalizationRenderStrategy | undefined, transformations: SpeechTransformation[]): string {

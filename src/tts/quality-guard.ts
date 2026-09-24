@@ -95,6 +95,8 @@ export type QualityThresholds = {
   passScore: number;
   missingRatio: number;
   unexpectedRatio: number;
+  unexpectedAbsoluteTokens: number;
+  unexpectedRunTokens: number;
   /** Small absolute ASR slips at or below this token count are always tolerated. */
   toleratedTokenMistakes: number;
   repetitionRatio: number;
@@ -108,10 +110,10 @@ export type QualityThresholds = {
 };
 
 export const defaultQualityThresholds: QualityThresholds = {
-  passScore: 0.9, missingRatio: 0.1, unexpectedRatio: 0.15, toleratedTokenMistakes: 1,
+  passScore: 0.9, missingRatio: 0.1, unexpectedRatio: 0.05, unexpectedAbsoluteTokens: 2, unexpectedRunTokens: 3, toleratedTokenMistakes: 1,
   repetitionRatio: 0.05, truncationSuffixRatio: 0.2, expectedWordsPerSecond: 3,
   durationRatioLow: 0.4, durationRatioHigh: 2.5, silenceGapSeconds: 6,
-  gibberishConfidence: 0.5, gibberishRatio: 0.3,
+  gibberishConfidence: 0.5, gibberishRatio: 0.2,
 };
 
 export type CompareOptions = {
@@ -235,6 +237,11 @@ export function compareSpokenText(expected: string, observations: AlignmentObser
   const soundOnly = words.filter((word) => word.sound && !word.tokens.length).length;
   const unexpected = transcribedTokens.filter((_token, index) => !matchedTranscribed.has(index)).length + (opts.expectedVocalizations ? 0 : soundOnly);
   const unexpectedRatio = unexpected / expectedCount;
+  let unexpectedRun = 0; let currentUnexpectedRun = 0;
+  for (let index = 0; index < transcribedTokens.length; index++) {
+    currentUnexpectedRun = matchedTranscribed.has(index) ? 0 : currentUnexpectedRun + 1;
+    unexpectedRun = Math.max(unexpectedRun, currentUnexpectedRun);
+  }
   const similarity = matchedExpected.size / expectedCount;
 
   // Consecutive n-gram duplication present in the transcription but not in the
@@ -275,12 +282,18 @@ export function compareSpokenText(expected: string, observations: AlignmentObser
   const unmatchedLowConfidence = wordSpans.filter(({ word, start, end }) => !word.sound && end > start && (word.observation.confidence ?? 1) < thresholds.gibberishConfidence
     && [...Array(end - start).keys()].some((offset) => !matchedTranscribed.has(start + offset))).length;
   const gibberishRatio = unmatchedLowConfidence / Math.max(1, wordSpans.filter(({ word, start, end }) => !word.sound && end > start).length);
+  let lowConfidenceRun = 0; let currentLowConfidenceRun = 0;
+  for (const { word, start, end } of wordSpans) {
+    currentLowConfidenceRun = !word.sound && end > start && (word.observation.confidence ?? 1) < thresholds.gibberishConfidence
+      && [...Array(end - start).keys()].some((offset) => !matchedTranscribed.has(start + offset)) ? currentLowConfidenceRun + 1 : 0;
+    lowConfidenceRun = Math.max(lowConfidenceRun, currentLowConfidenceRun);
+  }
 
   if (!expectedTokens.length) issues.push({ type: "invalid_audio", severity: 1, detail: "Expected spoken text is empty" });
   if (missing > thresholds.toleratedTokenMistakes && missingRatio >= thresholds.missingRatio)
     issues.push({ type: "missing_speech", severity: Math.min(1, missingRatio), detail: `${missing} of ${expectedTokens.length} expected tokens were not transcribed` });
-  if (unexpected > thresholds.toleratedTokenMistakes && unexpectedRatio >= thresholds.unexpectedRatio)
-    issues.push({ type: "unexpected_speech", severity: Math.min(1, unexpectedRatio), detail: `${unexpected} transcribed tokens were not in the expected text` });
+  if (unexpected > thresholds.toleratedTokenMistakes && (unexpected > thresholds.unexpectedAbsoluteTokens || unexpectedRatio > thresholds.unexpectedRatio || unexpectedRun >= thresholds.unexpectedRunTokens))
+    issues.push({ type: "unexpected_speech", severity: Math.min(1, Math.max(unexpectedRatio, unexpectedRun / expectedCount)), detail: `${unexpected} transcribed tokens were not in the expected text (longest contiguous run: ${unexpectedRun})` });
   if (repetitionRatio >= thresholds.repetitionRatio)
     issues.push({ type: "repetition", severity: Math.min(1, repetitionRatio * 4), detail: `${repeated.size} transcribed tokens are consecutive duplicates not present in the expected text` });
   if (truncated) issues.push({ type: "truncated", severity: Math.min(1, suffixMissing / expectedCount), detail: `The final ${suffixMissing} expected tokens were not transcribed` });
@@ -288,7 +301,7 @@ export function compareSpokenText(expected: string, observations: AlignmentObser
     issues.push({ type: "abnormal_duration", severity: 0.4, detail: `Audio duration is ${durationRatio.toFixed(2)}x the expected reading time` });
   if (timed.length > 2 && maximumGap > thresholds.silenceGapSeconds)
     issues.push({ type: "unexpected_silence", severity: 0.4, detail: `Transcription contains a ${maximumGap.toFixed(1)}s mid-segment silence` });
-  if (gibberishRatio >= thresholds.gibberishRatio && unmatchedLowConfidence >= 2)
+  if (unmatchedLowConfidence >= 2 && (gibberishRatio >= thresholds.gibberishRatio || lowConfidenceRun >= 2))
     issues.push({ type: "suspected_gibberish", severity: Math.min(1, gibberishRatio), detail: `${unmatchedLowConfidence} unmatched low-confidence tokens suggest gibberish` });
 
   let score = 1;
@@ -422,6 +435,8 @@ export class QualityGuardTTSProvider implements TTSProvider {
         toleratedTerms: this.options.toleratedTerms?.(expectedText),
       });
       const transcription = observations.map((observation) => observation.text).join(" ").trim() || undefined;
+      logger.debug({ event: "tts.quality.segment_comparison", segment: index + 1, attempt, expectedText, transcription,
+        score: comparison.score, issues: comparison.issues.map((issue) => issue.type) });
       if (comparison.score > best.score) best = { audio: current, score: comparison.score, transcription, issues: comparison.issues };
       const settings = { deliveryIntensity: deliveryIntensityForAttempt(request.deliveryIntensity, attempt) };
       if (comparison.score >= (this.options.thresholds?.passScore ?? defaultQualityThresholds.passScore) && !comparison.issues.some(criticalIssue)) {

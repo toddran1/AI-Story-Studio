@@ -100,8 +100,8 @@ describe("summary narration and audio", () => {
     const canonical = await create(); const written = 'It activates its "Worry-Free EXP" feature.';
     await media.editNarration("demo-story", canonical.id, { text: written });
     const speech = await media.speech("demo-story", canonical.id); await media.audio("demo-story", canonical.id);
-    expect(speech).toMatchObject({ narrationText: written, spokenText: "It activates its Worry-Free E-X-P feature." });
-    expect(tts.requests[0]?.text).toBe("It activates its Worry-Free E-X-P feature.");
+    expect(speech).toMatchObject({ narrationText: written, spokenText: "It activates its Worry-Free E X P feature." });
+    expect(tts.requests[0]?.text).toBe("It activates its Worry-Free E X P feature.");
   });
 
   it("normalizes vocalizations in summary narration for TTS without editing the narration", async () => {

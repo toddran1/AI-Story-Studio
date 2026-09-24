@@ -7,6 +7,7 @@ import { castQuotedDialogue, directQuotedDialogue, ensureChunkSpeakers } from ".
 import { isFishS2Model } from "./control-cues.js";
 import { adaptPronunciationText } from "../pronunciation.js";
 import type { VocalizationCapabilities, VocalizationRenderStrategy } from "../vocalizations.js";
+import { logger } from "../../utils/logger.js";
 
 export class FishAudioProvider implements TTSProvider {
   readonly name = "fish" as const;
@@ -17,7 +18,7 @@ export class FishAudioProvider implements TTSProvider {
   readonly vocalizationCapabilities: VocalizationCapabilities = { expressiveTags: true, supportedTypes: ["laugh", "chuckle", "sigh", "gasp"], separateSegments: false };
   // Included in the TTS fingerprint so audio made before normalization or
   // deterministic dialogue casting changes is never silently reused.
-  readonly inputNormalizationVersion = "fish-speech-normalization-v5";
+  readonly inputNormalizationVersion = "fish-speech-normalization-v6";
   constructor(
     private readonly apiKey?: string,
     private readonly fetcher: typeof fetch = fetch,
@@ -50,10 +51,14 @@ export class FishAudioProvider implements TTSProvider {
           const speechText = normalizeFishSpeechText(adaptPronunciationText(request.text, request.pronunciation ?? [], this.pronunciationCapabilities), request.model);
           if (!speechText) throw new ProviderError("Fish Audio narration is empty after speech normalization");
           const castText = multiSpeaker ? castQuotedDialogue(speechText) : directedSingleVoice ? directQuotedDialogue(speechText) : speechText;
-          const splitText = splitForTTS(castText, request.maxCharsPerRequest);
+          // Keep coherent paragraphs, but cap S2 requests below the general
+          // configured maximum so hallucinations are isolated to smaller segments.
+          const preferredMax = isFishS2Model(request.model) ? Math.min(request.maxCharsPerRequest, 900) : request.maxCharsPerRequest;
+          const splitText = splitForTTS(castText, preferredMax);
           return multiSpeaker ? ensureChunkSpeakers(splitText) : splitText;
         })();
-    for (const text of chunks) {
+    for (const [index, text] of chunks.entries()) {
+      logger.debug({ event: "tts.fish.segment_input", segment: index + 1, originalText: request.text, fishSafeText: text, characters: text.length });
       let response: Response;
       try {
         response = await this.fetcher("https://api.fish.audio/v1/tts", {

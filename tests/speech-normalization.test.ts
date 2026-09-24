@@ -32,18 +32,31 @@ describe("provider-neutral speech normalization", () => {
     const written = 'It activates its "Worry-Free EXP" feature, the "Devour" skill, his "Shadow Step" ability, the "S-Rank Necromancer" class, an "SSS-Rank" talent, and the "Blood Moon" dungeon.';
     const result = normalizeSpeechText(written, "en-US");
     expect(written).toContain('"Worry-Free EXP"');
-    expect(result.text).toBe("It activates its Worry-Free E-X-P feature, the Devour skill, his Shadow Step ability, the S-Rank Necromancer class, an SSS-Rank talent, and the Blood Moon dungeon.");
+    expect(result.text).toBe("It activates its Worry-Free E X P feature, the Devour skill, his Shadow Step ability, the S-Rank Necromancer class, an SSS-Rank talent, and the Blood Moon dungeon.");
     expect(result.transformations.filter((item) => item.kind === "quoted-label")).toHaveLength(6);
   });
 
   it("does not strip dialogue or ordinary quotations", () => {
     const written = '"Worry-Free EXP," she said. He answered, "Do not call that NPC a feature."';
-    expect(normalizeSpeechText(written, "en-US").text).toBe('"Worry-Free E-X-P," she said. He answered, "Do not call that N-P-C a feature."');
+    expect(normalizeSpeechText(written, "en-US").text).toBe('"Worry-Free E X P," she said. He answered, "Do not call that N P C a feature."');
   });
 
   it("uses deterministic defaults and story overrides for abbreviations", () => {
-    expect(normalizeSpeechText("EXP XP HP MP NPC", "en-US").text).toBe("E-X-P X-P H-P M-P N-P-C");
+    expect(normalizeSpeechText("EXP XP HP MP NPC", "en-US").text).toBe("E X P X P H P M P N P C");
     expect(normalizeSpeechText("EXP and HP", "en-US", { speechAbbreviations: { EXP: "experience points", HP: "health points" } }).text).toBe("experience points and health points");
+  });
+
+  it("consumes malformed EXP slashes and speaks stat values", () => {
+    expect(normalizeSpeechText("EXP EXP/ EXP / EXP/100 EXP / 100", "en-US").text).toBe("E X P E X P E X P E X P: one hundred E X P: one hundred");
+  });
+
+  it("turns bounded stat panels into speech and preserves prose parentheses", () => {
+    const level = normalizeSpeechText("【Level: Level 50 (EXP/)】", "en-US");
+    expect(level.text).toBe("Level: Level fifty. E X P.");
+    expect(level.transformations.some((item) => item.kind === "structured-block")).toBe(true);
+    expect(normalizeSpeechText("【Damage Transfer (Passive) (Level Max)】", "en-US").text).toBe("Damage Transfer. Passive. Level Max.");
+    expect(normalizeSpeechText("Damage Transfer (Passive) (Level Max)", "en-US").text).toBe("Damage Transfer. Passive. Level Max.");
+    expect(normalizeSpeechText("Asher looked at Mo Xie (who was still laughing) and sighed.", "en-US").text).toBe("Asher looked at Mo Xie (who was still laughing) and sighed.");
   });
 
   it("fingerprints the spoken representation and relevant settings only", () => {
