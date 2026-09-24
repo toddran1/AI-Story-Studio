@@ -19,6 +19,7 @@ export type ResolvedEntityCanon = {
   visualPrompt?: string;
   references?: VisualReferenceImage[];
   useVisualProfile: boolean;
+  groundingMode: "approved_profile" | "story_bible_fallback" | "profile_disabled";
 };
 
 export type ResolvedSceneVisualPrompt = {
@@ -259,6 +260,7 @@ export function resolveVisualCanonPrompt(options: {
         visualPrompt: preserveWardrobeEquipment ? profile.visualPrompt : undefined,
         references: profile.references,
         useVisualProfile,
+        groundingMode: "approved_profile",
       });
 
       entityCanonLines.push(`CANONICAL ${entity.type.toUpperCase()} [${entity.canonicalName}]: ${description}`);
@@ -273,6 +275,7 @@ export function resolveVisualCanonPrompt(options: {
         hasApprovedProfile: false,
         description: desc,
         useVisualProfile,
+        groundingMode: useVisualProfile ? "story_bible_fallback" : "profile_disabled",
       });
       entityCanonLines.push(`STORY BIBLE ${entity.type.toUpperCase()} [${entity.canonicalName}]: ${desc}`);
     }
@@ -300,6 +303,17 @@ export function resolveVisualCanonPrompt(options: {
   // Layer 2: Entity Visual Canon
   if (entityCanonLines.length > 0) {
     promptParts.push(`ENTITY VISUAL CANON:\n${entityCanonLines.join("\n")}`);
+  }
+  const characters = resolvedEntities.filter((entity) => entity.type === "character");
+  if (characters.length > 1) {
+    promptParts.push(`CHARACTER IDENTITY BLOCKS:\n${characters.map((entity) =>
+      `CHARACTER IDENTITY — ${entity.name}\nGrounding: ${entity.groundingMode === "approved_profile" ? "Approved Visual Profile" : "Story Bible fallback"}\nAppearance: ${entity.description}`,
+    ).join("\n\n")}`);
+    if (characters.some((entity) => entity.groundingMode !== "approved_profile") || new Set(characters.map((entity) => entity.groundingMode)).size > 1) {
+      promptParts.push(`CHARACTER IDENTITY SEPARATION:\n${characters.map((entity, index) => characters.slice(index + 1).map((other) =>
+        `${entity.name} and ${other.name} are different people. Keep their faces, facial proportions, hairlines, hairstyles, eye shapes, body silhouettes, and distinctive identifying features separate; do not reuse either person's identity traits for the other. They must be distinguishable at a glance.`,
+      ).join("\n")).filter(Boolean).join("\n")}`);
+    }
   }
 
   // One shared hierarchy keeps profiles and reference images from freezing a

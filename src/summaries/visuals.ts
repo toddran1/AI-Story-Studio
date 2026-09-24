@@ -17,6 +17,8 @@ import {
   generateSceneImage,
   loadApprovedVisualProfileReferences,
   REFERENCE_USAGE_INSTRUCTION,
+  referenceAssignmentPrompt,
+  characterReferenceProvenance,
   validPngFingerprint,
   backingArtworkVersion,
   resolveBestProductionAssetForPaths,
@@ -233,14 +235,14 @@ export class SummaryVisualService {
         }
         const totalBytes = references.images.reduce((sum, image) => sum + image.data.length, 0);
         if (data?.length && data.length <= MAX_REFERENCE_IMAGE_BYTES && totalBytes + data.length <= MAX_REFERENCE_TOTAL_BYTES) {
-          references.images.push({ data, mimeType: "image/png", role: "previous-scene" });
+          references.images.push({ data, mimeType: "image/png", role: "previous-scene", sourceKind: "continuity" });
           references.mode = "images";
           continuityReference.used = true;
         } else { if (references.mode === "none") references.mode = "text-only"; continuityReference.reason = "approved previous-scene image unavailable or outside reference budget; textual continuity retained"; }
       }
     }
     const bookStyle = effectiveDirection.source === "disabled" ? "" : context.story.artwork.stylePrompt?.trim() ? `BOOK ART STYLE: ${context.story.artwork.stylePrompt.trim()}` : "";
-    const prompt = [resolved.prompt, bookStyle, references.images.length ? REFERENCE_USAGE_INSTRUCTION : ""].filter(Boolean).join("\n\n");
+    const prompt = [resolved.prompt, bookStyle, referenceAssignmentPrompt(resolved, references.images), references.images.length ? REFERENCE_USAGE_INSTRUCTION : ""].filter(Boolean).join("\n\n");
     const { provider: pName, model, quality, aspectRatio, size, stylePrompt, outputFormat } = context.story.artwork;
     // Provenance keeps the attempted source and diagnostic reason. Fingerprints
     // include only the image actually sent; a text-only fallback has a stable
@@ -270,7 +272,7 @@ export class SummaryVisualService {
         profileRevision: entity.profileRevision,
       })),
       inputFingerprint: fingerprint({
-        version: "summary-visual-canon-v1",
+        version: "summary-visual-canon-v2-owned-references",
         prompt,
         references: references.loadedReferenceIds.map((id, index) => ({ id, fingerprint: references.referenceFingerprints[index] })),
         continuityReference: effectiveContinuityReference,
@@ -621,6 +623,7 @@ export class SummaryVisualService {
               referencesUsed: input.references.mode,
               referenceImageCount: input.references.images.length,
               availableReferenceCount: input.references.available,
+              characterReferences: characterReferenceProvenance(input.references.images),
               continuityReference: input.continuityReference,
               artDirection: input.artDirectionProvenance,
               visualCanon: input.grounding.map((entity) => ({

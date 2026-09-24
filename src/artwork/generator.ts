@@ -38,7 +38,27 @@ export const REFERENCE_USAGE_INSTRUCTION =
 
 // Bump when shared Visual Canon prompt semantics change. This intentionally
 // makes old artwork eligible for regeneration without touching story text.
-const VISUAL_CANON_ARTWORK_VERSION = "visual-canon-v2";
+const VISUAL_CANON_ARTWORK_VERSION = "visual-canon-v3-owned-references";
+
+/** Number references from the exact array sent to the provider. */
+export function referenceAssignmentPrompt(resolved: ResolvedSceneVisualPrompt, images: ImageReferenceImage[]): string {
+  const characters = resolved.resolvedEntities.filter((entity) => entity.type === "character");
+  if (!images.length && characters.length < 2) return "";
+  const lines = images.map((image, index) => image.sourceKind === "visual-profile" && image.entityId
+    ? `Reference image ${index + 1} depicts ${image.entityName} only; apply its identity traits only to ${image.entityName}.`
+    : `Reference image ${index + 1} is scene continuity, not a character identity reference.`);
+  for (const character of characters) {
+    const indexes = images.flatMap((image, index) => image.sourceKind === "visual-profile" && image.entityId === character.entityId ? [index + 1] : []);
+    lines.push(`${character.name}: ${indexes.length ? `character reference image${indexes.length === 1 ? "" : "s"} ${indexes.join(", ")} only` : "no character reference image; use only their own Story Bible or approved profile description"}.`);
+  }
+  return `CHARACTER REFERENCE ASSIGNMENT:\n${lines.join("\n")}`;
+}
+
+export function characterReferenceProvenance(images: ImageReferenceImage[]) {
+  return images.flatMap((image, index) => image.sourceKind === "visual-profile" && image.entityId && image.referenceId
+    ? [{ imageIndex: index + 1, entityId: image.entityId, entityName: image.entityName, referenceId: image.referenceId, role: image.role }]
+    : []);
+}
 
 /** Derivative production assets are only derived when a final output
  * resolution is requested and upscaling is enabled. Generation fingerprints
@@ -152,6 +172,7 @@ export async function generateStoredArtwork(options: {
     resolved: ResolvedSceneVisualPrompt;
     refs: Awaited<ReturnType<typeof loadCharacterVisualReferences>>;
     continuityReference?: VisualContinuityReferenceDecision;
+    loadedReferences: SceneReferencePayload;
     inputFingerprint: string;
   }> = [];
 
@@ -169,6 +190,7 @@ export async function generateStoredArtwork(options: {
       visualProfiles,
       visualContinuity: continuityText,
     });
+    const loadedReferences = await loadSceneReferenceImages(options.root, options.story, resolved, sceneContinuity?.referenceDecision, options.chapter);
 
     const inputFingerprint = artworkFingerprint(
       scene,
@@ -181,6 +203,7 @@ export async function generateStoredArtwork(options: {
         sceneDirectionFingerprint: resolved.sceneDirectionFingerprint,
         resolvedPromptFingerprint: resolved.resolvedPromptFingerprint,
         visualContinuityFingerprint: resolved.visualContinuityFingerprint,
+        referenceInputs: loadedReferences.images.map((image) => ({ sourceKind: image.sourceKind, entityId: image.entityId, entityName: image.entityName, referenceId: image.referenceId, role: image.role, bytes: fingerprint(image.data.toString("base64")) })),
       }
     );
 
@@ -196,7 +219,7 @@ export async function generateStoredArtwork(options: {
       scene.artwork.review === "needs-regeneration";
 
     if (needs) {
-      candidates.push({ scene, prompt: resolved.prompt, resolved, refs, continuityReference: sceneContinuity?.referenceDecision, inputFingerprint });
+      candidates.push({ scene, prompt: resolved.prompt, resolved, refs, continuityReference: sceneContinuity?.referenceDecision, loadedReferences, inputFingerprint });
     }
   }
 
@@ -310,10 +333,8 @@ export async function generateStoredArtwork(options: {
     });
 
     try {
-      const references = await loadSceneReferenceImages(options.root, options.story, item.resolved, item.continuityReference, options.chapter);
-      const providerPrompt = references.images.length
-        ? `${item.prompt}\n\n${REFERENCE_USAGE_INSTRUCTION}`
-        : item.prompt;
+      const references = item.loadedReferences;
+      const providerPrompt = [item.prompt, referenceAssignmentPrompt(item.resolved, references.images), references.images.length ? REFERENCE_USAGE_INSTRUCTION : ""].filter(Boolean).join("\n\n");
       const result = await generateSceneImage(options.provider, options.story, providerPrompt, {
         negativePrompt: item.resolved.negativePrompt || undefined,
         referenceImages: references.images,
@@ -349,7 +370,7 @@ export async function generateStoredArtwork(options: {
         model: options.story.artwork.model,
         prompt: providerPrompt,
         promptFingerprint: item.inputFingerprint,
-        resolvedVisualProfileReferences: item.resolved.resolvedEntities.map((e) => ({
+        resolvedVisualProfileReferences: item.resolved.resolvedEntities.filter((e) => e.hasApprovedProfile).map((e) => ({
           entityId: e.entityId,
           name: e.name,
           role: e.type,
@@ -369,6 +390,8 @@ export async function generateStoredArtwork(options: {
           referenceImageCount: references.images.length,
           availableReferenceCount: references.available,
           continuityReference: references.continuityReference,
+          characterReferences: characterReferenceProvenance(references.images),
+          visualGrounding: item.resolved.resolvedEntities.map((entity) => ({ entityId: entity.entityId, name: entity.name, mode: entity.groundingMode })),
         },
         review: "unreviewed",
       };
@@ -621,6 +644,7 @@ export function artworkFingerprint(
     sceneDirectionFingerprint?: string;
     resolvedPromptFingerprint?: string;
     visualContinuityFingerprint?: string;
+    referenceInputs?: Array<{ sourceKind?: string; entityId?: string; entityName?: string; referenceId?: string; role?: string; bytes: string }>;
   }
 ) {
   const artDirectionFingerprint =
@@ -641,6 +665,7 @@ export function artworkFingerprint(
     model: story.artwork.model,
     providerVersion,
     visualCanonArtworkVersion: VISUAL_CANON_ARTWORK_VERSION,
+    ...(extra?.referenceInputs?.length ? { referenceInputs: extra.referenceInputs } : {}),
     ...(artDirectionFingerprint ? { artDirectionFingerprint } : {}),
     ...(extra?.entityVisualFingerprints && Object.keys(extra.entityVisualFingerprints).length > 0
       ? { entityVisualFingerprints: extra.entityVisualFingerprints }
@@ -712,15 +737,15 @@ export type VisualProfileReferencePayload = {
 /** Shared, approved-only Visual Profile reference loader. Summary artwork uses
  * the same reference eligibility and byte limits as chapter artwork. */
 export async function loadApprovedVisualProfileReferences(root: string, story: Story, resolved: ResolvedSceneVisualPrompt): Promise<VisualProfileReferencePayload> {
-  const byEntity: VisualReferenceImage[][] = [];
+  const byEntity: Array<Array<{ reference: VisualReferenceImage; entityName: string }>> = [];
   for (const entity of resolved.resolvedEntities) {
-    if (!entity.useVisualProfile) continue;
-    const refs = (entity.references ?? []).filter((ref) => ref.approved).sort((left, right) => Number(right.role === "primary_reference") - Number(left.role === "primary_reference"));
+    if (!entity.hasApprovedProfile || !entity.useVisualProfile) continue;
+    const refs = (entity.references ?? []).filter((ref) => ref.approved).sort((left, right) => Number(right.role === "primary_reference") - Number(left.role === "primary_reference")).map((reference) => ({ reference, entityName: entity.name }));
     if (refs.length) byEntity.push(refs);
   }
   // Give each visible entity a chance to contribute its primary reference
   // before spending the shared provider budget on additional references.
-  const wanted: VisualReferenceImage[] = [];
+  const wanted: Array<{ reference: VisualReferenceImage; entityName: string }> = [];
   const maxRefs = Math.max(0, ...byEntity.map((refs) => refs.length));
   for (let index = 0; index < maxRefs; index++) for (const refs of byEntity) if (refs[index]) wanted.push(refs[index]!);
   const available = wanted.length;
@@ -731,7 +756,7 @@ export async function loadApprovedVisualProfileReferences(root: string, story: S
   const loadedReferenceIds: string[] = [];
   const referenceFingerprints: string[] = [];
   let totalBytes = 0;
-  for (const ref of wanted) {
+  for (const { reference: ref, entityName } of wanted) {
     if (images.length >= MAX_REFERENCE_IMAGES) break;
     const hint = /\.([a-zA-Z0-9]+)$/.exec(ref.imagePath)?.[1];
     const file = await findVisualReferenceFile(root, story.slug, ref.entityId, ref.id, hint);
@@ -739,7 +764,7 @@ export async function loadApprovedVisualProfileReferences(root: string, story: S
     const data = await readFile(file.path);
     if (!data.length || data.length > MAX_REFERENCE_IMAGE_BYTES || totalBytes + data.length > MAX_REFERENCE_TOTAL_BYTES) continue;
     totalBytes += data.length;
-    images.push({ data, mimeType: mimeForVisualReferenceExtension(file.ext), role: ref.role });
+    images.push({ data, mimeType: mimeForVisualReferenceExtension(file.ext), role: ref.role, sourceKind: "visual-profile", entityId: ref.entityId, entityName, referenceId: ref.id });
     loadedEntityIds.add(ref.entityId);
     loadedReferenceIds.push(ref.id);
     referenceFingerprints.push(fingerprint(data.toString("base64")));
@@ -777,7 +802,7 @@ async function loadSceneReferenceImages(root: string, story: Story, resolved: Re
       const data = await readFile(path);
       if (!data.length || data.length > MAX_REFERENCE_IMAGE_BYTES || totalBytes + data.length > MAX_REFERENCE_TOTAL_BYTES) throw new Error("continuity reference exceeds reference image budget");
       validatePng(data);
-      images.push({ data, mimeType: "image/png", role: continuityDecision.kind });
+      images.push({ data, mimeType: "image/png", role: continuityDecision.kind, sourceKind: "continuity" });
       continuityReference.used = true;
     } catch {
       continuityReference.reason = continuityReference.reason ? `${continuityReference.reason}; continuity image unavailable, textual continuity retained` : "continuity image unavailable, textual continuity retained";

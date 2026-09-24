@@ -2,7 +2,7 @@ export type ImageAspectRatio = "16:9" | "1:1" | "9:16";
 export type ImageQualityIntent = "low" | "medium" | "high";
 export type ImageSize = "1536x1024" | "1024x1024" | "1024x1536";
 
-export type ImageReferenceImage = { data: Buffer; mimeType: string; role?: string };
+export type ImageReferenceImage = { data: Buffer; mimeType: string; role?: string; sourceKind?: "visual-profile" | "continuity"; entityId?: string; entityName?: string; referenceId?: string };
 
 /** Provider-neutral generation intent. Each provider adapter translates this
  * into its own API parameters (size/quality/resolution/reference parts). */

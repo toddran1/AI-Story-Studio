@@ -2,7 +2,7 @@ import { mkdtemp, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { artworkFingerprint, generateStoredArtwork, reviewStoredArtwork } from "../src/artwork/generator.js";
+import { artworkFingerprint, generateStoredArtwork, reviewStoredArtwork, referenceAssignmentPrompt, loadApprovedVisualProfileReferences } from "../src/artwork/generator.js";
 import { GeminiImageProvider } from "../src/artwork/gemini-image.provider.js";
 import { OpenAIImageProvider } from "../src/artwork/openai-image.provider.js";
 import { ImageGenerationRequest, ImageProvider } from "../src/artwork/provider.js";
@@ -23,7 +23,9 @@ import { planStoredScenes } from "../src/scenes/manifest.js";
 import { artworkSettingsSchema, sceneDirectionSchema, sceneManifestSchema } from "../src/scenes/types.js";
 import { atomicWrite, atomicWriteJson } from "../src/storage/atomic-write.js";
 import { storyPaths, visualProfileRefPath } from "../src/storage/paths.js";
-import { saveVisualProfiles } from "../src/visual-canon/profiles.js";
+import { loadVisualProfiles, saveVisualProfiles } from "../src/visual-canon/profiles.js";
+import { resolveVisualCanonPrompt } from "../src/visual-canon/resolver.js";
+import { loadStoryArtDirection, resolveActiveArtDirection } from "../src/visual-canon/art-direction.js";
 import { pricingFor, calculateCost } from "../src/cost/pricing.js";
 import { pngWithDims, testStory } from "./helpers.js";
 
@@ -255,6 +257,64 @@ describe("Gemini image adapter", () => {
 });
 
 describe("artwork routing and provenance", () => {
+  it("scopes mixed-grounding character references to their owner in provider order", async () => {
+    const { root, story, paths } = await fixture({ provider: "gemini", model: "gemini-3.1-flash-image" }, { withCanon: true });
+    const fallbackId = "ent_222222222222222222222222";
+    const bible = JSON.parse(await readFile(paths.bible, "utf8"));
+    bible.canonicalEntities.push({ id: fallbackId, type: "character", canonicalName: "Zhang Yongxing", aliases: [], description: "A young rival with a guarded manner.", firstAppearance: 1, lastKnownAppearance: 1 });
+    await atomicWriteJson(paths.bible, bible);
+    const manifest = sceneManifestSchema.parse(JSON.parse(await readFile(paths.scenesManifest, "utf8")));
+    manifest.scenes[0]!.characters = ["Li Chen", "Zhang Yongxing"];
+    manifest.scenes[0]!.summary = "Zhang betrays Li Chen.";
+    await atomicWriteJson(paths.scenesManifest, manifest);
+    const profiles = await loadVisualProfiles(root, story.slug);
+    profiles[ENTITY_ID]!.references.push({ id: "ref-2", entityId: ENTITY_ID, role: "front", imagePath: "ignored/path.png", source: "uploaded", approved: true, createdAt: new Date().toISOString() });
+    await saveVisualProfiles(root, story.slug, profiles);
+    await atomicWrite(visualProfileRefPath(root, story.slug, ENTITY_ID, "ref-2", "png"), PNG_ALT);
+    const artDirection = resolveActiveArtDirection(await loadStoryArtDirection(root, story.slug));
+    const resolved = resolveVisualCanonPrompt({ scene: manifest.scenes[0]!, story, bible, artDirection, visualProfiles: profiles });
+    const loaded = await loadApprovedVisualProfileReferences(root, story, resolved);
+    expect(loaded.images.map((image) => ({ entityId: image.entityId, entityName: image.entityName, referenceId: image.referenceId, role: image.role }))).toEqual([
+      { entityId: ENTITY_ID, entityName: "Li Chen", referenceId: "ref-1", role: "face_portrait" },
+      { entityId: ENTITY_ID, entityName: "Li Chen", referenceId: "ref-2", role: "front" },
+    ]);
+    expect(referenceAssignmentPrompt(resolved, [...loaded.images, { data: PNG_ALT, mimeType: "image/png", sourceKind: "continuity" }])).toContain("Reference image 3 is scene continuity");
+    const images = fakeImages("gemini");
+    await generateStoredArtwork({ root, story, chapter: 1, provider: images, sceneId: manifest.scenes[0]!.id, allowUnprofiledEntityIds: [fallbackId] });
+    const request = images.calls[0]!;
+    expect(request.referenceImages?.map((image) => image.referenceId)).toEqual(["ref-1", "ref-2"]);
+    expect(request.prompt).toContain("Reference image 1 depicts Li Chen only");
+    expect(request.prompt).toContain("Zhang Yongxing: no character reference image");
+    expect(request.prompt).toContain("Li Chen and Zhang Yongxing are different people");
+    const after = sceneManifestSchema.parse(JSON.parse(await readFile(paths.scenesManifest, "utf8")));
+    expect(after.scenes[0]!.artwork.versions[0]!.provenance).toMatchObject({ characterReferences: [{ entityId: ENTITY_ID, referenceId: "ref-1" }, { entityId: ENTITY_ID, referenceId: "ref-2" }], visualGrounding: [{ mode: "approved_profile" }, { mode: "story_bible_fallback" }] });
+    expect(JSON.parse(await readFile(paths.bible, "utf8")).canonicalEntities[1].visualProfilePolicy).toBeUndefined();
+    bible.canonicalEntities[1].visualProfilePolicy = { mode: "skip" };
+    await atomicWriteJson(paths.bible, bible);
+    await generateStoredArtwork({ root, story, chapter: 1, provider: images, sceneId: manifest.scenes[0]!.id, force: true });
+    expect(images.calls[1]!.prompt).toContain("Zhang Yongxing: no character reference image");
+    expect(images.calls[1]!.referenceImages?.every((image) => image.entityId === ENTITY_ID)).toBe(true);
+  });
+  it("mentions only supplied references after budget truncation and omits pairwise guidance for one character", async () => {
+    const { root, story, paths } = await fixture({ provider: "gemini", model: "gemini-3.1-flash-image" }, { withCanon: true });
+    const profiles = await loadVisualProfiles(root, story.slug);
+    for (let index = 2; index <= 5; index++) {
+      profiles[ENTITY_ID]!.references.push({ id: `ref-${index}`, entityId: ENTITY_ID, role: "front", imagePath: "ignored/path.png", source: "uploaded", approved: true, createdAt: new Date().toISOString() });
+      await atomicWrite(visualProfileRefPath(root, story.slug, ENTITY_ID, `ref-${index}`, "png"), PNG_ALT);
+    }
+    await saveVisualProfiles(root, story.slug, profiles);
+    const bible = JSON.parse(await readFile(paths.bible, "utf8"));
+    const manifest = sceneManifestSchema.parse(JSON.parse(await readFile(paths.scenesManifest, "utf8")));
+    const artDirection = resolveActiveArtDirection(await loadStoryArtDirection(root, story.slug));
+    const resolved = resolveVisualCanonPrompt({ scene: manifest.scenes[0]!, story, bible, artDirection, visualProfiles: profiles });
+    const loaded = await loadApprovedVisualProfileReferences(root, story, resolved);
+    expect(loaded.images).toHaveLength(4);
+    expect(loaded.loadedReferenceIds).not.toContain("ref-5");
+    const assignment = referenceAssignmentPrompt(resolved, loaded.images);
+    expect(assignment).toContain("Reference image 4 depicts Li Chen only");
+    expect(assignment).not.toContain("Reference image 5");
+    expect(resolved.prompt).not.toContain("CHARACTER IDENTITY SEPARATION:");
+  });
   it("passes Visual Canon reference bytes when the provider supports them", async () => {
     const { root, story, paths } = await fixture({ provider: "gemini", model: "gemini-3.1-flash-image" }, { withCanon: true });
     const images = fakeImages("gemini");
