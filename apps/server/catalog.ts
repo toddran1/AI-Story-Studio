@@ -263,8 +263,9 @@ export async function getCanonicalEntitiesPage(root: string, slug: string, optio
   const { bible } = context;
   let entities = bible.canonicalEntities;
   const query = options.query?.trim().toLocaleLowerCase();
+  const tokens = query ? query.split(/\s+/).filter(Boolean) : [];
   if (options.type && options.type !== "all") entities = entities.filter((item) => item.type === options.type);
-  if (query) entities = entities.filter((item) => [item.canonicalName, item.originalName, item.preferredNarrationName ?? "", item.localizedNaming?.fullName ?? "", item.localizedNaming?.shortName ?? "", item.localizedNaming?.notes ?? "", item.description, item.notes, ...item.aliases, ...item.aliasNarrationRules.flatMap((rule) => [rule.alias, rule.replacement ?? ""])].some((value) => value.toLocaleLowerCase().includes(query)));
+  if (tokens.length) entities = entities.filter((item) => { const searchable = [item.canonicalName, item.originalName, item.preferredNarrationName ?? "", item.localizedNaming?.fullName ?? "", item.localizedNaming?.shortName ?? "", item.localizedNaming?.notes ?? "", item.description, item.notes, ...item.aliases, ...item.aliasNarrationRules.flatMap((rule) => [rule.alias, rule.replacement ?? ""])].join("\n").toLocaleLowerCase(); return tokens.every((token) => searchable.includes(token)); });
   const readinessOf = context.readinessOf;
   if (options.readiness) { const predicate = readinessFilterPredicate(options.readiness); entities = entities.filter((item) => predicate(readinessOf(item))); }
   const direction = options.sort === "last" ? (a: typeof entities[number], b: typeof entities[number]) => b.lastKnownAppearance - a.lastKnownAppearance : options.sort === "first" ? (a: typeof entities[number], b: typeof entities[number]) => a.firstAppearance - b.firstAppearance : (a: typeof entities[number], b: typeof entities[number]) => a.canonicalName.localeCompare(b.canonicalName);

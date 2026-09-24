@@ -1323,6 +1323,11 @@ function BiblePage({ slug, navigate, locationSearch }: { slug: string; navigate:
   const [checkedRecs, setCheckedRecs] = useState<string[]>([]);
   // Start unsynchronized so an initial ?entity= deep link is loaded as well.
   const [syncedLocationKey, setSyncedLocationKey] = useState("");
+  // Tracks the URL this component last wrote via history.replaceState. App
+  // passes locationSearch read live from location.search, so a self-written
+  // URL can arrive as a "new" location on the next unrelated App re-render;
+  // those must not be treated as external navigation.
+  const selfWrittenLocationKey = useRef<string>();
   const requestImpact = async (entityId: string, body: Record<string, unknown>, preview: { title: string; diff?: Array<{ label: string; before: string; after: string }>; applyLabel?: string; apply: () => Promise<void> }) => {
     try { setError(""); const impact = await post<EntityImpact>(`/stories/${slug}/story-bible/entities/${entityId}/impact`, body); setImpactPreview({ title: preview.title, diff: preview.diff ?? [], impact, applyLabel: preview.applyLabel, apply: preview.apply }); }
     catch (value) { setError(message(value)); }
@@ -1373,10 +1378,16 @@ function BiblePage({ slug, navigate, locationSearch }: { slug: string; navigate:
   };
   useEffect(() => {
     if (syncedLocationKey === locationKey) return;
+    if (selfWrittenLocationKey.current === locationKey) {
+      // Our own replaceState echoing back through a stale App render.
+      setSyncedLocationKey(locationKey);
+      return;
+    }
     const next = parseBibleQuery(locationSearch);
     setTab(next.tab ?? "canonical");
     setType(next.type ?? "all");
-    setQuery(next.q ?? "");
+    // Don't clobber in-progress typing; the URL q only reflects the deferred value.
+    if (deferred === query) setQuery(next.q ?? "");
     setSort(next.sort ?? "last");
     setReadiness(next.readiness ?? "all");
     setPage(next.page ?? 1);
@@ -1396,7 +1407,10 @@ function BiblePage({ slug, navigate, locationSearch }: { slug: string; navigate:
     if (syncedLocationKey !== locationKey || deferred !== query) return;
     const desired = `/stories/${slug}/bible${bibleQueryString({ tab, type, q: deferred, sort, readiness, page, entity: requestedEntityId, section: managementEntityId === requestedEntityId ? "management" : undefined })}`;
     const current = `${location.pathname}${location.search}`;
-    if (desired !== current) history.replaceState({}, "", desired);
+    if (desired !== current) {
+      history.replaceState({}, "", desired);
+      selfWrittenLocationKey.current = desired;
+    }
   }, [slug, tab, type, query, deferred, sort, readiness, page, requestedEntityId, managementEntityId, locationKey, syncedLocationKey]);
   const persistEdit = async (payload: any) => { const response = await put<any>(`/stories/${slug}/story-bible/entities/${editing.id}`, payload); const affected = response.invalidation?.affectedChapters?.length ?? 0; const manual = response.invalidation?.manualNarrationChapters?.length ?? 0; setNotice(affected ? `${affected} chapter${affected === 1 ? "" : "s"} marked affected.${manual ? ` ${manual} manual narration edit${manual === 1 ? " was" : "s were"} preserved for review.` : ""}` : "Protected record saved."); if (response.visualProfileReviewRequired) setNotice("Entity type saved. Existing Visual Profile was preserved; review it before regenerating visual canon."); setEditing(undefined); closeEntitySheet(editing.id); await load(); };
   const save = async () => { try { setError(""); const aliases = editing.aliasDrafts.map((item: any) => item.alias.trim()).filter(Boolean); const aliasNarrationRules = editing.aliasDrafts.filter((item: any) => item.alias.trim()).map((item: any) => ({ alias: item.alias.trim(), behavior: item.behavior, ...(item.behavior === "custom" ? { replacement: item.replacement.trim() } : {}) })); const payload = { canonicalName: editing.canonicalName, type: editing.type, aliases, canonicalNameLocked: editing.canonicalNameLocked, preferredNarrationName: editing.preferredNarrationName.trim() || null, aliasNarrationRules, pronunciation: editing.pronunciation ?? null, notes: editing.notes, status: editing.status }; const base = detail?.entity; if (base && canonicalEntityPatchImpact(base, payload).impactful) { await requestImpact(editing.id, { action: "update", patch: payload }, { title: `Edit ${base.canonicalName}`, diff: canonicalEntityDiff(base, payload), apply: () => persistEdit(payload) }); return; } await persistEdit(payload); } catch (value) { setError(message(value)); } };

@@ -159,6 +159,18 @@ describe("advanced Story Bible continuity", () => {
 
   it("paginates and searches large canonical indexes by alias or localized name", async () => { const root = await mkdtemp(join(tmpdir(), "bible-page-")); const characters = Array.from({ length: 125 }, (_, index) => named(`Character ${String(index + 1).padStart(3, "0")}`, 1, { aliases: index === 77 ? ["The Archivist"] : [] })); const bible = mergeStoryBible(emptyStoryBible(), update(1, { characters }), 1); bible.canonicalEntities[77]!.localizedNaming = { locale: "en-US", fullName: "Amelia Vale", shortName: "Amelia", usageMode: "ai_contextual" }; await atomicWriteJson(storyPaths(root, "demo-story", 1).bible, bible); const page = await getCanonicalEntitiesPage(root, "demo-story", { page: 2, pageSize: 50, type: "character", sort: "name" }); expect(page).toMatchObject({ page: 2, pages: 3, total: 125 }); expect(page.items).toHaveLength(50); const search = await getCanonicalEntitiesPage(root, "demo-story", { page: 1, pageSize: 10, query: "archivist" }); expect(search.items).toHaveLength(1); expect(search.items[0]?.aliases).toContain("The Archivist"); const localized = await getCanonicalEntitiesPage(root, "demo-story", { page: 1, pageSize: 10, query: "Amelia Vale" }); expect(localized.items[0]?.localizedNaming?.shortName).toBe("Amelia"); });
 
+  it("matches multi-word queries token-by-token against the combined searchable text", async () => {
+    const root = await mkdtemp(join(tmpdir(), "bible-tokens-"));
+    const bible = mergeStoryBible(emptyStoryBible(), update(1, { characters: [named("Qain Yi", 1, { aliases: ["Sword Saint"] }), named("Qain Luo", 1), named("Yi Chen", 1)] }), 1);
+    await atomicWriteJson(storyPaths(root, "demo-story", 1).bible, bible);
+    const both = await getCanonicalEntitiesPage(root, "demo-story", { page: 1, pageSize: 10, query: "Qain Yi" });
+    expect(both.items.map((item) => item.canonicalName)).toEqual(["Qain Yi"]);
+    const acrossFields = await getCanonicalEntitiesPage(root, "demo-story", { page: 1, pageSize: 10, query: "qain sword" });
+    expect(acrossFields.items.map((item) => item.canonicalName)).toEqual(["Qain Yi"]);
+    const missing = await getCanonicalEntitiesPage(root, "demo-story", { page: 1, pageSize: 10, query: "qainyi" });
+    expect(missing.items).toHaveLength(0);
+  });
+
   it("serves the atomic Story Bible snapshot without replaying malformed chapter history", async () => { const root = await mkdtemp(join(tmpdir(), "bible-snapshot-")); const bible = mergeStoryBible(emptyStoryBible(), update(1, { characters: [named("Snapshot Hero", 1)] }), 1); const paths = storyPaths(root, "demo-story", 1); await atomicWriteJson(paths.bible, bible); await atomicWriteJson(paths.bibleUpdate, { malformed: true }); const page = await getCanonicalEntitiesPage(root, "demo-story", { page: 1, pageSize: 10 }); expect(page.items[0]?.canonicalName).toBe("Snapshot Hero"); });
 
   it("retrieves bounded relevant context from a synthetic 1,600-chapter history", () => {
