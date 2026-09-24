@@ -119,7 +119,7 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
 
 type Route = { page: string; story?: string; chapter?: number };
 
-export type NavigateOptions = { scroll?: "top" | "preserve" };
+export type NavigateOptions = { scroll?: "top" | "preserve"; replace?: boolean };
 
 /** Scroll side effect of navigation: everything except "preserve" resets to the top. */
 export function performNavigateScroll(scroll: "top" | "preserve" = "top") {
@@ -183,7 +183,7 @@ export function App({ initialJob, initialRoute }: { initialJob?: Job; initialRou
     latestJob.current = next;
     setJob(next);
   };
-  const navigate = (path: string, options?: NavigateOptions) => { history.pushState({}, "", path); setRoute(parseRoute(path)); performNavigateScroll(options?.scroll); };
+  const navigate = (path: string, options?: NavigateOptions) => { if (options?.replace) history.replaceState({}, "", path); else history.pushState({}, "", path); setRoute(parseRoute(path)); performNavigateScroll(options?.scroll); };
   const active = route.story ? stories.find((story) => story.slug === route.story) : undefined;
   return <div className="studio-shell">
     <Sidebar stories={stories} active={route.story} navigate={navigate} />
@@ -1355,19 +1355,20 @@ export function BiblePage({ slug, navigate, locationSearch }: { slug: string; na
   const [impactPreview, setImpactPreview] = useState<{ title: string; diff: Array<{ label: string; before: string; after: string }>; impact: EntityImpact; applyLabel?: string; apply: () => Promise<void> } | null>(null);
   const [impactBusy, setImpactBusy] = useState(false);
   const entityChildOverlayOpen = Boolean(editing || mergeReview || impactPreview || bulkPreview || visualProfileTarget);
+  const activeEntityOverlay = visualProfileTarget ? `visual:${visualProfileTarget.id}` : impactPreview ? "impact" : bulkPreview ? "bulk" : editing ? `edit:${editing.id}` : mergeReview ? "merge" : undefined;
   useEffect(() => {
-    if (!entityChildOverlayOpen) return;
-    const selector = visualProfileTarget
+    if (!activeEntityOverlay) return;
+    const selector = activeEntityOverlay.startsWith("visual:")
       ? ".visual-profile-modal .btn-close"
-      : impactPreview
+      : activeEntityOverlay === "impact"
         ? ".entity-impact-dialog .entity-sheet-close, .entity-impact-dialog .editor-sheet-head button"
-        : bulkPreview
+        : activeEntityOverlay === "bulk"
           ? ".editor-sheet[aria-label='Review bulk update'] .editor-sheet-head button"
-          : editing
-            ? ".editor-sheet[aria-label='Edit canonical record'] .editor-sheet-head button"
+          : activeEntityOverlay.startsWith("edit:")
+            ? ".editor-sheet[aria-label='Edit canonical record'] input:not([type='checkbox'])"
             : ".editor-sheet[aria-label='Compare canonical entities before merge'] .editor-sheet-head button";
     document.querySelector<HTMLElement>(selector)?.focus();
-  }, [entityChildOverlayOpen, visualProfileTarget, impactPreview, bulkPreview, editing, mergeReview]);
+  }, [activeEntityOverlay]);
   useEffect(() => {
     if (!entityChildOverlayOpen) return;
     const onKeyDown = (event: KeyboardEvent) => {
@@ -1444,7 +1445,9 @@ export function BiblePage({ slug, navigate, locationSearch }: { slug: string; na
   const [managementEntityId, setManagementEntityId] = useState<string | undefined>(initial.section === "management" ? initial.entity : undefined);
   const entityRequestId = useRef(0);
   const requestedEntityIdRef = useRef(requestedEntityId);
+  const detailEntityIdRef = useRef<string | undefined>(detail?.entity?.id);
   requestedEntityIdRef.current = requestedEntityId;
+  detailEntityIdRef.current = detail?.entity?.id;
   const loadEntityDetail = (id: string, keepExisting = false) => {
     const requestId = ++entityRequestId.current;
     if (!keepExisting) setDetail(undefined);
@@ -1452,8 +1455,10 @@ export function BiblePage({ slug, navigate, locationSearch }: { slug: string; na
     return api<any>(`/stories/${slug}/story-bible/entities/${id}`).then((value) => { if (entityRequestId.current === requestId) setDetail(value); }).catch((value) => { if (entityRequestId.current === requestId) setError(message(value)); });
   };
   const closeEntitySheet = (expectedEntityId?: string) => {
-    if (expectedEntityId && requestedEntityIdRef.current !== expectedEntityId) return;
+    if (expectedEntityId && (requestedEntityIdRef.current ? requestedEntityIdRef.current !== expectedEntityId : detailEntityIdRef.current !== expectedEntityId)) return;
     entityRequestId.current++;
+    requestedEntityIdRef.current = undefined;
+    detailEntityIdRef.current = undefined;
     setDetail(undefined);
     setRequestedEntityId(undefined);
     setManagementEntityId(undefined);
@@ -1523,7 +1528,7 @@ export function BiblePage({ slug, navigate, locationSearch }: { slug: string; na
     catch (value) { setError(message(value)); }
   };
   const confirmMerge = async () => { if (!mergeReview) return; const target = mergeReview.target.entity; const source = mergeReview.source.entity; const openEntityId = requestedEntityId; await requestImpact(source.id, { action: "merge", targetEntityId: target.id }, { title: `Merge ${source.canonicalName} into ${target.canonicalName}`, diff: [{ label: "Merge", before: `${source.canonicalName} (${source.id})`, after: `Merged into ${target.canonicalName}` }], applyLabel: "Confirm merge", apply: async () => { await post(`/stories/${slug}/story-bible/merges`, { targetEntityId: target.id, sourceEntityIds: [source.id], reason: `Approved duplicate suggestion: ${mergeReview.reason}` }); setMergeReview(null); if (openEntityId === source.id) closeEntitySheet(source.id); else if (openEntityId === target.id && parseBibleQuery(location.search).entity === target.id) await loadEntityDetail(target.id, true); await load(); } }); };
-  const suppress = async (record: any) => { const entity = record.entity; const dependencies = [record.relationships?.length && `${record.relationships.length} relationships`, record.timeline?.length && `${record.timeline.length} timeline events`, record.issues?.length && `${record.issues.length} continuity findings`, entity.preferredNarrationName && "preferred narration name", entity.localizedNaming && "localization", record.visualProfileExists && "Visual Profile"].filter(Boolean).join(", "); if (!confirm(`Remove "${entity.canonicalName}" from the effective Story Bible?\n\nThis suppresses future rebuilt views, keeps historical evidence, and can be restored. Merge instead if this is a duplicate identity.${dependencies ? `\n\nExisting references to review: ${dependencies}.` : ""}`)) return; const reason = prompt("Reason for removing this canonical entity:"); if (!reason?.trim()) return; await requestImpact(entity.id, { action: "suppress" }, { title: `Remove ${entity.canonicalName}`, diff: [{ label: "Suppression", before: "Canonical entity", after: "Removed from the effective Story Bible (restorable)" }], applyLabel: "Remove entity", apply: async () => { await post(`/stories/${slug}/story-bible/entities/${entity.id}/suppress`, { reason: reason.trim() }); closeEntitySheet(entity.id); setNotice(`Removed "${entity.canonicalName}" from the effective Story Bible. You can restore it below.`); await load(); } }); };
+  const suppress = async (record: any) => { const entity = record.entity; const dependencies = [record.relationships?.length && `${record.relationships.length} relationships`, record.timeline?.length && `${record.timeline.length} timeline events`, record.issues?.length && `${record.issues.length} continuity findings`, entity.preferredNarrationName && "preferred narration name", entity.localizedNaming && "localization", record.visualProfileExists && "Visual Profile"].filter(Boolean).join(", "); if (!confirm(`Remove "${entity.canonicalName}" from the effective Story Bible?\n\nThis suppresses future rebuilt views, keeps historical evidence, and can be restored. Merge instead if this is a duplicate identity.${dependencies ? `\n\nExisting references to review: ${dependencies}.` : ""}`)) return; const reason = prompt("Reason for removing this canonical entity:"); if (!reason?.trim()) return; await requestImpact(entity.id, { action: "suppress" }, { title: `Remove ${entity.canonicalName}`, diff: [{ label: "Suppression", before: "Canonical entity", after: "Removed from the effective Story Bible (restorable)" }], applyLabel: "Remove entity", apply: async () => { await post(`/stories/${slug}/story-bible/entities/${entity.id}/suppress`, { reason: reason.trim() }); if (requestedEntityIdRef.current ? requestedEntityIdRef.current === entity.id : detailEntityIdRef.current === entity.id) { closeEntitySheet(entity.id); navigate(`/stories/${slug}/bible${bibleQueryString({ tab, type, q: debouncedQuery, sort, readiness, page })}`, { scroll: "preserve", replace: true }); } setNotice(`Removed "${entity.canonicalName}" from the effective Story Bible. You can restore it below.`); await load(); } }); };
   const restore = async (entityId: string) => { try { await post(`/stories/${slug}/story-bible/entities/${entityId}/restore`, {}); setNotice("Canonical entity restored."); await load(); } catch (value) { setError(message(value)); } };
   const undo = async (id: string) => { const expectedEntityId = requestedEntityId; if (!confirm("Undo this merge and restore the source entities?")) return; try { await post(`/stories/${slug}/story-bible/merges/${id}/undo`, {}); closeEntitySheet(expectedEntityId); await load(); } catch (value) { setError(message(value)); } };
   const demote = async (entity: any) => {
@@ -1847,6 +1852,7 @@ export function CanonicalEntitySheet({ detail, slug, navigate, onClose, onUndo, 
   const shownTimeline = viewing ? history!.timeline ?? [] : detail.timeline;
   const shownRelationships = viewing ? history!.relationships ?? [] : detail.relationships;
   const shownRelatedNames = viewing ? history!.relatedNames ?? {} : detail.relatedNames;
+  const reviewAttentionCount = (detail.issues?.length ?? 0) + (detail.namingCollisions?.length ?? 0) + (detail.readiness ?? []).filter((row: any) => row.state === "attention").length;
   const shownProvenance = viewing ? history!.provenance ?? [] : entity.provenance;
   const overrides = new Set<string>(viewing ? history!.currentOverrides ?? [] : []);
   const manualFields = new Set<string>(detail.manualFields ?? []);
@@ -2038,20 +2044,20 @@ export function CanonicalEntitySheet({ detail, slug, navigate, onClose, onUndo, 
               </div>
             </details>
           )}
-          {shownRelationships?.length > 0 && (
-            <div className="entity-history">
-              <span className="section-eyebrow">Relationships</span>
-              {shownRelationships.map((item: any) => (
-                <div key={item.id}>
-                  <b>{shownRelatedNames[item.sourceEntityId] ?? item.sourceEntityId}</b>
-                  <span>{item.type} → {shownRelatedNames[item.targetEntityId] ?? item.targetEntityId}</span>
-                  <small>Ch. {item.startChapter}{item.endChapter ? `—${item.endChapter}` : " · current"}</small>
-                </div>
-              ))}
-            </div>
-          )}
           </section>
         </EntityDetailAccordion>
+
+        {shownRelationships?.length > 0 && <EntityDetailAccordion key={`${entity.id}-relationships`} id="relationships" title="Relationships" badge={`${shownRelationships.length} relationship${shownRelationships.length === 1 ? "" : "s"}`}>
+          <div className="entity-history">
+            {shownRelationships.map((item: any) => (
+              <div key={item.id}>
+                <b>{shownRelatedNames[item.sourceEntityId] ?? item.sourceEntityId}</b>
+                <span>{item.type} → {shownRelatedNames[item.targetEntityId] ?? item.targetEntityId}</span>
+                <small>Ch. {item.startChapter}{item.endChapter ? `—${item.endChapter}` : " · current"}</small>
+              </div>
+            ))}
+          </div>
+        </EntityDetailAccordion>}
 
         {shownTimeline?.length > 0 && <EntityDetailAccordion key={`${entity.id}-timeline`} id="timeline" title="Timeline" badge={`${shownTimeline.length} event${shownTimeline.length === 1 ? "" : "s"}`}>
           <div className="entity-history">
@@ -2072,8 +2078,8 @@ export function CanonicalEntitySheet({ detail, slug, navigate, onClose, onUndo, 
           </section>
         </EntityDetailAccordion>}
 
-        {!viewing && (detail.namingCollisions?.length > 0 || detail.issues?.length > 0 || (detail.readiness ?? []).some((row: any) => row.state === "attention")) && (
-          <EntityDetailAccordion key={`${entity.id}-issues-review`} id="issues-review" title="Issues & Review" badge={`${(detail.issues?.length ?? 0) + (detail.namingCollisions?.length ?? 0) + (detail.readiness ?? []).filter((row: any) => row.state === "attention").length} items`} defaultOpen={Boolean(detail.issues?.length || detail.namingCollisions?.length || (detail.readiness ?? []).some((row: any) => row.state === "attention"))}>
+        {!viewing && reviewAttentionCount > 0 && (
+          <EntityDetailAccordion key={`${entity.id}-issues-review`} id="issues-review" title="Issues & Review" badge={`${reviewAttentionCount} ${reviewAttentionCount === 1 ? "item" : "items"}`}>
             <section className="entity-detail-section">
             {detail.namingCollisions?.map((collision: any) => (
               <div className="entity-issue-notice" key={collision.id}><b>Naming collision</b><p>{collision.hasMergeRelationship ? "These records already share a merge relationship. " : ""}{collision.reason}</p>{collision.entities.filter((candidate: any) => candidate.id !== entity.id).map((candidate: any) => <span className="entity-collision-entity" key={candidate.id}>{candidate.canonicalName} · {pretty(candidate.type)}{candidate.field ? ` · via ${candidate.field}` : ""}</span>)}</div>

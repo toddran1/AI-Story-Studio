@@ -99,6 +99,26 @@ describe("Story Bible entity detail accordion", () => {
     expect(host.querySelector<HTMLElement>("#entity-section-timeline")?.hidden).toBe(true);
   });
 
+  it("keeps Relationships and Issues & Review separate and closed by default", () => {
+    const detail = {
+      entity: { id: "entity-relations", type: "character", canonicalName: "Mara", originalName: "Mara", aliases: [], aliasNarrationRules: [], canonicalNameLocked: false, status: "alive", notes: "A note", description: "", origin: "automatic", firstAppearance: 1, lastKnownAppearance: 2, provenance: [], mergedFromIds: [] },
+      timeline: [], relationships: [{ id: "relation-1", sourceEntityId: "entity-relations", targetEntityId: "friend", type: "friend", startChapter: 1 }], relatedNames: { friend: "Lena" }, relatedReferences: [], issues: [{ id: "issue-1" }], merges: [], duplicateSuggestions: [], namingCollisions: [{ id: "collision-1", hasMergeRelationship: false, reason: "The name Sue is used by two entities.", entities: [{ id: "friend", canonicalName: "Lena", type: "character", field: "preferred narration name" }] }], readiness: [], visualProfileExists: false,
+    };
+    host = document.createElement("div"); document.body.append(host); root = createRoot(host);
+    act(() => root!.render(<CanonicalEntitySheet detail={detail} slug="story" navigate={() => undefined} onClose={() => undefined} onUndo={() => undefined} onEdit={() => undefined} />));
+    const relationships = host.querySelector<HTMLButtonElement>('button[aria-controls="entity-section-relationships"]')!;
+    const issues = host.querySelector<HTMLButtonElement>('button[aria-controls="entity-section-issues-review"]')!;
+    expect(relationships.getAttribute("aria-expanded")).toBe("false"); expect(relationships.textContent).toContain("1 relationship");
+    expect(issues.getAttribute("aria-expanded")).toBe("false"); expect(issues.textContent).toContain("2 items");
+    expect(host.querySelector("#entity-section-story-information")?.textContent).not.toContain("Lena");
+    expect(host.textContent).not.toContain("Lena");
+    act(() => relationships.click());
+    expect(host.querySelector("#entity-section-relationships")?.textContent).toContain("Lena");
+    act(() => issues.click());
+    expect(host.querySelector("#entity-section-issues-review")?.textContent).toContain("1 continuity issues");
+    expect(host.querySelector("#entity-section-issues-review")?.textContent).toContain("The name Sue is used by two entities.");
+  });
+
   it("uses historical timeline entries and omits the accordion when no timeline exists", () => {
     const detail = {
       entity: { id: "entity-history", type: "character", canonicalName: "History Entity", originalName: "History Entity", aliases: [], aliasNarrationRules: [], canonicalNameLocked: false, status: "alive", notes: "", description: "", origin: "automatic", firstAppearance: 1, lastKnownAppearance: 4, provenance: [], mergedFromIds: [] },
@@ -425,6 +445,44 @@ describe("Story Bible entity deep-link integration", () => {
     expect(page.querySelector(".entity-sheet")).toBeNull();
   });
 
+  it("removes the suppressed entity from the visible list and shows its restoration audit", async () => {
+    let suppressed = false;
+    installApi(undefined, (url, init) => {
+      if (url.includes("/story-bible/entities?")) return json({ ...bibleList, items: suppressed ? bibleList.items.filter((item) => item.id !== "entity-b") : bibleList.items, total: suppressed ? 1 : 2 });
+      if (url.endsWith("/story-bible/suppressions")) return json(suppressed ? [{ entityId: "entity-b", name: "Entity B", type: "character", reason: "duplicate", suppressedAt: new Date().toISOString() }] : []);
+      if (url.endsWith("/entities/entity-b/impact")) return json({ affectedChapters: [], warnings: [] });
+      if (url.endsWith("/entities/entity-b/suppress") && init?.method === "POST") { suppressed = true; return json({ status: "suppressed" }); }
+      return undefined;
+    });
+    vi.stubGlobal("confirm", vi.fn(() => true)); vi.stubGlobal("prompt", vi.fn(() => "duplicate"));
+    const page = mount("?entity=entity-b&section=management");
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+    await act(async () => { [...page.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === "Remove canonical entity…")!.click(); await new Promise((resolve) => setTimeout(resolve, 0)); });
+    await act(async () => { [...page.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === "Remove entity")!.click(); await new Promise((resolve) => setTimeout(resolve, 0)); });
+    expect(page.querySelector(".entity-sheet")).toBeNull();
+    expect(new URLSearchParams(location.search).has("entity")).toBe(false);
+    expect([...page.querySelectorAll(".entity-row.selectable")].some((row) => row.textContent?.includes("Entity B"))).toBe(false);
+    expect(page.textContent).toContain("removed canonical records");
+    expect(page.textContent).toContain("Restore entity");
+  });
+
+  it("keeps the entity sheet open when suppression fails", async () => {
+    installApi(undefined, (url, init) => {
+      if (url.endsWith("/entities/entity-a/impact")) return json({ affectedChapters: [], warnings: [] });
+      if (url.endsWith("/entities/entity-a/suppress") && init?.method === "POST") return new Response(JSON.stringify({ error: "Suppression failed" }), { status: 500, headers: { "content-type": "application/json" } });
+      return undefined;
+    });
+    vi.stubGlobal("confirm", vi.fn(() => true)); vi.stubGlobal("prompt", vi.fn(() => "duplicate"));
+    const page = mount("?entity=entity-a&section=management");
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+    await act(async () => { [...page.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === "Remove canonical entity…")!.click(); await new Promise((resolve) => setTimeout(resolve, 0)); });
+    await act(async () => { [...page.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === "Remove entity")!.click(); await new Promise((resolve) => setTimeout(resolve, 0)); });
+    expect(page.querySelector(".entity-sheet")).not.toBeNull();
+    expect(new URLSearchParams(location.search).get("entity")).toBe("entity-a");
+    expect(page.textContent).not.toContain('Removed "Entity A" from the effective Story Bible');
+    expect(page.textContent).toContain("Suppression failed");
+  });
+
   it("clears the entity URL when the user manually closes the sheet", async () => {
     installApi();
     const page = mount("?entity=entity-a&section=management&type=character");
@@ -434,6 +492,36 @@ describe("Story Bible entity deep-link integration", () => {
     expect(new URLSearchParams(location.search).has("entity")).toBe(false);
     expect(new URLSearchParams(location.search).has("section")).toBe(false);
     expect(new URLSearchParams(location.search).get("type")).toBe("character");
+  });
+
+  it("keeps editor focus and cursor through typing, spaces, and textarea edits", async () => {
+    installApi();
+    const page = mount("?entity=entity-a&section=management");
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+    act(() => [...page.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === "Edit entity")!.click());
+    const name = page.querySelector<HTMLInputElement>(".editor-sheet[aria-label='Edit canonical record'] input:not([type='checkbox'])")!;
+    const write = (element: HTMLInputElement | HTMLTextAreaElement, value: string) => {
+      const prototype = element instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+      Object.getOwnPropertyDescriptor(prototype, "value")!.set!.call(element, value);
+      element.dispatchEvent(new Event("input", { bubbles: true }));
+    };
+    expect(document.activeElement).toBe(name);
+    for (const value of ["J", "Jo", "John", "John ", "John Smith"]) {
+      act(() => write(name, value));
+      expect(document.activeElement).toBe(name);
+      expect(page.querySelector(".editor-sheet")).not.toBeNull();
+    }
+    expect(name.value).toBe("John Smith");
+    act(() => name.dispatchEvent(new KeyboardEvent("keydown", { key: " ", bubbles: true })));
+    expect(page.querySelector(".editor-sheet")).not.toBeNull();
+    const tab = new KeyboardEvent("keydown", { key: "Tab", bubbles: true, cancelable: true });
+    act(() => name.dispatchEvent(tab));
+    expect(tab.defaultPrevented).toBe(false);
+    const notes = page.querySelector<HTMLTextAreaElement>(".editor-sheet textarea")!;
+    act(() => { notes.focus(); write(notes, "First note with space"); });
+    expect(notes.value).toBe("First note with space"); expect(document.activeElement).toBe(notes);
+    act(() => window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })));
+    expect(page.querySelector(".editor-sheet[aria-label='Edit canonical record']")).toBeNull();
   });
 
   it("clears the deep link after a successful edit save that closes the sheet", async () => {
@@ -446,7 +534,7 @@ describe("Story Bible entity deep-link integration", () => {
     await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
     expect(page.querySelector(".editor-sheet.naming-editor")).not.toBeNull();
     expect(page.querySelector(".editor-sheet.naming-editor")?.getAttribute("aria-modal")).toBe("true");
-    expect(document.activeElement?.getAttribute("aria-label")).toBe("Close editor");
+    expect(document.activeElement).toBe(page.querySelector(".editor-sheet[aria-label='Edit canonical record'] input:not([type='checkbox'])"));
     expect(page.querySelector(".entity-sheet")?.hasAttribute("inert")).toBe(true);
     expect(page.querySelector(".entity-sheet")?.getAttribute("aria-hidden")).toBe("true");
     act(() => window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })));

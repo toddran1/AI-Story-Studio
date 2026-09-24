@@ -2,7 +2,7 @@ import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { getCanonicalEntityAudit, getCanonicalEntityDetail, getCanonicalEntityUsage, getStoryBibleHealth, getStoryBibleReview } from "../apps/server/catalog.js";
+import { getCanonicalEntitiesPage, getCanonicalEntityAudit, getCanonicalEntityDetail, getCanonicalEntityUsage, getStoryBible, getStoryBibleHealth, getStoryBibleReview, getSuppressedCanonicalEntities } from "../apps/server/catalog.js";
 import { StudioOperations } from "../apps/server/operations.js";
 import { loadEnvironment } from "../src/config/env.js";
 import { defaultStory } from "../src/config/load-config.js";
@@ -33,6 +33,28 @@ async function storyFixture() {
 async function seedBible(paths: ReturnType<typeof storyPaths>, entities: CanonicalEntity[]) {
   await atomicWriteJson(paths.bible, { ...emptyStoryBible(), canonicalEntities: entities });
 }
+
+describe("canonical suppression in effective reads", () => {
+  it("removes a record immediately, survives a regenerated base, and restores it", async () => {
+    const { root, story, paths } = await storyFixture();
+    const records = [entity("a1"), entity("b1"), entity("c1")];
+    await seedBible(paths, records);
+    const operations = new StudioOperations(root, env);
+    const page = () => getCanonicalEntitiesPage(root, story.slug, { page: 1, pageSize: 50 });
+    expect((await page()).items.map((item) => item.id)).toEqual(records.map((item) => item.id));
+    await operations.suppressCanonicalEntity(story.slug, records[1]!.id, { reason: "Wrong canonical identity" });
+    expect((await page()).items.map((item) => item.id)).toEqual([records[0]!.id, records[2]!.id]);
+    expect((await getStoryBible(root, story.slug)).canonicalEntities.map((item) => item.id)).not.toContain(records[1]!.id);
+    await expect(getCanonicalEntityDetail(root, story.slug, records[1]!.id)).rejects.toThrow("not found");
+    expect((await getSuppressedCanonicalEntities(root, story.slug))[0]).toMatchObject({ entityId: records[1]!.id, name: records[1]!.canonicalName, reason: "Wrong canonical identity", suppressedAt: expect.any(String) });
+    await seedBible(paths, records);
+    expect((await page()).items.map((item) => item.id)).toEqual([records[0]!.id, records[2]!.id]);
+    await operations.restoreCanonicalEntity(story.slug, records[1]!.id);
+    expect((await page()).items.map((item) => item.id)).toEqual(records.map((item) => item.id));
+    expect(await getSuppressedCanonicalEntities(root, story.slug)).toEqual([]);
+    await operations.close();
+  });
+});
 
 describe("naming collision detection", () => {
   it("detects canonical ↔ canonical collisions", () => {

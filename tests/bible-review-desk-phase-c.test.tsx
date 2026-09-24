@@ -37,8 +37,9 @@ describe("canonical entity sheet — Phase C sections", () => {
       />,
     );
     expect(html).toContain("Naming collision");
-    expect(html).toContain("The name &#x27;Sue&#x27; is used by 2 different entities.");
-    expect(html).toContain("Ming · Character · via preferred narration name");
+    expect(html).toContain('aria-expanded="false" aria-controls="entity-section-issues-review"');
+    expect(html).toContain("1 item");
+    expect(html).not.toContain("The name &#x27;Sue&#x27; is used by 2 different entities.");
     expect(html).not.toContain("Compare with Ming");
     expect(html).toContain("Entity Management");
   });
