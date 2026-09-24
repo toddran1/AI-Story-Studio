@@ -7,6 +7,7 @@ import {
   saveVisualProfiles,
   getVisualProfile,
   updateVisualProfile,
+  canApproveVisualProfile,
   deleteVisualProfile,
   deleteVisualReferenceImage,
   addVisualReferenceImage,
@@ -113,6 +114,41 @@ describe("Visual Entity Profiles", () => {
     expect(reloaded).toBeDefined();
     expect(reloaded?.status).toBe("approved");
     expect(reloaded?.visualPrompt).toContain("towering dark knight");
+  });
+
+  it("approves partial profiles, preserves omissions and approval through edits, and permits returning to draft", async () => {
+    const character = { apparentAge: "20s", gender: "male", height: "5'11\"", build: "lean", hairColor: "black", hairstyle: "short", eyeColor: "gray", defaultOutfit: "varsity jacket" };
+    await updateVisualProfile(root, slug, entityId, { character });
+    const approved = await updateVisualProfile(root, slug, entityId, { status: "approved" });
+    expect(approved).toMatchObject({ status: "approved", character });
+    expect(approved.approvedAt).toBeDefined();
+    for (const key of ["skinTone", "faceShape", "scars", "tattoos", "accessories"]) expect(approved.character?.[key as keyof typeof approved.character]).toBeUndefined();
+    const edited = await updateVisualProfile(root, slug, entityId, { character: { ...character, hairstyle: "long" } });
+    expect(edited.status).toBe("approved");
+    expect(edited.approvedAt).toBe(approved.approvedAt);
+    expect(edited.revision).toBe(approved.revision + 1);
+    const draft = await updateVisualProfile(root, slug, entityId, { status: "draft" });
+    expect(draft.approvedAt).toBeUndefined();
+  });
+
+  it("requires only one meaningful visual identity source across entity types", async () => {
+    const empty = await updateVisualProfile(root, slug, entityId, {});
+    expect(canApproveVisualProfile(empty)).toBe(false);
+    await expect(updateVisualProfile(root, slug, entityId, { status: "approved" })).rejects.toThrow("persistent visual detail");
+    const locationId = "ent_cccccccccccccccccccccccc";
+    const location = await updateVisualProfile(root, slug, locationId, { visualType: "location", location: { architecture: "brass dome", atmosphere: "hushed", colorPalette: "amber" }, status: "approved" });
+    expect(location.status).toBe("approved");
+    expect(location.approvedAt).toBeDefined();
+  });
+
+  it("allows an otherwise empty profile with an approved visual reference", async () => {
+    await addVisualReferenceImage(root, slug, entityId, {
+      role: "primary_reference", source: "uploaded", buffer: Buffer.from("reference"), approved: true,
+    });
+    const approved = await updateVisualProfile(root, slug, entityId, { status: "approved" });
+    expect(approved.status).toBe("approved");
+    expect(approved.appearance).toBe("");
+    expect(approved.character).toEqual({});
   });
 
   it("adds and stores visual reference images", async () => {

@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { generateStoredArtwork } from "../src/artwork/generator.js";
 import { canonicalEntitySchema, emptyStoryBible } from "../src/domain/story-bible.js";
 import { updateCanonicalEntity, loadStoryBibleWithCanonicalOverlay } from "../src/story-bible/canonical.js";
-import { updateVisualProfile } from "../src/visual-canon/profiles.js";
+import { getVisualProfile, updateVisualProfile } from "../src/visual-canon/profiles.js";
 import { inspectArtworkVisualPreflight } from "../src/visual-canon/preflight.js";
 import { sceneManifestSchema } from "../src/scenes/types.js";
 import { atomicWriteJson } from "../src/storage/atomic-write.js";
@@ -36,6 +36,19 @@ async function fixture() {
 afterEach(async () => { await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))); });
 
 describe("Artwork Visual Profile Preflight", () => {
+  it("accepts approved partial character and location profiles while leaving omitted fields unset", async () => {
+    const { root, story } = await fixture();
+    await updateVisualProfile(root, story.slug, characterId, { character: { hairColor: "ink black", eyeColor: "smoky gray" } });
+    const draft = await inspectArtworkVisualPreflight({ root, slug: story.slug, chapters: [1] });
+    expect(draft.requiresDecision).toEqual(expect.arrayContaining([expect.objectContaining({ entityId: characterId, state: "draft_profile" })]));
+    await updateVisualProfile(root, story.slug, characterId, { status: "approved" });
+    await updateVisualProfile(root, story.slug, locationId, { visualType: "location", location: { architecture: "brass dome" }, status: "approved" });
+    const approved = await inspectArtworkVisualPreflight({ root, slug: story.slug, chapters: [1] });
+    expect(approved.ready).toBe(true);
+    expect(approved.requiresDecision).toEqual([]);
+    expect(approved.entities.map((entity) => entity.state)).toEqual(["approved_profile", "approved_profile"]);
+    expect((await getVisualProfile(root, story.slug, characterId))?.character?.skinTone).toBeUndefined();
+  });
   it("deduplicates visually present canonical entities and blocks missing or draft profiles without provider work", async () => {
     const { root, story } = await fixture();
     const preflight = await inspectArtworkVisualPreflight({ root, slug: story.slug, chapters: [1] });

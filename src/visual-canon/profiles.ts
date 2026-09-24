@@ -32,6 +32,14 @@ import {
 
 const visualProfilesFileSchema = z.record(z.string(), visualProfileSchema);
 
+/** Approval records an editorial decision, independent of field completeness. */
+export function canApproveVisualProfile(profile: VisualEntityProfile): boolean {
+  const hasText = (value: string | undefined) => Boolean(value?.trim());
+  return hasText(profile.appearance) || hasText(profile.visualPrompt)
+    || visualFieldEntries(profile).some(([, value]) => hasText(value))
+    || profile.references.some((reference) => reference.approved);
+}
+
 function visualFieldEntries(profile: VisualEntityProfile): Array<[string, string | undefined]> {
   const sections: Array<["character" | "location" | "creature" | "item", Record<string, string | undefined> | undefined]> = [
     ["character", profile.character], ["location", profile.location], ["creature", profile.creature], ["item", profile.item],
@@ -137,6 +145,11 @@ export async function updateVisualProfile(
   }
 
   preserveManualFieldDecisions(existing, next, patch);
+
+  if (next.status === "approved" && existing?.status !== "approved") {
+    if (!canApproveVisualProfile(next)) throw new Error("Add at least one persistent visual detail or approve a reference image before approving this Visual Profile.");
+    if (next.conflicts?.some((conflict) => conflict.status === "needs_review")) throw new Error("Resolve Visual Profile conflicts before approval.");
+  }
 
   profiles[entityId] = next;
   await saveVisualProfiles(root, slug, profiles);

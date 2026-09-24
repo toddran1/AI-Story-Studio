@@ -3,7 +3,6 @@ import {
   VisualEntityProfile,
   VisualRole,
   VisualEntityType,
-  VisualProfileStatus,
   getVisualProfile,
   updateVisualProfile,
   uploadVisualReference,
@@ -153,6 +152,7 @@ export function VisualProfileModal({
       const updated = await updateVisualProfile(slug, entityId, profile);
       setProfile(updated);
       onUpdated?.(updated);
+      await inspectVisualProfile(slug, entityId).then(setCompleteness);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -162,16 +162,17 @@ export function VisualProfileModal({
 
   const handleStatusToggle = async () => {
     if (!profile) return;
-    const nextStatus: VisualProfileStatus = profile.status === "approved" ? "draft" : "approved";
-    const nextProfile = { ...profile, status: nextStatus };
-    setProfile(nextProfile);
+    const nextStatus = profile.status === "approved" ? "draft" : "approved";
+    setSaving(true);
+    setError(null);
     try {
-      const updated = await updateVisualProfile(slug, entityId, { status: nextStatus });
+      const updated = await updateVisualProfile(slug, entityId, { ...profile, status: nextStatus });
       setProfile(updated);
       onUpdated?.(updated);
+      await inspectVisualProfile(slug, entityId).then(setCompleteness);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
-    }
+    } finally { setSaving(false); }
   };
 
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -363,18 +364,16 @@ export function VisualProfileModal({
             <span
               className={`badge status-${profile.status}`}
               style={{
-                cursor: "pointer",
                 padding: "4px 10px",
                 borderRadius: "4px",
                 fontWeight: "bold",
                 backgroundColor: profile.status === "approved" ? "#2e7d32" : "#ed6c02",
                 color: "#fff",
               }}
-              onClick={handleStatusToggle}
-              title="Click to toggle Draft / Approved"
             >
               {profile.status === "approved" ? "✓ Approved Canon" : "Draft (Not Enforced)"}
             </span>
+            {completeness && <small>{completeness.coreComplete} / {completeness.coreTotal} core details established</small>}
           </div>
           <button className="btn-close" onClick={onClose}>✕</button>
         </div>
@@ -480,7 +479,7 @@ export function VisualProfileModal({
                 <section className="visual-completion-panel">
                   <div>
                     <strong>Persistent visual identity</strong>
-                    <p className="hint-text">{completeness ? `${completeness.coreComplete} / ${completeness.coreTotal} core details established.` : "Checking missing details…"} Existing and locked details stay protected until you explicitly apply a proposal.</p>
+                    <p className="hint-text">{completeness ? `${completeness.coreComplete} / ${completeness.coreTotal} core details established.` : "Checking missing details…"} More details are optional. Existing and locked details stay protected until you explicitly apply a proposal.</p>
                   </div>
                   <button type="button" className="btn btn-primary" disabled={proposing} onClick={() => handlePropose(false)}>{proposing ? "Preparing proposal…" : "Generate missing details with AI"}</button>
                 </section>
@@ -1032,6 +1031,9 @@ export function VisualProfileModal({
         </div>
 
         <div className="modal-footer">
+          <button type="button" className="btn btn-secondary" disabled={saving} onClick={() => void handleStatusToggle()}>
+            {profile.status === "approved" ? "Return to draft" : "Approve Visual Profile"}
+          </button>
           <button type="button" className="btn btn-secondary" onClick={onClose}>
             Cancel
           </button>
