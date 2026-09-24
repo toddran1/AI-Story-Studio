@@ -610,6 +610,7 @@ export function ChapterPage({
         chapters: [chapter],
         stage,
         mode: "selected",
+        executionPolicy: "chapter-stage",
       });
       onJob(next);
       watcher.current?.();
@@ -619,6 +620,7 @@ export function ChapterPage({
           onJob(job);
           if (isTerminalJob(job)) {
             setWorking("");
+            if (job.status === "failed") setError(job.error ?? `${pretty(stage)} failed`);
             await load();
           }
         },

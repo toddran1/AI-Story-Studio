@@ -15,6 +15,9 @@ import { resolveImageProvider } from "../artwork/providers.js";
 import type { VideoProcessor } from "../video/renderer.js";
 import { fingerprint } from "../utils/hash.js";
 import { BatchStage, batchStageSchema } from "./stage-selection.js";
+import { qaResultSchema } from "../domain/qa.js";
+import { readJsonIfExists } from "../storage/story-files.js";
+import { storyPaths } from "../storage/paths.js";
 
 /** `context` is a local, derived artifact. It is deliberately visible in plans
  * even though it is not a user-selectable Chapter stage. */
@@ -27,6 +30,7 @@ const canonicalStageExecutionInputSchema = z.object({
   stages: z.array(batchStageSchema).min(1).max(batchStageSchema.options.length),
   mode: stageExecutionModeSchema.default("selected"),
   force: z.boolean().default(false),
+  executionPolicy: z.enum(["standard", "chapter-stage"]).default("standard"),
   continueOnError: z.boolean().default(false),
   expectedPlanFingerprint: z.string().length(64).optional(),
   dryRun: z.boolean().default(false),
@@ -54,6 +58,7 @@ export type StageExecutionPlan = {
   artifacts: StageArtifactState[];
   reason: string;
 };
+export type StageExecutionPolicy = "standard" | "chapter-stage";
 export type StageExecutionAction = "selected-run" | "prerequisite-run" | "reuse" | "blocked";
 export type StageExecutionEntry = { stage: StageExecutionNode; action: StageExecutionAction; reason: string; availability: ArtifactAvailability; freshness?: ArtifactFreshness; requiredBy: BatchStage[] };
 export type StageExecutionBatchPlan = {
@@ -131,30 +136,69 @@ export function dependentProcessingStages(stage: StageName): StageName[] {
   return [...found].filter((node): node is StageName => node !== "context");
 }
 
-export async function planStageExecution(options: { root: string; story: string; chapter: number; selectedStages: readonly BatchStage[]; mode?: StageExecutionMode; force?: boolean }): Promise<StageExecutionPlan> {
-  const mode = options.mode ?? "selected"; const force = options.force ?? false; const selectedStages = orderedBatchStages(options.selectedStages);
+export async function planStageExecution(options: { root: string; story: string; chapter: number; selectedStages: readonly BatchStage[]; mode?: StageExecutionMode; force?: boolean; executionPolicy?: StageExecutionPolicy; storyConfig?: Story }): Promise<StageExecutionPlan> {
+  const chapterPolicy = options.executionPolicy === "chapter-stage";
+  const mode = chapterPolicy ? "selected" : options.mode ?? "selected"; const force = chapterPolicy || (options.force ?? false); const selectedStages = orderedBatchStages(options.selectedStages);
   if (!selectedStages.length) throw new Error("Select at least one executable stage");
-  const required = requiredStageNodesFor(selectedStages);
+  if (chapterPolicy && selectedStages.length !== 1) throw new Error("Chapter-stage execution requires exactly one target stage.");
+  const target = selectedStages[0];
+  const selectedNodes: StageExecutionNode[] = chapterPolicy && target === "audioMastering" ? ["tts", "audioMastering"]
+    : chapterPolicy && target === "subtitles" ? ["alignment", "subtitles"]
+    : chapterPolicy && target === "storyBible" ? ["storyBible", "context"] : selectedStages;
+  const stageDependencies = (stage: StageExecutionNode): StageExecutionNode[] => chapterPolicy && stage === "video" && options.storyConfig?.video.subtitleMode === "none"
+    ? dependencies.video.filter((dependency) => dependency !== "subtitles") : dependencies[stage];
+  const requiredFor = (stage: StageExecutionNode): StageExecutionNode[] => {
+    const found = new Set<StageExecutionNode>();
+    const visit = (node: StageExecutionNode) => { if (found.has(node)) return; found.add(node); stageDependencies(node).forEach(visit); };
+    visit(stage); return allStageOrder.filter((node) => found.has(node));
+  };
+  const required = allStageOrder.filter((stage) => selectedNodes.some((node) => requiredFor(node).includes(stage)));
   const artifacts = await Promise.all(required.map((stage) => inspectArtifact(options.root, options.story, options.chapter, stage)));
-  const byStage = new Map(artifacts.map((item) => [item.stage, item])); const selected = new Set<StageExecutionNode>(selectedStages); const entries = new Map<StageExecutionNode, StageExecutionEntry>();
-  const requiredBy = (stage: StageExecutionNode) => selectedStages.filter((selectedStage) => requiredStageNodes(selectedStage).includes(stage));
+  const byStage = new Map(artifacts.map((item) => [item.stage, item])); const selected = new Set<StageExecutionNode>(selectedNodes); const entries = new Map<StageExecutionNode, StageExecutionEntry>();
+  const requiredBy = (stage: StageExecutionNode) => selectedStages.filter(() => selectedNodes.some((node) => requiredFor(node).includes(stage)));
+  const qaNeeded = chapterPolicy && target !== "qa" && required.includes("qa");
+  let qaStatus: string | undefined;
+  if (qaNeeded && byStage.get("qa")?.availability === "available") {
+    try { qaStatus = qaResultSchema.parse(await readJsonIfExists(storyPaths(options.root, options.story, options.chapter).qa)).status; }
+    catch { /* The artifact inspector reports invalid QA below. */ }
+  }
+  const qaProblem = qaNeeded && (byStage.get("qa")?.availability !== "available" || qaStatus !== "pass")
+    ? byStage.get("qa")?.availability === "available"
+      ? `QA status is ${qaStatus ?? "invalid"}. QA must pass before ${target === "audioMastering" ? "Audio" : target === "storyBible" ? "Context" : target === "scenePlanning" ? "Scenes" : target} can be generated.`
+      : `QA data is ${byStage.get("qa")?.availability ?? "missing"}.`
+    : undefined;
   const entry = (stage: StageExecutionNode, action: StageExecutionAction, reason: string) => {
     const artifact = byStage.get(stage)!; const value: StageExecutionEntry = { stage, action, reason, availability: artifact.availability, freshness: artifact.freshness, requiredBy: requiredBy(stage) }; entries.set(stage, value); return value;
   };
   const ensurePrerequisite = (stage: StageExecutionNode): StageExecutionEntry => {
     const existing = entries.get(stage); if (existing) return existing;
     const artifact = byStage.get(stage)!;
+    if (stage === "qa" && qaProblem) return entry(stage, "blocked", qaProblem);
     if (artifact.availability === "available") return entry(stage, "reuse", `${stage} is available${artifact.freshness === "stale" ? " and stale but usable" : ""}.`);
     if (mode === "selected") return entry(stage, "blocked", `${stage} prerequisite is ${artifact.availability}; selected-only mode will not regenerate it.`);
-    const blockedDependency = dependencies[stage].map(ensurePrerequisite).find((item) => item.action === "blocked");
+    const blockedDependency = stageDependencies(stage).map(ensurePrerequisite).find((item) => item.action === "blocked");
     return blockedDependency
       ? entry(stage, "blocked", `${stage} cannot run because ${blockedDependency.stage} is blocked.`)
       : entry(stage, "prerequisite-run", `${stage} is ${artifact.availability} and is required by ${requiredBy(stage).join(", ")}.`);
   };
-  for (const stage of selectedStages) {
+  if (chapterPolicy) {
+    for (const stage of required) {
+      if (selected.has(stage)) continue;
+      const artifact = byStage.get(stage)!;
+      if (stage === "qa" && qaProblem) entry(stage, "blocked", qaProblem);
+      else if (artifact.availability !== "available") entry(stage, "blocked", `${stage} prerequisite is ${artifact.availability}.`);
+      else entry(stage, "reuse", `${stage} is available${artifact.freshness === "stale" ? " and stale but usable" : ""}.`);
+    }
+  }
+  for (const stage of selectedNodes) {
     const artifact = byStage.get(stage)!;
+    if (qaProblem) { entry("qa", "blocked", qaProblem); entry(stage, "blocked", `${stage} cannot run because ${qaProblem}`); continue; }
+    if (chapterPolicy) {
+      const unavailable = required.filter((node) => !selected.has(node)).map((node) => entries.get(node)!).find((item) => item.action === "blocked");
+      if (unavailable) { entry(stage, "blocked", `${stage} cannot run because ${unavailable.stage} is ${unavailable.availability}.`); continue; }
+    }
     if (artifact.availability === "available" && !force) { entry(stage, "reuse", `${stage} is already available${artifact.freshness === "stale" ? "; stale remains usable" : ""}.`); continue; }
-    const blockedDependency = dependencies[stage].map((dependency) => selected.has(dependency) ? entries.get(dependency) ?? ensurePrerequisite(dependency) : ensurePrerequisite(dependency)).find((item) => item.action === "blocked");
+    const blockedDependency = stageDependencies(stage).map((dependency) => selected.has(dependency) ? entries.get(dependency) ?? ensurePrerequisite(dependency) : ensurePrerequisite(dependency)).find((item) => item.action === "blocked");
     if (blockedDependency) entry(stage, "blocked", `${stage} cannot run because ${blockedDependency.stage} is unavailable.`);
     else entry(stage, "selected-run", force && artifact.availability === "available" ? "User requested regeneration of the selected stage." : `User selected this ${artifact.availability} stage.`);
   }
@@ -168,13 +212,13 @@ export async function planStageExecution(options: { root: string; story: string;
   return { selectedStages, mode, force, prerequisitesComplete, runStages, reusedStages, missingStages, blockedStages, entries: orderedEntries, artifacts, reason };
 }
 
-export async function planStageExecutionBatch(options: { root: string; story: string; chapters: readonly number[]; selectedStages: readonly BatchStage[]; mode?: StageExecutionMode; force?: boolean }): Promise<StageExecutionBatchPlan> {
+export async function planStageExecutionBatch(options: { root: string; story: string; chapters: readonly number[]; selectedStages: readonly BatchStage[]; mode?: StageExecutionMode; force?: boolean; executionPolicy?: StageExecutionPolicy; storyConfig?: Story }): Promise<StageExecutionBatchPlan> {
   const chapters = await Promise.all(options.chapters.map(async (chapter) => ({ chapter, ...await planStageExecution({ ...options, chapter }) })));
   const count = (actions: StageExecutionAction[]) => chapters.flatMap((chapter) => chapter.entries).filter((entry) => actions.includes(entry.action));
   const planned = count(["selected-run", "prerequisite-run"]); const reused = count(["reuse"]); const blocked = count(["blocked"]);
   const stageCounts = (entries: StageExecutionEntry[]) => entries.reduce<Partial<Record<StageExecutionNode, number>>>((result, item) => ({ ...result, [item.stage]: (result[item.stage] ?? 0) + 1 }), {});
   const providerOperations = planned.reduce((totals, item) => { const kind = providerKind(item.stage); if (kind) totals[kind]++; return totals; }, { llm: 0, tts: 0, images: 0 });
-  const summary: StageExecutionBatchPlan["summary"] = { chapterCount: chapters.length, selectedStages: orderedBatchStages(options.selectedStages), mode: options.mode ?? "selected", force: options.force ?? false, operationCount: planned.length, reusedCount: reused.length, blockedOperations: blocked.length, blockedChapters: chapters.filter((chapter) => chapter.blockedStages.length > 0).length, plannedByStage: stageCounts(planned), reusedByStage: stageCounts(reused), blockedByStage: stageCounts(blocked), addedPrerequisites: allStageOrder.filter((stage) => planned.some((entry) => entry.stage === stage && entry.action === "prerequisite-run")), providerOperations };
+  const summary: StageExecutionBatchPlan["summary"] = { chapterCount: chapters.length, selectedStages: orderedBatchStages(options.selectedStages), mode: options.executionPolicy === "chapter-stage" ? "selected" : options.mode ?? "selected", force: options.executionPolicy === "chapter-stage" || (options.force ?? false), operationCount: planned.length, reusedCount: reused.length, blockedOperations: blocked.length, blockedChapters: chapters.filter((chapter) => chapter.blockedStages.length > 0).length, plannedByStage: stageCounts(planned), reusedByStage: stageCounts(reused), blockedByStage: stageCounts(blocked), addedPrerequisites: allStageOrder.filter((stage) => planned.some((entry) => entry.stage === stage && entry.action === "prerequisite-run")), providerOperations };
   const planFingerprint = fingerprint({ chapters: chapters.map((chapter) => ({ chapter: chapter.chapter, entries: chapter.entries })), summary });
   return { chapters, summary, fingerprint: planFingerprint };
 }

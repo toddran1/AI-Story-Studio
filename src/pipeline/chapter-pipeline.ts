@@ -205,8 +205,15 @@ export class ChapterPipeline {
       const result = await polishNarration(this.llms.forStage(narrationConfig), narrationConfig, english, options.story.outputLanguage, priorContext, ttsConfig.provider, ttsConfig.model, options.story.narrationSettings.profanityMode, ttsConfig.deliveryIntensity, options.story.narrationSettings.includeChapterTitle !== false);
       const cleanNarration = stripDeliveryCues(result.text, ttsConfig.provider, ttsConfig.model);
       if (!cleanNarration) throw new PipelineError("Narration delivery cues cannot replace the chapter's spoken narration");
+      const previousNarration = await readTextIfExists(paths.narration);
       await atomicWrite(paths.narration, cleanNarration);
-      await atomicWrite(paths.narrationTts, result.text);
+      try {
+        await atomicWrite(paths.narrationTts, result.text);
+      } catch (error) {
+        if (previousNarration === undefined) await rm(paths.narration, { force: true });
+        else await atomicWrite(paths.narration, previousNarration);
+        throw error;
+      }
       chapter.counts.narrationWords = wordCount(cleanNarration);
       chapter.stages.narration.usage = result.usage;
       return cleanNarration;

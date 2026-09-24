@@ -7,7 +7,8 @@ import { CopyingAudioProcessor } from "../src/audio/chapter-audio.js";
 import { LLMRouter } from "../src/llm/router.js";
 import { storyPaths } from "../src/storage/paths.js";
 import { atomicWriteJson } from "../src/storage/atomic-write.js";
-import { pipelineStopAfterForStages, planStageExecution, planStageExecutionBatch, requiredStageNodes, stageExecutionInputSchema } from "../src/studio/stage-execution.js";
+import { executeStagePlan, pipelineStopAfterForStages, planStageExecution, planStageExecutionBatch, requiredStageNodes, stageExecutionInputSchema } from "../src/studio/stage-execution.js";
+import { inspectStageArtifact } from "../src/studio/artifact-state.js";
 import { MockLLM, MockTTS, testStory } from "./helpers.js";
 
 async function setup() {
@@ -19,6 +20,100 @@ async function setup() {
 }
 
 describe("manual stage execution planner", () => {
+  const chapterPlan = (ctx: Awaited<ReturnType<typeof setup>>, stage: Parameters<typeof planStageExecution>[0]["selectedStages"][number]) =>
+    planStageExecution({ root: ctx.root, story: ctx.story.slug, chapter: 1, selectedStages: [stage], executionPolicy: "chapter-stage", storyConfig: ctx.story });
+
+  it("forces translation alone, retains stale downstream files, and regenerates narration without translation", async () => {
+    const ctx = await setup(); const input = join(ctx.root, "chapter.txt");
+    const translation = await chapterPlan(ctx, "translation");
+    expect(translation.runStages).toEqual(["translation"]);
+    const translationProvider = new MockLLM("gemini", ["New translation"]);
+    const narrationProvider = new MockLLM("openai", ["New reader narration"]);
+    const pipeline = new ChapterPipeline(new LLMRouter(new Map([["gemini", translationProvider], ["openai", narrationProvider]])), new MockTTS(), new CopyingAudioProcessor());
+    const runtime = { pipeline, alignment: { config: {} as any }, video: {} as any };
+    await executeStagePlan({ root: ctx.root, story: ctx.story, chapter: 1, inputPath: input, plan: translation, runtime });
+    expect(await readFile(ctx.paths.english, "utf8")).toContain("New translation");
+    expect(await inspectStageArtifact(ctx.root, ctx.story.slug, 1, "narration")).toMatchObject({ availability: "available", freshness: "stale" });
+    expect(await readFile(ctx.paths.narration, "utf8")).toBeTruthy();
+    const narration = await chapterPlan(ctx, "narration");
+    expect(narration.runStages).toEqual(["narration"]);
+    await executeStagePlan({ root: ctx.root, story: ctx.story, chapter: 1, inputPath: input, plan: narration, runtime });
+    expect(await readFile(ctx.paths.narration, "utf8")).toContain("New reader narration");
+    expect(await readFile(ctx.paths.narrationTts, "utf8")).toContain("New reader narration");
+    expect(translationProvider.calls).toHaveLength(1);
+    await rm(ctx.root, { recursive: true, force: true });
+  });
+  it("keeps both narration artifacts when regeneration fails before replacement", async () => {
+    const ctx = await setup(); const previous = await Promise.all([readFile(ctx.paths.narration, "utf8"), readFile(ctx.paths.narrationTts, "utf8")]);
+    const failingNarrator = new MockLLM("openai");
+    failingNarrator.generateText = async () => { throw new Error("Provider unavailable"); };
+    const pipeline = new ChapterPipeline(new LLMRouter(new Map([["gemini", new MockLLM("gemini")], ["openai", failingNarrator]])), new MockTTS(), new CopyingAudioProcessor());
+    await expect(executeStagePlan({ root: ctx.root, story: ctx.story, chapter: 1, inputPath: join(ctx.root, "chapter.txt"), plan: await chapterPlan(ctx, "narration"), runtime: { pipeline, alignment: { config: {} as any }, video: {} as any } })).rejects.toThrow("Provider unavailable");
+    expect(await Promise.all([readFile(ctx.paths.narration, "utf8"), readFile(ctx.paths.narrationTts, "utf8")])).toEqual(previous);
+    await rm(ctx.root, { recursive: true, force: true });
+  });
+  it("preserves the previous translation when the provider returns empty output", async () => {
+    const ctx = await setup(); const previous = await readFile(ctx.paths.english, "utf8");
+    const pipeline = new ChapterPipeline(new LLMRouter(new Map([["gemini", new MockLLM("gemini", [""])], ["openai", new MockLLM("openai")]])), new MockTTS(), new CopyingAudioProcessor());
+    await expect(executeStagePlan({ root: ctx.root, story: ctx.story, chapter: 1, inputPath: join(ctx.root, "chapter.txt"), plan: await chapterPlan(ctx, "translation"), runtime: { pipeline, alignment: { config: {} as any }, video: {} as any } })).rejects.toThrow("empty chapter");
+    expect(await readFile(ctx.paths.english, "utf8")).toBe(previous);
+    await rm(ctx.root, { recursive: true, force: true });
+  });
+
+  it("uses stale upstream artifacts and expands only the target's internal operations", async () => {
+    const ctx = await setup(); const metadata = JSON.parse(await readFile(ctx.paths.chapterMeta, "utf8"));
+    for (const stage of ["translation", "narration", "qa", "storyBible", "audioMastering"]) metadata.stages[stage].staleReason = "Earlier settings changed";
+    await atomicWriteJson(ctx.paths.chapterMeta, metadata);
+    expect((await chapterPlan(ctx, "storyBible")).runStages).toEqual(["storyBible", "context"]);
+    expect((await chapterPlan(ctx, "audioMastering")).runStages).toEqual(["tts", "audioMastering"]);
+    expect((await chapterPlan(ctx, "subtitles")).runStages).toEqual(["alignment", "subtitles"]);
+    expect((await chapterPlan(ctx, "scenePlanning")).runStages).toEqual(["scenePlanning"]);
+    expect((await inspectStageArtifact(ctx.root, ctx.story.slug, 1, "translation")).availability).toBe("available");
+    await rm(ctx.root, { recursive: true, force: true });
+  });
+
+  it.each([["warn", false], ["warn", true], ["fail", false], ["fail", true]] as const)("blocks downstream stages when QA is %s (stale: %s)", async (status, stale) => {
+    const ctx = await setup(); const qa = JSON.parse(await readFile(ctx.paths.qa, "utf8")); qa.status = status; await atomicWriteJson(ctx.paths.qa, qa);
+    if (stale) { const metadata = JSON.parse(await readFile(ctx.paths.chapterMeta, "utf8")); metadata.stages.qa.staleReason = "Old QA"; await atomicWriteJson(ctx.paths.chapterMeta, metadata); }
+    for (const stage of ["storyBible", "audioMastering", "subtitles", "scenePlanning", "artwork", "video"] as const) {
+      const plan = await chapterPlan(ctx, stage);
+      expect(plan.blockedStages).toContain(stage);
+      expect(plan.entries.find((entry) => entry.stage === "qa")?.reason).toContain(`QA status is ${status}`);
+    }
+    await rm(ctx.root, { recursive: true, force: true });
+  });
+
+  it("blocks missing or invalid prerequisites without scheduling them", async () => {
+    const ctx = await setup(); await rm(ctx.paths.english);
+    const narration = await chapterPlan(ctx, "narration");
+    expect(narration.runStages).toEqual([]); expect(narration.entries.find((entry) => entry.stage === "translation")?.availability).toBe("missing");
+    const audioWithoutTranslation = await chapterPlan(ctx, "audioMastering");
+    expect(audioWithoutTranslation.runStages).toEqual([]); expect(audioWithoutTranslation.entries.find((entry) => entry.stage === "translation")?.availability).toBe("missing");
+    await writeFile(ctx.paths.english, "corrupt", "utf8"); await writeFile(ctx.paths.qa, "{bad", "utf8");
+    const audio = await chapterPlan(ctx, "audioMastering");
+    expect(audio.runStages).toEqual([]); expect(audio.entries.find((entry) => entry.stage === "qa")?.availability).toBe("invalid");
+    await rm(ctx.paths.qa);
+    expect((await chapterPlan(ctx, "audioMastering")).entries.find((entry) => entry.stage === "qa")?.availability).toBe("missing");
+    await rm(ctx.root, { recursive: true, force: true });
+  });
+
+  it("requires subtitles for video only when configured", async () => {
+    const ctx = await setup();
+    const withSubtitles = await chapterPlan(ctx, "video");
+    expect(withSubtitles.artifacts.map((item) => item.stage)).toContain("subtitles");
+    const withoutSubtitles = await planStageExecution({ root: ctx.root, story: ctx.story.slug, chapter: 1, selectedStages: ["video"], executionPolicy: "chapter-stage", storyConfig: { ...ctx.story, video: { ...ctx.story.video, subtitleMode: "none" } } });
+    expect(withoutSubtitles.artifacts.map((item) => item.stage)).not.toContain("subtitles");
+    await rm(ctx.root, { recursive: true, force: true });
+  });
+  it("blocks missing scenes for Artwork and Video without adding scene generation", async () => {
+    const ctx = await setup();
+    for (const stage of ["artwork", "video"] as const) {
+      const plan = await chapterPlan(ctx, stage);
+      expect(plan.runStages).toEqual([]);
+      expect(plan.entries.find((entry) => entry.stage === "scenePlanning")?.action).toBe("blocked");
+    }
+    await rm(ctx.root, { recursive: true, force: true });
+  });
   it("runs exactly selected stages and reuses stale prerequisites", async () => {
     const ctx = await setup(); const metadata = JSON.parse(await readFile(ctx.paths.chapterMeta, "utf8")); metadata.stages.storyBible.staleReason = "Changed settings"; await atomicWriteJson(ctx.paths.chapterMeta, metadata);
     const plan = await planStageExecution({ root: ctx.root, story: ctx.story.slug, chapter: 1, selectedStages: ["continuity"], force: true });

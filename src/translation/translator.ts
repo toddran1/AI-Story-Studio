@@ -17,6 +17,7 @@ export async function translate(provider: LLMProvider, config: StageModelConfig,
  * these phrases must not be rejected.
  */
 export function assertUsableTranslation(text: string) {
+  if (!text.trim()) throw new TranslationError("The translation provider returned an empty chapter. The existing translation was preserved.");
   const normalized = text.trim().replace(/\s+/g, " ").toLowerCase();
   const refusal = /^(?:i(?:'m| am) (?:unable|not able) to (?:provide|translate)|i(?:'m| am) sorry[,;:]? (?:but )?i (?:can(?:not|'t)|am unable|am not able) (?:to )?(?:provide|translate)|i can(?:not|'t) (?:provide|translate)[^.]{0,60}?(?:translation|chapter)|i (?:can|could) (?:instead )?offer (?:a )?(?:concise |brief |general )?(?:summary|overview|synopsis))/.test(normalized);
   const summarySubstitution = /\b(?:can|could) offer (?:a |only )?(?:concise |brief |general )?(?:summary|overview|synopsis)\b|\bwould you like (?:a |me to provide )?(?:general )?summary\b/.test(normalized);

@@ -257,17 +257,28 @@ export class StudioOperations {
   }
   async planStageExecution(slug: string, raw: unknown) {
     slugSchema.parse(slug); const input = stageExecutionInputSchema.parse(raw);
+    if (input.executionPolicy === "chapter-stage" && (input.chapters.length !== 1 || input.stages.length !== 1)) throw new ConfigurationError("Chapter-stage execution requires one chapter and one stage.");
+    const story = input.executionPolicy === "chapter-stage" ? await loadStory(storyPaths(this.root, slug, 1).storyConfig) : undefined;
     const imported = await loadImportedChapters(this.root, slug); const selected = selectChapterNumbers(imported.chapters, input.chapters);
-    return planStageExecutionBatch({ root: this.root, story: slug, chapters: selected.map((chapter) => chapter.chapter), selectedStages: input.stages, mode: input.mode, force: input.force });
+    return planStageExecutionBatch({ root: this.root, story: slug, chapters: selected.map((chapter) => chapter.chapter), selectedStages: input.stages, mode: input.mode, force: input.force, executionPolicy: input.executionPolicy, storyConfig: story });
   }
   startStageExecution(slug: string, raw: unknown) {
     slugSchema.parse(slug); const input = stageExecutionInputSchema.parse(raw);
+    if (input.executionPolicy === "chapter-stage" && (input.chapters.length !== 1 || input.stages.length !== 1)) throw new ConfigurationError("Chapter-stage execution requires one chapter and one stage.");
     if (input.dryRun) return this.planStageExecution(slug, input);
     return this.jobs.create("stageExecution", slug, async (control) => withStoryLock(this.root, slug, "manual stage processing", async () => {
       const story = await loadStory(storyPaths(this.root, slug, 1).storyConfig); const imported = await loadImportedChapters(this.root, slug);
-      const selected = selectChapterNumbers(imported.chapters, input.chapters); const batchPlan = await planStageExecutionBatch({ root: this.root, story: slug, chapters: selected.map((chapter) => chapter.chapter), selectedStages: input.stages, mode: input.mode, force: input.force });
+      const selected = selectChapterNumbers(imported.chapters, input.chapters); const batchPlan = await planStageExecutionBatch({ root: this.root, story: slug, chapters: selected.map((chapter) => chapter.chapter), selectedStages: input.stages, mode: input.mode, force: input.force, executionPolicy: input.executionPolicy, storyConfig: story });
       if (input.expectedPlanFingerprint && input.expectedPlanFingerprint !== batchPlan.fingerprint) throw new ConfigurationError("The execution plan changed after preview. Preview the current plan before running it.");
-      if (batchPlan.summary.blockedOperations) throw new ConfigurationError(`${batchPlan.summary.blockedOperations} stage operation${batchPlan.summary.blockedOperations === 1 ? " is" : "s are"} blocked by unavailable prerequisites. Select prerequisite mode and preview again.`);
+      if (batchPlan.summary.blockedOperations) {
+        if (input.executionPolicy === "chapter-stage") {
+          const plan = batchPlan.chapters[0]!;
+          const problem = plan.entries.find((entry) => entry.action === "blocked" && entry.stage !== input.stages[0]);
+          const label = ({ storyBible: "Context", audioMastering: "Audio", scenePlanning: "Scenes" } as Record<string, string>)[input.stages[0]!] ?? input.stages[0]!;
+          throw new ConfigurationError(`${label} cannot run because ${problem?.stage === "qa" && problem.reason.startsWith("QA status") ? problem.reason : `${problem?.stage ?? "required"} data is ${problem?.availability ?? "unavailable"}.`}`);
+        }
+        throw new ConfigurationError(`${batchPlan.summary.blockedOperations} stage operation${batchPlan.summary.blockedOperations === 1 ? " is" : "s are"} blocked by unavailable prerequisites. Select prerequisite mode and preview again.`);
+      }
       const sources = new Map(selected.map((item) => [item.chapter, item])); const results: Array<{ chapter: number; status: "completed" | "reused" | "blocked" | "failed"; plan: (typeof batchPlan.chapters)[number]; error?: string }> = [];
       for (const plan of batchPlan.chapters) {
         const chapter = plan.chapter; const source = sources.get(chapter)!;
