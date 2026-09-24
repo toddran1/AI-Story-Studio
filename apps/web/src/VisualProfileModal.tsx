@@ -329,7 +329,7 @@ export function VisualProfileModal({
   if (loading) {
     return (
       <div className="modal-backdrop" onClick={onClose}>
-        <div className="modal-content visual-profile-modal" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-content visual-profile-modal" role="dialog" aria-modal={!viewingReference} aria-label={`Visual Profile: ${entityName || entityId}`} onClick={(e) => e.stopPropagation()}>
           <div className="modal-header">
             <h3>Visual Profile: {entityName || entityId}</h3>
             <button className="btn-close" onClick={onClose}>✕</button>
@@ -343,7 +343,7 @@ export function VisualProfileModal({
   if (!profile) {
     return (
       <div className="modal-backdrop" onClick={onClose}>
-        <div className="modal-content visual-profile-modal" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-content visual-profile-modal" role="dialog" aria-modal={!viewingReference} aria-label={`Visual Profile: ${entityName || entityId}`} onClick={(e) => e.stopPropagation()}>
           <div className="modal-header">
             <h3>Visual Profile</h3>
             <button className="btn-close" onClick={onClose}>✕</button>
@@ -356,7 +356,7 @@ export function VisualProfileModal({
 
   return (
     <div className="modal-backdrop" onClick={onClose}>
-      <div className="modal-content visual-profile-modal" onClick={(e) => e.stopPropagation()}>
+      <div className="modal-content visual-profile-modal" role="dialog" aria-modal={!viewingReference} aria-label={`Visual Profile: ${entityName || entityId}`} onClick={(e) => e.stopPropagation()}>
         <div className="modal-header">
           <div className="modal-title-row">
             <h3>Visual Profile: {entityName || profile.entityId}</h3>

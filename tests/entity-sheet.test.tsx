@@ -127,9 +127,15 @@ describe("Story Bible entity detail accordion", () => {
     expect(css).toContain("--z-drawer: 30");
     expect(css).toContain("--z-modal: 50");
     expect(css).toContain("--z-dialog: 60");
+    const level = (name: string) => Number(css.match(new RegExp(`--z-${name}: (\\d+)`))?.[1]);
+    expect(level("drawer")).toBeLessThan(level("modal"));
+    expect(level("modal")).toBeLessThan(level("dialog"));
     expect(css).toContain(".editor-sheet.entity-sheet");
     expect(css).toContain(".editor-sheet:not(.entity-sheet)");
     expect(css).toContain(".entity-impact-dialog");
+    const scenes = readFileSync("apps/web/src/scenes.css", "utf8");
+    expect(scenes.match(/\.modal-backdrop \{[^}]*z-index:/)).toBeNull();
+    expect(scenes.match(/\.reference-viewer-backdrop \{[^}]*z-index:/)).toBeNull();
   });
 
   it("offers explicit retries for failed lazy usage and history loads without looping", async () => {
@@ -439,6 +445,8 @@ describe("Story Bible entity deep-link integration", () => {
     act(() => [...page.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === "Edit entity")!.click());
     await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
     expect(page.querySelector(".editor-sheet.naming-editor")).not.toBeNull();
+    expect(page.querySelector(".editor-sheet.naming-editor")?.getAttribute("aria-modal")).toBe("true");
+    expect(document.activeElement?.getAttribute("aria-label")).toBe("Close editor");
     expect(page.querySelector(".entity-sheet")?.hasAttribute("inert")).toBe(true);
     expect(page.querySelector(".entity-sheet")?.getAttribute("aria-hidden")).toBe("true");
     act(() => window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })));
