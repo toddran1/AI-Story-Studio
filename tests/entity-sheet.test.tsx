@@ -270,19 +270,40 @@ describe("Story Bible entity deep-link integration", () => {
 
   it("opens the management section from a deep link and restores it through Back/Forward", async () => {
     installApi();
-    history.replaceState({}, "", "/stories/demo/bible?entity=entity-a");
-    history.pushState({}, "", "/stories/demo/bible?entity=entity-a&section=management");
-    const page = mount("?entity=entity-a&section=management");
+    const filters = "tab=review&type=character&q=Qiang&sort=first&readiness=attention&page=2";
+    history.replaceState({}, "", `/stories/demo/bible?entity=entity-a&${filters}`);
+    history.pushState({}, "", `/stories/demo/bible?entity=entity-a&section=management&${filters}`);
+    const page = mount(`?entity=entity-a&section=management&${filters}`);
     await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
     const management = () => page.querySelector<HTMLButtonElement>('button[aria-controls="entity-section-entity-management"]');
     expect(management()?.getAttribute("aria-expanded")).toBe("true");
 
+    await act(async () => {
+      management()!.click();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(management()?.getAttribute("aria-expanded")).toBe("false");
+    expect(new URLSearchParams(location.search).get("entity")).toBe("entity-a");
+    expect(new URLSearchParams(location.search).get("section")).toBeNull();
+    for (const [key, value] of new URLSearchParams(filters)) expect(new URLSearchParams(location.search).get(key)).toBe(value);
+
+    await act(async () => {
+      management()!.click();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(management()?.getAttribute("aria-expanded")).toBe("true");
+    expect(new URLSearchParams(location.search).get("entity")).toBe("entity-a");
+    expect(new URLSearchParams(location.search).get("section")).toBe("management");
+    for (const [key, value] of new URLSearchParams(filters)) expect(new URLSearchParams(location.search).get(key)).toBe(value);
+
     await act(async () => { history.back(); await new Promise((resolve) => setTimeout(resolve, 20)); });
     expect(new URLSearchParams(location.search).get("section")).toBeNull();
+    expect(new URLSearchParams(location.search).get("entity")).toBe("entity-a");
     expect(management()?.getAttribute("aria-expanded")).toBe("false");
 
     await act(async () => { history.forward(); await new Promise((resolve) => setTimeout(resolve, 20)); });
     expect(new URLSearchParams(location.search).get("section")).toBe("management");
+    expect(new URLSearchParams(location.search).get("entity")).toBe("entity-a");
     expect(management()?.getAttribute("aria-expanded")).toBe("true");
   });
 
