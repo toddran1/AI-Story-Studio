@@ -265,14 +265,25 @@ describe("artwork routing and provenance", () => {
     await atomicWriteJson(paths.bible, bible);
     const manifest = sceneManifestSchema.parse(JSON.parse(await readFile(paths.scenesManifest, "utf8")));
     manifest.scenes[0]!.characters = ["Li Chen", "Zhang Yongxing"];
-    manifest.scenes[0]!.summary = "Zhang betrays Li Chen.";
+    manifest.scenes[0]!.summary = "Zhang Yongxing betrays Li Chen at the academy while Li Chen reaches forward from the ground.";
     await atomicWriteJson(paths.scenesManifest, manifest);
     const profiles = await loadVisualProfiles(root, story.slug);
+    profiles[ENTITY_ID]!.character = { apparentAge: "young adult", gender: "male", faceShape: "soft oval", hairColor: "black with a gray front streak", hairstyle: "layered fringe", defaultOutfit: "academy jacket with a teal collar" };
     profiles[ENTITY_ID]!.references.push({ id: "ref-2", entityId: ENTITY_ID, role: "front", imagePath: "ignored/path.png", source: "uploaded", approved: true, createdAt: new Date().toISOString() });
     await saveVisualProfiles(root, story.slug, profiles);
     await atomicWrite(visualProfileRefPath(root, story.slug, ENTITY_ID, "ref-2", "png"), PNG_ALT);
     const artDirection = resolveActiveArtDirection(await loadStoryArtDirection(root, story.slug));
     const resolved = resolveVisualCanonPrompt({ scene: manifest.scenes[0]!, story, bible, artDirection, visualProfiles: profiles });
+    const contrast = resolved.characterContrast[0]!;
+    expect(contrast).toMatchObject({ entityId: fallbackId, contrastedAgainst: [ENTITY_ID] });
+    expect(contrast.signatureExclusions.join(" ")).toContain("layered fringe");
+    expect(contrast.signatureExclusions.join(" ")).toContain("gray front streak");
+    expect(contrast.faceGuidance).toContain("jaw contour");
+    expect(contrast.faceGuidance).toContain("soft oval face shape");
+    expect(contrast.expressionGuidance).toContain("cold or smug");
+    expect(contrast.bodyLanguageGuidance).toContain("upright");
+    expect(contrast.wardrobeGuidance).toContain("Shared school or faction clothing is allowed");
+    expect(contrast.wardrobeGuidance).toContain("academy jacket with a teal collar");
     const loaded = await loadApprovedVisualProfileReferences(root, story, resolved);
     expect(loaded.images.map((image) => ({ entityId: image.entityId, entityName: image.entityName, referenceId: image.referenceId, role: image.role }))).toEqual([
       { entityId: ENTITY_ID, entityName: "Li Chen", referenceId: "ref-1", role: "face_portrait" },
@@ -287,10 +298,13 @@ describe("artwork routing and provenance", () => {
     expect(request.prompt).toContain("Zhang Yongxing: no character reference image");
     expect(request.prompt).toContain("Li Chen and Zhang Yongxing are different people");
     expect(request.prompt).toContain("FINAL CAST IDENTITY LOCK");
-    expect(request.prompt).toContain("Zhang Yongxing a visibly different face");
+    expect(request.prompt).toContain("Give Zhang Yongxing a clearly different jaw contour");
+    expect(request.prompt).toContain("Do not copy Li Chen's layered fringe hairstyle");
+    expect(request.prompt).toContain("VISUAL CONTRAST SUMMARY");
     expect(request.prompt).not.toContain("Reference image 2 depicts Li Chen");
     const after = sceneManifestSchema.parse(JSON.parse(await readFile(paths.scenesManifest, "utf8")));
-    expect(after.scenes[0]!.artwork.versions[0]!.provenance).toMatchObject({ characterReferences: [{ entityId: ENTITY_ID, referenceId: "ref-1" }], visualGrounding: [{ mode: "approved_profile" }, { mode: "story_bible_fallback" }] });
+    expect(after.scenes[0]!.artwork.versions[0]!.provenance).toMatchObject({ characterReferences: [{ entityId: ENTITY_ID, referenceId: "ref-1" }], visualGrounding: [{ mode: "approved_profile" }, { mode: "story_bible_fallback" }], characterContrast: [{ entityId: fallbackId, contrastedAgainst: [ENTITY_ID] }] });
+    expect(await loadVisualProfiles(root, story.slug)).toEqual(profiles);
     expect(JSON.parse(await readFile(paths.bible, "utf8")).canonicalEntities[1].visualProfilePolicy).toBeUndefined();
     bible.canonicalEntities[1].visualProfilePolicy = { mode: "skip" };
     await atomicWriteJson(paths.bible, bible);

@@ -38,7 +38,7 @@ export const REFERENCE_USAGE_INSTRUCTION =
 
 // Bump when shared Visual Canon prompt semantics change. This intentionally
 // makes old artwork eligible for regeneration without touching story text.
-const VISUAL_CANON_ARTWORK_VERSION = "visual-canon-v4-mixed-cast";
+const VISUAL_CANON_ARTWORK_VERSION = "visual-canon-v5-contrast-plan";
 
 /** Keep the final instruction close to the provider request's end, where a
  * mixed cast and a strong single-person reference otherwise invite cloning. */
@@ -51,7 +51,15 @@ export function mixedCastIdentityPrompt(resolved: ResolvedSceneVisualPrompt, ima
   return [
     "FINAL CAST IDENTITY LOCK: Render each named character as a separate person with one distinct face and body. Do not duplicate a reference person as another cast member.",
     ...referenced.map((entity) => `${entity.name}: the supplied reference of ${entity.name} applies to this character only.`),
-    ...fallback.map((entity) => `${entity.name}: use this character's Story Bible description and scene role. Give ${entity.name} a visibly different face, facial proportions, hairline, hairstyle, body silhouette, and clothing silhouette from ${profiled.map((item) => item.name).join(" and ")}, except where the scene explicitly establishes a shared trait or uniform. Any unspecified visual choices are scene-local, not persistent canon.`),
+    ...resolved.characterContrast.map((plan) => [
+      `${plan.name}: use this character's Story Bible description and scene role. The following contrast choices are for this scene only, not persistent canon.`,
+      plan.faceGuidance, plan.hairGuidance, plan.wardrobeGuidance,
+      plan.expressionGuidance, plan.bodyLanguageGuidance, plan.visualEnergyGuidance,
+      ...plan.signatureExclusions,
+    ].join(" ")),
+    "VISUAL CONTRAST SUMMARY:",
+    ...profiled.map((entity) => `- ${entity.name}: retain the approved Visual Profile identity, including its signature traits; follow the current scene for expression and posture.`),
+    ...resolved.characterContrast.map((plan) => `- ${plan.name}: separate face and hair shape, distinct outerwear silhouette, ${plan.visualEnergyGuidance}`),
   ].join("\n");
 }
 
@@ -218,6 +226,7 @@ export async function generateStoredArtwork(options: {
         sceneDirectionFingerprint: resolved.sceneDirectionFingerprint,
         resolvedPromptFingerprint: resolved.resolvedPromptFingerprint,
         visualContinuityFingerprint: resolved.visualContinuityFingerprint,
+        contrastPlanFingerprint: resolved.characterContrast.length ? fingerprint(resolved.characterContrast) : undefined,
         referenceInputs: loadedReferences.images.map((image) => ({ sourceKind: image.sourceKind, entityId: image.entityId, entityName: image.entityName, referenceId: image.referenceId, role: image.role, bytes: fingerprint(image.data.toString("base64")) })),
       }
     );
@@ -407,6 +416,7 @@ export async function generateStoredArtwork(options: {
           continuityReference: references.continuityReference,
           characterReferences: characterReferenceProvenance(references.images),
           visualGrounding: item.resolved.resolvedEntities.map((entity) => ({ entityId: entity.entityId, name: entity.name, mode: entity.groundingMode })),
+          characterContrast: item.resolved.characterContrast.map((plan) => ({ entityId: plan.entityId, contrastedAgainst: plan.contrastedAgainst, dimensions: ["face", "hair", "wardrobe", "expression", "body-language", "visual-energy"], signatureExclusions: plan.signatureExclusions })),
         },
         review: "unreviewed",
       };
@@ -659,6 +669,7 @@ export function artworkFingerprint(
     sceneDirectionFingerprint?: string;
     resolvedPromptFingerprint?: string;
     visualContinuityFingerprint?: string;
+    contrastPlanFingerprint?: string;
     referenceInputs?: Array<{ sourceKind?: string; entityId?: string; entityName?: string; referenceId?: string; role?: string; bytes: string }>;
   }
 ) {
@@ -686,6 +697,7 @@ export function artworkFingerprint(
       ? { entityVisualFingerprints: extra.entityVisualFingerprints }
       : {}),
     ...(extra?.visualContinuityFingerprint ? { visualContinuityFingerprint: extra.visualContinuityFingerprint } : {}),
+    ...(extra?.contrastPlanFingerprint ? { contrastPlanFingerprint: extra.contrastPlanFingerprint } : {}),
   });
 }
 

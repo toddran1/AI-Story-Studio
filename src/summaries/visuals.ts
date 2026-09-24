@@ -273,7 +273,7 @@ export class SummaryVisualService {
         profileRevision: entity.profileRevision,
       })),
       inputFingerprint: fingerprint({
-        version: "summary-visual-canon-v3-mixed-cast",
+        version: "summary-visual-canon-v4-contrast-plan",
         prompt,
         references: references.loadedReferenceIds.map((id, index) => ({ id, fingerprint: references.referenceFingerprints[index] })),
         continuityReference: effectiveContinuityReference,
@@ -625,6 +625,7 @@ export class SummaryVisualService {
               referenceImageCount: input.references.images.length,
               availableReferenceCount: input.references.available,
               characterReferences: characterReferenceProvenance(input.references.images),
+              characterContrast: input.resolved.characterContrast.map((plan) => ({ entityId: plan.entityId, contrastedAgainst: plan.contrastedAgainst, dimensions: ["face", "hair", "wardrobe", "expression", "body-language", "visual-energy"], signatureExclusions: plan.signatureExclusions })),
               continuityReference: input.continuityReference,
               artDirection: input.artDirectionProvenance,
               visualCanon: input.grounding.map((entity) => ({
