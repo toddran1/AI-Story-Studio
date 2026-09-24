@@ -1,8 +1,8 @@
 /** @vitest-environment jsdom */
 import { act, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { afterEach, describe, expect, it, vi } from "vitest";
-import { CanonicalEntitySheet, EntityDetailAccordion, EntityHistorySection, EntityUsageSection } from "../apps/web/src/App.js";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { App, CanonicalEntitySheet, EntityDetailAccordion, EntityHistorySection, EntityUsageSection } from "../apps/web/src/App.js";
 
 describe("Story Bible entity detail accordion", () => {
   let root: ReturnType<typeof createRoot> | undefined;
@@ -176,5 +176,245 @@ describe("Story Bible entity detail accordion", () => {
       await Promise.resolve();
     });
     expect(host.textContent).toContain("Candidate B");
+  });
+});
+
+describe("Story Bible entity deep-link integration", () => {
+  let root: ReturnType<typeof createRoot> | undefined;
+  let host: HTMLDivElement | undefined;
+  let originalScrollTo: typeof window.scrollTo;
+
+  const entities = [
+    { id: "entity-a", canonicalName: "Entity A" },
+    { id: "entity-b", canonicalName: "Entity B" },
+  ];
+  const detail = (entity: { id: string; canonicalName: string }) => ({
+    entity: { ...entity, type: "character", originalName: entity.canonicalName, aliases: [], aliasNarrationRules: [], canonicalNameLocked: false, status: "alive", notes: "", description: "", origin: "automatic", firstAppearance: 1, lastKnownAppearance: 2, provenance: [], mergedFromIds: [] },
+    timeline: [], relationships: [], relatedNames: {}, relatedReferences: [], issues: [], merges: [], duplicateSuggestions: [], namingCollisions: [], readiness: [], visualProfileExists: false,
+  });
+  const json = (value: unknown) => new Response(JSON.stringify(value), { status: 200, headers: { "content-type": "application/json" } });
+  const bibleList = { items: entities.map((entity) => ({ ...entity, type: "character", originalName: entity.canonicalName, aliases: [], firstAppearance: 1, lastKnownAppearance: 2, origin: "automatic", readiness: [] })), total: 2, page: 1, pages: 1, counts: { character: 2 }, duplicateSuggestions: [] };
+
+  beforeEach(() => {
+    originalScrollTo = window.scrollTo;
+    window.scrollTo = vi.fn();
+  });
+  afterEach(() => {
+    if (root) act(() => root!.unmount());
+    root = undefined;
+    host?.remove();
+    host = undefined;
+    window.scrollTo = originalScrollTo;
+    vi.unstubAllGlobals();
+  });
+
+  function mount(initialSearch = "") {
+    history.replaceState({}, "", `/stories/demo/bible${initialSearch}`);
+    host = document.createElement("div");
+    document.body.append(host);
+    root = createRoot(host);
+    act(() => root!.render(<App initialRoute={{ page: "bible", story: "demo" }} />));
+    return host;
+  }
+
+  function installApi(
+    detailRequest: (id: string) => Promise<Response> = async (id) => json(detail(entities.find((entity) => entity.id === id)!)),
+    overrideRequest?: (url: string, init?: RequestInit) => Response | undefined,
+  ) {
+    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const override = overrideRequest?.(url, init);
+      if (override) return Promise.resolve(override);
+      if (url === "/api/stories") return Promise.resolve(json({ stories: [] }));
+      if (url.endsWith("/jobs/active")) return Promise.resolve(json({ job: null }));
+      if (url.includes("/story-bible/entities?") || url.includes("/story-bible/entities?")) return Promise.resolve(json(bibleList));
+      if (url.endsWith("/story-bible/suppressions")) return Promise.resolve(json([]));
+      if (url.endsWith("/story-bible/health")) return Promise.resolve(json({}));
+      if (url.includes("/story-bible/review?")) return Promise.resolve(json({ items: [], openTotal: 0 }));
+      if (url.endsWith("/pronunciation")) return Promise.resolve(json({ entities: [], suggestions: {} }));
+      const entityId = url.match(/\/story-bible\/entities\/([^/?]+)/)?.[1];
+      if (entityId) return detailRequest(decodeURIComponent(entityId));
+      return Promise.resolve(json({}));
+    }));
+  }
+
+  it("uses browser Back and Forward as authoritative entity-sheet navigation while preserving filters", async () => {
+    installApi();
+    const page = mount("?type=character&q=Qiang&page=2");
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+    await act(async () => {
+      page.querySelector<HTMLElement>(".entity-row.selectable:not(.heading)")!.click();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(location.search).toContain("entity=entity-a");
+    expect(location.search).toContain("type=character");
+    expect(location.search).toContain("q=Qiang");
+    expect(location.search).toContain("page=2");
+    expect(page.textContent).toContain("Entity A");
+
+    await act(async () => {
+      history.back();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    expect(new URLSearchParams(location.search).has("entity")).toBe(false);
+    expect(page.querySelector(".entity-sheet")).toBeNull();
+    expect(location.search).toContain("q=Qiang");
+
+    await act(async () => {
+      history.forward();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    expect(new URLSearchParams(location.search).get("entity")).toBe("entity-a");
+    expect(page.textContent).toContain("Entity A");
+  });
+
+  it("opens the management section from a deep link and restores it through Back/Forward", async () => {
+    installApi();
+    history.replaceState({}, "", "/stories/demo/bible?entity=entity-a");
+    history.pushState({}, "", "/stories/demo/bible?entity=entity-a&section=management");
+    const page = mount("?entity=entity-a&section=management");
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+    const management = () => page.querySelector<HTMLButtonElement>('button[aria-controls="entity-section-entity-management"]');
+    expect(management()?.getAttribute("aria-expanded")).toBe("true");
+
+    await act(async () => { history.back(); await new Promise((resolve) => setTimeout(resolve, 20)); });
+    expect(new URLSearchParams(location.search).get("section")).toBeNull();
+    expect(management()?.getAttribute("aria-expanded")).toBe("false");
+
+    await act(async () => { history.forward(); await new Promise((resolve) => setTimeout(resolve, 20)); });
+    expect(new URLSearchParams(location.search).get("section")).toBe("management");
+    expect(management()?.getAttribute("aria-expanded")).toBe("true");
+  });
+
+  it("ignores a late detail response after browser navigation closes the sheet", async () => {
+    let resolveDetail!: (response: Response) => void;
+    installApi((id) => id === "entity-a" ? new Promise<Response>((resolve) => { resolveDetail = resolve; }) : Promise.resolve(json(detail(entities.find((entity) => entity.id === id)!))));
+    const page = mount();
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+    act(() => page.querySelector<HTMLElement>(".entity-row.selectable:not(.heading)")!.click());
+    await act(async () => { history.back(); await new Promise((resolve) => setTimeout(resolve, 20)); });
+    await act(async () => {
+      resolveDetail(json(detail(entities[0])));
+      await Promise.resolve();
+    });
+    expect(page.querySelector(".entity-sheet")).toBeNull();
+    expect(new URLSearchParams(location.search).has("entity")).toBe(false);
+  });
+
+  it("keeps the newest selection when an earlier entity request resolves last", async () => {
+    let resolveA!: (response: Response) => void;
+    installApi((id) => id === "entity-a" ? new Promise<Response>((resolve) => { resolveA = resolve; }) : Promise.resolve(json(detail(entities[1]))));
+    const page = mount();
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+    const rows = page.querySelectorAll<HTMLElement>(".entity-row.selectable:not(.heading)");
+    act(() => rows[0].click());
+    await act(async () => {
+      page.querySelectorAll<HTMLElement>(".entity-row.selectable:not(.heading)")[1].click();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(page.textContent).toContain("Entity B");
+    await act(async () => { resolveA(json(detail(entities[0]))); await Promise.resolve(); });
+    expect(new URLSearchParams(location.search).get("entity")).toBe("entity-b");
+    expect(page.querySelector(".entity-sheet")?.textContent).toContain("Entity B");
+    expect(page.querySelector(".entity-sheet")?.textContent).not.toContain("Entity A");
+  });
+
+  it("clears entity and management URL state after a successful suppress mutation", async () => {
+    installApi(undefined, (url, init) => {
+      if (url.endsWith("/entities/entity-a/impact")) return json({ affectedChapters: [], narrationAffected: 0, qaAffected: 0, ttsAffected: 0, audioAffected: 0, scenePlanningAffected: 0, artworkAffected: 0, videoAffected: 0, manualNarrationChapters: [], visualProfileAffected: false, continuityAffected: 0, warnings: [] });
+      if (url.endsWith("/entities/entity-a/suppress") && init?.method === "POST") return json({});
+      return undefined;
+    });
+    vi.stubGlobal("confirm", vi.fn(() => true));
+    vi.stubGlobal("prompt", vi.fn(() => "duplicate record"));
+    const page = mount("?entity=entity-a&section=management");
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+    await act(async () => {
+      [...page.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === "Remove canonical entity…")!.click();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    await act(async () => {
+      [...page.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === "Remove entity")!.click();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(new URLSearchParams(location.search).has("entity")).toBe(false);
+    expect(new URLSearchParams(location.search).has("section")).toBe(false);
+    expect(page.querySelector(".entity-sheet")).toBeNull();
+  });
+
+  it("clears the entity URL when the user manually closes the sheet", async () => {
+    installApi();
+    const page = mount("?entity=entity-a&section=management&type=character");
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+    act(() => page.querySelector<HTMLButtonElement>('button[aria-label="Close entity"]')!.click());
+    expect(page.querySelector(".entity-sheet")).toBeNull();
+    expect(new URLSearchParams(location.search).has("entity")).toBe(false);
+    expect(new URLSearchParams(location.search).has("section")).toBe(false);
+    expect(new URLSearchParams(location.search).get("type")).toBe("character");
+  });
+
+  it("clears the deep link after a successful edit save that closes the sheet", async () => {
+    installApi(undefined, (url, init) => url.endsWith("/entities/entity-a") && init?.method === "PUT"
+      ? json({ invalidation: { affectedChapters: [], manualNarrationChapters: [] } })
+      : undefined);
+    const page = mount("?entity=entity-a&section=management");
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+    act(() => [...page.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === "Edit entity")!.click());
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+    await act(async () => {
+      [...page.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === "Save protected record")!.click();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(page.querySelector(".entity-sheet")).toBeNull();
+    expect(new URLSearchParams(location.search).has("entity")).toBe(false);
+    expect(new URLSearchParams(location.search).has("section")).toBe(false);
+  });
+
+  it("clears the deep link after a successful demote mutation", async () => {
+    installApi(undefined, (url, init) => {
+      if (url.endsWith("/entities/entity-a/impact")) return json({ affectedChapters: [], narrationAffected: 0, qaAffected: 0, ttsAffected: 0, audioAffected: 0, scenePlanningAffected: 0, artworkAffected: 0, videoAffected: 0, manualNarrationChapters: [], visualProfileAffected: false, continuityAffected: 0, warnings: [] });
+      if (url.endsWith("/entities/entity-a/demote") && init?.method === "POST") return json({});
+      return undefined;
+    });
+    const page = mount("?entity=entity-a&section=management");
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+    await act(async () => {
+      [...page.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === "Convert to minor reference")!.click();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    await act(async () => {
+      page.querySelector<HTMLButtonElement>(".entity-impact-dialog button.primary")!.click();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(page.querySelector(".entity-sheet")).toBeNull();
+    expect(new URLSearchParams(location.search).has("entity")).toBe(false);
+    expect(new URLSearchParams(location.search).has("section")).toBe(false);
+  });
+
+  it("clears the merged source deep link after a successful merge", async () => {
+    const duplicateDetail: any = detail(entities[1]);
+    duplicateDetail.duplicateSuggestions = [{ id: "dup-a-b", entityIds: ["entity-a", "entity-b"], entities: [{ id: "entity-a", name: "Entity A", type: "character" }, { id: "entity-b", name: "Entity B", type: "character" }], reason: "matching aliases" }];
+    installApi(async (id) => json(id === "entity-b" ? duplicateDetail : detail(entities[0])), (url, init) => {
+      if (url.endsWith("/entities/entity-b/impact")) return json({ affectedChapters: [], narrationAffected: 0, qaAffected: 0, ttsAffected: 0, audioAffected: 0, scenePlanningAffected: 0, artworkAffected: 0, videoAffected: 0, manualNarrationChapters: [], visualProfileAffected: false, continuityAffected: 0, warnings: [] });
+      if (url.endsWith("/story-bible/merges") && init?.method === "POST") return json({});
+      return undefined;
+    });
+    const page = mount("?entity=entity-b&section=management");
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+    await act(async () => {
+      [...page.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === "Compare & merge")!.click();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    await act(async () => {
+      [...page.querySelectorAll<HTMLButtonElement>(".editor-sheet-actions button")].find((button) => button.textContent === "Confirm merge")!.click();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    await act(async () => {
+      page.querySelector<HTMLButtonElement>(".entity-impact-dialog button.primary")!.click();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(page.querySelector(".entity-sheet")).toBeNull();
+    expect(new URLSearchParams(location.search).has("entity")).toBe(false);
+    expect(new URLSearchParams(location.search).has("section")).toBe(false);
   });
 });

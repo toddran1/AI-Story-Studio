@@ -191,7 +191,7 @@ export function App({ initialJob, initialRoute }: { initialJob?: Job; initialRou
         {route.page === "chapter" && route.story && route.chapter && <ChapterPage slug={route.story} chapter={route.chapter} navigate={navigate} onJob={updateJob} activeJob={job} />}
         {route.page === "qa" && route.story && <QaPage slug={route.story} navigate={navigate} />}
         {route.page === "preview" && route.story && <PreviewPage slug={route.story} onJob={updateJob} />}
-        {route.page === "bible" && route.story && <BiblePage slug={route.story} navigate={navigate} />}
+        {route.page === "bible" && route.story && <BiblePage slug={route.story} navigate={navigate} locationSearch={location.search} />}
         {route.page === "names" && route.story && <NamesLocalizationPage slug={route.story} navigate={navigate} onJob={updateJob} />}
         {route.page === "continuity" && route.story && <ContinuityPage slug={route.story} navigate={navigate} />}
         {route.page === "summaries" && route.story && <SummariesPage slug={route.story} onJob={updateJob} />}
@@ -1300,8 +1300,9 @@ export function BibleReviewQueue({ view, kind, status, onKind, onStatus, onPage,
   </div>;
 }
 
-function BiblePage({ slug, navigate }: { slug: string; navigate: (path: string) => void }) {
-  const initial = parseBibleQuery(location.search);
+function BiblePage({ slug, navigate, locationSearch }: { slug: string; navigate: (path: string) => void; locationSearch: string }) {
+  const initial = parseBibleQuery(locationSearch);
+  const locationKey = `${location.pathname}${locationSearch}`;
   const [view, setView] = useState<any>(); const [detail, setDetail] = useState<any>(); const [editing, setEditing] = useState<any>(); const [error, setError] = useState(""); const [notice, setNotice] = useState(""); const [query, setQuery] = useState(initial.q ?? ""); const deferred = useDeferredValue(query); const [type, setType] = useState(initial.type ?? "all"); const [sort, setSort] = useState(initial.sort ?? "last"); const [page, setPage] = useState(initial.page ?? 1); const [readiness, setReadiness] = useState(initial.readiness ?? "all");
   const [tab, setTab] = useState<BibleTab>(initial.tab ?? "canonical");
   const [health, setHealth] = useState<any>();
@@ -1320,6 +1321,8 @@ function BiblePage({ slug, navigate }: { slug: string; navigate: (path: string) 
   const [impactPreview, setImpactPreview] = useState<{ title: string; diff: Array<{ label: string; before: string; after: string }>; impact: EntityImpact; applyLabel?: string; apply: () => Promise<void> } | null>(null);
   const [impactBusy, setImpactBusy] = useState(false);
   const [checkedRecs, setCheckedRecs] = useState<string[]>([]);
+  // Start unsynchronized so an initial ?entity= deep link is loaded as well.
+  const [syncedLocationKey, setSyncedLocationKey] = useState("");
   const requestImpact = async (entityId: string, body: Record<string, unknown>, preview: { title: string; diff?: Array<{ label: string; before: string; after: string }>; applyLabel?: string; apply: () => Promise<void> }) => {
     try { setError(""); const impact = await post<EntityImpact>(`/stories/${slug}/story-bible/entities/${entityId}/impact`, body); setImpactPreview({ title: preview.title, diff: preview.diff ?? [], impact, applyLabel: preview.applyLabel, apply: preview.apply }); }
     catch (value) { setError(message(value)); }
@@ -1335,59 +1338,80 @@ function BiblePage({ slug, navigate }: { slug: string; navigate: (path: string) 
   const [requestedEntityId, setRequestedEntityId] = useState<string | undefined>(initial.entity);
   const [managementEntityId, setManagementEntityId] = useState<string | undefined>(initial.section === "management" ? initial.entity : undefined);
   const entityRequestId = useRef(0);
-  const activeSheetSlug = useRef(slug);
-  useEffect(() => {
-    if (activeSheetSlug.current !== slug) {
-      activeSheetSlug.current = slug;
-      const next = parseBibleQuery(location.search);
-      setDetail(undefined);
-      setRequestedEntityId(next.entity);
-      setManagementEntityId(next.section === "management" ? next.entity : undefined);
-      if (next.entity) void open(next.entity, next.section === "management");
-      else entityRequestId.current++;
-      return;
-    }
-    if (requestedEntityId && !detail) void open(requestedEntityId, managementEntityId === requestedEntityId);
-  }, [slug]);
-  useEffect(() => { history.replaceState({}, "", `/stories/${slug}/bible${bibleQueryString({ tab, type, q: deferred, sort, readiness, page, entity: requestedEntityId, section: managementEntityId === requestedEntityId ? "management" : undefined })}`); }, [slug, tab, type, deferred, sort, readiness, page, requestedEntityId, managementEntityId]);
-  const open = (id: string, management = false) => {
+  const requestedEntityIdRef = useRef(requestedEntityId);
+  requestedEntityIdRef.current = requestedEntityId;
+  const loadEntityDetail = (id: string, keepExisting = false) => {
     const requestId = ++entityRequestId.current;
-    setRequestedEntityId(id);
-    setManagementEntityId(management ? id : undefined);
-    setDetail(undefined);
+    if (!keepExisting) setDetail(undefined);
     setError("");
     return api<any>(`/stories/${slug}/story-bible/entities/${id}`).then((value) => { if (entityRequestId.current === requestId) setDetail(value); }).catch((value) => { if (entityRequestId.current === requestId) setError(message(value)); });
   };
-  const navigateReviewAction = (href: string) => {
-    const target = new URL(href, location.href);
-    const query = parseBibleQuery(target.search);
-    if (target.pathname === `/stories/${slug}/bible` && query.entity) {
-      navigate(`${target.pathname}${target.search}`);
-      void open(query.entity, query.section === "management");
-      return;
-    }
-    navigate(href);
-  };
-  const closeEntitySheet = () => {
+  const closeEntitySheet = (expectedEntityId?: string) => {
+    if (expectedEntityId && requestedEntityIdRef.current !== expectedEntityId) return;
     entityRequestId.current++;
     setDetail(undefined);
     setRequestedEntityId(undefined);
     setManagementEntityId(undefined);
   };
-  const persistEdit = async (payload: any) => { const response = await put<any>(`/stories/${slug}/story-bible/entities/${editing.id}`, payload); const affected = response.invalidation?.affectedChapters?.length ?? 0; const manual = response.invalidation?.manualNarrationChapters?.length ?? 0; setNotice(affected ? `${affected} chapter${affected === 1 ? "" : "s"} marked affected.${manual ? ` ${manual} manual narration edit${manual === 1 ? " was" : "s were"} preserved for review.` : ""}` : "Protected record saved."); if (response.visualProfileReviewRequired) setNotice("Entity type saved. Existing Visual Profile was preserved; review it before regenerating visual canon."); setEditing(undefined); setDetail(undefined); await load(); };
+  const navigateToEntity = (id: string, management = false) => {
+    const href = `/stories/${slug}/bible${bibleQueryString({ tab, type, q: deferred, sort, readiness, page, entity: id, section: management ? "management" : undefined })}`;
+    if (`${location.pathname}${location.search}` !== href) navigate(href);
+    else {
+      setRequestedEntityId(id);
+      setManagementEntityId(management ? id : undefined);
+      if (detail?.entity?.id !== id) void loadEntityDetail(id);
+    }
+  };
+  const navigateReviewAction = (href: string) => {
+    const target = new URL(href, location.href);
+    const query = parseBibleQuery(target.search);
+    if (target.pathname === `/stories/${slug}/bible` && query.entity) {
+      navigateToEntity(query.entity, query.section === "management");
+      return;
+    }
+    navigate(href);
+  };
+  useEffect(() => {
+    if (syncedLocationKey === locationKey) return;
+    const next = parseBibleQuery(locationSearch);
+    setTab(next.tab ?? "canonical");
+    setType(next.type ?? "all");
+    setQuery(next.q ?? "");
+    setSort(next.sort ?? "last");
+    setReadiness(next.readiness ?? "all");
+    setPage(next.page ?? 1);
+    if (!next.entity) {
+      closeEntitySheet();
+    } else {
+      const management = next.section === "management";
+      setRequestedEntityId(next.entity);
+      setManagementEntityId(management ? next.entity : undefined);
+      if (detail?.entity?.id !== next.entity || requestedEntityId !== next.entity) void loadEntityDetail(next.entity);
+    }
+    setSyncedLocationKey(locationKey);
+  }, [locationKey]);
+  useEffect(() => {
+    // A changed browser location must first be reconciled into component state.
+    // Also wait for useDeferredValue to catch up after restoring a URL query.
+    if (syncedLocationKey !== locationKey || deferred !== query) return;
+    const desired = `/stories/${slug}/bible${bibleQueryString({ tab, type, q: deferred, sort, readiness, page, entity: requestedEntityId, section: managementEntityId === requestedEntityId ? "management" : undefined })}`;
+    const current = `${location.pathname}${location.search}`;
+    if (desired !== current) history.replaceState({}, "", desired);
+  }, [slug, tab, type, query, deferred, sort, readiness, page, requestedEntityId, managementEntityId, locationKey, syncedLocationKey]);
+  const persistEdit = async (payload: any) => { const response = await put<any>(`/stories/${slug}/story-bible/entities/${editing.id}`, payload); const affected = response.invalidation?.affectedChapters?.length ?? 0; const manual = response.invalidation?.manualNarrationChapters?.length ?? 0; setNotice(affected ? `${affected} chapter${affected === 1 ? "" : "s"} marked affected.${manual ? ` ${manual} manual narration edit${manual === 1 ? " was" : "s were"} preserved for review.` : ""}` : "Protected record saved."); if (response.visualProfileReviewRequired) setNotice("Entity type saved. Existing Visual Profile was preserved; review it before regenerating visual canon."); setEditing(undefined); closeEntitySheet(editing.id); await load(); };
   const save = async () => { try { setError(""); const aliases = editing.aliasDrafts.map((item: any) => item.alias.trim()).filter(Boolean); const aliasNarrationRules = editing.aliasDrafts.filter((item: any) => item.alias.trim()).map((item: any) => ({ alias: item.alias.trim(), behavior: item.behavior, ...(item.behavior === "custom" ? { replacement: item.replacement.trim() } : {}) })); const payload = { canonicalName: editing.canonicalName, type: editing.type, aliases, canonicalNameLocked: editing.canonicalNameLocked, preferredNarrationName: editing.preferredNarrationName.trim() || null, aliasNarrationRules, pronunciation: editing.pronunciation ?? null, notes: editing.notes, status: editing.status }; const base = detail?.entity; if (base && canonicalEntityPatchImpact(base, payload).impactful) { await requestImpact(editing.id, { action: "update", patch: payload }, { title: `Edit ${base.canonicalName}`, diff: canonicalEntityDiff(base, payload), apply: () => persistEdit(payload) }); return; } await persistEdit(payload); } catch (value) { setError(message(value)); } };
   const merge = async (item: any) => { try { const [a, b] = await Promise.all(item.entities.map((entity: any) => api<any>(`/stories/${slug}/story-bible/entities/${entity.id}`))); setMergeReview({ target: a, source: b, reason: item.reason }); } catch (value) { setError(message(value)); } };
   const revertAuditEntry = async (entry: EntityAuditEntry) => {
     const patch = entityAuditRevertPatch(entry); const base = detail?.entity;
     if (!patch || !base) return;
-    const apply = async () => { await put(`/stories/${slug}/story-bible/entities/${base.id}`, patch); setDetail(undefined); await load(); await open(base.id); };
+    const apply = async () => { await put(`/stories/${slug}/story-bible/entities/${base.id}`, patch); await load(); if (parseBibleQuery(location.search).entity === base.id) await loadEntityDetail(base.id, true); };
     try { setError(""); if (canonicalEntityPatchImpact(base, patch).impactful) await requestImpact(base.id, { action: "update", patch }, { title: `Revert ${base.canonicalName}`, diff: canonicalEntityDiff(base, patch), applyLabel: "Revert change", apply }); else await apply(); }
     catch (value) { setError(message(value)); }
   };
-  const confirmMerge = async () => { if (!mergeReview) return; const target = mergeReview.target.entity; const source = mergeReview.source.entity; await requestImpact(source.id, { action: "merge", targetEntityId: target.id }, { title: `Merge ${source.canonicalName} into ${target.canonicalName}`, diff: [{ label: "Merge", before: `${source.canonicalName} (${source.id})`, after: `Merged into ${target.canonicalName}` }], applyLabel: "Confirm merge", apply: async () => { await post(`/stories/${slug}/story-bible/merges`, { targetEntityId: target.id, sourceEntityIds: [source.id], reason: `Approved duplicate suggestion: ${mergeReview.reason}` }); setMergeReview(null); setDetail(undefined); await load(); } }); };
-  const suppress = async (record: any) => { const entity = record.entity; const dependencies = [record.relationships?.length && `${record.relationships.length} relationships`, record.timeline?.length && `${record.timeline.length} timeline events`, record.issues?.length && `${record.issues.length} continuity findings`, entity.preferredNarrationName && "preferred narration name", entity.localizedNaming && "localization", record.visualProfileExists && "Visual Profile"].filter(Boolean).join(", "); if (!confirm(`Remove "${entity.canonicalName}" from the effective Story Bible?\n\nThis suppresses future rebuilt views, keeps historical evidence, and can be restored. Merge instead if this is a duplicate identity.${dependencies ? `\n\nExisting references to review: ${dependencies}.` : ""}`)) return; const reason = prompt("Reason for removing this canonical entity:"); if (!reason?.trim()) return; await requestImpact(entity.id, { action: "suppress" }, { title: `Remove ${entity.canonicalName}`, diff: [{ label: "Suppression", before: "Canonical entity", after: "Removed from the effective Story Bible (restorable)" }], applyLabel: "Remove entity", apply: async () => { await post(`/stories/${slug}/story-bible/entities/${entity.id}/suppress`, { reason: reason.trim() }); setDetail(undefined); setNotice(`Removed "${entity.canonicalName}" from the effective Story Bible. You can restore it below.`); await load(); } }); };
+  const confirmMerge = async () => { if (!mergeReview) return; const target = mergeReview.target.entity; const source = mergeReview.source.entity; const openEntityId = requestedEntityId; await requestImpact(source.id, { action: "merge", targetEntityId: target.id }, { title: `Merge ${source.canonicalName} into ${target.canonicalName}`, diff: [{ label: "Merge", before: `${source.canonicalName} (${source.id})`, after: `Merged into ${target.canonicalName}` }], applyLabel: "Confirm merge", apply: async () => { await post(`/stories/${slug}/story-bible/merges`, { targetEntityId: target.id, sourceEntityIds: [source.id], reason: `Approved duplicate suggestion: ${mergeReview.reason}` }); setMergeReview(null); if (openEntityId === source.id) closeEntitySheet(source.id); else if (openEntityId === target.id && parseBibleQuery(location.search).entity === target.id) await loadEntityDetail(target.id, true); await load(); } }); };
+  const suppress = async (record: any) => { const entity = record.entity; const dependencies = [record.relationships?.length && `${record.relationships.length} relationships`, record.timeline?.length && `${record.timeline.length} timeline events`, record.issues?.length && `${record.issues.length} continuity findings`, entity.preferredNarrationName && "preferred narration name", entity.localizedNaming && "localization", record.visualProfileExists && "Visual Profile"].filter(Boolean).join(", "); if (!confirm(`Remove "${entity.canonicalName}" from the effective Story Bible?\n\nThis suppresses future rebuilt views, keeps historical evidence, and can be restored. Merge instead if this is a duplicate identity.${dependencies ? `\n\nExisting references to review: ${dependencies}.` : ""}`)) return; const reason = prompt("Reason for removing this canonical entity:"); if (!reason?.trim()) return; await requestImpact(entity.id, { action: "suppress" }, { title: `Remove ${entity.canonicalName}`, diff: [{ label: "Suppression", before: "Canonical entity", after: "Removed from the effective Story Bible (restorable)" }], applyLabel: "Remove entity", apply: async () => { await post(`/stories/${slug}/story-bible/entities/${entity.id}/suppress`, { reason: reason.trim() }); closeEntitySheet(entity.id); setNotice(`Removed "${entity.canonicalName}" from the effective Story Bible. You can restore it below.`); await load(); } }); };
   const restore = async (entityId: string) => { try { await post(`/stories/${slug}/story-bible/entities/${entityId}/restore`, {}); setNotice("Canonical entity restored."); await load(); } catch (value) { setError(message(value)); } };
-  const undo = async (id: string) => { if (!confirm("Undo this merge and restore the source entities?")) return; try { await post(`/stories/${slug}/story-bible/merges/${id}/undo`, {}); setDetail(undefined); await load(); } catch (value) { setError(message(value)); } };
+  const undo = async (id: string) => { const expectedEntityId = requestedEntityId; if (!confirm("Undo this merge and restore the source entities?")) return; try { await post(`/stories/${slug}/story-bible/merges/${id}/undo`, {}); closeEntitySheet(expectedEntityId); await load(); } catch (value) { setError(message(value)); } };
   const demote = async (entity: any) => {
     await requestImpact(entity.id, { action: "demote" }, {
       title: `Convert ${entity.canonicalName} to a minor reference`,
@@ -1396,7 +1420,7 @@ function BiblePage({ slug, navigate }: { slug: string; navigate: (path: string) 
       apply: async () => {
         await post(`/stories/${slug}/story-bible/entities/${entity.id}/demote`, { disposition: "minor_reference", reason: "Converted via Canonical Entity Sheet" });
         setNotice(`Converted "${entity.canonicalName}" to a minor reference.`);
-        setDetail(undefined);
+        closeEntitySheet(entity.id);
         await load();
         if (tab === "references") void loadReferences();
         if (analysis) void loadAnalysis();
@@ -1422,6 +1446,7 @@ function BiblePage({ slug, navigate }: { slug: string; navigate: (path: string) 
       setNotice(`Cleanup applied: ${result.demotedCount ?? 0} demoted, ${result.mergedCount ?? 0} merged.`);
       await loadAnalysis();
       await load();
+      if (requestedEntityId && ((result.appliedDemotions ?? []).includes(requestedEntityId) || (result.appliedMerges ?? []).includes(requestedEntityId))) closeEntitySheet(requestedEntityId);
       if (tab === "references") void loadReferences();
     } catch (value) { setError(message(value)); }
   };
@@ -1437,6 +1462,7 @@ function BiblePage({ slug, navigate }: { slug: string; navigate: (path: string) 
       setNotice(`Cleanup plan: ${parts.join(" · ")}.`);
       await loadAnalysis();
       await load();
+      if (requestedEntityId && ((result.appliedDemotions ?? []).includes(requestedEntityId) || (result.appliedMerges ?? []).includes(requestedEntityId))) closeEntitySheet(requestedEntityId);
       if (tab === "references") void loadReferences();
     } catch (value) { setError(message(value)); }
   };
@@ -1456,6 +1482,7 @@ function BiblePage({ slug, navigate }: { slug: string; navigate: (path: string) 
       setNotice(`Bulk update: ${parts.join(" · ")}.`);
       setBulkPreview(null); setSelected([]);
       await load();
+      if (requestedEntityId && result.applied.includes(requestedEntityId) && parseBibleQuery(location.search).entity === requestedEntityId) await loadEntityDetail(requestedEntityId, true);
     } catch (value) { setError(message(value)); } finally { setBulkBusy(false); }
   };
   if (!view) return error ? <LoadFailure error={error} /> : <Loading />;
@@ -1471,7 +1498,7 @@ function BiblePage({ slug, navigate }: { slug: string; navigate: (path: string) 
       {view.duplicateSuggestions?.length > 0 && <div className="duplicate-strip"><div><span className="eyebrow">Possible duplicates</span><b>{view.duplicateSuggestions.length} suggestions need approval</b></div>{view.duplicateSuggestions.slice(0, 3).map((item: any) => <article key={item.id}><div><b>{item.entities[0].name}</b><span>↔</span><b>{item.entities[1].name}</b></div><small>{Math.round(item.confidence * 100)}% · {item.reason} · Ch. {item.supportingChapters.join(", ")}</small><button onClick={() => merge(item)}>Compare & merge…</button></article>)}</div>}
       <Pagination position="top" page={view.page} pages={view.pages} total={view.total} itemLabel="entities" onPrevious={() => setPage(page - 1)} onNext={() => setPage(page + 1)} />
       {selected.length > 0 && <div className="bulk-toolbar"><b>{selected.length} selected</b><select aria-label="Bulk action" value={bulkAction} onChange={(event) => { setBulkAction(event.target.value as typeof bulkAction); setBulkValue(event.target.value === "set-visual-policy" ? "prompt" : "character"); }}><option value="lock">Lock canonical names</option><option value="unlock">Unlock canonical names</option><option value="set-type">Set entity type</option><option value="set-visual-policy">Set Visual Profile policy</option></select>{bulkAction === "set-type" && <select aria-label="Bulk entity type" value={bulkValue} onChange={(event) => setBulkValue(event.target.value)}>{["character", "location", "organization", "ability", "item", "concept", "other"].map((value) => <option key={value} value={value}>{pretty(value)}</option>)}</select>}{bulkAction === "set-visual-policy" && <select aria-label="Bulk Visual Profile policy" value={bulkValue} onChange={(event) => setBulkValue(event.target.value)}><option value="prompt">Prompt for a Visual Profile</option><option value="skip">Skip Visual Profile</option></select>}<button className="button primary" disabled={bulkBusy} onClick={reviewBulk}>Review &amp; apply</button><button className="button" onClick={() => setSelected([])}>Clear</button></div>}
-      <div className="entity-table"><div className="entity-row heading selectable"><span><input type="checkbox" aria-label="Select all on this page" checked={view.items.length > 0 && pageSelectionState(view.items.map((entity: any) => entity.id), selected) === "all"} ref={(input) => { if (input) input.indeterminate = pageSelectionState(view.items.map((entity: any) => entity.id), selected) === "some"; }} onChange={(event) => { const ids = view.items.map((entity: any) => entity.id); setSelected(event.target.checked ? [...new Set([...selected, ...ids])] : selected.filter((id) => !ids.includes(id))); }} /></span><span>Canonical entity</span><span>Type</span><span>Appearances</span><span>Origin</span><span>Issues</span><span>Readiness</span></div>{view.items.map((entity: any) => <div className="entity-row selectable" key={entity.id} onClick={() => open(entity.id)}><span onClick={(event) => event.stopPropagation()}><input type="checkbox" aria-label={`Select ${entity.canonicalName}`} checked={selected.includes(entity.id)} onChange={(event) => setSelected(toggleEntitySelection(selected, entity.id, event.target.checked))} /></span><span><b>{entity.canonicalName}</b>{view.duplicateSuggestions?.some((item: any) => item.entityIds.includes(entity.id)) && <i className="lock-dot">Possible duplicate</i>}<small>{entity.aliases.length ? entity.aliases.join(" · ") : entity.originalName}</small></span><span>{pretty(entity.type)}</span><span className="mono">{entity.firstAppearance}—{entity.lastKnownAppearance}</span><span>{entity.canonicalNameLocked && <i className="lock-dot">Locked</i>} {pretty(entity.origin)}</span><span className={entity.conflictCount ? "issue-count" : ""}>{entity.conflictCount || "—"}</span><span><ReadinessStrip rows={entity.readiness} /></span></div>)}</div>{!view.items.length && <Empty title="No matching canonical entities" text="Run Story Bible extraction or change the filters." />}
+    <div className="entity-table"><div className="entity-row heading selectable"><span><input type="checkbox" aria-label="Select all on this page" checked={view.items.length > 0 && pageSelectionState(view.items.map((entity: any) => entity.id), selected) === "all"} ref={(input) => { if (input) input.indeterminate = pageSelectionState(view.items.map((entity: any) => entity.id), selected) === "some"; }} onChange={(event) => { const ids = view.items.map((entity: any) => entity.id); setSelected(event.target.checked ? [...new Set([...selected, ...ids])] : selected.filter((id) => !ids.includes(id))); }} /></span><span>Canonical entity</span><span>Type</span><span>Appearances</span><span>Origin</span><span>Issues</span><span>Readiness</span></div>{view.items.map((entity: any) => <div className="entity-row selectable" key={entity.id} onClick={() => navigateToEntity(entity.id)}><span onClick={(event) => event.stopPropagation()}><input type="checkbox" aria-label={`Select ${entity.canonicalName}`} checked={selected.includes(entity.id)} onChange={(event) => setSelected(toggleEntitySelection(selected, entity.id, event.target.checked))} /></span><span><b>{entity.canonicalName}</b>{view.duplicateSuggestions?.some((item: any) => item.entityIds.includes(entity.id)) && <i className="lock-dot">Possible duplicate</i>}<small>{entity.aliases.length ? entity.aliases.join(" · ") : entity.originalName}</small></span><span>{pretty(entity.type)}</span><span className="mono">{entity.firstAppearance}—{entity.lastKnownAppearance}</span><span>{entity.canonicalNameLocked && <i className="lock-dot">Locked</i>} {pretty(entity.origin)}</span><span className={entity.conflictCount ? "issue-count" : ""}>{entity.conflictCount || "—"}</span><span><ReadinessStrip rows={entity.readiness} /></span></div>)}</div>{!view.items.length && <Empty title="No matching canonical entities" text="Run Story Bible extraction or change the filters." />}
       <Pagination position="bottom" page={view.page} pages={view.pages} total={view.total} itemLabel="entities" onPrevious={() => setPage(page - 1)} onNext={() => setPage(page + 1)} />
     </>}
     {tab === "references" && <>
@@ -1523,7 +1550,7 @@ function BiblePage({ slug, navigate }: { slug: string; navigate: (path: string) 
     </div> : <LoadFailure error="Could not load analysis." />)}
     {tab === "canonical" && suppressedEntities.length > 0 && <div className="duplicate-strip"><div><span className="eyebrow">Suppression audit</span><b>{suppressedEntities.length} removed canonical records</b></div>{suppressedEntities.map((item: any) => <article key={item.entityId}><div><b>{item.name}</b><small>{pretty(item.type)} · {item.entityId}</small></div><small>{item.reason} · {item.suppressedAt}</small><button onClick={() => restore(item.entityId)}>Restore entity</button></article>)}</div>}
     {mergeReview && <div className="editor-sheet naming-editor" role="dialog" aria-label="Compare canonical entities before merge"><div className="editor-sheet-head"><div><span className="eyebrow">Protected identity merge</span><h3>Compare before merging</h3></div><button onClick={() => setMergeReview(null)} aria-label="Close comparison">×</button></div>{[mergeReview.target, mergeReview.source].map((record: any, index: number) => <section key={record.entity.id}><span className="eyebrow">{index === 0 ? "Surviving target" : "Merged source"}</span><h4>{record.entity.canonicalName} · {pretty(record.entity.type)}</h4><p>Original: {record.entity.originalName || "—"} · Ch. {record.entity.firstAppearance}–{record.entity.lastKnownAppearance}</p><p>Aliases: {record.entity.aliases.join(", ") || "—"}</p><p>Description: {record.entity.description || "—"}</p><p>Preferred narration: {record.entity.preferredNarrationName || "—"} · Localized: {record.entity.localizedNaming?.fullName || "—"}</p><p>Alias rules: {record.entity.aliasNarrationRules.length} · Provenance: {record.entity.provenance.length} · Relationships: {record.relationships.length} · Timeline: {record.timeline.length}</p><p>Visual Profile: {record.visualProfileExists ? "Exists — review before merge" : "None"}</p></section>)}<section><span className="eyebrow">Result preview</span><p>Surviving ID: {mergeReview.target.entity.id}. Appearance range: Ch. {Math.min(mergeReview.target.entity.firstAppearance, mergeReview.source.entity.firstAppearance)}–{Math.max(mergeReview.target.entity.lastKnownAppearance, mergeReview.source.entity.lastKnownAppearance)}.</p><p>Aliases: {[...new Set([...mergeReview.target.entity.aliases, mergeReview.source.entity.canonicalName, ...mergeReview.source.entity.aliases])].join(", ") || "—"}</p><p>Description/notes: target text and source text are both retained. Provenance: {mergeReview.target.entity.provenance.length + mergeReview.source.entity.provenance.length} records. Relationships: {mergeReview.target.relationships.length + mergeReview.source.relationships.length} references remapped. Timeline: {mergeReview.target.timeline.length + mergeReview.source.timeline.length} events remapped.</p><p>Preferred narration: {mergeReview.target.entity.preferredNarrationName || mergeReview.source.entity.preferredNarrationName || "—"}. Localized naming: {mergeReview.target.entity.localizedNaming?.fullName || mergeReview.source.entity.localizedNaming?.fullName || "—"}. Alias rules: {mergeReview.target.entity.aliasNarrationRules.length + mergeReview.source.entity.aliasNarrationRules.length}. Merged-from IDs: {[...mergeReview.target.entity.mergedFromIds, mergeReview.source.entity.id, ...mergeReview.source.entity.mergedFromIds].join(", ")}.</p></section>{mergeNamingConflict(mergeReview.target.entity, mergeReview.source.entity) && <div className="naming-notice">Naming conflict: edit one entity’s preferred/localized naming before merging. The server will reject an unresolved conflict.</div>}<div className="editor-sheet-actions"><button className="button" onClick={() => setMergeReview({ target: mergeReview.source, source: mergeReview.target, reason: mergeReview.reason })}>Swap target</button><button className="button" onClick={() => setMergeReview(null)}>Cancel</button><button className="button primary" disabled={mergeNamingConflict(mergeReview.target.entity, mergeReview.source.entity)} onClick={confirmMerge}>Confirm merge</button></div></div>}
-    {detail && <CanonicalEntitySheet key={detail.entity.id} detail={detail} slug={slug} navigate={navigate} managementInitiallyOpen={managementEntityId === detail.entity.id} onClose={closeEntitySheet} onUndo={undo} onEdit={() => setEditing({ ...canonicalDraft(detail.entity), originalType: detail.entity.type, visualProfileExists: detail.visualProfileExists })} onDemote={() => demote(detail.entity)} onSuppress={() => suppress(detail)} onMerge={(item: any) => merge(item)} onOpenVisualProfile={(id: string, name?: string) => setVisualProfileTarget({ id, name })} onRevert={revertAuditEntry} />}
+    {detail && <CanonicalEntitySheet key={detail.entity.id} detail={detail} slug={slug} navigate={navigate} managementInitiallyOpen={managementEntityId === detail.entity.id} onClose={() => closeEntitySheet()} onUndo={undo} onEdit={() => setEditing({ ...canonicalDraft(detail.entity), originalType: detail.entity.type, visualProfileExists: detail.visualProfileExists })} onDemote={() => demote(detail.entity)} onSuppress={() => suppress(detail)} onMerge={(item: any) => merge(item)} onOpenVisualProfile={(id: string, name?: string) => setVisualProfileTarget({ id, name })} onRevert={revertAuditEntry} />}
     {visualProfileTarget && <VisualProfileModal slug={slug} entityId={visualProfileTarget.id} entityName={visualProfileTarget.name} onClose={() => setVisualProfileTarget(null)} />}
     <PronunciationPanel slug={slug} />{editing && <CanonicalEntityEditor slug={slug} value={editing} onChange={setEditing} onClose={() => setEditing(undefined)} onSave={save} />}
     {impactPreview && <EntityImpactDialog title={impactPreview.title} diff={impactPreview.diff} impact={impactPreview.impact} busy={impactBusy} applyLabel={impactPreview.applyLabel} onCancel={() => setImpactPreview(null)} onApply={runImpactApply} />}
@@ -1628,12 +1655,14 @@ export function EntityImpactDialog({ title, diff = [], impact, busy = false, app
   </div>;
 }
 
-export function EntityDetailAccordion({ id, title, badge, defaultOpen = false, children }: { id: string; title: string; badge?: string; defaultOpen?: boolean; children: ReactNode }) {
-  const [open, setOpen] = useState(defaultOpen);
-  const [visited, setVisited] = useState(defaultOpen);
+export function EntityDetailAccordion({ id, title, badge, defaultOpen = false, controlledOpen, onOpenChange, children }: { id: string; title: string; badge?: string; defaultOpen?: boolean; controlledOpen?: boolean; onOpenChange?: (open: boolean) => void; children: ReactNode }) {
+  const [localOpen, setLocalOpen] = useState(defaultOpen);
+  const open = controlledOpen ?? localOpen;
+  const [visited, setVisited] = useState(defaultOpen || controlledOpen === true);
   const panelId = `entity-section-${id}`;
+  useEffect(() => { if (open) setVisited(true); }, [open]);
   return <section className={`entity-detail-accordion${open ? " is-open" : ""}`}>
-    <button type="button" className="entity-detail-accordion-header" aria-expanded={open} aria-controls={panelId} onClick={() => { setOpen((value) => !value); setVisited(true); }}>
+    <button type="button" className="entity-detail-accordion-header" aria-expanded={open} aria-controls={panelId} onClick={() => { const next = !open; onOpenChange?.(next); if (controlledOpen === undefined) setLocalOpen(next); setVisited(true); }}>
       <span className="entity-detail-accordion-title">{title}</span>
       {badge && <span className="entity-section-badge">{badge}</span>}
       <span className="entity-detail-chevron" aria-hidden="true">⌄</span>
@@ -1943,7 +1972,7 @@ export function CanonicalEntitySheet({ detail, slug, navigate, onClose, onUndo, 
           </section>
         </EntityDetailAccordion>}
 
-        {!viewing && (onDemote || onSuppress || onMerge || activeMerges.length > 0) && <EntityDetailAccordion key={`${entity.id}-entity-management`} id="entity-management" title="Entity Management" badge={detail.duplicateSuggestions?.length ? `${detail.duplicateSuggestions.length} duplicate candidate${detail.duplicateSuggestions.length === 1 ? "" : "s"}` : "Advanced"} defaultOpen={managementInitiallyOpen}>
+        {!viewing && (onDemote || onSuppress || onMerge || activeMerges.length > 0) && <EntityDetailAccordion key={`${entity.id}-entity-management`} id="entity-management" title="Entity Management" badge={detail.duplicateSuggestions?.length ? `${detail.duplicateSuggestions.length} duplicate candidate${detail.duplicateSuggestions.length === 1 ? "" : "s"}` : "Advanced"} defaultOpen={managementInitiallyOpen} controlledOpen={managementInitiallyOpen} onOpenChange={(open) => setManagementEntityId(open ? entity.id : undefined)}>
           <div className="entity-management-content">
             <div className="entity-management-intro"><h4>Advanced entity controls</h4><p>Changes here affect canonical Story Bible state. Destructive actions always require confirmation.</p></div>
 
