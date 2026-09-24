@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { FishAudioProvider, normalizeFishReferenceId, normalizeFishSpeechText } from "../src/tts/fish/fish-audio.provider.js";
-import { splitForTTS } from "../src/tts/split-text.js";
+import { splitForTTS, splitOpeningSentenceForTTSRepair } from "../src/tts/split-text.js";
 import { TTSRequest } from "../src/tts/types.js";
 
 describe("Fish TTS", () => {
@@ -14,6 +14,10 @@ describe("Fish TTS", () => {
     const chunks = splitForTTS('"That is true!" She stepped back. "They have grown up." He nodded.', 30);
     expect(chunks.every((chunk) => !/^[”’)]|^["'](?:[.!?]|$)/u.test(chunk))).toBe(true);
     expect(chunks.join(" ")).toContain('"That is true!"');
+  });
+
+  it("avoids sentence repair when speaker state would be lost", () => {
+    expect(splitOpeningSentenceForTTSRepair("<|speaker:1|>Hello there. He answered at length.")).toBeUndefined();
   });
 
   it("uses mocked Fish responses and combines segments", async () => {
@@ -52,7 +56,7 @@ describe("Fish TTS", () => {
     await provider.synthesize({ text: "**Important:** *whisper this.* [sad] 2 * 2", model: "s2.1-pro", speed: 1, format: "mp3", sampleRate: 44100, bitrate: 128, normalize: true, maxCharsPerRequest: 500 });
     const body = JSON.parse(String((fetcher.mock.calls[0]?.[1] as RequestInit).body));
     expect(body.text).toBe("Important: whisper this. [sad] 2 * 2");
-    expect(provider.inputNormalizationVersion).toBe("fish-speech-normalization-v7");
+    expect(provider.inputNormalizationVersion).toBe("fish-speech-normalization-v8");
   });
 
   it("does not turn profanity into the literal word bleep inside Fish", async () => {
@@ -166,6 +170,20 @@ describe("Fish TTS", () => {
     const result = await provider.synthesize({ text: "[sad] 【Level: Level 50 (EXP/)】 [Level 50] [pause]", model: "s2-pro", speed: 1, format: "mp3", sampleRate: 44100, bitrate: 128, normalize: true, maxCharsPerRequest: 500 });
     expect(posted[0]).toBe("[sad] Level: Level fifty. E X P. Level 50 [pause]");
     expect(result.segmentTexts).toEqual(posted);
+  });
+
+  it("posts stable leading dialogue punctuation and performed vocalization cues", async () => {
+    const posted: string[] = [];
+    const fetcher = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      posted.push(JSON.parse(String(init?.body)).text);
+      return new Response(new Uint8Array([1]), { headers: { "content-type": "audio/mpeg" } });
+    });
+    const narration = "“Actually… it’s not impossible.” “Hehe, I guessed it!” “Ahem, ahem, ahem… You’re right.”";
+    await new FishAudioProvider("test-key", fetcher as typeof fetch).synthesize({ text: narration, model: "s2-pro", speed: 1, format: "mp3", sampleRate: 44100, bitrate: 128, normalize: true, maxCharsPerRequest: 500 });
+    expect(posted.join(" ")).toContain("Actually, it’s not impossible");
+    expect(posted.join(" ")).toContain("[laugh] I guessed it");
+    expect(posted.join(" ")).toContain("[cough] You’re right");
+    expect(narration).toContain("Ahem, ahem, ahem…");
   });
 
   it("normalizes fiction abbreviations, titles, values, and units for speech", () => {

@@ -1,7 +1,7 @@
 export const FISH_S2_MODELS = new Set(["s2-pro", "s2.1-pro", "s2.1-pro-free"]);
 
 export const FISH_S2_CONTROL_CUES = [
-  "whisper", "whispering", "laugh", "laughing", "clears throat", "emphasis", "sigh", "gasp", "pause", "long-break", "inhale", "exhale",
+  "whisper", "whispering", "laugh", "laughing", "clears throat", "cough", "emphasis", "sigh", "gasp", "pause", "long-break", "inhale", "exhale",
   "happy", "sad", "angry", "excited", "calm", "nervous", "confident", "surprised", "scared", "worried", "frustrated",
   "empathetic", "mysterious", "determined", "soft", "shouting", "breathless",
 ] as const;

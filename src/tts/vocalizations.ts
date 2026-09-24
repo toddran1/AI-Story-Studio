@@ -86,11 +86,11 @@ export function scanVocalizations(text: string): ScannedVocalization[] {
     if (!entry) continue;
     const start = match.index!;
     const sourceText = match[0];
-    if (entry.vocalization === "throat_clear") {
+    if (entry.vocalization === "throat_clear" || entry.vocalization === "laugh") {
       const before = text.slice(Math.max(0, start - 45), start);
       // A quoted lexical mention is prose, not a performed reaction.
-      if (/\b(?:word|text|transcript|term|wrote|spelled|literal(?:ly)?)\b[^.!?\n]{0,35}$/iu.test(before)) continue;
-      if (!/(?:^|[.!?…\n“"‘']\s*)$/u.test(before)) continue;
+      if (/\b(?:word|text|transcript|term|wrote|typed|spelled|literal(?:ly)?)\b[^.!?\n]{0,35}$/iu.test(before)) continue;
+      if (entry.vocalization === "throat_clear" && !/(?:^|[.!?…\n“"‘']\s*)$/u.test(before)) continue;
     }
     const punctuation = match[2] ?? "";
     results.push({

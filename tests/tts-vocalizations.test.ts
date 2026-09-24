@@ -10,7 +10,7 @@ describe("Fish vocalization strategy", () => {
 
   it.each(["s2-pro", "s2.1-pro", "s2.1-pro-free"])("uses verified native tags for %s", (model) => {
     const strategy = provider.vocalizationStrategy(model);
-    expect(strategy).toEqual({ kind: "native_tags", tags: { laugh: "[laugh]", chuckle: "[laugh]", throat_clear: "[clears throat]", sigh: "[sigh]", gasp: "[gasp]" } });
+    expect(strategy).toEqual({ kind: "native_tags", tags: { laugh: "[laugh]", chuckle: "[laugh]", throat_clear: "[cough]", sigh: "[sigh]", gasp: "[gasp]" } });
   });
 
   it.each(["s1", "s1-mini", "unknown-model", undefined])("falls back to safe_normalize for %s", (model) => {
@@ -34,9 +34,9 @@ describe("Fish vocalization strategy", () => {
   it("renders a standalone ahem reaction as a throat clear without changing literal mentions", () => {
     const original = "“Ahem, ahem, ahem… You’re right. That makes sense!”";
     const spoken = normalizeSpeechText(original, "en-US", {}, provider.vocalizationStrategy("s2-pro"));
-    expect(spoken.text).toContain("[clears throat] You’re right");
-    expect(spoken.transformations).toContainEqual(expect.objectContaining({ kind: "vocalization", spoken: "[clears throat]" }));
-    expect(normalizeFishSpeechText("Ahem... excuse me.", "s2-pro")).toBe("[clears throat] excuse me.");
+    expect(spoken.text).toContain("[cough] You’re right");
+    expect(spoken.transformations).toContainEqual(expect.objectContaining({ kind: "vocalization", spoken: "[cough]" }));
+    expect(normalizeFishSpeechText("Ahem... excuse me.", "s2-pro")).toBe("[cough] excuse me.");
     expect(normalizeFishSpeechText("He wrote the word “ahem” in the margin.", "s2-pro")).toContain("“ahem”");
     expect(original).toContain("Ahem, ahem, ahem");
   });
@@ -46,6 +46,24 @@ describe("Fish vocalization strategy", () => {
     expect(normalizeFishSpeechText(original, "s2-pro")).toContain("Tsk, tsk, tsk.");
     expect(normalizeFishSpeechText(original, "s2-pro", { tskRendering: "direction" })).toContain("[clicks tongue disapprovingly] You lose");
     expect(normalizeFishSpeechText("The transcript literally contained “tsk, tsk.”", "s2-pro", { tskRendering: "direction" })).toContain("“tsk, tsk.”");
+  });
+
+  it("regularizes only leading discourse ellipses for Fish S2", () => {
+    expect(normalizeFishSpeechText("“Actually… it’s not impossible.”", "s2-pro")).toContain("Actually, it’s not impossible");
+    expect(normalizeFishSpeechText("Actually... it’s not impossible.", "s2-pro")).toBe("Actually, it’s not impossible.");
+    expect(normalizeFishSpeechText("Well… I suppose so. Uh… maybe.", "s2-pro")).toBe("Well, I suppose so. Uh, maybe.");
+    expect(normalizeFishSpeechText("His voice faded into the distance… She stared at him… then turned away.", "s2-pro"))
+      .toBe("His voice faded into the distance… She stared at him… then turned away.");
+    expect(normalizeFishSpeechText("Actually… it’s possible.", "s1")).toBe("Actually… it’s possible.");
+  });
+
+  it("maps a performed laugh to the approved cue but leaves a literal mention intact", () => {
+    expect(normalizeFishSpeechText("“Hehe, I guessed it, didn’t I?”", "s2-pro")).toContain("[laugh] I guessed it");
+    expect(normalizeFishSpeechText("Haha, I knew it.", "s2-pro")).toBe("[laugh] I knew it.");
+    expect(normalizeFishSpeechText("She typed “hehe” into the chat.", "s2-pro")).toContain("“hehe”");
+    const original = "“Ahem, ahem, ahem… You’re right.”";
+    expect(normalizeFishSpeechText(original, "s2-pro")).toContain("[cough] You’re right");
+    expect(original).toContain("Ahem, ahem, ahem");
   });
 });
 

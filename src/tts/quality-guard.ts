@@ -11,8 +11,9 @@ import { FISH_S2_CONTROL_CUES } from "./fish/control-cues.js";
 import type { TTSProvider } from "./provider.js";
 import type { TTSRequest, TTSResult } from "./types.js";
 import { scanVocalizations } from "./vocalizations.js";
+import { splitOpeningSentenceForTTSRepair } from "./split-text.js";
 
-export const TTS_QUALITY_GUARD_VERSION = "tts-quality-guard-v2";
+export const TTS_QUALITY_GUARD_VERSION = "tts-quality-guard-v3";
 
 export const ttsQualityIssueTypeSchema = z.enum([
   "unexpected_speech", "unexpected_vocalization", "segment_start_mismatch", "missing_speech", "repetition", "truncated", "suspected_gibberish",
@@ -175,7 +176,7 @@ function authorizedVocalizations(text: string): Set<string> {
   for (const match of text.matchAll(/\[([^\]]+)\]/g)) {
     const cue = match[1]!.toLowerCase();
     if (cue === "laugh" || cue === "laughing") allowed.add("laughter");
-    if (cue === "clears throat") allowed.add("throat clear");
+    if (cue === "clears throat" || cue === "cough") allowed.add("throat clear");
     if (cue === "gasp") allowed.add("gasp");
     if (cue === "sigh") allowed.add("sigh");
   }
@@ -460,19 +461,21 @@ export class QualityGuardTTSProvider implements TTSProvider {
     try {
       const segments = [...result.segments];
       const quality: TtsSegmentQuality[] = [];
+      const usage = { providerRequests: result.providerRequests ?? result.segments.length, requestIds: [...(result.requestIds ?? [])] };
       for (const [index, expectedText] of result.segmentTexts.entries()) {
-        quality.push(await this.verifySegment({ request, expectedText, index, segments, directory, available, maxAttempts }));
+        quality.push(await this.verifySegment({ request, expectedText, index, segments, directory, available, maxAttempts, usage }));
       }
       const summary = summarizeQuality(quality);
-      return { ...result, audio: concat(segments), segments, quality: { version: 1, status: summary.status, segments: quality, retried: summary.retried } };
+      return { ...result, audio: concat(segments), segments, providerRequests: usage.providerRequests, requestIds: usage.requestIds,
+        quality: { version: 1, status: summary.status, segments: quality, retried: summary.retried } };
     } finally { await rm(directory, { recursive: true, force: true }); }
   }
 
   private async verifySegment(context: {
     request: TTSRequest; expectedText: string; index: number; segments: Uint8Array[];
-    directory: string; available: boolean; maxAttempts: number;
+    directory: string; available: boolean; maxAttempts: number; usage: { providerRequests: number; requestIds: string[] };
   }): Promise<TtsSegmentQuality> {
-    const { request, expectedText, index, segments, directory, maxAttempts } = context;
+    const { request, expectedText, index, segments, directory, maxAttempts, usage } = context;
     const configuredIntensity = request.deliveryIntensity ?? "restrained";
     const attempts: TtsQualityAttempt[] = [];
     const initialAudio = segments[index]!;
@@ -527,18 +530,27 @@ export class QualityGuardTTSProvider implements TTSProvider {
         segments[index] = best.audio;
         return { index, expectedText, audioFingerprint: fingerprint(Buffer.from(best.audio).toString("base64")), transcription: best.transcription, score: best.score >= 0 ? best.score : undefined, status: "needs_review", issues: best.issues, attempts, finalAttempt: attempt };
       }
-      const retried = await this.inner.synthesize({
-        ...request,
-        text: expectedText,
-        exactChunk: true,
-        deliveryIntensity: deliveryIntensityForAttempt(request.deliveryIntensity, attempt + 1),
-        maxCharsPerRequest: request.maxCharsPerRequest,
-      });
-      const requestId = retried.requestIds?.join(",");
+      const repair = comparison.issues.some((issue) => issue.type === "segment_start_mismatch") && attempt === 1
+        ? splitOpeningSentenceForTTSRepair(expectedText) : undefined;
+      const retryText = repair ?? [expectedText];
+      const retryIntensity = repair ? "none" : deliveryIntensityForAttempt(request.deliveryIntensity, attempt + 1);
+      if (repair) logger.debug({ event: "tts.quality.segment_start_repair", segment: index + 1, attempt: attempt + 1,
+        originalCharacters: expectedText.length, repairChunks: repair.length, firstChunkText: repair[0] });
+      const repairedAudio: Uint8Array[] = [];
+      const retryRequestIds: string[] = [];
+      for (const text of retryText) {
+        const retried = await this.inner.synthesize({ ...request, text, exactChunk: true,
+          deliveryIntensity: retryIntensity, maxCharsPerRequest: request.maxCharsPerRequest });
+        usage.providerRequests += retried.providerRequests ?? retried.segments.length;
+        usage.requestIds.push(...(retried.requestIds ?? []));
+        retryRequestIds.push(...(retried.requestIds ?? []));
+        repairedAudio.push(retried.segments.length === 1 ? retried.segments[0]! : retried.audio);
+      }
+      const requestId = retryRequestIds.join(",") || undefined;
       logger.debug({ event: "tts.quality.segment_retry", segment: index + 1, attempt: attempt + 1,
-        deliveryIntensity: deliveryIntensityForAttempt(request.deliveryIntensity, attempt + 1), requestId, expectedText });
+        deliveryIntensity: retryIntensity, requestId, expectedText, repairChunks: retryText.length });
       attempts.push({ attempt, settings, status: "retry", score: comparison.score, issues: comparison.issues, ...(requestId ? { requestId } : {}) });
-      const replacement = retried.segments.length === 1 ? retried.segments[0]! : retried.audio;
+      const replacement = concat(repairedAudio);
       if (!replacement.byteLength) {
         attempts.push({ attempt: attempt + 1, settings: { deliveryIntensity: deliveryIntensityForAttempt(request.deliveryIntensity, attempt + 1) }, status: "needs_review", issues: [{ type: "invalid_audio", severity: 1, detail: "Retry returned empty audio" }] });
         segments[index] = best.audio;

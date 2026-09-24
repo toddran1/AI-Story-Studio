@@ -108,6 +108,48 @@ describe("tts quality guard verification", () => {
     expect(result.quality?.segments[0]?.issues.map((issue) => issue.type)).not.toContain("unexpected_vocalization");
   });
 
+  it("authorizes cough only when the expected Fish text contains its cue", async () => {
+    const spoken = "[cough] You are right.";
+    const inner = new ScriptedTTS(() => singleSegment(spoken, "ok"));
+    const transcriber = new FakeTranscriber(() => say("coughing You are right."));
+    const result = await guard(inner, transcriber).synthesize(request({ text: spoken }));
+    expect(result.quality?.status).toBe("verified");
+    expect(result.quality?.segments[0]?.issues.map((issue) => issue.type)).not.toContain("unexpected_vocalization");
+    expect(compareSpokenText("You are right.", say("coughing You are right.")).issues.map((issue) => issue.type)).toContain("unexpected_vocalization");
+  });
+
+  it("repairs an opening mismatch with two bounded exact-text requests and counts both", async () => {
+    const opening = "In the blink of an eye, eighty million E X P had evaporated.";
+    const remainder = "Asher checked his remaining balance; just over forty-eight million remained.";
+    const expected = `${opening} ${remainder}`;
+    const inner = new ScriptedTTS((req, call) => ({ ...singleSegment(req.text, call === 1 ? "bad" : call === 2 ? "open" : "rest"), requestIds: [`req-${call}`] }));
+    const transcriber = new FakeTranscriber((audio) => say(String.fromCharCode(...audio.slice(0, 3)) === "bad"
+      ? `walking beneath the silver moon eighty million E X P had evaporated. ${remainder}` : expected));
+    const result = await guard(inner, transcriber).synthesize(request({ text: expected, deliveryIntensity: "expressive" }));
+    expect(inner.calls.map((call) => call.text)).toEqual([expected, opening, remainder]);
+    expect(inner.calls.slice(1).every((call) => call.exactChunk && call.deliveryIntensity === "none")).toBe(true);
+    expect(result.providerRequests).toBe(3);
+    expect(result.requestIds).toEqual(["req-1", "req-2", "req-3"]);
+    expect(result.quality?.segments[0]).toMatchObject({ status: "verified", finalAttempt: 2 });
+    expect(result.quality?.segments[0]?.attempts[0]?.issues.map((issue) => issue.type)).toContain("segment_start_mismatch");
+  });
+
+  it("keeps middle-speech retries on one exact segment and bounds failed opening repair", async () => {
+    const opening = "In the blink of an eye, eighty million E X P had evaporated.";
+    const remainder = "Asher checked his remaining balance; just over forty-eight million remained.";
+    const expected = `${opening} ${remainder}`;
+    const inner = new ScriptedTTS((req, call) => singleSegment(req.text, `bad${call}`));
+    const transcriber = new FakeTranscriber(() => say(`walking beneath the silver moon eighty million E X P had evaporated. ${remainder}`));
+    const result = await guard(inner, transcriber, 1).synthesize(request({ text: expected }));
+    expect(inner.calls).toHaveLength(3);
+    expect(result.quality?.status).toBe("needs_review");
+    const middle = new ScriptedTTS((req) => singleSegment(req.text, "bad"));
+    const middleTranscriber = new FakeTranscriber(() => say(`${opening} dancing under the silver moon ${remainder}`));
+    await guard(middle, middleTranscriber, 1).synthesize(request({ text: expected }));
+    expect(middle.calls).toHaveLength(2);
+    expect(middle.calls[1]?.text).toBe(expected);
+  });
+
   it("retries only the segment with an opening hallucination and marks persistent failure for review", async () => {
     const first = "The first segment was clear and complete.";
     const second = "In the blink of an eye eighty million E X P had evaporated.";

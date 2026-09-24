@@ -26,3 +26,16 @@ export function splitForTTS(text: string, maxChars: number): string[] {
   if (current) chunks.push(current);
   return chunks;
 }
+
+/** Split one failed segment for a bounded opening repair. No audio slicing. */
+export function splitOpeningSentenceForTTSRepair(text: string): [string, string] | undefined {
+  const trimmed = text.trim();
+  // Speaker assignment can carry across sentences; splitting would lose that
+  // state in the second exactChunk request. Fall back to one-segment retry.
+  if (/<\|speaker:\d+\|>/u.test(trimmed)) return undefined;
+  const first = /^(.*?[.!?。！？]+[”"'’)]*)(?:\s+|$)/u.exec(trimmed)?.[1]?.trim();
+  if (!first || first.length < 15 || first.length > 400) return undefined;
+  const remainder = trimmed.slice(first.length).trim();
+  if (remainder.length < 10) return undefined;
+  return [first, remainder];
+}

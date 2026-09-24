@@ -86,7 +86,7 @@ function replaceAll(text: string, replacements: ReadonlyArray<readonly [RegExp, 
  * fictional terminology are not silently changed.
  */
 export function normalizeFishSpeechText(text: string, model?: string, options: { tskRendering?: "preserve" | "direction" } = {}): string {
-  const structured = text.replace(/【[^【】\n]{1,500}】/gu, normalizeStructuredSpeechBlock)
+  const structured = normalizeFishLeadingHesitations(text, model).replace(/【[^【】\n]{1,500}】/gu, normalizeStructuredSpeechBlock)
     .replace(/(?<![\p{L}\p{N}])([A-Z][\p{L}\p{N} -]{1,80})\s+\((Passive|Active)\)\s+\((Level [^()\n]{1,30}|Rank [^()\n]{1,30})\)/gu, normalizeSystemMetadataText);
   const withoutMarkup = renderFishVocalizations(disambiguateFishS2Brackets(stripFishMarkdownEmphasis(stripEmojiForSpeech(stripMarkdownForSpeech(structured))), model), model, options)
     .replace(/(?<![\p{L}\p{N}])(EXP|XP|HP|MP)\s*\/\s*(\d{1,6})?(?![\p{L}\p{N}])/giu, (_match, label: string, number?: string) =>
@@ -123,14 +123,23 @@ export function normalizeFishSpeechText(text: string, model?: string, options: {
     .trim();
 }
 
+/** Only discourse-word hesitation at a sentence/dialogue start is regularized. */
+export function normalizeFishLeadingHesitations(text: string, model?: string): string {
+  if (!isFishS2Model(model)) return text;
+  return text.replace(/(^|[.!?\n“"‘']\s*)(Actually|Well|So|But|Uh|Um)(?:…|\.{3})(?=\s+\p{L})/gimu,
+    (_match, prefix: string, word: string) => `${prefix}${word},`);
+}
+
 /** Experimental tsk direction is opt-in; the production fallback speaks the text. */
 export function renderFishVocalizations(text: string, model?: string, options: { tskRendering?: "preserve" | "direction" } = {}): string {
   if (!isFishS2Model(model)) return text;
   let result = text;
   for (const item of scanVocalizations(text).reverse()) {
     const before = text.slice(Math.max(0, item.start - 45), item.start);
-    if (/\b(?:word|text|transcript|term|wrote|spelled|literal(?:ly)?)\b[^.!?\n]{0,35}$/iu.test(before)) continue;
-    const replacement = item.vocalization === "throat_clear" ? "[clears throat]"
+    if (/\b(?:word|text|transcript|term|wrote|typed|spelled|literal(?:ly)?)\b[^.!?\n]{0,35}$/iu.test(before)) continue;
+    const openingReaction = /(?:^|[.!?…\n“"‘']\s*)$/u.test(before) && /[,!?.…]/u.test(item.sourceText);
+    const replacement = item.vocalization === "throat_clear" ? "[cough]"
+      : item.vocalization === "laugh" && item.confidence >= .8 && openingReaction ? "[laugh]"
       : item.vocalization === "scoff" && /^tsk\b/iu.test(item.sourceText) && options.tskRendering === "direction" ? "[clicks tongue disapprovingly]"
       : undefined;
     if (replacement) result = result.slice(0, item.start) + replacement + result.slice(item.end);
