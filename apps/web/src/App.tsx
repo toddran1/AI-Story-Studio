@@ -34,6 +34,7 @@ export { Pagination, type PaginationProps, type PaginationVariant } from "./Pagi
 import "./entity-sheet-actions.css";
 import "./stage-execution.css";
 import "./scenes.css";
+import "./overlay-layers.css";
 
 export type ErrorBoundaryProps = {
   children: ReactNode;
@@ -1351,6 +1352,34 @@ export function BiblePage({ slug, navigate, locationSearch }: { slug: string; na
   const [bulkBusy, setBulkBusy] = useState(false);
   const [impactPreview, setImpactPreview] = useState<{ title: string; diff: Array<{ label: string; before: string; after: string }>; impact: EntityImpact; applyLabel?: string; apply: () => Promise<void> } | null>(null);
   const [impactBusy, setImpactBusy] = useState(false);
+  const entityChildOverlayOpen = Boolean(editing || mergeReview || impactPreview || bulkPreview || visualProfileTarget);
+  useEffect(() => {
+    if (!entityChildOverlayOpen) return;
+    const selector = visualProfileTarget
+      ? ".visual-profile-modal .btn-close"
+      : impactPreview
+        ? ".entity-impact-dialog .entity-sheet-close, .entity-impact-dialog .editor-sheet-head button"
+        : bulkPreview
+          ? ".editor-sheet[aria-label='Review bulk update'] .editor-sheet-head button"
+          : editing
+            ? ".editor-sheet.naming-editor:not([aria-label]) .editor-sheet-head button"
+            : ".editor-sheet[aria-label='Compare canonical entities before merge'] .editor-sheet-head button";
+    document.querySelector<HTMLElement>(selector)?.focus();
+  }, [entityChildOverlayOpen, visualProfileTarget, impactPreview, bulkPreview, editing, mergeReview]);
+  useEffect(() => {
+    if (!entityChildOverlayOpen) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      if (visualProfileTarget) setVisualProfileTarget(null);
+      else if (impactPreview) setImpactPreview(null);
+      else if (bulkPreview) setBulkPreview(null);
+      else if (editing) setEditing(undefined);
+      else if (mergeReview) setMergeReview(null);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [entityChildOverlayOpen, visualProfileTarget, impactPreview, bulkPreview, editing, mergeReview]);
   const [checkedRecs, setCheckedRecs] = useState<string[]>([]);
   // Start unsynchronized so an initial ?entity= deep link is loaded as well.
   const [syncedLocationKey, setSyncedLocationKey] = useState("");
@@ -1634,8 +1663,8 @@ export function BiblePage({ slug, navigate, locationSearch }: { slug: string; na
       </div>
     </div> : <LoadFailure error="Could not load analysis." />)}
     {tab === "canonical" && suppressedEntities.length > 0 && <div className="duplicate-strip"><div><span className="eyebrow">Suppression audit</span><b>{suppressedEntities.length} removed canonical records</b></div>{suppressedEntities.map((item: any) => <article key={item.entityId}><div><b>{item.name}</b><small>{pretty(item.type)} · {item.entityId}</small></div><small>{item.reason} · {item.suppressedAt}</small><button onClick={() => restore(item.entityId)}>Restore entity</button></article>)}</div>}
-    {mergeReview && <div className="editor-sheet naming-editor" role="dialog" aria-label="Compare canonical entities before merge"><div className="editor-sheet-head"><div><span className="eyebrow">Protected identity merge</span><h3>Compare before merging</h3></div><button onClick={() => setMergeReview(null)} aria-label="Close comparison">×</button></div>{[mergeReview.target, mergeReview.source].map((record: any, index: number) => <section key={record.entity.id}><span className="eyebrow">{index === 0 ? "Surviving target" : "Merged source"}</span><h4>{record.entity.canonicalName} · {pretty(record.entity.type)}</h4><p>Original: {record.entity.originalName || "—"} · Ch. {record.entity.firstAppearance}–{record.entity.lastKnownAppearance}</p><p>Aliases: {record.entity.aliases.join(", ") || "—"}</p><p>Description: {record.entity.description || "—"}</p><p>Preferred narration: {record.entity.preferredNarrationName || "—"} · Localized: {record.entity.localizedNaming?.fullName || "—"}</p><p>Alias rules: {record.entity.aliasNarrationRules.length} · Provenance: {record.entity.provenance.length} · Relationships: {record.relationships.length} · Timeline: {record.timeline.length}</p><p>Visual Profile: {record.visualProfileExists ? "Exists — review before merge" : "None"}</p></section>)}<section><span className="eyebrow">Result preview</span><p>Surviving ID: {mergeReview.target.entity.id}. Appearance range: Ch. {Math.min(mergeReview.target.entity.firstAppearance, mergeReview.source.entity.firstAppearance)}–{Math.max(mergeReview.target.entity.lastKnownAppearance, mergeReview.source.entity.lastKnownAppearance)}.</p><p>Aliases: {[...new Set([...mergeReview.target.entity.aliases, mergeReview.source.entity.canonicalName, ...mergeReview.source.entity.aliases])].join(", ") || "—"}</p><p>Description/notes: target text and source text are both retained. Provenance: {mergeReview.target.entity.provenance.length + mergeReview.source.entity.provenance.length} records. Relationships: {mergeReview.target.relationships.length + mergeReview.source.relationships.length} references remapped. Timeline: {mergeReview.target.timeline.length + mergeReview.source.timeline.length} events remapped.</p><p>Preferred narration: {mergeReview.target.entity.preferredNarrationName || mergeReview.source.entity.preferredNarrationName || "—"}. Localized naming: {mergeReview.target.entity.localizedNaming?.fullName || mergeReview.source.entity.localizedNaming?.fullName || "—"}. Alias rules: {mergeReview.target.entity.aliasNarrationRules.length + mergeReview.source.entity.aliasNarrationRules.length}. Merged-from IDs: {[...mergeReview.target.entity.mergedFromIds, mergeReview.source.entity.id, ...mergeReview.source.entity.mergedFromIds].join(", ")}.</p></section>{mergeNamingConflict(mergeReview.target.entity, mergeReview.source.entity) && <div className="naming-notice">Naming conflict: edit one entity’s preferred/localized naming before merging. The server will reject an unresolved conflict.</div>}<div className="editor-sheet-actions"><button className="button" onClick={() => setMergeReview({ target: mergeReview.source, source: mergeReview.target, reason: mergeReview.reason })}>Swap target</button><button className="button" onClick={() => setMergeReview(null)}>Cancel</button><button className="button primary" disabled={mergeNamingConflict(mergeReview.target.entity, mergeReview.source.entity)} onClick={confirmMerge}>Confirm merge</button></div></div>}
-    {detail && <CanonicalEntitySheet key={detail.entity.id} detail={detail} slug={slug} navigate={navigate} managementInitiallyOpen={managementEntityId === detail.entity.id} onManagementOpenChange={(open: boolean) => setManagementEntityId(open ? detail.entity.id : undefined)} onClose={() => closeEntitySheet()} onUndo={undo} onEdit={() => setEditing({ ...canonicalDraft(detail.entity), originalType: detail.entity.type, visualProfileExists: detail.visualProfileExists })} onDemote={() => demote(detail.entity)} onSuppress={() => suppress(detail)} onMerge={(item: any) => merge(item)} onOpenVisualProfile={(id: string, name?: string) => setVisualProfileTarget({ id, name })} onRevert={revertAuditEntry} />}
+    {mergeReview && <div className="editor-sheet naming-editor" role="dialog" aria-modal="true" aria-label="Compare canonical entities before merge"><div className="editor-sheet-head"><div><span className="eyebrow">Protected identity merge</span><h3>Compare before merging</h3></div><button autoFocus onClick={() => setMergeReview(null)} aria-label="Close comparison">×</button></div>{[mergeReview.target, mergeReview.source].map((record: any, index: number) => <section key={record.entity.id}><span className="eyebrow">{index === 0 ? "Surviving target" : "Merged source"}</span><h4>{record.entity.canonicalName} · {pretty(record.entity.type)}</h4><p>Original: {record.entity.originalName || "—"} · Ch. {record.entity.firstAppearance}–{record.entity.lastKnownAppearance}</p><p>Aliases: {record.entity.aliases.join(", ") || "—"}</p><p>Description: {record.entity.description || "—"}</p><p>Preferred narration: {record.entity.preferredNarrationName || "—"} · Localized: {record.entity.localizedNaming?.fullName || "—"}</p><p>Alias rules: {record.entity.aliasNarrationRules.length} · Provenance: {record.entity.provenance.length} · Relationships: {record.relationships.length} · Timeline: {record.timeline.length}</p><p>Visual Profile: {record.visualProfileExists ? "Exists — review before merge" : "None"}</p></section>)}<section><span className="eyebrow">Result preview</span><p>Surviving ID: {mergeReview.target.entity.id}. Appearance range: Ch. {Math.min(mergeReview.target.entity.firstAppearance, mergeReview.source.entity.firstAppearance)}–{Math.max(mergeReview.target.entity.lastKnownAppearance, mergeReview.source.entity.lastKnownAppearance)}.</p><p>Aliases: {[...new Set([...mergeReview.target.entity.aliases, mergeReview.source.entity.canonicalName, ...mergeReview.source.entity.aliases])].join(", ") || "—"}</p><p>Description/notes: target text and source text are both retained. Provenance: {mergeReview.target.entity.provenance.length + mergeReview.source.entity.provenance.length} records. Relationships: {mergeReview.target.relationships.length + mergeReview.source.relationships.length} references remapped. Timeline: {mergeReview.target.timeline.length + mergeReview.source.timeline.length} events remapped.</p><p>Preferred narration: {mergeReview.target.entity.preferredNarrationName || mergeReview.source.entity.preferredNarrationName || "—"}. Localized naming: {mergeReview.target.entity.localizedNaming?.fullName || mergeReview.source.entity.localizedNaming?.fullName || "—"}. Alias rules: {mergeReview.target.entity.aliasNarrationRules.length + mergeReview.source.entity.aliasNarrationRules.length}. Merged-from IDs: {[...mergeReview.target.entity.mergedFromIds, mergeReview.source.entity.id, ...mergeReview.source.entity.mergedFromIds].join(", ")}.</p></section>{mergeNamingConflict(mergeReview.target.entity, mergeReview.source.entity) && <div className="naming-notice">Naming conflict: edit one entity’s preferred/localized naming before merging. The server will reject an unresolved conflict.</div>}<div className="editor-sheet-actions"><button className="button" onClick={() => setMergeReview({ target: mergeReview.source, source: mergeReview.target, reason: mergeReview.reason })}>Swap target</button><button className="button" onClick={() => setMergeReview(null)}>Cancel</button><button className="button primary" disabled={mergeNamingConflict(mergeReview.target.entity, mergeReview.source.entity)} onClick={confirmMerge}>Confirm merge</button></div></div>}
+    {detail && <CanonicalEntitySheet key={detail.entity.id} detail={detail} slug={slug} navigate={navigate} hasActiveChildOverlay={entityChildOverlayOpen} managementInitiallyOpen={managementEntityId === detail.entity.id} onManagementOpenChange={(open: boolean) => setManagementEntityId(open ? detail.entity.id : undefined)} onClose={() => closeEntitySheet()} onUndo={undo} onEdit={() => setEditing({ ...canonicalDraft(detail.entity), originalType: detail.entity.type, visualProfileExists: detail.visualProfileExists })} onDemote={() => demote(detail.entity)} onSuppress={() => suppress(detail)} onMerge={(item: any) => merge(item)} onOpenVisualProfile={(id: string, name?: string) => setVisualProfileTarget({ id, name })} onRevert={revertAuditEntry} />}
     {visualProfileTarget && <VisualProfileModal slug={slug} entityId={visualProfileTarget.id} entityName={visualProfileTarget.name} onClose={() => setVisualProfileTarget(null)} />}
     <PronunciationPanel slug={slug} />{editing && <CanonicalEntityEditor slug={slug} value={editing} onChange={setEditing} onClose={() => setEditing(undefined)} onSave={save} />}
     {impactPreview && <EntityImpactDialog title={impactPreview.title} diff={impactPreview.diff} impact={impactPreview.impact} busy={impactBusy} applyLabel={impactPreview.applyLabel} onCancel={() => setImpactPreview(null)} onApply={runImpactApply} />}
@@ -1731,7 +1760,7 @@ export function cleanupOriginLabel(source: unknown): string | undefined {
 /** Preview-before-apply confirmation for high-impact entity operations. */
 export function EntityImpactDialog({ title, diff = [], impact, busy = false, applyLabel = "Apply change", onCancel, onApply }: { title: string; diff?: Array<{ label: string; before: string; after: string }>; impact: EntityImpact; busy?: boolean; applyLabel?: string; onCancel: () => void; onApply: () => void }) {
   const lines = impactEstimateLines(impact);
-  return <div className="editor-sheet naming-editor entity-impact-dialog" role="dialog" aria-label="Review estimated impact">
+  return <div className="editor-sheet naming-editor entity-impact-dialog" role="dialog" aria-modal="true" aria-label="Review estimated impact">
     <div className="editor-sheet-head"><div><span className="eyebrow">Estimated impact</span><h3>{title}</h3></div><button onClick={onCancel} aria-label="Cancel impact preview">×</button></div>
     {diff.length > 0 && <section className="impact-diff"><span className="eyebrow">Change</span>{diff.map((item) => <p key={item.label}><b>{item.label}</b>: {item.before} → {item.after}</p>)}</section>}
     <section className="impact-estimate"><span className="eyebrow">Estimated impact</span>{lines.length ? lines.map((line) => <p key={line}>{line}</p>) : <p>No production artifacts are affected by this change.</p>}</section>
@@ -1769,11 +1798,12 @@ type CanonicalEntitySheetProps = {
   onOpenVisualProfile?: (id: string, name?: string) => void;
   onRevert?: (entry: EntityAuditEntry) => void;
   onManagementOpenChange?: (open: boolean) => void;
+  hasActiveChildOverlay?: boolean;
   historyView?: EntityHistoryView;
   managementInitiallyOpen?: boolean;
 };
 
-export function CanonicalEntitySheet({ detail, slug, navigate, onClose, onUndo, onEdit, onDemote, onSuppress, onMerge, onOpenVisualProfile, onRevert, onManagementOpenChange, historyView, managementInitiallyOpen = false }: CanonicalEntitySheetProps) {
+export function CanonicalEntitySheet({ detail, slug, navigate, onClose, onUndo, onEdit, onDemote, onSuppress, onMerge, onOpenVisualProfile, onRevert, onManagementOpenChange, hasActiveChildOverlay = false, historyView, managementInitiallyOpen = false }: CanonicalEntitySheetProps) {
   const entity = detail.entity;
   const activeMerges = (detail.merges ?? []).filter((item: any) => !item.undoneAt);
   const [descExpanded, setDescExpanded] = useState(false);
@@ -1800,11 +1830,11 @@ export function CanonicalEntitySheet({ detail, slug, navigate, onClose, onUndo, 
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onClose();
+      if (event.key === "Escape" && !hasActiveChildOverlay) onClose();
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [onClose]);
+  }, [onClose, hasActiveChildOverlay]);
 
   // Read-only "as of chapter" mode: the same sheet renders the reconstructed
   // historical state; editing, management, and action controls are hidden.
@@ -1843,7 +1873,7 @@ export function CanonicalEntitySheet({ detail, slug, navigate, onClose, onUndo, 
   const narrationConfigured = Boolean(shown.preferredNarrationName || shown.localizedNaming?.fullName);
 
   return (
-    <div className="editor-sheet entity-sheet" role="dialog" aria-modal="true" aria-labelledby="canonical-entity-title">
+    <div className="editor-sheet entity-sheet" role="dialog" aria-modal={!hasActiveChildOverlay} aria-labelledby="canonical-entity-title" aria-hidden={hasActiveChildOverlay} inert={hasActiveChildOverlay}>
       <header className="entity-sheet-header">
         <div className="entity-sheet-title-group">
           <h3 id="canonical-entity-title" className="entity-sheet-title">{shown.canonicalName}{manualBadge("canonicalName")}{overrideBadge("canonicalName")}</h3>
@@ -2006,18 +2036,6 @@ export function CanonicalEntitySheet({ detail, slug, navigate, onClose, onUndo, 
               </div>
             </details>
           )}
-          {shownTimeline?.length > 0 && (
-            <div className="entity-history">
-              <span className="section-eyebrow">Timeline</span>
-              {shownTimeline.map((item: any) => (
-                <button key={item.id} onClick={() => navigate(`/stories/${slug}/chapters/${item.chapter}`)}>
-                  <b>Ch. {item.chapter}</b>
-                  <span>{pretty(item.type)}</span>
-                  <p>{item.summary}</p>
-                </button>
-              ))}
-            </div>
-          )}
           {shownRelationships?.length > 0 && (
             <div className="entity-history">
               <span className="section-eyebrow">Relationships</span>
@@ -2032,6 +2050,18 @@ export function CanonicalEntitySheet({ detail, slug, navigate, onClose, onUndo, 
           )}
           </section>
         </EntityDetailAccordion>
+
+        {shownTimeline?.length > 0 && <EntityDetailAccordion key={`${entity.id}-timeline`} id="timeline" title="Timeline" badge={`${shownTimeline.length} event${shownTimeline.length === 1 ? "" : "s"}`}>
+          <div className="entity-history">
+            {shownTimeline.map((item: any) => (
+              <button key={item.id} onClick={() => navigate(`/stories/${slug}/chapters/${item.chapter}`)}>
+                <b>Ch. {item.chapter}</b>
+                <span>{pretty(item.type)}</span>
+                <p>{item.summary}</p>
+              </button>
+            ))}
+          </div>
+        </EntityDetailAccordion>}
 
         {!viewing && <EntityDetailAccordion key={`${entity.id}-visual-canon`} id="visual-canon" title="Visual Canon" badge={detail.visualProfileExists ? "Profile available" : "No visual profile"}>
           <section className="entity-detail-section">

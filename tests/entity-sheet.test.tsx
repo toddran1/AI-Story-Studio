@@ -1,6 +1,7 @@
 /** @vitest-environment jsdom */
 import { act, useState } from "react";
 import { createRoot } from "react-dom/client";
+import { readFileSync } from "node:fs";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App, CanonicalEntitySheet, EntityDetailAccordion, EntityHistorySection, EntityUsageSection } from "../apps/web/src/App.js";
 
@@ -74,6 +75,61 @@ describe("Story Bible entity detail accordion", () => {
     expect(host.textContent).toContain("Entity B");
     expect([...host.querySelectorAll("button")].some((button) => button.textContent === "Show less")).toBe(false);
     expect(host.querySelector<HTMLButtonElement>('button[aria-controls="entity-section-entity-management"]')?.getAttribute("aria-expanded")).toBe("false");
+  });
+
+  it("keeps Story Information open while Timeline is a separate collapsed accordion", () => {
+    const detail = {
+      entity: { id: "entity-timeline", type: "character", canonicalName: "Timeline Entity", originalName: "Timeline Entity", aliases: [], aliasNarrationRules: [], canonicalNameLocked: false, status: "alive", notes: "", description: "", origin: "automatic", firstAppearance: 1, lastKnownAppearance: 4, provenance: [], mergedFromIds: [] },
+      timeline: [{ id: "current-event", chapter: 4, type: "appearance", summary: "Current timeline event" }],
+      relationships: [], relatedNames: {}, relatedReferences: [], issues: [], merges: [], duplicateSuggestions: [], namingCollisions: [], readiness: [], visualProfileExists: false,
+    };
+    host = document.createElement("div");
+    document.body.append(host);
+    root = createRoot(host);
+    act(() => root!.render(<CanonicalEntitySheet detail={detail} slug="story" navigate={() => undefined} onClose={() => undefined} onUndo={() => undefined} onEdit={() => undefined} />));
+    expect(host.querySelector<HTMLButtonElement>('button[aria-controls="entity-section-story-information"]')?.getAttribute("aria-expanded")).toBe("true");
+    const timeline = host.querySelector<HTMLButtonElement>('button[aria-controls="entity-section-timeline"]')!;
+    expect(timeline.getAttribute("aria-expanded")).toBe("false");
+    expect(timeline.textContent).toContain("1 event");
+    expect(host.textContent).not.toContain("Current timeline event");
+    act(() => timeline.click());
+    expect(host.textContent).toContain("Current timeline event");
+    expect([...host.querySelectorAll<HTMLButtonElement>(".entity-history button")].some((button) => button.textContent?.includes("Ch. 4"))).toBe(true);
+    act(() => timeline.click());
+    expect(host.querySelector<HTMLElement>("#entity-section-timeline")?.hidden).toBe(true);
+  });
+
+  it("uses historical timeline entries and omits the accordion when no timeline exists", () => {
+    const detail = {
+      entity: { id: "entity-history", type: "character", canonicalName: "History Entity", originalName: "History Entity", aliases: [], aliasNarrationRules: [], canonicalNameLocked: false, status: "alive", notes: "", description: "", origin: "automatic", firstAppearance: 1, lastKnownAppearance: 4, provenance: [], mergedFromIds: [] },
+      timeline: [{ id: "current-event", chapter: 4, type: "appearance", summary: "Current event only" }],
+      relationships: [], relatedNames: {}, relatedReferences: [], issues: [], merges: [], duplicateSuggestions: [], namingCollisions: [], readiness: [], visualProfileExists: false,
+    };
+    host = document.createElement("div");
+    document.body.append(host);
+    root = createRoot(host);
+    const base = { slug: "story", navigate: () => undefined, onClose: () => undefined, onUndo: () => undefined, onEdit: () => undefined };
+    act(() => root!.render(<CanonicalEntitySheet detail={detail} {...base} historyView={{ chapter: 2, exists: true, entity: detail.entity, timeline: [{ id: "historical-event", chapter: 2, type: "appearance", summary: "Historical event only" }], relationships: [], relatedNames: {}, provenance: [], currentOverrides: [], warnings: [], firstAppearanceKnown: true }} />));
+    const timeline = host.querySelector<HTMLButtonElement>('button[aria-controls="entity-section-timeline"]')!;
+    expect(timeline.textContent).toContain("1 event");
+    expect(timeline.getAttribute("aria-expanded")).toBe("false");
+    act(() => timeline.click());
+    expect(host.textContent).toContain("Historical event only");
+    expect(host.textContent).not.toContain("Current event only");
+
+    const withoutTimeline = { ...detail, entity: { ...detail.entity, id: "entity-no-timeline" }, timeline: [] };
+    act(() => root!.render(<CanonicalEntitySheet detail={withoutTimeline} {...base} />));
+    expect(host.querySelector('button[aria-controls="entity-section-timeline"]')).toBeNull();
+  });
+
+  it("defines a shared drawer, modal, and dialog overlay contract", () => {
+    const css = readFileSync("apps/web/src/overlay-layers.css", "utf8");
+    expect(css).toContain("--z-drawer: 30");
+    expect(css).toContain("--z-modal: 50");
+    expect(css).toContain("--z-dialog: 60");
+    expect(css).toContain(".editor-sheet.entity-sheet");
+    expect(css).toContain(".editor-sheet:not(.entity-sheet)");
+    expect(css).toContain(".entity-impact-dialog");
   });
 
   it("offers explicit retries for failed lazy usage and history loads without looping", async () => {
@@ -380,6 +436,15 @@ describe("Story Bible entity deep-link integration", () => {
       : undefined);
     const page = mount("?entity=entity-a&section=management");
     await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+    act(() => [...page.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === "Edit entity")!.click());
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+    expect(page.querySelector(".editor-sheet.naming-editor")).not.toBeNull();
+    expect(page.querySelector(".entity-sheet")?.hasAttribute("inert")).toBe(true);
+    expect(page.querySelector(".entity-sheet")?.getAttribute("aria-hidden")).toBe("true");
+    act(() => window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })));
+    expect(page.querySelector(".editor-sheet.naming-editor")).toBeNull();
+    expect(page.querySelector(".entity-sheet")?.hasAttribute("inert")).toBe(false);
+    expect(new URLSearchParams(location.search).get("entity")).toBe("entity-a");
     act(() => [...page.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === "Edit entity")!.click());
     await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
     await act(async () => {

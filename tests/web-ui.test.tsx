@@ -2476,8 +2476,10 @@ describe("story bible review desk (phase D) — as-of-chapter view and sheet org
     expect(html).not.toContain("View change history");
     expect(html).not.toContain("Set →");
     expect(html).not.toContain("Configure →");
-    // Only the chapter ≤ 2 timeline entry renders
-    expect(html).toContain("Enters the city");
+    // Historical Timeline is a separate collapsed accordion with the historical event count.
+    expect(html).toContain("1 event");
+    expect(html).toContain('aria-expanded="false" aria-controls="entity-section-timeline"');
+    expect(html).not.toContain("Enters the city");
     expect(html).not.toContain("Breakthrough");
     // The naming readiness badge follows the historical version, not today's configured narration name.
     expect(html).toContain("Needs setup");

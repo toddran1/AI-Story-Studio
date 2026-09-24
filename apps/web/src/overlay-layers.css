@@ -1,0 +1,25 @@
+/* Shared overlay order: page < drawer < editor/modal < focused confirmation. */
+:root {
+  --z-drawer: 30;
+  --z-modal: 50;
+  --z-dialog: 60;
+}
+
+.editor-sheet.entity-sheet {
+  z-index: var(--z-drawer);
+}
+
+.editor-sheet:not(.entity-sheet) {
+  z-index: var(--z-modal);
+}
+
+.entity-impact-dialog,
+.stage-modal-backdrop,
+.visual-preflight-backdrop,
+.reference-viewer-backdrop {
+  z-index: var(--z-dialog);
+}
+
+.modal-backdrop {
+  z-index: var(--z-modal);
+}

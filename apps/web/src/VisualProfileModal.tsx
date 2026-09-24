@@ -133,9 +133,15 @@ export function VisualProfileModal({
 
   useEffect(() => {
     if (!viewingReference) return;
-    const onKeyDown = (event: KeyboardEvent) => { if (event.key === "Escape") setViewingReference(null); };
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
+    document.querySelector<HTMLElement>(".reference-viewer .btn-close")?.focus();
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      setViewingReference(null);
+    };
+    window.addEventListener("keydown", onKeyDown, true);
+    return () => window.removeEventListener("keydown", onKeyDown, true);
   }, [viewingReference]);
 
   const handleSave = async (e?: React.FormEvent) => {

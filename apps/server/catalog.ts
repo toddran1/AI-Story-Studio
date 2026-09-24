@@ -64,6 +64,12 @@ export type ChapterSummary = {
   qaScore?: number; qaIssues?: QaResult["issues"]; qaStale: boolean; qaNeedsVerification?: number; qaStage?: string; tts: string; audioMastering: string; continuity: string; alignment: string; subtitles: string; subtitlesAvailable: boolean; subtitlesStale: boolean; scenePlanning: string; artwork: string; video: string; audioAvailable: boolean; audioStale: boolean; videoAvailable: boolean; videoStale: boolean; durationSeconds?: number;
 };
 
+type ChapterStatusProjection = {
+  rows: ChapterSummary[];
+  byChapter: Map<number, ChapterSummary>;
+  aggregates: { total: number; scenePlanningComplete: number; artworkComplete: number };
+};
+
 export async function listStories(root: string, warnings: string[] = []) {
   const startedAt = Date.now();
   const storiesRoot = join(root, "stories"); let directories: string[] = [];
@@ -1043,7 +1049,7 @@ export async function invalidateChapterStatusDerivedReads(root: string, slug: st
   logger.debug({ event: "chapter_status.revision_invalidation", story: slug, durationMs: Date.now() - startedAt });
 }
 
-export async function getChapterStatusReadModel(root: string, slug: string): Promise<ChapterSummary[]> {
+async function getChapterStatusProjection(root: string, slug: string): Promise<ChapterStatusProjection> {
   slugSchema.parse(slug);
   const startedAt = Date.now();
   const { value, cacheHit } = await cachedStoryRead(CHAPTER_STATUS_CACHE, root, slug,
@@ -1052,10 +1058,29 @@ export async function getChapterStatusReadModel(root: string, slug: string): Pro
       const index = await loadChapterIndex(root, slug);
       const rows = await loadSummaries(root, slug, index.numbers, index);
       logger.debug({ event: "chapter_status.full_build", story: slug, durationMs: Date.now() - buildStartedAt, chapters: rows.length });
-      return rows;
+      const aggregates = { total: rows.length, scenePlanningComplete: 0, artworkComplete: 0 };
+      const byChapter = new Map<number, ChapterSummary>();
+      for (const row of rows) {
+        byChapter.set(row.chapter, row);
+        if (row.scenePlanning === "complete") aggregates.scenePlanningComplete++;
+        if (row.artwork === "complete") aggregates.artworkComplete++;
+      }
+      return { rows, byChapter, aggregates };
     });
-  logger.debug({ event: "chapter_status.read_model", story: slug, cacheHit, durationMs: Date.now() - startedAt, chapters: value.length });
+  logger.debug({ event: "chapter_status.read_model", story: slug, cacheHit, durationMs: Date.now() - startedAt, chapters: value.rows.length });
   return value;
+}
+
+export async function getChapterStatusReadModel(root: string, slug: string): Promise<ChapterSummary[]> {
+  return (await getChapterStatusProjection(root, slug)).rows;
+}
+
+export async function getChapterStatusRow(root: string, slug: string, chapter: number): Promise<ChapterSummary | undefined> {
+  return (await getChapterStatusProjection(root, slug)).byChapter.get(chapter);
+}
+
+export async function getChapterStatusAggregates(root: string, slug: string): Promise<ChapterStatusProjection["aggregates"]> {
+  return (await getChapterStatusProjection(root, slug)).aggregates;
 }
 
 export const loadChapterSummaries = getChapterStatusReadModel;
@@ -1204,7 +1229,8 @@ export async function getScenesIndex(root: string, slug: string) {
   const startedAt = Date.now();
   slugSchema.parse(slug);
   const story = await loadStory(storyPaths(root, slug, 1).storyConfig);
-  const chapters = await getChapterStatusReadModel(root, slug);
+  const chapterStatus = await getChapterStatusProjection(root, slug);
+  const chapters = chapterStatus.rows;
   const env = loadEnvironment();
   const globalDefaults = await loadGlobalSettings(root, env).catch(() => undefined);
   const scenePlannerRouting = resolveModelRouting({
@@ -1252,9 +1278,9 @@ export async function getScenesIndex(root: string, slug: string) {
       artworkStatus: item.artwork,
     })),
     counts: {
-      chapters: chapters.length,
-      planned: chapters.filter((item) => item.scenePlanning === "complete").length,
-      artworkReady: chapters.filter((item) => item.artwork === "complete").length,
+      chapters: chapterStatus.aggregates.total,
+      planned: chapterStatus.aggregates.scenePlanningComplete,
+      artworkReady: chapterStatus.aggregates.artworkComplete,
     },
     manifest: undefined,
     previousHandoff: undefined,
@@ -1387,16 +1413,16 @@ export async function getScenesChapter(root: string, slug: string, chapter: numb
 
 export async function getScenesIndexRow(root: string, slug: string, chapter: number) {
   slugSchema.parse(slug);
-  const chapters = await getChapterStatusReadModel(root, slug);
-  const item = chapters.find((entry) => entry.chapter === chapter);
+  const chapterStatus = await getChapterStatusProjection(root, slug);
+  const item = chapterStatus.byChapter.get(chapter);
   if (!item) throw new Error(`Chapter ${chapter} was not found`);
   return { row: { chapter: item.chapter, title: item.originalTitle, durationSeconds: item.durationSeconds,
     audioMastering: item.audioMastering, audioAvailable: item.audioAvailable, audioStale: item.audioStale,
     subtitleStatus: item.subtitles, subtitlesAvailable: item.subtitlesAvailable, subtitlesStale: item.subtitlesStale,
     videoStatus: item.video, videoAvailable: item.videoAvailable, videoStale: item.videoStale,
     sceneStatus: item.scenePlanning, artworkStatus: item.artwork },
-    counts: { chapters: chapters.length, planned: chapters.filter((entry) => entry.scenePlanning === "complete").length,
-      artworkReady: chapters.filter((entry) => entry.artwork === "complete").length } };
+    counts: { chapters: chapterStatus.aggregates.total, planned: chapterStatus.aggregates.scenePlanningComplete,
+      artworkReady: chapterStatus.aggregates.artworkComplete } };
 }
 
 /** Compatibility read for older callers. Browser workspace uses separate endpoints. */
