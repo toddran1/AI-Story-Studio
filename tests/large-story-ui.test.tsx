@@ -145,6 +145,14 @@ describe("large story pages", () => {
     expect(calls.some((url) => url.includes("group=artwork"))).toBe(true);
   });
 
+  it("includes Artwork in the known-file and group counts", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => url.endsWith("/outputs/summary") ? json({ counts: { chapterAudio: 2, audiobooks: 1, chapterVideos: 0, combinedVideos: 0, subtitles: 0, artwork: 3 } }) : json({ items: [], page: 1, pages: 1, total: 3 })));
+    await mount(<OutputsPage slug="test-story" />);
+    expect(container!.textContent).toContain("6 known files");
+    const artwork = [...container!.querySelectorAll(".output-group > button")].find((button) => button.textContent?.includes("Artwork"));
+    expect(artwork?.textContent).toContain("3");
+  });
+
   it("loads Scenes index once and only chapter detail when switching", async () => {
     const calls: string[] = [];
     const chapters = [1, 2].map((chapter) => ({ chapter, title: `Chapter ${chapter}`, durationSeconds: 0, audioMastering: "pending", audioAvailable: false, audioStale: false, subtitleStatus: "pending", subtitlesAvailable: false, subtitlesStale: false, videoStatus: "pending", videoAvailable: false, videoStale: false, sceneStatus: "pending", artworkStatus: "pending" }));
@@ -155,6 +163,21 @@ describe("large story pages", () => {
     await act(async () => { chapterSelect.value = "2"; chapterSelect.dispatchEvent(new Event("change", { bubbles: true })); });
     expect(calls.filter((url) => url.endsWith("/scenes/index"))).toHaveLength(1);
     expect(calls.some((url) => url.endsWith("/scenes/2"))).toBe(true);
+  });
+
+  it("refreshes one Scenes index row after a scene save without reloading workspace settings", async () => {
+    const calls: string[] = [];
+    const row = { chapter: 1, title: "Chapter 1", durationSeconds: 10, audioMastering: "pending", audioAvailable: false, audioStale: false, subtitleStatus: "pending", subtitlesAvailable: false, subtitlesStale: false, videoStatus: "pending", videoAvailable: false, videoStale: false, sceneStatus: "complete", artworkStatus: "pending" };
+    const scene = { id: "scene-001", summary: "Old scene", startSeconds: 0, endSeconds: 10, characters: [], visualPrompt: "A lantern", importance: "standard", artwork: { status: "pending", review: "unreviewed", versions: [] } };
+    const manifest = { chapter: 1, durationSeconds: 10, manualRevision: 0, manuallyEdited: false, scenes: [scene] };
+    const index = { settings: { targetDurationSeconds: 20, minimumDurationSeconds: 10, maximumScenesPerChapter: 50 }, artwork: { provider: "openai", model: "fake", stylePrompt: "style", aspectRatio: "16:9", quality: "medium", size: "1536x1024", outputFormat: "png", outputResolution: "native", upscaling: "off", upscaler: "local-realesrgan" }, planner: { provider: "openai", model: "fake" }, videoSubtitleMode: "burn", selectedChapter: 1, chapters: [row], counts: { chapters: 1, planned: 1, artworkReady: 0 } };
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => { calls.push(url); if (url.endsWith("/scenes/index")) return json(index); if (url.endsWith("/scenes/index/1")) return json({ row, counts: index.counts }); if (url.endsWith("/scenes/1")) return json({ selectedChapter: 1, manifest }); return json({}); }));
+    await mount(<ScenesPage slug="test-story" onJob={() => undefined} />);
+    const summary = container!.querySelector<HTMLTextAreaElement>("#scene-001 .scene-copy textarea")!;
+    await act(async () => { Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(summary, "Changed scene"); summary.dispatchEvent(new Event("input", { bubbles: true })); });
+    await act(async () => [...container!.querySelectorAll("button")].find((button) => button.textContent === "Save all scene edits")!.click());
+    expect(calls.filter((url) => url.endsWith("/scenes/index"))).toHaveLength(1);
+    expect(calls.some((url) => url.endsWith("/scenes/index/1"))).toBe(true);
   });
 
   it("keeps production setup separate from live status polling", async () => {

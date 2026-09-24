@@ -47,6 +47,8 @@ import { applyStoredSceneRegeneration, planStoredScenes, previewStoredSceneRegen
 import { SceneManifest, sceneManifestSchema } from "../../src/scenes/types.js";
 import { persistChapterVisualContinuity, removeVisualContinuityOverride, upsertVisualContinuityOverride, visualContinuityOverrideEntrySchema } from "../../src/visual-canon/continuity.js";
 import { generateStoredArtwork, reviewStoredArtwork, reviewStoredArtworkVersion, reupscaleStoredArtwork } from "../../src/artwork/generator.js";
+import { invalidateArtworkOutputIndex } from "../../src/artwork/output-index-revision.js";
+import { invalidateStoryReadCache } from "../../src/story-bible/read-cache.js";
 import { ImageProvider } from "../../src/artwork/provider.js";
 import { ImageProviderSource, resolveImageProvider } from "../../src/artwork/providers.js";
 import {
@@ -450,9 +452,9 @@ export class StudioOperations {
   }
   async updateCover(slug: string, filename: string, bytes: Uint8Array) { const result = await saveCover(this.root, slug, filename, bytes); invalidateCatalogCache(this.root, slug); return result; }
   async duplicateProject(slug: string, raw: unknown) { const input = z.object({ slug: slugSchema, mode: z.enum(["settings", "full"]) }).strict().parse(raw); const result = await duplicateStory(this.root, slug, input.slug, input.mode); invalidateCatalogCache(this.root, result.slug); return result; }
-  async deleteProject(slug: string, raw: unknown) { const input = z.object({ confirmation: z.string() }).strict().parse(raw); const result = await deleteStory(this.root, slug, input.confirmation); invalidateCatalogCache(this.root, slug); return result; }
+  async deleteProject(slug: string, raw: unknown) { const input = z.object({ confirmation: z.string() }).strict().parse(raw); const result = await deleteStory(this.root, slug, input.confirmation); invalidateCatalogCache(this.root, slug); invalidateStoryReadCache(this.root, slug, "artwork-output-index"); return result; }
   createBackup(slug: string, raw: unknown) { const input = z.object({ includeMedia: z.boolean().default(false) }).strict().parse(raw); return buildStoryBackup(this.root, slug, input.includeMedia); }
-  restoreBackup(path: string) { return restoreStoryBackupFile(this.root, path); }
+  async restoreBackup(path: string) { const result = await restoreStoryBackupFile(this.root, path); await invalidateArtworkOutputIndex(this.root, result.slug); return result; }
   storageUsage(slug: string) { return getStorageUsage(this.root, slug); }
   recentActivity(slug: string, limit?: number) { return readActivity(this.root, slug, limit); }
   async cleanup(slug: string, raw: unknown) { const input = z.object({ kind: cleanupKindSchema }).strict().parse(raw); const result = await cleanupStory(this.root, slug, input.kind); invalidateCatalogCache(this.root, slug); return result; }

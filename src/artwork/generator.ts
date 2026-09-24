@@ -1,3 +1,4 @@
+import { writeArtworkOutputManifest } from "./output-index-revision.js";
 import { readFile } from "node:fs/promises";
 import { Chapter, chapterSchema } from "../domain/chapter.js";
 import { Story } from "../domain/story.js";
@@ -248,7 +249,7 @@ export async function generateStoredArtwork(options: {
   }
   if (derivativesChanged) {
     manifest.updatedAt = new Date().toISOString();
-    await atomicWriteJson(paths.scenesManifest, manifest);
+    await writeArtworkOutputManifest(options.root, options.story.slug, options.chapter, manifest);
     chapter.stages.video = { status: "pending" };
     chapter.video = undefined;
     await persistChapter(paths.chapterMeta, chapter);
@@ -298,7 +299,7 @@ export async function generateStoredArtwork(options: {
       error: undefined,
     };
     manifest.updatedAt = new Date().toISOString();
-    await atomicWriteJson(paths.scenesManifest, manifest);
+    await writeArtworkOutputManifest(options.root, options.story.slug, options.chapter, manifest);
 
     options.onProgress?.({
       type: "artwork.scene.started",
@@ -411,7 +412,7 @@ export async function generateStoredArtwork(options: {
         review: "needs-regeneration",
         error: error instanceof Error ? error.message : String(error),
       };
-      await atomicWriteJson(paths.scenesManifest, manifest);
+      await writeArtworkOutputManifest(options.root, options.story.slug, options.chapter, manifest);
       chapter.stages.artwork = {
         ...chapter.stages.artwork,
         status: "failed",
@@ -423,7 +424,7 @@ export async function generateStoredArtwork(options: {
         cause: error,
       });
     }
-    await atomicWriteJson(paths.scenesManifest, manifest);
+    await writeArtworkOutputManifest(options.root, options.story.slug, options.chapter, manifest);
   }
 
   const outputFingerprint = fingerprint(
@@ -532,7 +533,7 @@ export async function reviewStoredArtworkVersion(options: {
   }
 
   manifest.updatedAt = new Date().toISOString();
-  await atomicWriteJson(paths.scenesManifest, manifest);
+  await writeArtworkOutputManifest(options.root, options.story.slug, options.chapter, manifest);
 
   const chapterRaw = await readJsonIfExists<Chapter>(paths.chapterMeta);
   if (chapterRaw) {
@@ -592,7 +593,7 @@ export async function reviewStoredArtwork(options: {
     scene.artwork.approvedVersionId = undefined;
   }
   manifest.updatedAt = new Date().toISOString();
-  await atomicWriteJson(paths.scenesManifest, manifest);
+  await writeArtworkOutputManifest(options.root, options.story.slug, options.chapter, manifest);
 
   const chapterRaw = await readJsonIfExists<Chapter>(paths.chapterMeta);
   if (chapterRaw) {
@@ -1094,7 +1095,7 @@ export async function reupscaleStoredArtwork(options: {
 
   if (changed) {
     manifest.updatedAt = new Date().toISOString();
-    await atomicWriteJson(paths.scenesManifest, manifest);
+    await writeArtworkOutputManifest(options.root, options.story.slug, options.chapter, manifest);
     const chapterRaw = await readJsonIfExists<Chapter>(paths.chapterMeta);
     if (chapterRaw) {
       const chapter = chapterSchema.parse(chapterRaw);

@@ -20,6 +20,7 @@ import { exportManifestSchema } from "../../src/audio/audiobook.js";
 import { videoExportManifestSchema } from "../../src/video/video-export.js";
 import { SceneManifest, artworkSettingsSchema, sceneManifestSchema, sceneSettingsSchema } from "../../src/scenes/types.js";
 import { sceneContentFingerprint } from "../../src/scenes/manifest.js";
+import { getArtworkOutputReadRevision } from "../../src/artwork/output-index-revision.js";
 import { resolveChapterVisualContinuity, ResolvedSceneContinuity } from "../../src/visual-canon/continuity.js";
 import { resolveSceneVisualEntity } from "../../src/scenes/identity.js";
 import { loadLatestProduction } from "../../src/production/manifest.js";
@@ -905,18 +906,44 @@ export async function getContinuityReview(root: string, slug: string, status?: s
 export const outputGroupSchema = z.enum(["chapterAudio", "audiobooks", "chapterVideos", "combinedVideos", "subtitles", "artwork"]);
 export type OutputGroup = z.infer<typeof outputGroupSchema>;
 
+async function getArtworkOutputIndex(root: string, slug: string) {
+  const startedAt = Date.now();
+  const result = await cachedStoryRead("artwork-output-index", root, slug, () => getArtworkOutputReadRevision(root, slug), async () => {
+    const chapters = await getChapterStatusReadModel(root, slug);
+    const manifests = await mapLimit(chapters, 8, async ({ chapter }) => {
+      const raw = await readJsonIfExists<SceneManifest>(storyPaths(root, slug, chapter).scenesManifest);
+      const parsed = raw ? sceneManifestSchema.safeParse(raw) : undefined;
+      if (!parsed?.success) return [];
+      return parsed.data.scenes.filter((scene) => scene.artwork.status === "complete")
+        .map((scene) => ({ chapter, sceneId: scene.id, path: sceneImagePath(root, slug, chapter, scene.id) }));
+    });
+    const entries = manifests.flat();
+    logger.debug({ event: "artwork_output.index_build", story: slug, totalArtwork: entries.length, durationMs: Date.now() - startedAt });
+    return entries;
+  });
+  if (result.cacheHit) logger.debug({ event: "artwork_output.index_cache_hit", story: slug, totalArtwork: result.value.length, durationMs: Date.now() - startedAt });
+  return result.value;
+}
+
 export async function getOutputsSummary(root: string, slug: string) {
   const startedAt = Date.now();
-  const [chapters, audio, video] = await Promise.all([getChapterStatusReadModel(root, slug), getAudioSummary(root, slug), getVideoSummary(root, slug)]);
+  const [chapters, audio, video, artwork] = await Promise.all([getChapterStatusReadModel(root, slug), getAudioSummary(root, slug), getVideoSummary(root, slug), getArtworkOutputIndex(root, slug)]);
   const counts = { chapterAudio: chapters.filter((item) => item.audioAvailable).length, audiobooks: audio.exports.length,
     chapterVideos: chapters.filter((item) => item.videoAvailable).length, combinedVideos: video.exports.length,
-    subtitles: chapters.filter((item) => item.subtitles === "complete").length * 2 };
-  logger.debug({ event: "outputs.summary", story: slug, durationMs: Date.now() - startedAt });
+    subtitles: chapters.filter((item) => item.subtitles === "complete").length * 2, artwork: artwork.length };
+  logger.debug({ event: "outputs.summary", story: slug, totalArtwork: artwork.length, durationMs: Date.now() - startedAt });
   return { counts };
 }
 
 export async function getOutputsPage(root: string, slug: string, group: OutputGroup, page: number, pageSize: number) {
   const startedAt = Date.now(); slugSchema.parse(slug);
+  if (group === "artwork") {
+    const index = await getArtworkOutputIndex(root, slug);
+    const slice = mediaPage(index, page, pageSize);
+    const items = (await mapLimit(slice.items, 8, ({ chapter, sceneId, path }) => outputItem(path, { id: `artwork-${chapter}-${sceneId}`, group, chapter, format: "png", url: `/api/stories/${slug}/chapters/${chapter}/scenes/${sceneId}.png` }))).filter((item) => !item.missing);
+    logger.debug({ event: "outputs.page", story: slug, group, page: slice.page, pageSize: slice.pageSize, total: slice.total, durationMs: Date.now() - startedAt });
+    return { ...slice, items };
+  }
   const chapters = await getChapterStatusReadModel(root, slug);
   const entries: Array<{ path: string; fallbackPath?: string; value: OutputValue }> = [];
   if (group === "chapterAudio") for (const item of chapters) if (item.audioAvailable) {
@@ -927,14 +954,6 @@ export async function getOutputsPage(root: string, slug: string, group: OutputGr
   if (group === "subtitles") for (const item of chapters) if (item.subtitles === "complete") for (const format of ["srt", "vtt"] as const) entries.push({ path: format === "srt" ? storyPaths(root, slug, item.chapter).subtitlesSrt : storyPaths(root, slug, item.chapter).subtitlesVtt, value: { id: `subtitle-${format}-${item.chapter}`, group, chapter: item.chapter, format, url: `/api/stories/${slug}/chapters/${item.chapter}/subtitles.${format}`, downloadUrl: `/api/stories/${slug}/chapters/${item.chapter}/subtitles.${format}?download=1` } });
   if (group === "audiobooks") for (const item of (await getAudioSummary(root, slug)).exports) entries.push({ path: exportPaths(root, slug, item.from, item.to, item.format).output, value: { id: `audiobook-${item.fingerprint}`, group, from: item.from, to: item.to, format: item.format, createdAt: item.createdAt, durationSeconds: item.durationSeconds, url: item.downloadUrl, downloadUrl: item.downloadUrl } });
   if (group === "combinedVideos") for (const item of (await getVideoSummary(root, slug)).exports) entries.push({ path: videoExportPaths(root, slug, item.from, item.to).output, value: { id: `video-${item.fingerprint}`, group, from: item.from, to: item.to, format: "mp4", createdAt: item.createdAt, durationSeconds: item.durationSeconds, url: item.downloadUrl, downloadUrl: item.downloadUrl } });
-  if (group === "artwork") {
-    const manifests = await mapLimit(chapters, 8, async (item) => {
-      const raw = await readJsonIfExists<SceneManifest>(storyPaths(root, slug, item.chapter).scenesManifest);
-      const parsed = raw ? sceneManifestSchema.safeParse(raw) : undefined;
-      return parsed?.success ? { chapter: item.chapter, scenes: parsed.data.scenes.filter((scene) => scene.artwork.status === "complete") } : undefined;
-    });
-    for (const manifest of manifests) if (manifest) for (const scene of manifest.scenes) entries.push({ path: sceneImagePath(root, slug, manifest.chapter, scene.id), value: { id: `artwork-${manifest.chapter}-${scene.id}`, group, chapter: manifest.chapter, format: "png", url: `/api/stories/${slug}/chapters/${manifest.chapter}/scenes/${scene.id}.png` } });
-  }
   const slice = mediaPage(entries, page, pageSize);
   const items = (await mapLimit(slice.items, 8, async (entry) => { const item = await outputItem(entry.path, entry.value); return item.missing && entry.fallbackPath ? outputItem(entry.fallbackPath, entry.value) : item; })).filter((item) => !item.missing);
   logger.debug({ event: "outputs.page", story: slug, group, page: slice.page, pageSize: slice.pageSize, total: slice.total, durationMs: Date.now() - startedAt });
@@ -1181,26 +1200,76 @@ export async function getArtDirection(root: string, slug: string) {
   return await loadStoryArtDirection(root, slug);
 }
 
-export async function getScenesDashboard(root: string, slug: string, selectedChapter?: number, mode: "full" | "index" | "chapter" = "full") {
+export async function getScenesIndex(root: string, slug: string) {
   const startedAt = Date.now();
   slugSchema.parse(slug);
   const story = await loadStory(storyPaths(root, slug, 1).storyConfig);
   const chapters = await getChapterStatusReadModel(root, slug);
-  const chapterNumber = selectedChapter ?? chapters[0]?.chapter;
-  if (chapterNumber !== undefined && !chapters.some((item) => item.chapter === chapterNumber))
-    throw new Error(`Chapter ${chapterNumber} was not found`);
   const env = loadEnvironment();
-  const globalDefaults = mode === "chapter" ? undefined : await loadGlobalSettings(root, env).catch(() => undefined);
-  const scenePlannerRouting = mode === "chapter" ? undefined : resolveModelRouting({
+  const globalDefaults = await loadGlobalSettings(root, env).catch(() => undefined);
+  const scenePlannerRouting = resolveModelRouting({
     stage: "scenePlanner",
     story,
     globalSettings: globalDefaults,
     env,
     requiredCapability: "structured_output",
   });
-  const artDirection = mode === "chapter" ? undefined : await loadStoryArtDirection(root, slug);
+  const artDirection = await loadStoryArtDirection(root, slug);
   const visualProfiles = (await cachedStoryRead("scenes-profiles", root, slug, () => fileStamp(storyPaths(root, slug, 1).visualProfiles), () => loadVisualProfiles(root, slug))).value;
 
+  logger.debug({ event: "scenes.index", story: slug, durationMs: Date.now() - startedAt });
+  return {
+    settings: story.scenes,
+    artwork: story.artwork,
+    artworkRouting: {
+      provider: story.artwork.provider,
+      model: story.artwork.model,
+      availableProviders: Object.entries(IMAGE_PROVIDER_CATALOG).map(([name, entry]) => ({
+        name,
+        models: entry.models,
+        defaultModel: entry.defaultModel,
+      })),
+    },
+    resolvedBehavior: resolvedArtworkBehavior(story),
+    planner: story.pipeline.scenePlanner,
+    scenePlannerRouting,
+    selectedChapter: chapters[0]?.chapter,
+    videoSubtitleMode: story.video.subtitleMode,
+    chapters: chapters.map((item) => ({
+      chapter: item.chapter,
+      title: item.originalTitle,
+      durationSeconds: item.durationSeconds,
+      audioMastering: item.audioMastering,
+      audioAvailable: item.audioAvailable,
+      audioStale: item.audioStale,
+      subtitleStatus: item.subtitles,
+      subtitlesAvailable: item.subtitlesAvailable,
+      subtitlesStale: item.subtitlesStale,
+      videoStatus: item.video,
+      videoAvailable: item.videoAvailable,
+      videoStale: item.videoStale,
+      sceneStatus: item.scenePlanning,
+      artworkStatus: item.artwork,
+    })),
+    counts: {
+      chapters: chapters.length,
+      planned: chapters.filter((item) => item.scenePlanning === "complete").length,
+      artworkReady: chapters.filter((item) => item.artwork === "complete").length,
+    },
+    manifest: undefined,
+    previousHandoff: undefined,
+    artDirection,
+    visualProfiles: Object.values(visualProfiles),
+  };
+}
+
+export async function getScenesChapter(root: string, slug: string, chapter: number) {
+  const startedAt = Date.now();
+  slugSchema.parse(slug);
+  if (!Number.isSafeInteger(chapter) || chapter < 1) throw new Error(`Chapter ${chapter} was not found`);
+  const chapterPaths = storyPaths(root, slug, chapter);
+  if (!(await exists(chapterPaths.chapterMeta)) && !(await exists(chapterPaths.original)) && !(await exists(chapterPaths.scenesManifest))) throw new Error(`Chapter ${chapter} was not found`);
+  const chapterNumber = chapter;
   let manifest:
     | (Omit<SceneManifest, "scenes"> & {
         scenes: Array<
@@ -1231,10 +1300,11 @@ export async function getScenesDashboard(root: string, slug: string, selectedCha
     | { chapter: number; sceneId: string; stateFingerprint: string; hasApprovedArtwork: boolean; usedAsReference: boolean; origin: string }
     | undefined;
 
-  if (mode !== "index" && chapterNumber !== undefined) {
+  if (chapterNumber !== undefined) {
     const raw = await readJsonIfExists<SceneManifest>(storyPaths(root, slug, chapterNumber).scenesManifest);
     const parsed = raw ? sceneManifestSchema.safeParse(raw) : undefined;
     if (parsed?.success) {
+      const visualProfiles = (await cachedStoryRead("scenes-profiles", root, slug, () => fileStamp(storyPaths(root, slug, 1).visualProfiles), () => loadVisualProfiles(root, slug))).value;
       const bible = await cachedStoryRead("scenes-bible", root, slug, async () => {
         const paths = storyPaths(root, slug, 1);
         return `${await getStoryBibleReadRevision(root, slug)}:${await filesStampFingerprint([paths.bible, paths.bibleManual, paths.bibleCanonicalManual])}`;
@@ -1249,6 +1319,7 @@ export async function getScenesDashboard(root: string, slug: string, selectedCha
         contentFingerprints: Object.fromEntries(parsed.data.scenes.map((scene) => [scene.id, sceneContentFingerprint(scene)])),
       });
       const continuityByScene = new Map(continuity.resolved.perScene.map((entry) => [entry.sceneId, entry]));
+      const resolvedByName = new Map([...new Set(parsed.data.scenes.flatMap((scene) => scene.characters ?? []))].map((name) => [name, resolveSceneVisualEntity(name, bible?.canonicalEntities ?? [], visualProfiles)]));
       const scenes = await mapLimit(parsed.data.scenes, 8, async (scene) => {
         const hasMain =
           scene.artwork.status === "complete" &&
@@ -1271,9 +1342,7 @@ export async function getScenesDashboard(root: string, slug: string, selectedCha
                 : undefined,
           };
         });
-        const resolvedCharacters = (scene.characters ?? []).map((charName) =>
-          resolveSceneVisualEntity(charName, bible?.canonicalEntities ?? [], visualProfiles)
-        );
+        const resolvedCharacters = (scene.characters ?? []).map((charName) => resolvedByName.get(charName)!);
         const continuityEntry = continuityByScene.get(scene.id);
         return {
           ...scene,
@@ -1312,58 +1381,31 @@ export async function getScenesDashboard(root: string, slug: string, selectedCha
     }
   }
 
-  logger.debug({ event: mode === "chapter" ? "scenes.chapter" : "scenes.index", story: slug, chapter: chapterNumber, durationMs: Date.now() - startedAt });
-  return {
-    settings: story.scenes,
-    artwork: story.artwork,
-    artworkRouting: {
-      provider: story.artwork.provider,
-      model: story.artwork.model,
-      availableProviders: Object.entries(IMAGE_PROVIDER_CATALOG).map(([name, entry]) => ({
-        name,
-        models: entry.models,
-        defaultModel: entry.defaultModel,
-      })),
-    },
-    resolvedBehavior: resolvedArtworkBehavior(story),
-    planner: story.pipeline.scenePlanner,
-    scenePlannerRouting,
-    selectedChapter: chapterNumber,
-    videoSubtitleMode: story.video.subtitleMode,
-    chapters: (mode === "chapter" ? [] : chapters).map((item) => ({
-      chapter: item.chapter,
-      title: item.originalTitle,
-      durationSeconds: item.durationSeconds,
-      audioMastering: item.audioMastering,
-      audioAvailable: item.audioAvailable,
-      audioStale: item.audioStale,
-      subtitleStatus: item.subtitles,
-      subtitlesAvailable: item.subtitlesAvailable,
-      subtitlesStale: item.subtitlesStale,
-      videoStatus: item.video,
-      videoAvailable: item.videoAvailable,
-      videoStale: item.videoStale,
-      sceneStatus: item.scenePlanning,
-      artworkStatus: item.artwork,
-    })),
-    counts: {
-      chapters: chapters.length,
-      planned: chapters.filter((item) => item.scenePlanning === "complete").length,
-      artworkReady: chapters.filter((item) => item.artwork === "complete").length,
-    },
-    manifest,
-    previousHandoff,
-    artDirection,
-    visualProfiles: Object.values(visualProfiles),
-  };
+  logger.debug({ event: "scenes.chapter", story: slug, chapter, durationMs: Date.now() - startedAt });
+  return { selectedChapter: chapter, manifest, previousHandoff };
 }
 
-export async function getScenesIndex(root: string, slug: string) {
-  return getScenesDashboard(root, slug, undefined, "index");
+export async function getScenesIndexRow(root: string, slug: string, chapter: number) {
+  slugSchema.parse(slug);
+  const chapters = await getChapterStatusReadModel(root, slug);
+  const item = chapters.find((entry) => entry.chapter === chapter);
+  if (!item) throw new Error(`Chapter ${chapter} was not found`);
+  return { row: { chapter: item.chapter, title: item.originalTitle, durationSeconds: item.durationSeconds,
+    audioMastering: item.audioMastering, audioAvailable: item.audioAvailable, audioStale: item.audioStale,
+    subtitleStatus: item.subtitles, subtitlesAvailable: item.subtitlesAvailable, subtitlesStale: item.subtitlesStale,
+    videoStatus: item.video, videoAvailable: item.videoAvailable, videoStale: item.videoStale,
+    sceneStatus: item.scenePlanning, artworkStatus: item.artwork },
+    counts: { chapters: chapters.length, planned: chapters.filter((entry) => entry.scenePlanning === "complete").length,
+      artworkReady: chapters.filter((entry) => entry.artwork === "complete").length } };
 }
-export async function getScenesChapter(root: string, slug: string, chapter: number) {
-  const detail = await getScenesDashboard(root, slug, chapter, "chapter");
-  return { selectedChapter: detail.selectedChapter, manifest: detail.manifest, previousHandoff: detail.previousHandoff };
+
+/** Compatibility read for older callers. Browser workspace uses separate endpoints. */
+export async function getScenesDashboard(root: string, slug: string, selectedChapter?: number) {
+  const index = await getScenesIndex(root, slug);
+  const chapter = selectedChapter ?? index.selectedChapter;
+  if (chapter === undefined) return index;
+  if (!index.chapters.some((item) => item.chapter === chapter)) throw new Error(`Chapter ${chapter} was not found`);
+  return { ...index, ...await getScenesChapter(root, slug, chapter) };
 }
 
 /** Pre-generation resolution behavior estimate, derived only from catalog

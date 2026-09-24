@@ -2858,7 +2858,7 @@ export function ScenesPage({ slug, onJob, navigate, initialData }: { slug: strin
     const next = await api<ScenesDashboard>(`/stories/${slug}/scenes/${selected}`);
     if (request !== loadRequest.current) return;
     setData((current) => current ? { ...current, selectedChapter: next.selectedChapter, manifest: next.manifest, previousHandoff: next.previousHandoff } : next);
-    if (refreshIndex) void api<ScenesDashboard>(`/stories/${slug}/scenes/index`).then((index) => { if (request === loadRequest.current) setData((current) => current ? { ...current, chapters: index.chapters, counts: index.counts } : index); }).catch((value) => setError(message(value)));
+    if (refreshIndex) void api<{ row: ScenesDashboard["chapters"][number]; counts: ScenesDashboard["counts"] }>(`/stories/${slug}/scenes/index/${selected}`).then(({ row, counts }) => { if (request === loadRequest.current) setData((current) => current ? { ...current, chapters: current.chapters.map((item) => item.chapter === selected ? row : item), counts } : current); }).catch((value) => { if (request === loadRequest.current) setError(message(value)); });
     const incoming = structuredClone(next.manifest?.scenes ?? []);
     setSelectedSceneIds((current) => resetDraft ? [] : current.filter((id) => incoming.some((scene) => scene.id === id)));
     const previous = savedRef.current;
@@ -3110,7 +3110,11 @@ export function ScenesPage({ slug, onJob, navigate, initialData }: { slug: strin
   // Refresh continuity from the server without clobbering unsaved scene draft
   // edits: only continuity-related fields are merged back into the draft.
   const refreshContinuity = async () => {
-    const next = await api<ScenesDashboard>(`/stories/${slug}/scenes/${data?.selectedChapter}`);
+    const request = loadRequest.current;
+    const chapter = data?.selectedChapter;
+    if (!chapter) return;
+    const next = await api<ScenesDashboard>(`/stories/${slug}/scenes/${chapter}`);
+    if (request !== loadRequest.current) return;
     setData((current) => current ? { ...current, manifest: next.manifest, previousHandoff: next.previousHandoff } : next);
     setDraft((current) =>
       current.map((scene) => {

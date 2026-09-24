@@ -1,12 +1,15 @@
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { getChapterStatusReadModel, getAudioChapterPage, getAudioSummary, getVideoChapterPage, getVideoSummary, getOutputsSummary, getOutputsPage, getScenesIndex, getScenesChapter, getChapterPage, getQaPage, getQaSummary, getProductionStatus, normalizeChapterSearch, getStoryDashboard, getStoryOverview, invalidateChapterStatusDerivedReads } from "../apps/server/catalog.js";
 import { defaultStory } from "../src/config/load-config.js";
 import { loadEnvironment } from "../src/config/env.js";
 import { atomicWriteJson } from "../src/storage/atomic-write.js";
-import { storyPaths } from "../src/storage/paths.js";
+import { sceneImagePath, storyPaths } from "../src/storage/paths.js";
+import { sceneManifestSchema } from "../src/scenes/types.js";
+import { writeArtworkOutputManifest } from "../src/artwork/output-index-revision.js";
+import { readJsonIfExists } from "../src/storage/story-files.js";
 import { chapterStatusReadRevisionPath, getChapterStatusReadRevision } from "../src/studio/chapter-status-revision.js";
 import { resetStoryReadCaches, storyReadCacheStats } from "../src/story-bible/read-cache.js";
 
@@ -32,6 +35,17 @@ describe("chapter status read model", () => {
     await invalidateChapterStatusDerivedReads(root, slug);
     await getChapterStatusReadModel(root, slug);
     expect(builds(root, slug)).toBe(2);
+  });
+
+  it("loads Scenes chapter detail without rebuilding workspace settings or chapter rows", async () => {
+    const { root, slug } = await fixture();
+    await atomicWriteJson(storyPaths(root, slug, 1).chapterMeta, { chapter: 1 });
+    await getScenesIndex(root, slug);
+    const before = builds(root, slug);
+    await rm(storyPaths(root, slug, 1).storyConfig);
+    expect((await getScenesChapter(root, slug, 1)).selectedChapter).toBe(1);
+    expect(builds(root, slug)).toBe(before);
+    await expect(getScenesIndex(root, slug)).rejects.toThrow();
   });
 
   it("paginates cached chapter and QA rows without another chapter build", async () => {
@@ -86,6 +100,38 @@ describe("chapter status read model", () => {
     const detail = await getScenesChapter(root, slug, 2);
     expect(detail.selectedChapter).toBe(2); expect(detail).not.toHaveProperty("chapters");
     expect(builds(root, slug)).toBe(1);
+  });
+
+  it("shares one Artwork Output Index across pages and summary, then invalidates on manifest writes", async () => {
+    const { root, slug } = await fixture();
+    expect((await getOutputsSummary(root, slug)).counts.artwork).toBe(0);
+    const now = new Date().toISOString();
+    for (let chapter = 1; chapter <= 3; chapter++) {
+      const paths = storyPaths(root, slug, chapter);
+      await atomicWriteJson(paths.chapterMeta, { chapter, originalTitle: `Chapter ${chapter}`, sourceLanguage: "zh-CN", outputLanguage: "en-US", counts: { originalCharacters: 1, englishWords: 0, narrationWords: 0 }, createdAt: now, updatedAt: now, stages: { ingestion: { status: "pending" }, translation: { status: "pending" }, narration: { status: "pending" }, qa: { status: "pending" }, storyBible: { status: "pending" }, tts: { status: "pending" } } });
+      const manifest = sceneManifestSchema.parse({ version: 1, chapter, durationSeconds: 10, planningFingerprint: "test", planner: { provider: "test", model: "test", promptVersion: "1" }, createdAt: now, updatedAt: now, scenes: [{ id: "scene-001", summary: "A visual beat", startSeconds: 0, endSeconds: 10, characters: [], visualPrompt: "A lantern", artwork: { status: "complete", review: "approved", imageFingerprint: "test" } }] });
+      await writeArtworkOutputManifest(root, slug, chapter, manifest);
+      const imagePath = sceneImagePath(root, slug, chapter, "scene-001");
+      await mkdir(dirname(imagePath), { recursive: true });
+      await writeFile(imagePath, "image");
+    }
+    await invalidateChapterStatusDerivedReads(root, slug);
+    const key = `artwork-output-index\0${root}\0${slug}`;
+    const before = storyReadCacheStats().builds[key] ?? 0;
+    const [summary, first] = await Promise.all([getOutputsSummary(root, slug), getOutputsPage(root, slug, "artwork", 1, 2)]);
+    expect((storyReadCacheStats().builds[key] ?? 0) - before).toBe(1);
+    expect(summary.counts.artwork).toBe(3);
+    expect(first).toMatchObject({ total: 3, pages: 2 });
+    expect(first.items).toHaveLength(2);
+    const second = await getOutputsPage(root, slug, "artwork", 2, 2);
+    expect(second.items).toHaveLength(1);
+    expect(storyReadCacheStats().builds[key]).toBe(before + 1);
+    const path = storyPaths(root, slug, 1);
+    const old = sceneManifestSchema.parse(await readJsonIfExists(path.scenesManifest));
+    const changed = sceneManifestSchema.parse({ ...old, scenes: [{ id: "scene-001", summary: "A visual beat", startSeconds: 0, endSeconds: 10, characters: [], visualPrompt: "A lantern", artwork: { status: "pending", review: "unreviewed" } }] });
+    await writeArtworkOutputManifest(root, slug, 1, changed);
+    expect((await getOutputsSummary(root, slug)).counts.artwork).toBe(2);
+    expect(storyReadCacheStats().builds[key]).toBe(before + 2);
   });
 
   it("uses a stable missing revision and heals malformed JSON on bump", async () => {
