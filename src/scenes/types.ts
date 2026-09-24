@@ -115,7 +115,9 @@ export const artworkVersionSchema = z.object({
   createdAt: z.string().datetime(),
   provider: z.string(),
   model: z.string(),
-  prompt: z.string().max(12000),
+  // This stores the complete provider request, including Visual Canon and
+  // reference assignments. It can exceed the editor's scene-prompt limit.
+  prompt: z.string().max(1_000_000),
   promptFingerprint: z.string(),
   resolvedVisualProfileReferences: z.array(z.object({
     entityId: z.string(),
@@ -150,7 +152,7 @@ export const sceneArtworkSchema = z.object({
   review: artworkReviewSchema.default("unreviewed"),
   provider: z.string().optional(), model: z.string().optional(), fingerprint: z.string().optional(), imageFingerprint: z.string().optional(),
   generatedAt: z.string().optional(), error: z.string().optional(),
-  manuallyEdited: z.boolean().optional(), prompt: z.string().max(12000).optional(),
+  manuallyEdited: z.boolean().optional(), prompt: z.string().max(1_000_000).optional(),
   sourceType: z.enum(["chapter", "summary"]).optional(), sourceId: z.string().optional(), entityIds: z.array(z.string()).optional(),
   originalFingerprint: z.string().optional(), acceptedAt: z.string().datetime().optional(),
   versions: z.array(artworkVersionSchema).optional().default([]),

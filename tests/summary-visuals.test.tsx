@@ -58,6 +58,20 @@ describe("summary visual production", () => {
   });
   afterEach(async () => { await rm(root, { recursive: true, force: true }); });
   const produce = () => visuals.produce("demo-story", id, { pacing: "custom", sceneCount: 2 });
+  it("loads a saved recap with a full artwork provider prompt over 12000 characters", async () => {
+    await produce();
+    await visuals.artwork("demo-story", id, { scenes: ["scene-001"] });
+    const path = summaryPath(root, "demo-story", id);
+    const raw = JSON.parse(await readFile(path, "utf8"));
+    const prompt = `VISUAL CANON:\n${"persistent identity and scene grounding. ".repeat(400)}`;
+    expect(prompt.length).toBeGreaterThan(12_000);
+    raw.scenePlan.scenes[0].artwork.prompt = prompt;
+    raw.scenePlan.scenes[0].artwork.versions[0].prompt = prompt;
+    await atomicWriteJson(path, raw);
+    const loaded = await summaries.get("demo-story", id);
+    expect(loaded.scenePlan?.scenes[0]?.artwork.prompt).toBe(prompt);
+    expect(loaded.scenePlan?.scenes[0]?.artwork.versions[0]?.prompt).toBe(prompt);
+  });
   const prepareContinuityArtwork = async (model = "gpt-image-2.5-flare", references: number | Buffer[] = 0) => {
     const planned = await produce(); const entityId = planned.scenePlan!.scenes[1]!.entityIds![0]!;
     const story = testStory(); story.artwork.model = model; await atomicWriteJson(storyPaths(root, "demo-story", 1).storyConfig, story);
