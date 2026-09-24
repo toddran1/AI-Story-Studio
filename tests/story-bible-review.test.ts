@@ -111,7 +111,8 @@ describe("story bible review queue", () => {
     expect(review.items.filter((item) => item.kind === "continuity")).toHaveLength(1);
     const duplicate = review.items.find((item) => item.kind === "duplicate")!;
     expect(duplicate.entityIds).toEqual(expect.arrayContaining([a.id, b.id]));
-    expect(duplicate.action.href).toBe(`/stories/${story.slug}/bible?entity=${a.id}`);
+    expect(duplicate.action.href).toBe(`/stories/${story.slug}/bible?entity=${a.id}&section=management`);
+    expect(duplicate.action.label).toBe("Review duplicate");
     const continuity = review.items.find((item) => item.kind === "continuity")!;
     expect(continuity.action.href).toBe(`/stories/${story.slug}/continuity?entity=${a.id}`);
     expect(continuity.severity).toBe("critical");

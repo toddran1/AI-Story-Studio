@@ -876,6 +876,17 @@
   font-size: 12px;
 }
 
+.entity-lazy-load-error {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.entity-lazy-load-error .empty-text {
+  margin: 0;
+}
+
 .locked-demote-notice {
   font-size: 12px;
   text-align: left;

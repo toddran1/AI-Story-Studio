@@ -553,7 +553,7 @@ export async function getStoryBibleReview(root: string, slug: string, options: {
     detail: `${Math.round(suggestion.confidence * 100)}% confidence · ${suggestion.reason}`,
     severity: suggestion.confidence >= 0.85 ? "warn" : "info",
     chapters: suggestion.supportingChapters, source: "duplicate-detection", lifecycle: "derived", status: "open",
-    action: { label: "Compare & merge", href: entityHref(suggestion.entityIds[0]) },
+    action: { label: "Review duplicate", href: `${entityHref(suggestion.entityIds[0])}&section=management` },
   });
 
   for (const collision of context.namingCollisions) items.push({

@@ -2352,6 +2352,9 @@ describe("story bible review desk (phase A)", () => {
     expect(parsed).toEqual({ tab: "review", type: "character", q: "su", sort: "name", readiness: "needs-attention", entity: "ent_0123456789abcdef01234567", page: 3 });
     expect(parseBibleQuery("?tab=bogus")).toEqual({});
     expect(bibleQueryString({ tab: "review", type: "all", q: "", sort: "last", readiness: "all", page: 1, entity: "ent_x" })).toBe("?tab=review&entity=ent_x");
+    expect(parseBibleQuery("?entity=ent_x&section=management")).toEqual({ entity: "ent_x", section: "management" });
+    expect(parseBibleQuery("?section=management")).toEqual({});
+    expect(bibleQueryString({ tab: "canonical", type: "all", q: "", sort: "last", readiness: "all", page: 1, entity: "ent_x", section: "management" })).toBe("?entity=ent_x&section=management");
     expect(bibleQueryString({ tab: "canonical", type: "all", q: "", sort: "last", readiness: "all", page: 1 })).toBe("");
     const roundtrip = parseBibleQuery(bibleQueryString({ tab: "cleanup", type: "location", q: "hall", sort: "first", readiness: "duplicate-candidates", page: 2 }));
     expect(roundtrip).toEqual({ tab: "cleanup", type: "location", q: "hall", sort: "first", readiness: "duplicate-candidates", page: 2 });
@@ -2476,6 +2479,8 @@ describe("story bible review desk (phase D) — as-of-chapter view and sheet org
     // Only the chapter ≤ 2 timeline entry renders
     expect(html).toContain("Enters the city");
     expect(html).not.toContain("Breakthrough");
+    // The naming readiness badge follows the historical version, not today's configured narration name.
+    expect(html).toContain("Needs setup");
     // Back-to-current toggle is available
     expect(html).toContain(">Current</button>");
   });
@@ -2498,5 +2503,15 @@ describe("story bible review desk (phase D) — as-of-chapter view and sheet org
     expect(html).toContain("No record of this entity before chapter 1.");
     expect(html).toContain("Earliest known record: chapter 2.");
     expect(html).not.toContain("Edit entity");
+  });
+
+  it("uses the historical naming values for narration readiness when they exist", () => {
+    const historyView = {
+      chapter: 2, exists: true,
+      entity: { ...baseEntity, canonicalName: "Su Ming", preferredNarrationName: "Ming" },
+      timeline: [], relationships: [], relatedNames: {}, provenance: [], currentOverrides: [], warnings: [], firstAppearanceKnown: true,
+    };
+    const html = renderToStaticMarkup(<CanonicalEntitySheet detail={baseDetail} {...sheetProps} historyView={historyView} />);
+    expect(html).toContain("Narration configured");
   });
 });
