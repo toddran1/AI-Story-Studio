@@ -14,8 +14,103 @@ import { TRANSLATION_FINGERPRINT_VERSION, TRANSLATION_PROMPT_VERSION } from "../
 import { CensorAudioService } from "../src/tts/censor-audio.js";
 import { TTSRequest } from "../src/tts/types.js";
 import { markStagesCurrent } from "../src/studio/stage-acceptance.js";
+import { qaResultSchema, qaStateSchema } from "../src/domain/qa.js";
+import { StructuredLLMRequest } from "../src/llm/types.js";
 
 class CountingAudioProcessor extends CopyingAudioProcessor { calls = 0; override async master(inputs: string[], output: string) { this.calls++; return super.master(inputs, output); } }
+
+const qaWithIssues = (count: number, fail = false) => ({
+  status: fail ? "fail" : "warn", score: fail ? 0.2 : 0.7,
+  issues: Array.from({ length: count }, (_, index) => ({ category: "numbers", severity: fail && index >= 3 ? "fail" : "warn", message: `Fresh issue ${index}`, evidence: `Evidence ${index}` })),
+  checks: { completeness: "pass", names: "pass", numbers: fail ? "fail" : "warn", terminology: "pass", dialogue: "pass", storyConsistency: "pass", narrationFidelity: "pass" },
+});
+
+describe("pipeline QA fresh execution and recovery", () => {
+  async function fixture(results: ReturnType<typeof qaWithIssues>[]) {
+    const root = await mkdtemp(join(tmpdir(), "story-studio-qa-recovery-"));
+    const input = join(root, "chapter.txt");
+    await writeFile(input, "第一章\n\n林遥打开了门。", "utf8");
+    const gemini = new MockLLM("gemini", ["Translation one", "Translation two"]);
+    const openai = new SequenceQaLLM(results);
+    const pipeline = new ChapterPipeline(new LLMRouter(new Map([["gemini", gemini], ["openai", openai]])), new MockTTS(), new CopyingAudioProcessor());
+    const story = testStory();
+    const paths = storyPaths(root, story.slug, 1);
+    await pipeline.run({ root, story, chapter: 1, inputPath: input, stopAfter: "narration" });
+    return { root, input, gemini, openai, pipeline, story, paths };
+  }
+
+  it("runs QA once at four issues and replaces old chapter review state", async () => {
+    const ctx = await fixture([qaWithIssues(4)]);
+    const contextBefore = await readFile(ctx.paths.storyContext, "utf8");
+    const preserved = [ctx.paths.audioRaw, ctx.paths.audio, ctx.paths.subtitlesSrt, ctx.paths.scenesManifest, ctx.paths.video];
+    for (const path of preserved) await writeFile(path, "keep", "utf8");
+    const oldQa = { ...qaWithIssues(1), findings: [{ id: "qaf_aaaaaaaaaaaaaaaaaaaaaaaa", category: "numbers", severity: "warn", message: "Old", evidence: "Old", status: "dismissed", fingerprint: "old" }] };
+    await atomicWriteJson(ctx.paths.qa, oldQa);
+    const beforeTranslation = await readFile(ctx.paths.english, "utf8");
+    const beforeNarration = await readFile(ctx.paths.narration, "utf8");
+    const result = await ctx.pipeline.run({ root: ctx.root, story: ctx.story, chapter: 1, inputPath: ctx.input, executionStages: ["qa"], stopAfter: "qa" });
+    const qa = qaStateSchema.parse(JSON.parse(await readFile(ctx.paths.qa, "utf8")));
+    expect(ctx.openai.qaCalls).toBe(1);
+    expect(ctx.gemini.calls).toHaveLength(1);
+    expect(await readFile(ctx.paths.english, "utf8")).toBe(beforeTranslation);
+    expect(await readFile(ctx.paths.narration, "utf8")).toBe(beforeNarration);
+    for (const path of preserved) expect(await readFile(path, "utf8")).toBe("keep");
+    expect(await readFile(ctx.paths.storyContext, "utf8")).toBe(contextBefore);
+    expect(qa.findings).toHaveLength(4);
+    expect(qa.findings.some((finding) => finding.id === "qaf_aaaaaaaaaaaaaaaaaaaaaaaa")).toBe(false);
+    expect(result.quality?.status).toBe("warn");
+  });
+
+  it("recovers once at five mixed issues and keeps the second QA result", async () => {
+    const ctx = await fixture([qaWithIssues(5, true), qaWithIssues(2)]);
+    await writeFile(ctx.paths.audioRaw, "keep", "utf8");
+    const events: string[] = [];
+    const result = await ctx.pipeline.run({ root: ctx.root, story: ctx.story, chapter: 1, inputPath: ctx.input, executionStages: ["qa"], stopAfter: "qa", onStageEvent: (event) => {
+      if (event.status === "started" && !event.detail) events.push(event.stage);
+    } });
+    expect(events).toEqual(["qa", "translation", "narration", "qa"]);
+    expect(ctx.gemini.calls).toHaveLength(2);
+    expect(ctx.openai.calls.filter((call) => !call.structured)).toHaveLength(2);
+    expect(ctx.openai.qaCalls).toBe(2);
+    expect(await readFile(ctx.paths.english, "utf8")).toBe("Translation two");
+    expect(await readFile(ctx.paths.narration, "utf8")).toBe("Narration two");
+    expect((await readFile(ctx.paths.narrationTts, "utf8")).length).toBeGreaterThan(0);
+    expect(await readFile(ctx.paths.audioRaw, "utf8")).toBe("keep");
+    expect(qaStateSchema.parse(JSON.parse(await readFile(ctx.paths.qa, "utf8"))).findings).toHaveLength(2);
+    expect(result.quality?.status).toBe("warn");
+  });
+
+  it("stops after the second QA and applies its failure gate", async () => {
+    const ctx = await fixture([qaWithIssues(6, true), qaWithIssues(8, true)]);
+    await expect(ctx.pipeline.run({ root: ctx.root, story: ctx.story, chapter: 1, inputPath: ctx.input, executionStages: ["qa"], stopAfter: "qa" })).rejects.toThrow("failed QA");
+    expect(ctx.openai.qaCalls).toBe(2);
+    expect(ctx.gemini.calls).toHaveLength(2);
+    expect(qaStateSchema.parse(JSON.parse(await readFile(ctx.paths.qa, "utf8"))).findings).toHaveLength(8);
+  });
+
+  it("budgets recovery independently for each chapter", async () => {
+    const ctx = await fixture([qaWithIssues(2), qaWithIssues(5), qaWithIssues(1)]);
+    const secondInput = join(ctx.root, "chapter-two.txt");
+    await writeFile(secondInput, "第二章\n\n林遥关上了门。", "utf8");
+    await ctx.pipeline.run({ root: ctx.root, story: ctx.story, chapter: 2, inputPath: secondInput, stopAfter: "narration" });
+    await ctx.pipeline.run({ root: ctx.root, story: ctx.story, chapter: 1, inputPath: ctx.input, executionStages: ["qa"], stopAfter: "qa" });
+    await ctx.pipeline.run({ root: ctx.root, story: ctx.story, chapter: 2, inputPath: secondInput, executionStages: ["qa"], stopAfter: "qa" });
+    expect(ctx.openai.qaCalls).toBe(3);
+    expect(qaStateSchema.parse(JSON.parse(await readFile(ctx.paths.qa, "utf8"))).findings).toHaveLength(2);
+    expect(qaStateSchema.parse(JSON.parse(await readFile(storyPaths(ctx.root, ctx.story.slug, 2).qa, "utf8"))).findings).toHaveLength(1);
+  });
+});
+
+class SequenceQaLLM extends MockLLM {
+  qaCalls = 0;
+  constructor(private readonly results: ReturnType<typeof qaWithIssues>[]) { super("openai", ["Narration one", "Narration two", "Narration three", "Narration four"]); }
+  override async generateStructured<T>(request: StructuredLLMRequest<T>) {
+    if (request.schemaName !== "chapter_qa") return super.generateStructured(request);
+    this.calls.push({ ...request, structured: true });
+    const result = qaResultSchema.parse(this.results[Math.min(this.qaCalls++, this.results.length - 1)]);
+    return { value: request.schema.parse(result), usage: { inputTokens: 10, outputTokens: 5 } };
+  }
+}
 
 async function setup() {
   const root = await mkdtemp(join(tmpdir(), "story-studio-")); const input = join(root, "chapter.txt");

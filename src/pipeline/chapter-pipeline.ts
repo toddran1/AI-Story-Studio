@@ -27,7 +27,6 @@ import { QA_PROMPT_VERSION } from "../qa/prompts.js";
 import { computeQaDependencyFingerprint, computeQaDependencyFingerprints, qaDependencySnapshot, loadQaDeterministicDependencies, resolveStoredQaContext } from "../qa/freshness.js";
 import { validateChapterQuality } from "../qa/validator.js";
 import { buildQaState, prepareQaDetections } from "../qa/review.js";
-import { migrateQaState } from "../qa/findings.js";
 import { runDeterministicQaChecks } from "../qa/deterministic.js";
 import { exceptionsPromptSection, filterExceptedFindings, listQaExceptions } from "../qa/exceptions.js";
 import { mergeStoryBible, normalizeStoryBibleUpdate } from "../story-bible/updater.js";
@@ -59,6 +58,8 @@ export type PipelineOptions = {
   onStageEvent?: (event: PipelineStageEvent) => void;
   /** A dependency-aware manual execution plan. Omitted for normal production. */
   executionStages?: StageExecutionNode[];
+  /** Internal guard: one automatic recovery per chapter invocation. */
+  qaRecoveryAttempted?: boolean;
 };
 
 const pending = (): StageState => ({ status: "pending" });
@@ -123,6 +124,7 @@ export class ChapterPipeline {
         return undefined;
       }
       const started = Date.now();
+      if (stage === "qa") await resetChapterQaForExecution(paths.qa, chapter);
       invalidateDownstream(chapter, stage);
       chapter.stages[stage] = { ...details, status: "running", fingerprint: fp, startedAt: new Date().toISOString() };
       await persist();
@@ -241,13 +243,9 @@ export class ChapterPipeline {
         source, translation: english, narration, context: qaContext.parsed, authorizedNarrationEntities: narrationNamingEntities, profanityMode: options.story.narrationSettings.profanityMode, includeChapterTitle: options.story.narrationSettings.includeChapterTitle !== false,
         exceptionsContext: exceptionsPromptSection(exceptions), mode: options.story.qaMode,
       });
-      // Reconcile fresh pipeline detections with any prior QA state so reruns
-      // preserve dismissal/fix resolution memory before persisting.
-      const priorQaRaw = await readJsonIfExists(paths.qa);
-      const previous = priorQaRaw ? migrateQaState(priorQaRaw, { chapter: options.chapter }) : undefined;
       const effectiveNamingEntities = (await loadStoryBibleWithCanonicalOverlay(options.root, options.story.slug)).canonicalEntities;
       const detections = prepareQaDetections([...deterministic.detections, ...result.value.issues], { canonicalEntities: qaContext.parsed.canonicalEntities, effectiveNamingEntities, translation: english, narration });
-      const { state } = buildQaState(previous, filterExceptedFindings(detections, exceptions), {
+      const { state } = buildQaState(undefined, filterExceptedFindings(detections, exceptions), {
         chapter: options.chapter, canonicalEntities: qaContext.parsed.canonicalEntities, effectiveNamingEntities, translation: english, narration,
         baseScore: { score: result.value.score, originalScore: result.value.originalScore, status: result.value.status, originalStatus: result.value.originalStatus },
         mode: options.story.qaMode,
@@ -266,6 +264,23 @@ export class ChapterPipeline {
       // Legacy/reused QA artifacts may predate the chapter-level summary.
       const expectedQuality = { status: quality.status, score: quality.score, issueCategories: [...new Set(activeQaIssues(quality).map((issue) => issue.category))] };
       if (JSON.stringify(chapter.quality) !== JSON.stringify(expectedQuality)) { chapter.quality = expectedQuality; await persist(); }
+      if (qaResult && !options.qaRecoveryAttempted) {
+        const issueCount = activeQaIssues(quality).filter((issue) => issue.severity === "warn" || issue.severity === "fail").length;
+        if (issueCount > 4) {
+          logger.info({ event: "pipeline.qa.auto_recovery", story: options.story.slug, chapter: options.chapter, issueCount, threshold: 4,
+            detail: `QA found ${issueCount} issues. Regenerating Translation, Narration, and QA once.` });
+          await Promise.all([paths.english, paths.narration, paths.narrationTts, paths.qa].map((path) => rm(path, { force: true })));
+          chapter.stages.translation = pending();
+          chapter.stages.narration = pending();
+          chapter.stages.qa = pending();
+          chapter.quality = undefined;
+          await persist();
+          const recoveryStages = options.executionStages
+            ? [...new Set<StageExecutionNode>([...options.executionStages, "translation", "narration", "qa"])]
+            : undefined;
+          return this.run({ ...options, executionStages: recoveryStages, force: recoveryStages ? options.force : "translation", qaRecoveryAttempted: true });
+        }
+      }
       if (quality.status === "warn") logger.warn({ event: "pipeline.qa.warn", story: options.story.slug, chapter: options.chapter, score: quality.score, issues: quality.issues.length });
       if (quality.status === "fail") {
         chapter.stages.storyBible = pending();
@@ -384,6 +399,12 @@ function isForced(force: ForceStage | undefined, stage: StageName): boolean {
   if (stageName === "continuity") return stage === "continuity";
   // Forcing an upstream transform also invalidates all dependent downstream stages.
   return order.indexOf(stage) >= order.indexOf(stageName as StageName);
+}
+
+async function resetChapterQaForExecution(qaPath: string, chapter: Chapter): Promise<void> {
+  await rm(qaPath, { force: true });
+  chapter.quality = undefined;
+  chapter.stages.qa = pending();
 }
 
 async function requireText(path: string, stage: string): Promise<string> {

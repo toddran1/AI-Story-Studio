@@ -425,8 +425,8 @@ describe("recheckChapterQa", () => {
   });
 });
 
-describe("pipeline QA reconciliation", () => {
-  it("preserves a prior dismissal when the pipeline QA stage reruns", async () => {
+describe("pipeline QA reruns", () => {
+  it("discards a prior dismissal when the pipeline QA stage reruns", async () => {
     const root = await mkdtemp(join(tmpdir(), "qa-pipeline-"));
     const input = join(root, "chapter.txt");
     await writeFile(input, "第一章\n\n林遥打开了门。", "utf8");
@@ -440,14 +440,15 @@ describe("pipeline QA reconciliation", () => {
     let state = qaStateSchema.parse(JSON.parse(await readFile(paths.qa, "utf8")));
     expect(state.findings).toHaveLength(1);
     expect(state.status).toBe("warn");
-    // Dismiss the finding, then rerun the QA stage: the dismissal must survive.
+    // A fresh QA run must not inherit chapter-specific review history.
     await atomicWriteJson(paths.qa, resolveQaFindingsByIndex(state, [0], "dismissed", "2026-09-16T11:00:00.000Z", 1));
     const rerun = await pipeline.run({ root, story, chapter: 1, inputPath: input, force: "qa", stopAfter: "qa" });
     state = qaStateSchema.parse(JSON.parse(await readFile(paths.qa, "utf8")));
     expect(state.findings).toHaveLength(1);
-    expect(state.findings[0]).toMatchObject({ status: "dismissed", resolution: { action: "dismiss" } });
-    expect(state.status).toBe("pass");
-    expect(rerun.quality).toMatchObject({ status: "pass", issueCategories: [] });
+    expect(state.findings[0]).toMatchObject({ status: "open" });
+    expect(state.findings[0]?.resolution).toBeUndefined();
+    expect(state.status).toBe("warn");
+    expect(rerun.quality).toMatchObject({ status: "warn" });
   });
 
   it("still gates the pipeline on open fail findings", async () => {
