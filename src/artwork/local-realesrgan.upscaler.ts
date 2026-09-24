@@ -1,5 +1,7 @@
 import { access, mkdir, rename, rm } from "node:fs/promises";
+import { access, mkdir, realpath, rename, rm } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import { homedir } from "node:os";
 import { randomUUID } from "node:crypto";
 import { runCommand, CommandRunner } from "../audio/ffmpeg.js";
 import { ConfigurationError } from "../pipeline/errors.js";
@@ -31,6 +33,9 @@ export class LocalRealEsrganUpscaler implements ImageUpscaler {
   readonly name = "local-realesrgan";
   readonly version = LOCAL_REALESRGAN_VERSION;
   private validation?: Promise<void>;
+  private resolvedExecutable?: string;
+  private resolvedModelPath?: string;
+
   constructor(
     private readonly executable = "realesrgan-ncnn-vulkan",
     readonly model = "realesrgan-x4plus",
@@ -41,6 +46,16 @@ export class LocalRealEsrganUpscaler implements ImageUpscaler {
   ) {}
 
   validateConfiguration() { return this.validation ??= this.checkConfiguration(); }
+  async validateConfiguration(): Promise<void> {
+    if (this.validation) return this.validation;
+    try {
+      this.validation = this.checkConfiguration();
+      await this.validation;
+    } catch (error) {
+      this.validation = undefined;
+      throw error;
+    }
+  }
 
   private async checkConfiguration() {
     // realesrgan-ncnn-vulkan prints its usage banner and exits non-zero for -h,
@@ -48,15 +63,97 @@ export class LocalRealEsrganUpscaler implements ImageUpscaler {
     try { await this.runner(this.executable, ["-h"], Math.min(this.timeoutMs, 60_000)); }
     catch (error) {
       if (error instanceof Error && error.message.includes("Usage: realesrgan")) return;
+    const candidates = this.executableCandidates();
+    let lastError: unknown;
+
+    for (const candidate of candidates) {
+      try {
+        await this.probeExecutable(candidate);
+        this.resolvedExecutable = candidate;
+        lastError = undefined;
+        break;
+      } catch (error) {
+        lastError = error;
+      }
+    }
+
+    if (!this.resolvedExecutable) {
+      const cause = lastError instanceof Error ? ` (cause: ${lastError.message})` : "";
       throw new ConfigurationError(
         `Upscaler executable '${this.executable}' is unavailable. Install Real-ESRGAN (e.g. 'brew install realesrgan-ncnn-vulkan' or the Upscayl ncnn binaries) or set UPSCALER_EXECUTABLE.`,
         { cause: error }
+        `Upscaler executable '${this.executable}' is unavailable. Install Real-ESRGAN (e.g. 'brew install realesrgan-ncnn-vulkan' or the Upscayl ncnn binaries) or set UPSCALER_EXECUTABLE.${cause}`,
+        { cause: lastError }
       );
+    }
+
+    await this.resolveModelDirectory();
+  }
+
+  private async probeExecutable(executable: string) {
+    try {
+      await this.runner(executable, ["-h"], Math.min(this.timeoutMs, 60_000));
+    } catch (error) {
+      if (error instanceof Error && error.message.includes("Usage: realesrgan")) return;
+      throw error;
+    }
+  }
+
+  private executableCandidates(): string[] {
+    const list = [this.executable];
+    if (!this.executable.includes("/") && !this.executable.includes("\\")) {
+      if (this.modelPath) {
+        list.push(join(dirname(this.modelPath), this.executable));
+      }
+      try {
+        list.push(join(homedir(), "realesrgan", this.executable));
+      } catch {}
+      list.push(`/usr/local/bin/${this.executable}`);
+      list.push(`/opt/homebrew/bin/${this.executable}`);
+      list.push(`/Applications/Upscayl.app/Contents/Resources/bin/${this.executable}`);
+    }
+    return [...new Set(list)];
+  }
+
+  private async resolveModelDirectory() {
+    if (this.modelPath) {
+      this.resolvedModelPath = this.modelPath;
+      return;
+    }
+    const exe = this.resolvedExecutable ?? this.executable;
+    const candidates: string[] = [];
+
+    if (exe.includes("/") || exe.includes("\\")) {
+      candidates.push(join(dirname(exe), "models"));
+      try {
+        const real = await realpath(exe);
+        if (real !== exe) {
+          candidates.push(join(dirname(real), "models"));
+        }
+      } catch {}
+    }
+
+    try {
+      candidates.push(join(homedir(), "realesrgan", "models"));
+    } catch {}
+    candidates.push("/usr/local/share/realesrgan/models");
+    candidates.push("/opt/homebrew/share/realesrgan/models");
+    candidates.push("/Applications/Upscayl.app/Contents/Resources/models");
+
+    for (const dir of [...new Set(candidates)]) {
+      try {
+        await access(dir);
+        this.resolvedModelPath = dir;
+        return;
+      } catch {}
     }
   }
 
   async upscale(request: ImageUpscaleRequest): Promise<ImageUpscaleResult> {
     await this.validateConfiguration();
+    const executable = this.resolvedExecutable ?? this.executable;
+    const modelPath = this.resolvedModelPath ?? this.modelPath;
+
     let factor: 2 | 4;
     if (request.sourceWidth * 2 >= request.targetWidth && request.sourceHeight * 2 >= request.targetHeight) {
       factor = 2;
@@ -73,6 +170,18 @@ export class LocalRealEsrganUpscaler implements ImageUpscaler {
     const staged = join(directory, `upscale-${randomUUID()}.staging.png`);
     try {
       await this.runner(this.executable, ["-i", request.sourcePath, "-o", staged, "-n", request.model ?? this.model, ...(this.modelPath ? ["-m", this.modelPath] : []), "-s", String(factor), "-f", "png"], this.timeoutMs);
+      await this.runner(
+        executable,
+        [
+          "-i", request.sourcePath,
+          "-o", staged,
+          "-n", request.model ?? this.model,
+          ...(modelPath ? ["-m", modelPath] : []),
+          "-s", String(factor),
+          "-f", "png",
+        ],
+        this.timeoutMs
+      );
       await access(staged).catch(() => { throw new Error(`Upscaler produced no output at ${staged}`); });
       return await this.finish(request, staged, factor);
     } catch (error) {

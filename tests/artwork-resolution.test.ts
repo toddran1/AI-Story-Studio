@@ -248,6 +248,36 @@ describe("local Real-ESRGAN upscaler adapter", () => {
       upscaler.upscale({ ...request, sourceWidth: 640, sourceHeight: 360, targetWidth: 3840, targetHeight: 2160, outputPath: "out.png" })
     ).rejects.toThrow(/Unsupported upscaling scale/);
   });
+  it("discovers fallback executable path when bare command name fails in PATH", async () => {
+    const captured: any = {};
+    const fallbackRunner = async (command: string, args: string[]): Promise<CommandResult> => {
+      (captured.calls ??= []).push({ command, args });
+      if (command === "realesrgan-ncnn-vulkan") throw new Error("spawn ENOENT");
+      if (command.includes("/usr/local/bin/realesrgan-ncnn-vulkan")) {
+        if (args[0] === "-h") return { stdout: "Usage: realesrgan-ncnn-vulkan ...", stderr: "" };
+        if (args.includes("-o")) await atomicWrite(args[args.indexOf("-o") + 1]!, pngWithDims(5504, 3072));
+        return { stdout: "", stderr: "" };
+      }
+      throw new Error(`Unexpected command: ${command}`);
+    };
+    const resizer = async (_i: string, o: string, source: any, target: any) => { await atomicWrite(o, pngWithDims(target.width, target.height)); return { fit: "exact" as const }; };
+    const upscaler = new LocalRealEsrganUpscaler("realesrgan-ncnn-vulkan", "realesrgan-x4plus", 1000, fallbackRunner, resizer);
+    await upscaler.validateConfiguration();
+    const result = await upscaler.upscale({ ...request, outputPath: join(await mkdtemp(join(tmpdir(), "upscale-")), "out.png") });
+    expect(result.finalDimensions).toEqual({ width: 3840, height: 2160 });
+    expect(captured.calls.some((c: any) => c.command === "/usr/local/bin/realesrgan-ncnn-vulkan")).toBe(true);
+  });
+  it("allows retrying validateConfiguration after an initial failure", async () => {
+    let fail = true;
+    const retryRunner = async (command: string, args: string[]): Promise<CommandResult> => {
+      if (fail) throw new Error("transient error");
+      return { stdout: "Usage: realesrgan-ncnn-vulkan ...", stderr: "" };
+    };
+    const upscaler = new LocalRealEsrganUpscaler("realesrgan-ncnn-vulkan", "realesrgan-x4plus", 1000, retryRunner);
+    await expect(upscaler.validateConfiguration()).rejects.toBeInstanceOf(ConfigurationError);
+    fail = false;
+    await expect(upscaler.validateConfiguration()).resolves.toBeUndefined();
+  });
 });
 
 describe("artwork generation with production derivatives", () => {
