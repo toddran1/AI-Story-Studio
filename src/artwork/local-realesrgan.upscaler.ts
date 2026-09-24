@@ -1,4 +1,3 @@
-import { access, mkdir, rename, rm } from "node:fs/promises";
 import { access, mkdir, realpath, rename, rm } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
@@ -45,7 +44,6 @@ export class LocalRealEsrganUpscaler implements ImageUpscaler {
     private readonly modelPath?: string
   ) {}
 
-  validateConfiguration() { return this.validation ??= this.checkConfiguration(); }
   async validateConfiguration(): Promise<void> {
     if (this.validation) return this.validation;
     try {
@@ -58,11 +56,6 @@ export class LocalRealEsrganUpscaler implements ImageUpscaler {
   }
 
   private async checkConfiguration() {
-    // realesrgan-ncnn-vulkan prints its usage banner and exits non-zero for -h,
-    // so presence is proven by the banner, not the exit code.
-    try { await this.runner(this.executable, ["-h"], Math.min(this.timeoutMs, 60_000)); }
-    catch (error) {
-      if (error instanceof Error && error.message.includes("Usage: realesrgan")) return;
     const candidates = this.executableCandidates();
     let lastError: unknown;
 
@@ -80,8 +73,6 @@ export class LocalRealEsrganUpscaler implements ImageUpscaler {
     if (!this.resolvedExecutable) {
       const cause = lastError instanceof Error ? ` (cause: ${lastError.message})` : "";
       throw new ConfigurationError(
-        `Upscaler executable '${this.executable}' is unavailable. Install Real-ESRGAN (e.g. 'brew install realesrgan-ncnn-vulkan' or the Upscayl ncnn binaries) or set UPSCALER_EXECUTABLE.`,
-        { cause: error }
         `Upscaler executable '${this.executable}' is unavailable. Install Real-ESRGAN (e.g. 'brew install realesrgan-ncnn-vulkan' or the Upscayl ncnn binaries) or set UPSCALER_EXECUTABLE.${cause}`,
         { cause: lastError }
       );
@@ -169,7 +160,6 @@ export class LocalRealEsrganUpscaler implements ImageUpscaler {
     // Not a dotfile: realesrgan-ncnn-vulkan silently skips hidden output paths.
     const staged = join(directory, `upscale-${randomUUID()}.staging.png`);
     try {
-      await this.runner(this.executable, ["-i", request.sourcePath, "-o", staged, "-n", request.model ?? this.model, ...(this.modelPath ? ["-m", this.modelPath] : []), "-s", String(factor), "-f", "png"], this.timeoutMs);
       await this.runner(
         executable,
         [
