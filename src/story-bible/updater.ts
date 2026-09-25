@@ -2,6 +2,7 @@ import { CanonicalEntity, EntityType, MinorEntityReference, StoryBible, StoryBib
 import { fingerprint } from "../utils/hash.js";
 import { CanonicalOverlay } from "./canonical.js";
 import { classifyEntityPersistenceSync } from "./granularity.js";
+import { mergeEntityVisualEvidence, resolveEntityVisualEvidence } from "./visual-evidence.js";
 
 type Named = { canonicalEnglishName: string; originalName: string; description: string; firstSeenChapter: number; lastSeenChapter: number; aliases?: string[]; gender?: string; pronouns?: string[] };
 
@@ -38,6 +39,14 @@ export function mergeStoryBible(
   result.translationTerms = mergeTerms(existing.translationTerms, update.translationTerms);
   const overlay = options && "version" in options ? options : options?.overlay;
   const canonical = mergeCanonicalHistory(existing, update, chapter, overlay);
+  for (const observation of update.visualObservations) {
+    const name = normalizeName(observation.entity);
+    const entity = canonical.entities.find((candidate) => [candidate.canonicalName, candidate.originalName, candidate.preferredNarrationName, candidate.localizedNaming?.fullName, candidate.localizedNaming?.shortName, ...candidate.aliases].some((alias) => normalizeName(alias) === name));
+    if (!entity) continue;
+    if (observation.field.split(".")[0] !== entity.type && !(observation.field.startsWith("creature.") && entity.type === "concept")) continue;
+    mergeEntityVisualEvidence(entity, observation, chapter);
+    if (observation.persistence === "changed") addTimeline(canonical.timeline, entity.id, chapter, "appearance", `${entity.canonicalName}: ${observation.field} changed to ${observation.value}`, undefined, undefined, observation.confidence);
+  }
   result.canonicalEntities = canonical.entities; result.canonicalRelationships = canonical.relationships; result.entityTimeline = canonical.timeline;
   result.minorReferences = canonical.minorReferences;
   result.chapterSummaries = { ...existing.chapterSummaries, [String(chapter)]: update.chapterSummary };
@@ -51,6 +60,7 @@ export function normalizeStoryBibleUpdate(update: StoryBibleUpdate, chapter: num
     for (const item of normalized[key]) { item.firstSeenChapter = chapter; item.lastSeenChapter = chapter; }
   }
   for (const event of normalized.timelineEvents) event.chapter = chapter;
+  for (const observation of normalized.visualObservations) observation.chapter = chapter;
   return normalized;
 }
 
@@ -85,6 +95,19 @@ export function contextBeforeChapter(bible: StoryBible, chapter: number, recentS
     (result[key] as Array<{ firstSeenChapter: number }>) = result[key].filter((item) => item.firstSeenChapter < chapter) as never;
   }
   result.canonicalEntities = result.canonicalEntities.filter((item) => item.firstAppearance < chapter);
+  for (const entity of result.canonicalEntities) if (entity.visualEvidence) {
+    entity.visualEvidence = entity.visualEvidence.filter((item) => item.chapter < chapter).map((item) => {
+      const provenance = item.provenance.filter((source) => source.chapter < chapter);
+      const confidence = provenance.reduce((score, source, index) => index ? Math.min(1, score + (1 - score) * source.confidence * 0.5) : source.confidence, 0);
+      return { ...item, provenance, confidence, lastObservedChapter: Math.max(...provenance.map((source) => source.chapter)), status: item.persistence === "temporary" ? "temporary" as const : "current" as const };
+    });
+    const resolved = resolveEntityVisualEvidence(entity, chapter - 1);
+    for (const item of entity.visualEvidence) {
+      if (item.persistence === "temporary") continue;
+      if (resolved.conflicts[item.field]?.some((candidate) => candidate.id === item.id)) item.status = "conflict";
+      else if (resolved.values[item.field]?.id !== item.id) item.status = "historical";
+    }
+  }
   const ids = new Set(result.canonicalEntities.map((item) => item.id));
   result.canonicalRelationships = result.canonicalRelationships.filter((item) => item.startChapter < chapter && ids.has(item.sourceEntityId) && ids.has(item.targetEntityId));
   result.entityTimeline = result.entityTimeline.filter((item) => item.chapter < chapter && ids.has(item.entityId));

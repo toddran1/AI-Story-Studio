@@ -110,6 +110,7 @@ import { addQaException, listQaExceptions, prepareQaException, removeQaException
 import { resetChapterQa, resetChapterQaBatch, qaResetScopeSchema } from "../../src/qa/reset.js";
 import { applyNarrationNamingPreferences } from "../../src/narration/naming-preferences.js";
 import { loadNarrationNamingEntities } from "../../src/story-bible/narration-names.js";
+import { extractChapterVisualObservations } from "../../src/story-bible/extractor.js";
 import { captureQaRepairFindingSnapshotsFromIssues, captureQaRepairTextSnapshot, inferQaRepairTargets, repairQaText, targetOverridesByFindingId, validateQaRepairFindingSnapshots, validateQaRepairTextSnapshot, type QaRepairFindingSnapshot, type QaRepairTarget } from "../../src/qa/repair.js";
 import { QaArtifactUnavailableError, QaFindingStaleSelectionError, QaPrerequisiteError, QaRepairTargetAmbiguousError } from "../../src/qa/errors.js";
 import { resolveStoredQaContext } from "../../src/qa/freshness.js";
@@ -1903,6 +1904,14 @@ export class StudioOperations {
         prompt: notes,
       });
     });
+  }
+
+  async extractChapterVisualObservations(slug: string, chapter: number, narration: string, bible: Awaited<ReturnType<typeof getStoryBible>>) {
+    slugSchema.parse(slug);
+    chapterParamSchema.parse(chapter);
+    const story = await loadStory(storyPaths(this.root, slug, 1).storyConfig);
+    const config = story.pipeline.storyBible;
+    return withUsageScope({ story: slug, chapter, stage: "storyBible" }, () => extractChapterVisualObservations(this.llm.forStage(config), config, chapter, narration, bible));
   }
 
   async generateStyleSheet(slug: string, entityId: string, options?: { promptOverride?: string; role?: any; presetId?: string }) {

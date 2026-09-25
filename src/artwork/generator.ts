@@ -204,6 +204,7 @@ export async function generateStoredArtwork(options: {
       artDirection: activePreset,
       visualProfiles,
       visualContinuity: continuityText,
+      chapter: options.chapter,
     });
     const loadedReferences = await loadSceneReferenceImages(options.root, options.story, resolved, sceneContinuity?.referenceDecision, options.chapter);
 

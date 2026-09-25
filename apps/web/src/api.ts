@@ -570,7 +570,7 @@ export async function generateStyleSheet(slug: string, entityId: string): Promis
   return post<{ styleSheetUrl: string; profile: VisualEntityProfile }>(`/stories/${encodeURIComponent(slug)}/visual-profiles/${encodeURIComponent(entityId)}/style-sheet`, {});
 }
 
-export async function inspectVisualProfile(slug: string, entityId: string): Promise<{ profile: VisualEntityProfile; eligibleFields: string[]; protectedFields: string[]; fields: VisualProfileFieldState[]; conflicts: VisualProfileConflict[]; coreComplete: number; coreTotal: number }> {
+export async function inspectVisualProfile(slug: string, entityId: string): Promise<{ profile: VisualEntityProfile; eligibleFields: string[]; protectedFields: string[]; fields: VisualProfileFieldState[]; conflicts: VisualProfileConflict[]; coreComplete: number; coreTotal: number; context: { explicitVisualFacts: Record<string, string>; storyBibleVisualEvidence?: { values: Record<string, { value: string; chapter: number; confidence: number; source: string }>; conflicts: Record<string, Array<{ value: string; chapter: number }>> } } }> {
   return api(`/stories/${encodeURIComponent(slug)}/visual-profiles/${encodeURIComponent(entityId)}/inspect`);
 }
 export async function proposeVisualProfile(slug: string, entityId: string, input: { fields?: string[]; regenerate?: boolean } = {}): Promise<VisualProfileProposal> {

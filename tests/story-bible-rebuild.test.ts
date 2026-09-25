@@ -35,6 +35,18 @@ describe("Story Bible chronological reconstruction", () => {
     expect(await computeStaleExtractionChapters(root, slug)).toEqual([1]);
   });
 
+  it("rebuilds visual evidence from a local sidecar without changing completed chapter extraction", async () => {
+    const root = await mkdtemp(join(tmpdir(), "bible-visual-backfill-")); const slug = "story";
+    const paths = storyPaths(root, slug, 1);
+    const update = storyBibleUpdateSchema.parse({ characters: [{ canonicalEnglishName: "Lin Yao", originalName: "林遥", description: "A traveler", firstSeenChapter: 1, lastSeenChapter: 1 }], chapterSummary: "Arrival" });
+    await mkdir(dirname(paths.bibleUpdate), { recursive: true });
+    await writeFile(paths.bibleUpdate, JSON.stringify(update));
+    await writeFile(paths.visualEvidenceBackfill, JSON.stringify([{ entity: "Lin Yao", field: "character.hairColor", value: "black", chapter: 1, confidence: 0.85, persistence: "persistent", excerpt: "Lin Yao had black hair." }]));
+    const rebuilt = await rebuildStoryBibleBeforeChapter(root, slug, 2);
+    expect(rebuilt.canonicalEntities[0]?.visualEvidence?.[0]).toMatchObject({ field: "character.hairColor", source: "source_text", chapter: 1 });
+    expect(JSON.parse(await (await import("node:fs/promises")).readFile(paths.bibleUpdate, "utf8"))).not.toHaveProperty("visualObservations.0");
+  });
+
   it("preserves later completed entities when an earlier chapter supplies a replacement update", async () => {
     const root = await mkdtemp(join(tmpdir(), "bible-rebuild-replacement-")); const slug = "story";
     const updates = ["Early", "Later", "Latest"].map((name) => storyBibleUpdateSchema.parse({ characters: [{ canonicalEnglishName: name, originalName: name, description: name, firstSeenChapter: 1, lastSeenChapter: 1 }], chapterSummary: name }));

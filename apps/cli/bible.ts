@@ -6,6 +6,13 @@ import { loadEnvironment, resolveStudioRoot } from "../../src/config/env.js";
 import { loadImportedChapters } from "../../src/source/importer.js";
 import { rebuildStoryBibleBeforeChapter } from "../../src/story-bible/rebuild.js";
 import { withStoryLock } from "../../src/storage/story-lock.js";
+import { readFile } from "node:fs/promises";
+import { storyPaths } from "../../src/storage/paths.js";
+import { readJsonIfExists } from "../../src/storage/story-files.js";
+import { atomicWriteJson } from "../../src/storage/atomic-write.js";
+import { storyBibleUpdateSchema } from "../../src/domain/story-bible.js";
+import { extractLocalVisualObservations } from "../../src/story-bible/visual-backfill.js";
+import { bumpStoryBibleReadRevision } from "../../src/story-bible/read-revision.js";
 
 type Command =
   | { action: "list"; story: string; type?: string; query?: string }
@@ -14,6 +21,7 @@ type Command =
   | { action: "merge"; story: string; target: string; sources: string[]; reason: string }
   | { action: "undo"; story: string; mergeId: string }
   | { action: "rebuild"; story: string; through?: number }
+  | { action: "visuals"; story: string; from?: number; to?: number; apply?: boolean; ai?: boolean }
   | { action: "analyze"; story: string; json?: boolean }
   | { action: "cleanup"; story: string; highConfidence?: boolean; apply?: boolean; json?: boolean }
   | { action: "demote"; story: string; entityId: string; parent?: string; reason?: string; force?: boolean }
@@ -25,13 +33,14 @@ const json = (value: string) => { try { const parsed = JSON.parse(value); if (!p
 export function parseBibleArgs(v: string[]): Command {
   const [action, storyRaw, id, ...rest] = v;
   const story = storyRaw && slug(storyRaw);
-  if (!action || !story) throw new Error("Usage: story:bible <list|show|edit|merge|undo|rebuild|analyze|cleanup|demote|promote|references> <story> ...");
+  if (!action || !story) throw new Error("Usage: story:bible <list|show|edit|merge|undo|rebuild|visuals|analyze|cleanup|demote|promote|references> <story> ...");
   if (action === "list") return { action, story, ...options(id ? [id, ...rest] : []) };
   if (action === "show") { if (!id || rest.length) throw new Error("Show requires an entity ID"); return { action, story, id }; }
   if (action === "edit") { if (!id || rest[0] !== "--json" || !rest[1] || rest.length !== 2) throw new Error("Edit requires <entity-id> --json '{...}'"); return { action, story, id, patch: json(rest[1]) }; }
   if (action === "merge") { const o = options(rest); if (!id || !o.target || !o.sources || !o.reason) throw new Error("Merge requires --target <entity-id> --sources id,id --reason text"); return { action, story, target: o.target, sources: o.sources.split(",").filter(Boolean), reason: o.reason }; }
   if (action === "undo") { if (!id || rest.length) throw new Error("Undo requires a merge ID"); return { action, story, mergeId: id }; }
   if (action === "rebuild") { const o = options(id ? [id, ...rest] : []); return { action, story, through: o.through ? integer(o.through, "--through") : undefined }; }
+  if (action === "visuals") { const o = options(id ? [id, ...rest] : []); return { action, story, from: o.from ? integer(o.from, "--from") : undefined, to: o.to ? integer(o.to, "--to") : undefined, apply: o.apply === "true", ai: o.ai === "true" }; }
   if (action === "analyze") {
     const rawOpts = id ? [id, ...rest] : [];
     return { action, story, json: rawOpts.includes("--json") };
@@ -96,7 +105,7 @@ export async function runBibleCommand(
   command: Command,
   d: {
     root: string;
-    operations: Pick<StudioOperations, "updateCanonicalEntity" | "mergeCanonicalEntities" | "undoCanonicalMerge" | "analyzeStoryBible" | "applyCleanupRecommendations" | "demoteCanonicalEntity" | "promoteMinorReference">;
+    operations: Pick<StudioOperations, "updateCanonicalEntity" | "mergeCanonicalEntities" | "undoCanonicalMerge" | "analyzeStoryBible" | "applyCleanupRecommendations" | "demoteCanonicalEntity" | "promoteMinorReference"> & Partial<Pick<StudioOperations, "extractChapterVisualObservations">>;
     stdout: (text: string) => unknown;
   },
 ) {
@@ -174,6 +183,34 @@ export async function runBibleCommand(
   if (command.action === "references") {
     const page = await getMinorReferencesPage(d.root, command.story, { page: 1, pageSize: 100, parentEntityId: command.parent, type: command.type, query: command.query });
     d.stdout(page.items.length ? page.items.map((x) => `${x.id}\t${x.type ?? "other"}\t${x.name}${x.parentEntityName ? ` (parent: ${x.parentEntityName})` : ""}`).join("\n") + "\n" : "No minor references found.\n");
+    return;
+  }
+  if (command.action === "visuals") {
+    await withStoryLock(d.root, command.story, "Story Bible visual evidence backfill", async () => {
+      const chapters = (await loadImportedChapters(d.root, command.story)).chapters.map((item) => item.chapter).sort((a, b) => a - b);
+      const from = command.from ?? chapters[0]; const to = command.to ?? chapters.at(-1);
+      if (!from || !to || to < from) throw new Error("Choose a valid chapter range");
+      const bible = await rebuildStoryBibleBeforeChapter(d.root, command.story, Number.MAX_SAFE_INTEGER);
+      const report: Array<{ chapter: number; observations: number }> = [];
+      for (const chapter of chapters.filter((number) => number >= from && number <= to)) {
+        const paths = storyPaths(d.root, command.story, chapter);
+        const update = await readJsonIfExists(paths.bibleUpdate);
+        if (!update || !storyBibleUpdateSchema.safeParse(update).success) continue;
+        const text = await readFile(paths.narration, "utf8").catch(() => readFile(paths.english, "utf8").catch(() => ""));
+        const observations = command.ai && command.apply
+          ? await d.operations.extractChapterVisualObservations?.(command.story, chapter, text, bible)
+          : command.ai ? [] : extractLocalVisualObservations(text, bible.canonicalEntities, chapter);
+        if (command.ai && command.apply && !observations) throw new Error("AI visual extraction is unavailable");
+        report.push({ chapter, observations: observations?.length ?? 0 });
+        if (command.apply) await atomicWriteJson(paths.visualEvidenceBackfill, observations);
+      }
+      if (command.apply) {
+        const rebuilt = await rebuildStoryBibleBeforeChapter(d.root, command.story, Number.MAX_SAFE_INTEGER);
+        await atomicWriteJson(storyPaths(d.root, command.story, 1).bible, rebuilt);
+        await bumpStoryBibleReadRevision(d.root, command.story);
+      }
+      d.stdout(JSON.stringify({ dryRun: !command.apply, ai: Boolean(command.ai), paidCallsPlanned: command.ai && !command.apply ? report.length : 0, from, to, chapters: report.length, observations: report.reduce((sum, item) => sum + item.observations, 0), byChapter: report }, null, 2) + "\n");
+    });
     return;
   }
   await withStoryLock(d.root, command.story, "Story Bible rebuild", async () => {

@@ -1001,10 +1001,13 @@ function SubtitleWorkspace({ data, cues, working, onCue, onAlign, onGenerate, on
   </div>;
 }
 
-function ResetQaDialog({ slug, chapterCount, minChapter, maxChapter, onClose, onDone }: { slug: string; chapterCount: number; minChapter?: number; maxChapter?: number; onClose: () => void; onDone: (summary: string) => void }) {
+export function ResetQaDialog({ slug, chapterCount, onClose, onDone }: { slug: string; chapterCount: number; onClose: () => void; onDone: (summary: string) => void }) {
   const [scope, setScope] = useState<"range" | "all">("all");
   const [fromChapter, setFromChapter] = useState("1");
   const [toChapter, setToChapter] = useState("1");
+  const [chapterNumbers, setChapterNumbers] = useState<number[]>();
+  const [chapterNumbersLoading, setChapterNumbersLoading] = useState(false);
+  const [chapterNumbersError, setChapterNumbersError] = useState("");
   const [typedConfirmation, setTypedConfirmation] = useState("");
   const [working, setWorking] = useState(false);
   const [error, setError] = useState("");
@@ -1012,9 +1015,45 @@ function ResetQaDialog({ slug, chapterCount, minChapter, maxChapter, onClose, on
 
   const from = Number(fromChapter); const to = Number(toChapter);
   const rangeValid = Number.isSafeInteger(from) && Number.isSafeInteger(to) && from >= 1 && to >= from;
-  const rangeMatches = rangeValid && minChapter !== undefined && maxChapter !== undefined && from <= maxChapter && to >= minChapter;
-  const rangeError = !rangeValid ? "Starting chapter must be less than or equal to ending chapter." : !rangeMatches ? "No chapters fall within this range." : "";
-  const canSubmit = !working && typedConfirmation.trim() === "RESET QA" && (scope === "all" ? chapterCount > 0 : !rangeError);
+  const affectedChapterNumbers = chapterNumbers?.filter((chapter) => chapter >= from && chapter <= to);
+  const rangeMatches = Boolean(affectedChapterNumbers?.length);
+  const rangeError = !rangeValid
+    ? "Starting chapter must be less than or equal to ending chapter."
+    : chapterNumbersError
+      ? "Could not verify the chapters in this range. Retry by reopening the reset dialog."
+      : chapterNumbers !== undefined && !rangeMatches
+        ? "No chapters fall within this range."
+        : "";
+  const affectedChapterCount = scope === "all" ? chapterCount : affectedChapterNumbers?.length;
+  const canSubmit = !working && typedConfirmation.trim() === "RESET QA" && (scope === "all" ? chapterCount > 0 : chapterNumbers !== undefined && !chapterNumbersError && !rangeError);
+
+  useEffect(() => {
+    if (scope !== "range") return;
+    let active = true;
+    setChapterNumbers(undefined);
+    setChapterNumbersError("");
+    setChapterNumbersLoading(true);
+    const loadChapterNumbers = async () => {
+      try {
+        const numbers: number[] = [];
+        let page = 1;
+        let pages = 1;
+        do {
+          const result = await api<{ items: Array<{ chapter: number }>; pages: number }>(`/stories/${slug}/chapters?page=${page}&pageSize=100&filter=all`);
+          numbers.push(...result.items.map((item) => item.chapter));
+          pages = result.pages;
+          page++;
+        } while (active && page <= pages);
+        if (active) setChapterNumbers(numbers);
+      } catch (value) {
+        if (active) setChapterNumbersError(message(value));
+      } finally {
+        if (active) setChapterNumbersLoading(false);
+      }
+    };
+    void loadChapterNumbers();
+    return () => { active = false; };
+  }, [scope, slug]);
 
   const submit = async () => {
     try {
@@ -1061,6 +1100,7 @@ function ResetQaDialog({ slug, chapterCount, minChapter, maxChapter, onClose, on
           The next QA run will evaluate these chapters from a clean QA state.
         </p>
         {error && <ErrorBox text={error} />}
+        {chapterNumbersError && <ErrorBox text={`Unable to check the chapter range: ${message(chapterNumbersError)}`} />}
         {batchResult && (
           <div className="naming-notice" style={{ borderLeft: "4px solid var(--color-danger, #d32f2f)", marginBottom: "16px" }}>
             <b>QA reset completed with {batchResult.failed} problem{batchResult.failed === 1 ? "" : "s"}</b>
@@ -1109,8 +1149,9 @@ function ResetQaDialog({ slug, chapterCount, minChapter, maxChapter, onClose, on
 
         <div className="naming-notice" style={{ marginTop: "12px", marginBottom: "12px" }}>
             <p>
-              This will permanently delete QA data for <b>{affectedChapterNumbers.length} existing chapter{affectedChapterNumbers.length === 1 ? "" : "s"}</b>{scope === "range" && rangeValid ? <>: Chapters {from}–{to}</> : ""}. Other production data will not be changed.
+              This will permanently delete QA data for <b>{affectedChapterCount === undefined ? "checking" : `${affectedChapterCount} existing chapter${affectedChapterCount === 1 ? "" : "s"}`}</b>{scope === "range" && rangeValid ? <>: Chapters {from}–{to}</> : ""}. Other production data will not be changed.
             </p>
+            {scope === "range" && chapterNumbersLoading && <p>Checking which chapters exist in this range…</p>}
             {rangeError && <p className="error-text">{rangeError}</p>}
             <label className="field" style={{ marginTop: "8px" }}>
               <span>Type <code>RESET QA</code> to continue:</span>
@@ -1125,7 +1166,7 @@ function ResetQaDialog({ slug, chapterCount, minChapter, maxChapter, onClose, on
 
         <footer>
           <small>
-            Affected chapters: {affectedChapterNumbers.length}
+            Affected chapters: {affectedChapterCount === undefined ? "checking…" : affectedChapterCount}
           </small>
           <button
             className="button primary"
@@ -1161,7 +1202,7 @@ export function QaPage({ slug, navigate }: { slug: string; navigate: (path: stri
   return <section className="page">
     <div className="section-heading"><div><h2>Quality review</h2><p>Every concern is linked back to its chapter and evidence.</p></div><div className="section-heading-actions"><button className="button" onClick={() => setResetModalOpen(true)}>Reset QA data</button></div></div>
     {banner && <div className="naming-notice" style={{ marginBottom: "16px" }}>{banner}</div>}
-    {resetModalOpen && <ResetQaDialog slug={slug} chapterCount={summary?.counts.chapterCount ?? 0} minChapter={summary?.counts.minChapter} maxChapter={summary?.counts.maxChapter} onClose={() => setResetModalOpen(false)} onDone={(msg) => { setResetModalOpen(false); setBanner(msg); setRevision((value) => value + 1); }} />}
+    {resetModalOpen && <ResetQaDialog slug={slug} chapterCount={summary?.counts.chapterCount ?? 0} onClose={() => setResetModalOpen(false)} onDone={(msg) => { setResetModalOpen(false); setBanner(msg); setRevision((value) => value + 1); }} />}
     {summaryError && <ErrorBox text={summaryError} />}
     {summary && <><div className="qa-summary">{(["pass", "warn", "fail"] as const).map((key) => <button onClick={() => chooseStatus(key)} className={`qa-count ${key}`} key={key}><span>{key}</span><b>{summary.counts[key]}</b><i /></button>)}</div>
     {summary.counts.needsVerification > 0 && <p className="qa-unverified-label"><button className="button small" onClick={() => chooseStatus("needs-verification")}>{summary.counts.needsVerification} previous findings need verification</button></p>}

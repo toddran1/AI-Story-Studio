@@ -7,6 +7,10 @@ describe("administration CLI contracts", () => {
   it("parses Story Bible edits as a shared-service patch", () => {
     expect(parseBibleArgs(["edit", "demo-story", "ent_0123456789abcdef01234567", "--json", '{"canonicalName":"Hero"}'])).toMatchObject({ action: "edit", story: "demo-story", patch: { canonicalName: "Hero" } });
   });
+  it("defaults visual backfill to read-only and requires explicit apply", () => {
+    expect(parseBibleArgs(["visuals", "demo-story", "--from", "2", "--to", "5"])).toMatchObject({ action: "visuals", from: 2, to: 5, apply: false });
+    expect(parseBibleArgs(["visuals", "demo-story", "--apply"])).toMatchObject({ action: "visuals", apply: true });
+  });
   it("maps human continuity resolutions to the web operation values", () => {
     expect(parseContinuityArgs(["resolve", "demo-story", "ctf_0123456789abcdef01234567", "--action", "keep-canonical"])).toMatchObject({ action: "resolve", resolution: "kept_existing" });
   });

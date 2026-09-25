@@ -1,6 +1,6 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
-import { App, applyVideoResolutionPreset, ArtworkEstimateSummary, ArtworkVersionMetadata, artworkModelOptionsFor, BibleReviewQueue, bibleQueryString, CanonicalEntitySheet, canDeleteChapterSceneDraft, chapterPageSize, chapterSceneStructureDirty, chapterScenesDirty, chapterVideoReadinessChecks, deleteChapterSceneDraft, moveChapterSceneDraft, toggleChapterSceneEnabledDraft, ChapterPage, chapterQaStatusView, chunkPresetFor, clearJobDismissal, clearJobMinimized, continuityReferenceTriState, describeContinuityReference, dismissJob, EntityDetailAccordion, EntityStatusField, ErrorBoundary, EXECUTABLE_CHAPTER_STAGES, getStageActionDetails, humanizeContinuityChanges, isJobConsoleMinimized, isJobDismissed, isTerminalJob, JobConsole, paginateRows, Pagination, parseBibleQuery, PreviousHandoffBadge, QaDetail, QaFindingCard, QaResolvedFindings, ReadinessGrid, ReadinessStrip, resolvedBehaviorSummary, ResolvedBehaviorHint, reupscaleAvailable, SceneContinuityPanel, ScenesPage, setJobConsoleMinimized, SettingsPage, shouldRefreshAfterJob, Status, StoryBibleHealthCard, TtsQualityBadge, TtsSegmentRow, VIDEO_RESOLUTION_PRESETS, videoResolutionFor } from "../apps/web/src/App.js";
+import { App, applyVideoResolutionPreset, ArtworkEstimateSummary, ArtworkVersionMetadata, artworkModelOptionsFor, BibleReviewQueue, bibleQueryString, CanonicalEntitySheet, canDeleteChapterSceneDraft, chapterPageSize, chapterSceneStructureDirty, chapterScenesDirty, chapterVideoReadinessChecks, deleteChapterSceneDraft, moveChapterSceneDraft, toggleChapterSceneEnabledDraft, ChapterPage, chapterQaStatusView, chunkPresetFor, clearJobDismissal, clearJobMinimized, continuityReferenceTriState, describeContinuityReference, dismissJob, EntityDetailAccordion, EntityStatusField, ErrorBoundary, EXECUTABLE_CHAPTER_STAGES, getStageActionDetails, humanizeContinuityChanges, isJobConsoleMinimized, isJobDismissed, isTerminalJob, JobConsole, paginateRows, Pagination, parseBibleQuery, PreviousHandoffBadge, QaDetail, QaFindingCard, QaResolvedFindings, ReadinessGrid, ReadinessStrip, ResetQaDialog, resolvedBehaviorSummary, ResolvedBehaviorHint, reupscaleAvailable, SceneContinuityPanel, ScenesPage, setJobConsoleMinimized, SettingsPage, shouldRefreshAfterJob, Status, StoryBibleHealthCard, TtsQualityBadge, TtsSegmentRow, VIDEO_RESOLUTION_PRESETS, videoResolutionFor } from "../apps/web/src/App.js";
 import { api, ApiError } from "../apps/web/src/api.js";
 import type { ArtworkVersion, ChapterDetail, Job, QaFinding, Scene, TtsQualityArtifact, TtsSegmentQuality, VideoSettings, VisualContinuityChange } from "../apps/web/src/api.js";
 import { pretty } from "../apps/web/src/format.js";
@@ -15,6 +15,11 @@ import { formatChapterSelection, parseChapterSelection } from "../src/batch/rang
 import type { StageExecutionBatchPlan } from "../src/studio/stage-execution.js";
 
 describe("web UI", () => {
+  it("renders the book-wide QA reset dialog without a missing chapter-count binding", () => {
+    const html = renderToStaticMarkup(<ResetQaDialog slug="demo-story" chapterCount={3} onClose={() => undefined} onDone={() => undefined} />);
+    expect(html).toContain("3 existing chapters");
+    expect(html).toContain("Affected chapters: 3");
+  });
   it("keeps structured QA lifecycle conflict codes available for UI reconciliation", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ error: "QA finding has already been resolved.", code: "QA_FINDING_ALREADY_RESOLVED" }), { status: 409, headers: { "content-type": "application/json" } })));
     await expect(api("/stories/demo/chapters/1/qa/findings/qaf_0123456789abcdef01234567/dismiss", { method: "POST", body: "{}" })).rejects.toMatchObject({ name: "ApiError", code: "QA_FINDING_ALREADY_RESOLVED" } satisfies Partial<ApiError>);

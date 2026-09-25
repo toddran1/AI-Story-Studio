@@ -241,6 +241,7 @@ export async function applyCanonicalOverlay(root: string, slug: string, input: S
     target.firstAppearance = Math.min(target.firstAppearance, source.firstAppearance);
     target.lastKnownAppearance = Math.max(target.lastKnownAppearance, source.lastKnownAppearance);
     target.provenance = uniqueObjects([...target.provenance, ...source.provenance]);
+    target.visualEvidence = uniqueObjects([...(target.visualEvidence ?? []), ...(source.visualEvidence ?? [])]);
     target.mergedFromIds = unique([...target.mergedFromIds, source.id, ...source.mergedFromIds]);
     target.origin = "manual";
   }

@@ -6,6 +6,7 @@ import { Scene, SceneDirection, SceneOverrides, sceneDirectionSchema, sceneOverr
 import { resolveVisualEntities } from "../scenes/identity.js";
 import { fingerprint } from "../utils/hash.js";
 import { artworkCompositionGuidance, resolveArtworkAspectRatio } from "../artwork/composition.js";
+import { resolveEntityVisualEvidence } from "../story-bible/visual-evidence.js";
 
 export type ResolvedEntityCanon = {
   entityId: string;
@@ -144,6 +145,7 @@ export function resolveVisualCanonPrompt(options: {
   artDirection: ArtDirectionPreset;
   visualProfiles: Record<string, VisualEntityProfile>;
   visualContinuity?: string;
+  chapter?: number;
 }): ResolvedSceneVisualPrompt {
   const { scene, story, bible, artDirection, visualProfiles, visualContinuity } = options;
 
@@ -283,7 +285,26 @@ export function resolveVisualCanonPrompt(options: {
       // Fallback to Story Bible canonical description
       const namePrefix = entity.originalName ? `${entity.canonicalName} (${entity.originalName})` : entity.canonicalName;
       const visualDescription = entity.type === "character" ? fallbackArtworkDescription(entity.description ?? "") : entity.description;
-      const desc = visualDescription ? `${namePrefix}: ${visualDescription}` : namePrefix;
+      const evidence = resolveEntityVisualEvidence(entity, options.chapter ?? Number.MAX_SAFE_INTEGER);
+      const persistent = Object.entries(evidence.values).filter(([, item]) => item.persistence === "persistent");
+      const changing = Object.entries(evidence.values).filter(([, item]) => item.persistence === "changed");
+      const draft = profile && profile.status !== "approved" ? profile : undefined;
+      const manual = Object.entries(draft?.fieldProvenance ?? {}).flatMap(([path, provenance]) => {
+        if (!provenance.locked && provenance.source !== "manual_override" && provenance.source !== "user_edit") return [];
+        const [section, field] = path.split(".") as ["character" | "location" | "creature" | "item", string];
+        const value = (draft?.[section] as Record<string, string | undefined> | undefined)?.[field];
+        return value?.trim() ? [`${path}: ${value.trim()}`] : [];
+      });
+      const protectedPaths = new Set(manual.map((line) => line.split(":", 1)[0]));
+      const lines = (items: typeof persistent) => items.filter(([path]) => !protectedPaths.has(path)).map(([path, item]) => `${path}: ${item.value} (source chapter ${item.chapter})`);
+      const fallbackContext = [
+        manual.length ? `MANUAL VISUAL DECISIONS: ${manual.join("; ")}` : "",
+        persistent.length ? `PERSISTENT IDENTITY: ${lines(persistent).join("; ")}` : "",
+        changing.length ? `CURRENT CHAPTER VISUAL STATE: ${lines(changing).join("; ")}` : "",
+        visualContinuity ? "SCENE-SPECIFIC STATE: follow the current visual continuity and scene overrides below." : "",
+        "UNKNOWN/UNSPECIFIED: Do not borrow another character's reference identity for details absent from this entity's evidence.",
+      ].filter(Boolean).join("\n");
+      const desc = `${namePrefix}${visualDescription ? `: ${visualDescription}` : ""}${fallbackContext ? `\n${fallbackContext}` : ""}`;
       resolvedEntities.push({
         entityId,
         name: entity.canonicalName,

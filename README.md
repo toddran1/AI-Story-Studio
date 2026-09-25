@@ -32,6 +32,8 @@ The browser studio is the primary local workflow. Open a story dashboard to see 
 
 The chapter workspace supports side-by-side source, translation, and narration review. Saving a manual translation or narration edit marks dependent stages stale but never starts paid regeneration. Story Bible corrections are stored in `story-bible-manual.json` as a protected overlay, so later extraction runs cannot silently replace deliberate edits. Voice tests are similarly isolated under `voice-previews/` and never become chapter artifacts.
 
+Story Bible extraction also records source-quoted visual observations on canonical entities. Artwork resolves stable appearance and explicit later changes for its target chapter; temporary details stay in scene continuity, and approved Visual Profiles remain authoritative. A draft Visual Profile can pull in available Story Bible visual facts for review. Older chapters can be scanned locally without provider calls: `npm run story:bible -- visuals <story> --from 1 --to 50` previews the result, and adding `--apply` saves chapter sidecars and rebuilds the Story Bible. For explicit provider extraction of harder descriptions, add `--ai --apply`; `--ai` without `--apply` only previews the number of paid calls. This backfill does not regenerate translation, narration, audio, or artwork.
+
 The Outputs library exposes only known chapter and export artifacts through validated localhost API routes; arbitrary filesystem paths are never accepted from the browser. Production can be paused after the current chapter and resumed from its durable manifest after a page reload or server restart.
 
 ### Explicit chapter-stage batches

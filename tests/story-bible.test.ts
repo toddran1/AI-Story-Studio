@@ -5,7 +5,8 @@ import { contextBeforeChapter, mergeStoryBible, normalizeStoryBibleUpdate } from
 
 describe("Story Bible extraction prompt", () => {
   it("covers every schema bucket, relationships, translation terms, and narration-input caveats", () => {
-    expect(STORY_BIBLE_PROMPT_VERSION).toBe("4");
+    expect(STORY_BIBLE_PROMPT_VERSION).toBe("5-visual-evidence");
+    expect(storyBibleInstructions).toContain("visualObservations");
     for (const bucket of ["characters", "locations", "factions", "abilities", "items", "classes", "ranks", "creatures", "systemTerms"]) expect(storyBibleInstructions).toContain(bucket);
     expect(storyBibleInstructions).toContain("relationships");
     expect(storyBibleInstructions).toContain("translationTerms");

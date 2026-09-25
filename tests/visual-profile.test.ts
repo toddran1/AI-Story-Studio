@@ -84,6 +84,22 @@ describe("Visual Entity Profiles", () => {
     expect(profiles).toEqual({});
   });
 
+  it("offers source-backed visual evidence without changing a manual profile field", async () => {
+    const bible = emptyStoryBible();
+    bible.canonicalEntities = [canonicalEntitySchema.parse({
+      id: entityId, type: "character", canonicalName: "Test Character", aliases: [], description: "", firstAppearance: 1, lastKnownAppearance: 2,
+      visualEvidence: [{ id: "ve_0123456789abcdef01234567", field: "character.hairColor", value: "black", normalizedValue: "black", chapter: 2, lastObservedChapter: 2, confidence: 0.9, persistence: "persistent", status: "current", source: "source_text", provenance: [{ chapter: 2, excerpt: "Test Character had black hair.", confidence: 0.9 }] }],
+    })];
+    const before = await inspectVisualProfile(root, slug, bible, entityId);
+    expect((before.context.storyBibleVisualEvidence as { values: Record<string, { value: string }> }).values["character.hairColor"]?.value).toBe("black");
+    expect(before.protectedFields).toContain("character.hairColor");
+    expect(before.profile.character?.hairColor).toBeUndefined();
+    await updateVisualProfile(root, slug, entityId, { character: { hairColor: "silver" }, fieldProvenance: { "character.hairColor": { source: "manual_override", locked: true } } });
+    const after = await inspectVisualProfile(root, slug, bible, entityId);
+    expect(after.profile.character?.hairColor).toBe("silver");
+    expect(after.fields.find((field) => field.path === "character.hairColor")?.locked).toBe(true);
+  });
+
   it("creates a draft profile when querying a non-existent entity via updateVisualProfile", async () => {
     const nonExistent = await getVisualProfile(root, slug, entityId);
     expect(nonExistent).toBeUndefined();

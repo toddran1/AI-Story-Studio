@@ -65,7 +65,7 @@ export function VisualProfileModal({
   const [saving, setSaving] = useState(false);
   const [generatingSheet, setGeneratingSheet] = useState(false);
   const [uploading, setUploading] = useState(false);
-  const [completeness, setCompleteness] = useState<{ eligibleFields: string[]; protectedFields: string[]; fields: VisualProfileFieldState[]; coreComplete: number; coreTotal: number; conflicts: NonNullable<VisualEntityProfile["conflicts"]> } | null>(null);
+  const [completeness, setCompleteness] = useState<Awaited<ReturnType<typeof inspectVisualProfile>> | null>(null);
   const [proposal, setProposal] = useState<VisualProfileProposal | null>(null);
   const [selectedProposalFields, setSelectedProposalFields] = useState<string[]>([]);
   const [proposing, setProposing] = useState(false);
@@ -158,6 +158,24 @@ export function VisualProfileModal({
     } finally {
       setSaving(false);
     }
+  };
+
+  const useStoryBibleEvidence = () => {
+    if (!profile || profile.status === "approved") return;
+    const facts = completeness?.context?.storyBibleVisualEvidence?.values ?? {};
+    const next = structuredClone(profile);
+    for (const [path, evidence] of Object.entries(facts)) {
+      const [section, field] = path.split(".") as ["character" | "location" | "creature" | "item", string];
+      if (!["character", "location", "creature", "item"].includes(section)) continue;
+      const existing = (next[section] as Record<string, string | undefined> | undefined)?.[field];
+      if (existing?.trim() || next.fieldProvenance?.[path]?.locked) continue;
+      (next as unknown as Record<string, Record<string, string>>)[section] ??= {};
+      (next as unknown as Record<string, Record<string, string>>)[section]![field] = evidence.value;
+      next.fieldProvenance ??= {};
+      next.fieldProvenance[path] = { source: "source_text", locked: false };
+    }
+    setProfile(next);
+    setActiveTab("details");
   };
 
   const handleStatusToggle = async () => {
@@ -374,11 +392,14 @@ export function VisualProfileModal({
               {profile.status === "approved" ? "✓ Approved Canon" : "Draft (Not Enforced)"}
             </span>
             {completeness && <small>{completeness.coreComplete} / {completeness.coreTotal} core details established</small>}
+            {Boolean(Object.keys(completeness?.context?.storyBibleVisualEvidence?.values ?? {}).length) && <small>Story Bible visual evidence available</small>}
+            {Boolean(Object.keys(completeness?.context?.storyBibleVisualEvidence?.conflicts ?? {}).length) && <small>Story Bible visual facts conflict; review source chapters</small>}
           </div>
           <button className="btn-close" onClick={onClose}>✕</button>
         </div>
 
         {error && <div className="error-banner">{error}</div>}
+        {profile.status === "draft" && Boolean(Object.keys(completeness?.context?.storyBibleVisualEvidence?.values ?? {}).length) && <button type="button" className="btn-secondary" onClick={useStoryBibleEvidence}>Use Story Bible visual facts in this draft</button>}
 
         <div className="modal-tabs">
           <button

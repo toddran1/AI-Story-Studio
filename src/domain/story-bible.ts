@@ -69,10 +69,34 @@ export const extractedTimelineEventSchema = z.object({
   summary: z.string().min(1).max(1000), relatedEntity: z.string().max(300).optional(), status: z.string().max(500).optional(), chapter: z.number().int().positive(), confidence: z.number().min(0).max(1).optional(),
 });
 
+export const visualEvidenceFieldSchema = z.enum([
+  "character.apparentAge", "character.gender", "character.height", "character.build", "character.skinTone", "character.faceShape", "character.eyeColor", "character.hairColor", "character.hairstyle", "character.facialHair", "character.distinguishingFeatures", "character.scars", "character.tattoos", "character.defaultOutfit", "character.shoes", "character.accessories", "character.weapons", "character.equipment", "character.additionalAppearanceNotes",
+  "location.environmentDescription", "location.architecture", "location.terrain", "location.vegetation", "location.weatherTendencies", "location.lighting", "location.atmosphere", "location.colorPalette", "location.recurringLandmarks", "location.canonicalEnvironmentPrompt",
+  "creature.species", "creature.scale", "creature.anatomy", "creature.coloration", "creature.eyes", "creature.armorFur", "creature.distinguishingFeatures", "creature.sizeRelativeToHuman", "creature.canonicalCreaturePrompt",
+  "item.shape", "item.materials", "item.dimensions", "item.color", "item.ornamentation", "item.wearDamage", "item.magicalEffects", "item.canonicalObjectPrompt",
+]);
+export const extractedVisualObservationSchema = z.object({
+  entity: z.string().trim().min(1).max(300), field: visualEvidenceFieldSchema,
+  value: z.string().trim().min(1).max(1000), chapter: z.number().int().positive(),
+  confidence: z.number().min(0).max(1), persistence: z.enum(["persistent", "changed", "temporary"]),
+  excerpt: z.string().trim().min(1).max(500),
+});
+export type ExtractedVisualObservation = z.infer<typeof extractedVisualObservationSchema>;
+export const visualEvidenceSchema = z.object({
+  id: z.string().regex(/^ve_[a-f0-9]{24}$/), field: visualEvidenceFieldSchema,
+  value: z.string().trim().min(1).max(1000), normalizedValue: z.string().min(1).max(1000),
+  chapter: z.number().int().positive(), lastObservedChapter: z.number().int().positive(),
+  confidence: z.number().min(0).max(1), persistence: extractedVisualObservationSchema.shape.persistence,
+  status: z.enum(["current", "historical", "conflict", "temporary"]),
+  source: z.enum(["source_text", "story_bible", "manual"]),
+  provenance: z.array(z.object({ chapter: z.number().int().positive(), excerpt: z.string().trim().min(1).max(500), confidence: z.number().min(0).max(1) })).min(1),
+});
+export type VisualEvidence = z.infer<typeof visualEvidenceSchema>;
+
 export const storyBibleUpdateSchema = z.object({
   characters: z.array(character).max(2000).default([]), locations: z.array(namedEntity).max(2000).default([]), factions: z.array(namedEntity).max(2000).default([]), abilities: z.array(namedEntity).max(2000).default([]),
   classes: z.array(namedEntity).max(2000).default([]), ranks: z.array(namedEntity).max(2000).default([]), items: z.array(namedEntity).max(2000).default([]), creatures: z.array(namedEntity).max(2000).default([]), systemTerms: z.array(namedEntity).max(2000).default([]),
-  relationships: z.array(relationship).max(2000).default([]), translationTerms: z.array(translationTerm).max(2000).default([]), timelineEvents: z.array(extractedTimelineEventSchema).max(2000).default([]), chapterSummary: z.string().min(1).max(20_000),
+  relationships: z.array(relationship).max(2000).default([]), translationTerms: z.array(translationTerm).max(2000).default([]), timelineEvents: z.array(extractedTimelineEventSchema).max(2000).default([]), visualObservations: z.array(extractedVisualObservationSchema).max(2000).default([]), chapterSummary: z.string().min(1).max(20_000),
 });
 
 export const canonicalEntitySchema = z.object({
@@ -84,7 +108,7 @@ export const canonicalEntitySchema = z.object({
   // than encoded as a fake empty Visual Profile.
   visualProfilePolicy: z.object({ mode: z.enum(["prompt", "skip"]) }).optional(),
   firstAppearance: z.number().int().positive(), lastKnownAppearance: z.number().int().positive(), status: z.string().max(500).default("unknown"), notes: z.string().max(10_000).default(""), canonicalNameLocked: z.boolean().default(false),
-  origin: factOriginSchema.default("automatic"), provenance: z.array(provenanceSchema).default([]), mergedFromIds: z.array(z.string()).default([]),
+  origin: factOriginSchema.default("automatic"), provenance: z.array(provenanceSchema).default([]), mergedFromIds: z.array(z.string()).default([]), visualEvidence: z.array(visualEvidenceSchema).optional(),
 });
 export type CanonicalEntity = z.infer<typeof canonicalEntitySchema>;
 export const timelineEventSchema = z.object({
@@ -145,7 +169,7 @@ export const storyBibleSchema = storyBibleUpdateSchema.extend({
   version: z.number().int().nonnegative().default(0), chapterSummaries: z.record(z.string(), z.string()).default({}), canonicalEntities: z.array(canonicalEntitySchema).default([]),
   canonicalRelationships: z.array(canonicalRelationshipSchema).default([]), entityTimeline: z.array(timelineEventSchema).default([]), merges: z.array(mergeRecordSchema).default([]),
   minorReferences: z.array(minorEntityReferenceSchema).default([]), granularityAudits: z.array(granularityAuditSchema).default([]),
-}).omit({ chapterSummary: true, timelineEvents: true });
+}).omit({ chapterSummary: true, timelineEvents: true, visualObservations: true });
 
 export type StoryBibleUpdate = z.infer<typeof storyBibleUpdateSchema>;
 export type StoryBible = z.infer<typeof storyBibleSchema>;
