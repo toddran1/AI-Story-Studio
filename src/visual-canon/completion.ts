@@ -12,6 +12,10 @@ const characterFields = ["character.apparentAge", "character.gender", "character
 const locationFields = ["location.architecture", "location.terrain", "location.vegetation", "location.lighting", "location.atmosphere", "location.colorPalette", "location.recurringLandmarks"] as const;
 const fieldsByType: Partial<Record<VisualEntityType, readonly string[]>> = { character: characterFields, location: locationFields };
 
+export const visualProfileProposalItemSchema = z.object({ field: z.string().trim().min(1), value: z.string().trim().min(1).max(5_000) }).strict();
+export const visualProfileProposalResponseSchema = z.object({ values: z.array(visualProfileProposalItemSchema), rationale: z.string().trim().max(2_000).default("") }).strict();
+export type VisualProfileProposalResponse = z.infer<typeof visualProfileProposalResponseSchema>;
+
 export const visualProfileProposalSchema = z.object({ values: z.record(z.string(), z.string().trim().min(1).max(5_000)).default({}), rationale: z.string().trim().max(2_000).default("") });
 export type VisualProfileProposal = z.infer<typeof visualProfileProposalSchema> & { entityId: string; visualType: VisualEntityType; eligibleFields: string[]; protectedFields: string[]; contextFingerprint: string; provider: string; model: string };
 export type VisualProfileFieldState = { path: string; value?: string; source?: string; locked: boolean; missing: boolean; canonical: boolean; regenerable: boolean; conflict?: VisualProfileConflict };
@@ -96,9 +100,47 @@ export async function resolveVisualProfileConflict(root: string, slug: string, b
 }
 export async function proposeMissingVisualDetails(root: string, slug: string, bible: StoryBible, entityId: string, provider: LLMProvider, config: StageModelConfig, options: { fields?: string[]; regenerate?: boolean } = {}): Promise<VisualProfileProposal> {
   const inspection = await synchronizeVisualProfileConflicts(root, slug, bible, entityId); const knownFields = new Set(fieldsByType[inspection.profile.visualType] ?? []); const requested = options.fields ? [...new Set(options.fields)] : inspection.eligibleFields; if (requested.some((field) => !knownFields.has(field))) throw new Error("One or more requested visual fields are not supported for this profile type"); if (options.regenerate && !options.fields?.length) throw new Error("Choose one or more AI-generated fields to regenerate"); const eligibleFields = requested.filter((field) => { const state = inspection.fields.find((item) => item.path === field); return options.regenerate ? Boolean(state?.regenerable || state?.missing) : inspection.eligibleFields.includes(field); });
+  const inspection = await synchronizeVisualProfileConflicts(root, slug, bible, entityId);
+  const knownFields = new Set(fieldsByType[inspection.profile.visualType] ?? []);
+  const requested = options.fields ? [...new Set(options.fields)] : inspection.eligibleFields;
+  if (requested.some((field) => !knownFields.has(field))) throw new Error("One or more requested visual fields are not supported for this profile type");
+  if (options.regenerate && !options.fields?.length) throw new Error("Choose one or more AI-generated fields to regenerate");
+  const eligibleFields = requested.filter((field) => {
+    const state = inspection.fields.find((item) => item.path === field);
+    return options.regenerate ? Boolean(state?.regenerable || state?.missing) : inspection.eligibleFields.includes(field);
+  });
   if (!eligibleFields.length) return { entityId, visualType: inspection.profile.visualType, values: {}, rationale: "No selected visual details can be safely generated.", eligibleFields: [], protectedFields: inspection.protectedFields, contextFingerprint: inspection.contextFingerprint, provider: provider.name, model: config.model };
   const result = await provider.generateStructured({ model: config.model, schemaName: "visual_profile_completion", schema: visualProfileProposalSchema, instructions: "Design only the requested persistent visual details for this one entity. Source evidence, Story Bible facts, manual/locked fields, and approved primary references are authoritative. Never overwrite or contradict them. Do not use temporary injuries, scene action, current weather, one-off emotions, or short-lived clothing as persistent identity. Use role, relationships, culture, powers, occupation, equipment, faction, history, and entity-relevant summaries only when they support a durable visual suggestion. AI output is a proposal, not story canon. Return only requested fields.", input: JSON.stringify({ ...inspection.context, requestedFields: eligibleFields, mode: options.regenerate ? "explicit_selected_regeneration" : "fill_missing_only" }, null, 2) });
   const values = Object.fromEntries(Object.entries(result.value.values).filter(([field]) => eligibleFields.includes(field))); return { entityId, visualType: inspection.profile.visualType, values, rationale: result.value.rationale, eligibleFields, protectedFields: inspection.protectedFields, contextFingerprint: inspection.contextFingerprint, provider: provider.name, model: config.model };
+  const result = await provider.generateStructured({
+    model: config.model,
+    schemaName: "visual_profile_completion",
+    schema: visualProfileProposalResponseSchema,
+    instructions: "Design only the requested persistent visual details for this one entity. Source evidence, Story Bible facts, manual/locked fields, and approved primary references are authoritative. Never overwrite or contradict them. Do not use temporary injuries, scene action, current weather, one-off emotions, or short-lived clothing as persistent identity. Use role, relationships, culture, powers, occupation, equipment, faction, history, and entity-relevant summaries only when they support a durable visual suggestion. AI output is a proposal, not story canon. Return only the requested visual fields. For each proposed field, return an item in values where 'field' is exactly one of the requested field paths and 'value' is the proposed persistent visual description. Do not return unrequested fields, do not rename field paths, and do not return nested profile objects.",
+    input: JSON.stringify({ ...inspection.context, requestedFields: eligibleFields, mode: options.regenerate ? "explicit_selected_regeneration" : "fill_missing_only" }, null, 2)
+  });
+  const values: Record<string, string> = {};
+  const rawValues = Array.isArray(result.value?.values) ? result.value.values : [];
+  for (const item of rawValues) {
+    if (!item || typeof item !== "object") continue;
+    const field = typeof item.field === "string" ? item.field.trim() : "";
+    const value = typeof item.value === "string" ? item.value.trim() : "";
+    if (!field || !value) continue;
+    if (!eligibleFields.includes(field)) continue;
+    if (field in values) continue;
+    values[field] = value;
+  }
+  return {
+    entityId,
+    visualType: inspection.profile.visualType,
+    values,
+    rationale: result.value.rationale ?? "",
+    eligibleFields,
+    protectedFields: inspection.protectedFields,
+    contextFingerprint: inspection.contextFingerprint,
+    provider: provider.name,
+    model: config.model,
+  };
 }
 export async function applyVisualProfileProposal(root: string, slug: string, bible: StoryBible, proposal: VisualProfileProposal, selectedFields: string[]): Promise<VisualEntityProfile> {
   const inspection = await synchronizeVisualProfileConflicts(root, slug, bible, proposal.entityId); if (proposal.contextFingerprint !== inspection.contextFingerprint) throw new Error("The visual profile changed after this proposal was generated. Generate a fresh proposal before applying it."); const next = structuredClone(inspection.profile);

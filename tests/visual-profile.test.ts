@@ -17,6 +17,15 @@ import {
   handleEntityDemote,
 } from "../src/visual-canon/profiles.js";
 import { applyVisualProfileProposal, inspectVisualProfile, proposeMissingVisualDetails, resolveVisualProfileConflict } from "../src/visual-canon/completion.js";
+import {
+  applyVisualProfileProposal,
+  inspectVisualProfile,
+  proposeMissingVisualDetails,
+  resolveVisualProfileConflict,
+  visualProfileProposalResponseSchema,
+} from "../src/visual-canon/completion.js";
+import { toOpenAiTextFormat } from "../src/llm/openai/openai.provider.js";
+import { geminiJsonSchema } from "../src/llm/gemini/gemini.provider.js";
 import { VisualEntityProfile } from "../src/domain/visual-profile.js";
 import { storyPaths } from "../src/storage/paths.js";
 import { atomicWrite, atomicWriteJson } from "../src/storage/atomic-write.js";
@@ -247,6 +256,24 @@ describe("Visual Entity Profiles", () => {
     await updateVisualProfile(root, slug, entityId, { character: { hairColor: "silver", eyeColor: "blue" } });
     let calls = 0;
     const provider = { name: "fake", validateConfiguration: async () => {}, generateText: async () => ({ text: "" }), generateStructured: async () => { calls++; return { value: { values: { "character.build": "lean athletic", "character.faceShape": "angular with a narrow jaw", "character.hairColor": "black" }, rationale: "Role-informed design" } }; } };
+    const provider = {
+      name: "fake",
+      validateConfiguration: async () => {},
+      generateText: async () => ({ text: "" }),
+      generateStructured: async () => {
+        calls++;
+        return {
+          value: {
+            values: [
+              { field: "character.build", value: "lean athletic" },
+              { field: "character.faceShape", value: "angular with a narrow jaw" },
+              { field: "character.hairColor", value: "black" },
+            ],
+            rationale: "Role-informed design",
+          },
+        };
+      },
+    };
     const proposal = await proposeMissingVisualDetails(root, slug, bible, entityId, provider as any, { provider: "openai", model: "fake" });
     expect(calls).toBe(1);
     expect(proposal.values).toMatchObject({ "character.build": "lean athletic", "character.faceShape": "angular with a narrow jaw" });
@@ -269,6 +296,19 @@ describe("Visual Entity Profiles", () => {
     expect(inspection.protectedFields).toContain("character.hairColor");
     expect(inspection.protectedFields).toContain("character.eyeColor");
     const provider = { name: "fake", generateStructured: async () => ({ value: { values: { "character.hairColor": "black", "character.eyeColor": "red", "character.build": "lean" }, rationale: "" } }) };
+    const provider = {
+      name: "fake",
+      generateStructured: async () => ({
+        value: {
+          values: [
+            { field: "character.hairColor", value: "black" },
+            { field: "character.eyeColor", value: "red" },
+            { field: "character.build", value: "lean" },
+          ],
+          rationale: "",
+        },
+      }),
+    };
     const proposal = await proposeMissingVisualDetails(root, slug, bible, entityId, provider as any, { provider: "openai", model: "fake" }, { regenerate: true, fields: ["character.hairColor", "character.eyeColor", "character.build"] });
     expect(proposal.values).toEqual({ "character.build": "lean" });
   });
@@ -426,5 +466,249 @@ describe("Visual Entity Profiles", () => {
 
     const profiles = await loadVisualProfiles(root, slug);
     expect(entityId in profiles).toBe(false);
+  });
+
+  it("converts visualProfileProposalResponseSchema to OpenAI text format without propertyNames", () => {
+    const formatted = toOpenAiTextFormat(visualProfileProposalResponseSchema, "visual_profile_completion");
+    expect(formatted).toBeDefined();
+    const serialized = JSON.stringify(formatted);
+    expect(serialized).not.toContain("propertyNames");
+    expect((formatted as any).name).toBe("visual_profile_completion");
+    expect((formatted as any).strict).toBe(true);
+    expect((formatted as any).schema.additionalProperties).toBe(false);
+  });
+
+  it("proposes missing visual details converting array response into dictionary", async () => {
+    const bible = {
+      ...emptyStoryBible(),
+      canonicalEntities: [canonicalEntitySchema.parse({ id: entityId, type: "character", canonicalName: "Test Character", aliases: [], description: "", firstAppearance: 1, lastKnownAppearance: 1 })],
+    };
+    await atomicWriteJson(storyPaths(root, slug, 1).bible, bible);
+    const provider = {
+      name: "test-provider",
+      validateConfiguration: async () => {},
+      generateText: async () => ({ text: "" }),
+      generateStructured: async () => ({
+        value: {
+          values: [
+            { field: "character.skinTone", value: "pale" },
+            { field: "character.hairColor", value: "silver" },
+          ],
+          rationale: "Character aesthetic proposal",
+        },
+      }),
+    };
+    const proposal = await proposeMissingVisualDetails(root, slug, bible, entityId, provider as any, { provider: "openai", model: "test-model" });
+    expect(proposal.values).toEqual({
+      "character.skinTone": "pale",
+      "character.hairColor": "silver",
+    });
+    expect(proposal.rationale).toBe("Character aesthetic proposal");
+    expect(proposal.provider).toBe("test-provider");
+    expect(proposal.model).toBe("test-model");
+  });
+
+  it("drops unrequested and ineligible fields returned by the model", async () => {
+    const bible = {
+      ...emptyStoryBible(),
+      canonicalEntities: [canonicalEntitySchema.parse({ id: entityId, type: "character", canonicalName: "Test Character", aliases: [], description: "", firstAppearance: 1, lastKnownAppearance: 1 })],
+    };
+    await atomicWriteJson(storyPaths(root, slug, 1).bible, bible);
+    const provider = {
+      name: "test-provider",
+      validateConfiguration: async () => {},
+      generateStructured: async () => ({
+        value: {
+          values: [
+            { field: "character.skinTone", value: "pale" },
+            { field: "character.nonexistentField", value: "invalid" },
+            { field: "location.terrain", value: "mountains" },
+            { field: "unrequested.extra", value: "extra" },
+          ],
+          rationale: "",
+        },
+      }),
+    };
+    const proposal = await proposeMissingVisualDetails(root, slug, bible, entityId, provider as any, { provider: "openai", model: "test-model" }, { fields: ["character.skinTone"] });
+    expect(proposal.values).toEqual({ "character.skinTone": "pale" });
+    expect(proposal.values["character.nonexistentField"]).toBeUndefined();
+    expect(proposal.values["location.terrain"]).toBeUndefined();
+    expect(proposal.values["unrequested.extra"]).toBeUndefined();
+  });
+
+  it("resolves duplicate fields in LLM response with first-valid-wins rule", async () => {
+    const bible = {
+      ...emptyStoryBible(),
+      canonicalEntities: [canonicalEntitySchema.parse({ id: entityId, type: "character", canonicalName: "Test Character", aliases: [], description: "", firstAppearance: 1, lastKnownAppearance: 1 })],
+    };
+    await atomicWriteJson(storyPaths(root, slug, 1).bible, bible);
+    const provider = {
+      name: "test-provider",
+      validateConfiguration: async () => {},
+      generateStructured: async () => ({
+        value: {
+          values: [
+            { field: "character.build", value: "athletic" },
+            { field: "character.build", value: "slender" },
+            { field: "character.skinTone", value: "tan" },
+            { field: "character.skinTone", value: "pale" },
+          ],
+          rationale: "",
+        },
+      }),
+    };
+    const proposal = await proposeMissingVisualDetails(root, slug, bible, entityId, provider as any, { provider: "openai", model: "test-model" });
+    expect(proposal.values["character.build"]).toBe("athletic");
+    expect(proposal.values["character.skinTone"]).toBe("tan");
+  });
+
+  it("handles empty proposal array gracefully without crashing", async () => {
+    const bible = {
+      ...emptyStoryBible(),
+      canonicalEntities: [canonicalEntitySchema.parse({ id: entityId, type: "character", canonicalName: "Test Character", aliases: [], description: "", firstAppearance: 1, lastKnownAppearance: 1 })],
+    };
+    await atomicWriteJson(storyPaths(root, slug, 1).bible, bible);
+    const provider = {
+      name: "test-provider",
+      validateConfiguration: async () => {},
+      generateStructured: async () => ({
+        value: {
+          values: [],
+          rationale: "Nothing missing to propose",
+        },
+      }),
+    };
+    const proposal = await proposeMissingVisualDetails(root, slug, bible, entityId, provider as any, { provider: "openai", model: "test-model" });
+    expect(proposal.values).toEqual({});
+    expect(proposal.rationale).toBe("Nothing missing to propose");
+  });
+
+  it("prevents proposing or applying protected canonical fields", async () => {
+    const bible = {
+      ...emptyStoryBible(),
+      canonicalEntities: [canonicalEntitySchema.parse({ id: entityId, type: "character", canonicalName: "Test Character", aliases: [], description: "Skin Tone: bronze.", firstAppearance: 1, lastKnownAppearance: 1 })],
+    };
+    await atomicWriteJson(storyPaths(root, slug, 1).bible, bible);
+    await updateVisualProfile(root, slug, entityId, { character: { eyeColor: "amber" }, fieldProvenance: { "character.eyeColor": { source: "manual_override", locked: true } } });
+    const inspection = await inspectVisualProfile(root, slug, bible, entityId);
+    expect(inspection.protectedFields).toContain("character.skinTone");
+    expect(inspection.protectedFields).toContain("character.eyeColor");
+
+    const provider = {
+      name: "test-provider",
+      validateConfiguration: async () => {},
+      generateStructured: async () => ({
+        value: {
+          values: [
+            { field: "character.skinTone", value: "pale" },
+            { field: "character.eyeColor", value: "blue" },
+            { field: "character.height", value: "tall" },
+          ],
+          rationale: "",
+        },
+      }),
+    };
+    const proposal = await proposeMissingVisualDetails(root, slug, bible, entityId, provider as any, { provider: "openai", model: "test-model" });
+    expect(proposal.values["character.skinTone"]).toBeUndefined();
+    expect(proposal.values["character.eyeColor"]).toBeUndefined();
+    expect(proposal.values["character.height"]).toBe("tall");
+
+    const updated = await applyVisualProfileProposal(root, slug, bible, proposal, ["character.skinTone", "character.eyeColor", "character.height"]);
+    expect(updated.character?.height).toBe("tall");
+    expect(updated.character?.eyeColor).toBe("amber");
+    expect(updated.character?.skinTone).toBeUndefined();
+  });
+
+  it("allows selecting and regenerating existing AI-generated visual fields", async () => {
+    const bible = {
+      ...emptyStoryBible(),
+      canonicalEntities: [canonicalEntitySchema.parse({ id: entityId, type: "character", canonicalName: "Test Character", aliases: [], description: "", firstAppearance: 1, lastKnownAppearance: 1 })],
+    };
+    await atomicWriteJson(storyPaths(root, slug, 1).bible, bible);
+    await updateVisualProfile(root, slug, entityId, {
+      character: { build: "slender" },
+      fieldProvenance: { "character.build": { source: "ai_generated", locked: false } },
+    });
+    const inspection = await inspectVisualProfile(root, slug, bible, entityId);
+    const buildState = inspection.fields.find((f) => f.path === "character.build");
+    expect(buildState?.regenerable).toBe(true);
+
+    const provider = {
+      name: "test-provider",
+      validateConfiguration: async () => {},
+      generateStructured: async () => ({
+        value: {
+          values: [{ field: "character.build", value: "muscular and broad" }],
+          rationale: "Regenerated build",
+        },
+      }),
+    };
+    const proposal = await proposeMissingVisualDetails(root, slug, bible, entityId, provider as any, { provider: "openai", model: "test-model" }, { regenerate: true, fields: ["character.build"] });
+    expect(proposal.values["character.build"]).toBe("muscular and broad");
+
+    const updated = await applyVisualProfileProposal(root, slug, bible, proposal, ["character.build"]);
+    expect(updated.character?.build).toBe("muscular and broad");
+    expect(updated.fieldProvenance?.["character.build"]?.source).toBe("ai_generated");
+  });
+
+  it("preserves provenance, provider, model, and contextFingerprint upon applying proposal", async () => {
+    const bible = {
+      ...emptyStoryBible(),
+      canonicalEntities: [canonicalEntitySchema.parse({ id: entityId, type: "character", canonicalName: "Test Character", aliases: [], description: "", firstAppearance: 1, lastKnownAppearance: 1 })],
+    };
+    await atomicWriteJson(storyPaths(root, slug, 1).bible, bible);
+    await updateVisualProfile(root, slug, entityId, {});
+    const provider = {
+      name: "test-provider",
+      validateConfiguration: async () => {},
+      generateStructured: async () => ({
+        value: {
+          values: [{ field: "character.hairstyle", value: "braided" }],
+          rationale: "Styling proposal",
+        },
+      }),
+    };
+    const proposal = await proposeMissingVisualDetails(root, slug, bible, entityId, provider as any, { provider: "openai", model: "gpt-4o" });
+    const updated = await applyVisualProfileProposal(root, slug, bible, proposal, ["character.hairstyle"]);
+    expect(updated.character?.hairstyle).toBe("braided");
+    const prov = updated.fieldProvenance?.["character.hairstyle"];
+    expect(prov).toBeDefined();
+    expect(prov?.source).toBe("ai_generated");
+    expect(prov?.locked).toBe(false);
+    expect(prov?.provider).toBe("test-provider");
+    expect(prov?.model).toBe("gpt-4o");
+    expect(prov?.contextFingerprint).toBe(proposal.contextFingerprint);
+  });
+
+  it("validates cleanly with OpenAI, Gemini, and Kimi structured output expectations", () => {
+    // 1. OpenAI format
+    const openAiFormat = toOpenAiTextFormat(visualProfileProposalResponseSchema, "visual_profile_completion") as any;
+    expect(openAiFormat.strict).toBe(true);
+    expect(openAiFormat.name).toBe("visual_profile_completion");
+    expect(openAiFormat.schema.additionalProperties).toBe(false);
+    expect(openAiFormat.schema.required).toContain("values");
+    expect(openAiFormat.schema.required).toContain("rationale");
+    expect(JSON.stringify(openAiFormat)).not.toContain("propertyNames");
+
+    // 2. Gemini format
+    const geminiSchema = geminiJsonSchema(visualProfileProposalResponseSchema) as any;
+    expect(geminiSchema.type).toBe("object");
+    expect(geminiSchema.properties.values.type).toBe("array");
+    expect(geminiSchema.properties.values.items.type).toBe("object");
+    expect(geminiSchema.properties.values.items.properties.field.type).toBe("string");
+    expect(geminiSchema.properties.values.items.properties.value.type).toBe("string");
+
+    // 3. Kimi / Zod validation of compliant JSON payload
+    const wirePayload = {
+      values: [
+        { field: "character.hairColor", value: "silver" },
+        { field: "character.eyeColor", value: "violet" },
+      ],
+      rationale: "Validated structure",
+    };
+    const parsed = visualProfileProposalResponseSchema.parse(wirePayload);
+    expect(parsed.values).toHaveLength(2);
+    expect(parsed.values[0]?.field).toBe("character.hairColor");
+    expect(parsed.rationale).toBe("Validated structure");
   });
 });
