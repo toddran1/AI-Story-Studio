@@ -18,9 +18,25 @@ describe("configuration", () => {
   });
 
   it("maps legacy qualityGuard stories to verification without automatic Fish repair", () => {
+  it("defaults legacy stories without explicit qualityMode to off regardless of qualityGuard", () => {
     const story = defaultStory("legacy-story", loadEnvironment({}));
     const legacy = storySchema.parse({ ...story, pipeline: { ...story.pipeline, tts: { ...story.pipeline.tts, qualityMode: undefined, qualityGuard: true, maxQualityRetries: 2 } } });
     expect(ttsQualityMode(legacy.pipeline.tts)).toBe("verify");
+    // Case A: qualityMode unset, qualityGuard: true -> "off"
+    const legacyA = storySchema.parse({ ...story, pipeline: { ...story.pipeline, tts: { ...story.pipeline.tts, qualityMode: undefined, qualityGuard: true, maxQualityRetries: 2 } } });
+    expect(ttsQualityMode(legacyA.pipeline.tts)).toBe("off");
+
+    // Case B: qualityMode unset, qualityGuard: false -> "off"
+    const legacyB = storySchema.parse({ ...story, pipeline: { ...story.pipeline, tts: { ...story.pipeline.tts, qualityMode: undefined, qualityGuard: false, maxQualityRetries: 2 } } });
+    expect(ttsQualityMode(legacyB.pipeline.tts)).toBe("off");
+
+    // Case C: qualityMode: "verify", qualityGuard: false -> "verify"
+    const legacyC = storySchema.parse({ ...story, pipeline: { ...story.pipeline, tts: { ...story.pipeline.tts, qualityMode: "verify", qualityGuard: false, maxQualityRetries: 2 } } });
+    expect(ttsQualityMode(legacyC.pipeline.tts)).toBe("verify");
+
+    // Case D: qualityMode: "auto_repair", qualityGuard: false -> "auto_repair"
+    const legacyD = storySchema.parse({ ...story, pipeline: { ...story.pipeline, tts: { ...story.pipeline.tts, qualityMode: "auto_repair", qualityGuard: false, maxQualityRetries: 2 } } });
+    expect(ttsQualityMode(legacyD.pipeline.tts)).toBe("auto_repair");
   });
 
   it("reports a missing provider key without revealing secrets", () => {

@@ -79,6 +79,7 @@ import { planProduction, runProduction } from "../../src/production/orchestrator
 import { productionForceSchema, productionOutputSchema } from "../../src/production/types.js";
 import { refreshProductionRange } from "../../src/production/refresh.js";
 import { TTSProvider } from "../../src/tts/provider.js";
+import { ttsQualityMode } from "../../src/domain/provider.js";
 import { TTSProviderRouter } from "../../src/tts/router.js";
 import { CensorAudioService, FfmpegCensorAudioService } from "../../src/tts/censor-audio.js";
 import { addManualBibleEntry, bibleCategorySchema, chapterTextEditSchema, deleteBibleEntry, saveChapterTextEdit, saveVoicePreview, updateManualBibleEntry, voicePreviewSchema } from "../../src/studio/workflow.js";
@@ -1514,6 +1515,7 @@ export class StudioOperations {
         baseProvider: this.tts.forName(request.provider),
         pronunciationEntities: entities,
         qualityMode: config.qualityMode ?? (config.qualityGuard ? "verify" : "off"),
+        qualityMode: ttsQualityMode(config),
         maxQualityRetries: config.maxQualityRetries,
         language: story.outputLanguage,
         transcriber: this.optionalSpeechTranscriber(),
@@ -1528,6 +1530,7 @@ export class StudioOperations {
           voiceMode: config.voiceMode,
           deliveryIntensity: config.deliveryIntensity,
           qualityGuard: (config.qualityMode ?? (config.qualityGuard ? "verify" : "off")) !== "off",
+          qualityGuard: ttsQualityMode(config) !== "off",
           providerQualityGuard: config.providerQualityGuard,
           bleepStrongProfanity: story.narrationSettings.bleepStrongProfanity,
           speed: request.speed,

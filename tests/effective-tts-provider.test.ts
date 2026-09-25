@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 import { AlignmentObservation } from "../src/alignment/types.js";
 import { loadEnvironment } from "../src/config/env.js";
 import { canonicalEntitySchema } from "../src/domain/story-bible.js";
+import { ttsQualityMode } from "../src/domain/provider.js";
 import { TrackedTTSProvider, withUsageScope } from "../src/cost/context.js";
 import { ProviderUsageRecord, UsageSink } from "../src/cost/types.js";
 import { atomicWrite, atomicWriteJson } from "../src/storage/atomic-write.js";
@@ -127,14 +128,57 @@ describe("effective TTS provider construction", () => {
   });
 
   it("verifies a failed segment without spending a second Fish request in legacy verify mode", async () => {
+  it("verifies a failed segment without spending a second Fish request in explicit verify mode", async () => {
     const text = "First sentence needs verification.";
     const base = new ScriptedTTS(() => singleSegment(text, "bad"));
     const transcriber = new FakeTranscriber(() => say("unrelated random speech"));
     const effective = createEffectiveTtsProvider({ baseProvider: base, qualityGuardEnabled: true, maxQualityRetries: 2, language: "en-US", transcriber });
+    const effective = createEffectiveTtsProvider({ baseProvider: base, qualityMode: "verify", maxQualityRetries: 2, language: "en-US", transcriber });
     const result = await effective.provider.synthesize({ text, model: "s2.1-pro", speed: 1, format: "mp3", sampleRate: 44100, bitrate: 128, normalize: true, maxCharsPerRequest: 1750, qualityGuard: true });
     expect(base.calls).toHaveLength(1);
     expect(result.providerRequests).toBe(1);
     expect(result.quality?.segments[0]?.attempts).toHaveLength(1);
+  });
+
+  it("skips transcriber for legacy stories with qualityGuard=true but no explicit qualityMode", async () => {
+    const legacyConfig = {
+      provider: "fish" as const,
+      model: "s2.1-pro",
+      voiceMode: "same-voice-dialogue" as const,
+      deliveryIntensity: "restrained" as const,
+      qualityGuard: true,
+      providerQualityGuard: true,
+      maxQualityRetries: 2,
+      speed: 1,
+      format: "mp3" as const,
+      sampleRate: 44100 as const,
+      bitrate: 128 as const,
+      normalize: true,
+      maxCharsPerRequest: 1750,
+    };
+    const resolvedMode = ttsQualityMode(legacyConfig);
+    expect(resolvedMode).toBe("off");
+
+    const fetcher = vi.fn(async () => new Response(bytes("mp3"), { headers: { "content-type": "audio/mpeg" } }));
+    const transcriber = new FakeTranscriber(() => say("unexpected speech"));
+    const effective = createEffectiveTtsProvider({
+      baseProvider: new FishAudioProvider("test-key", fetcher as typeof fetch),
+      qualityMode: resolvedMode,
+      transcriber,
+    });
+    const result = await effective.provider.synthesize({
+      text: "A normal paragraph of text to synthesize.",
+      model: "s2.1-pro",
+      speed: 1,
+      format: "mp3",
+      sampleRate: 44100,
+      bitrate: 128,
+      normalize: true,
+      maxCharsPerRequest: 1750,
+      qualityGuard: resolvedMode !== "off",
+    });
+    expect(result.quality).toBeUndefined();
+    expect(transcriber.calls).toBe(0);
   });
 
   it("generates each initial S2.1-Pro chunk once with default post-generation checking off", async () => {

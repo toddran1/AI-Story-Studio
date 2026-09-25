@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { FishAudioProvider, normalizeFishReferenceId, normalizeFishSpeechText } from "../src/tts/fish/fish-audio.provider.js";
+import { castQuotedDialogue, prepareFishMultiSpeakerChunks } from "../src/tts/fish/dialogue-casting.js";
 import { splitForTTS, splitOpeningSentenceForTTSRepair } from "../src/tts/split-text.js";
 import { TTSRequest } from "../src/tts/types.js";
 
@@ -254,5 +255,71 @@ describe("Fish TTS", () => {
     expect(posted.some((chunk) => chunk.includes("Paragraph 2."))).toBe(true);
     expect(result.providerRequests).toBe(posted.length);
     expect(progress).toEqual(posted.flatMap((_, index) => [`${index + 1}/${posted.length}:started`, `${index + 1}/${posted.length}:completed`]));
+  });
+
+  describe("prepareFishMultiSpeakerChunks", () => {
+    it("guarantees every chunk starts with a speaker tag and never exceeds the character limit", () => {
+      const dialogueText = Array.from({ length: 10 }, (_, i) =>
+        `Paragraph ${i + 1}. The narrator described the landscape in detail. "We must proceed immediately," said the commander. "Do not fall behind." He turned and continued walking.`
+      ).join("\n\n");
+      const cast = castQuotedDialogue(dialogueText);
+      const chunks = prepareFishMultiSpeakerChunks(cast, 500);
+
+      expect(chunks.length).toBeGreaterThan(1);
+      for (const chunk of chunks) {
+        expect(chunk.length).toBeLessThanOrEqual(500);
+        expect(chunk).toMatch(/^<\|speaker:[01]\|>/);
+      }
+    });
+
+    it("strictly preserves speaker continuity when dialogue crosses a chunk boundary", () => {
+      const dialogueText = `Narration introductory part that is fairly long. ${"A long sentence setting the scene. ".repeat(10)}"This is a very long dialogue utterance by the second speaker that extends across multiple sentences and should trigger a split. Are you following along? We still have more to say." Then the narrator resumed explaining the situation.`;
+      const cast = castQuotedDialogue(dialogueText);
+      const chunks = prepareFishMultiSpeakerChunks(cast, 300);
+
+      expect(chunks.length).toBeGreaterThan(1);
+      expect(chunks.every((c) => c.length <= 300)).toBe(true);
+      expect(chunks.every((c) => c.startsWith("<|speaker:0|>") || c.startsWith("<|speaker:1|>"))).toBe(true);
+
+      // Verify that after speaker 1 started speaking in one chunk, the next chunk starts with <|speaker:1|> if speech continues
+      let speaker = 0;
+      for (const chunk of chunks) {
+        const expectedSpeaker = speaker;
+        expect(chunk.startsWith(`<|speaker:${expectedSpeaker}|>`)).toBe(true);
+        for (const match of chunk.matchAll(/<\|speaker:([01])\|>/g)) {
+          speaker = match[1] === "1" ? 1 : 0;
+        }
+      }
+    });
+
+    it("handles multi-speaker synthesis near chunk limit without throwing limit errors", async () => {
+      const posted: string[] = [];
+      const fetcher = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+        posted.push(JSON.parse(String(init?.body)).text);
+        return new Response(new Uint8Array([1, 2, 3]), { headers: { "content-type": "audio/mpeg" } });
+      });
+      const provider = new FishAudioProvider("test-key", fetcher as typeof fetch);
+      const text = Array.from({ length: 6 }, (_, i) =>
+        `Chapter section ${i + 1}. The guide looked around carefully. "Stop right here," she whispered. "There is danger ahead in the shadows." The soldiers halted and drew their weapons.`
+      ).join("\n\n");
+
+      const result = await provider.synthesize({
+        text,
+        model: "s2.1-pro",
+        referenceId: "narrator-ref",
+        secondaryReferenceId: "dialogue-ref",
+        voiceMode: "narrator-dialogue",
+        speed: 1,
+        format: "mp3",
+        sampleRate: 44100,
+        bitrate: 128,
+        normalize: true,
+        maxCharsPerRequest: 500,
+      });
+
+      expect(result.segments.length).toBeGreaterThan(1);
+      expect(posted.every((chunk) => chunk.length <= 500)).toBe(true);
+      expect(posted.every((chunk) => chunk.startsWith("<|speaker:0|>") || chunk.startsWith("<|speaker:1|>"))).toBe(true);
+    });
   });
 });

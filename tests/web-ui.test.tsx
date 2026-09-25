@@ -2235,6 +2235,7 @@ describe("Milestone 23 — image output quality UI", () => {
 
   describe("Story Settings TTS Quality Guard controls", () => {
     const createMockStory = (qualityGuard = true, providerQualityGuard = false) => ({
+    const createMockStory = (qualityGuard = true, providerQualityGuard = false, qualityMode?: "off" | "verify" | "auto_repair") => ({
       slug: "test-story",
       title: "Test Story",
       author: "Author",
@@ -2267,6 +2268,7 @@ describe("Milestone 23 — image output quality UI", () => {
           voiceMode: "same-voice-dialogue" as const,
           deliveryIntensity: "restrained" as const,
           qualityGuard,
+          qualityMode,
           providerQualityGuard,
           maxCharsPerRequest: 1750,
           maxQualityRetries: 2,
@@ -2302,11 +2304,15 @@ describe("Milestone 23 — image output quality UI", () => {
 
     it("renders an explicit post-generation quality mode alongside the separate provider guard", () => {
       const story = createMockStory(true, false);
+      const story = createMockStory(false, false, "verify");
       const html = renderToStaticMarkup(<SettingsPage slug="test-story" onJob={() => undefined} initialStory={story as any} />);
 
       expect(html.match(/Post-generation audio quality mode/g)).toHaveLength(1);
       expect(html).toContain('value="verify" selected=""');
       expect(html).toContain('Auto repair — retry failed chunks');
+      expect(html).toContain("Off — generate once");
+      expect(html).toContain("Verify only — transcribe/check, no Fish retries");
+      expect(html).toContain("Auto repair — transcribe/check and retry failed chunks");
 
       // Exactly one Provider Quality Guard control
       const providerGuardMatches = html.match(/Provider Quality Guard/g);
@@ -2316,14 +2322,24 @@ describe("Milestone 23 — image output quality UI", () => {
       expect(html).not.toContain("<b>Quality guard</b>");
 
       expect(html).toContain("Existing qualityGuard settings use Verify only");
+      expect(html).toContain("Off is the default. Verification and auto-repair run only when explicitly selected.");
       expect(html).not.toContain("Max quality retries");
+    });
+
+    it("shows Max quality retries only when qualityMode is auto_repair", () => {
+      const story = createMockStory(false, false, "auto_repair");
+      const html = renderToStaticMarkup(<SettingsPage slug="test-story" onJob={() => undefined} initialStory={story as any} />);
+      expect(html).toContain('value="auto_repair" selected=""');
+      expect(html).toContain("Max quality retries");
     });
 
     it("independently binds legacy verification mode and providerQualityGuard states", () => {
       // Case 1: qualityGuard=true, providerQualityGuard=false
+      // Case 1: legacy story with qualityGuard=true, qualityMode unset -> defaults to off
       const storyA = createMockStory(true, false);
       const htmlA = renderToStaticMarkup(<SettingsPage slug="test-story" onJob={() => undefined} initialStory={storyA as any} />);
       expect(htmlA).toContain('value="verify" selected=""');
+      expect(htmlA).toContain('value="off" selected=""');
       expect(htmlA).toContain('<b>Provider Quality Guard</b><small>Use the TTS provider&#x27;s native quality-control feature when supported.</small></div><input type="checkbox"/>');
 
       // Case 2: qualityGuard=false, providerQualityGuard=true

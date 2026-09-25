@@ -9,6 +9,7 @@ import { enrichStoryPronunciations, loadPronunciationEntities } from "../story-b
 import { pronunciationProvider, pronunciationFingerprint, resolvePronunciations } from "../tts/pronunciation.js";
 import { createEffectiveTtsProvider } from "../tts/effective-provider.js";
 import { ttsSynthesisSettings } from "../domain/provider.js";
+import { ttsQualityMode, ttsSynthesisSettings } from "../domain/provider.js";
 import type { SpeechTranscriber } from "../tts/quality-guard.js";
 import { loadNarrationNamingEntities } from "../story-bible/narration-names.js";
 import { retrieveRelevantContext } from "../story-bible/retrieval.js";
@@ -97,6 +98,7 @@ export class SummaryMediaService {
       baseProvider: this.ttsRouter.forName(config.provider),
       pronunciationEntities,
       qualityMode: config.qualityMode ?? (config.qualityGuard ? "verify" : "off"),
+      qualityMode: ttsQualityMode(config),
       maxQualityRetries: config.maxQualityRetries,
       language: story.outputLanguage,
       transcriber,
@@ -293,6 +295,7 @@ export class SummaryMediaService {
         const config = input.story.pipeline.tts;
         const result = await this.censor.synthesize(input.provider, { ...config, referenceId: input.referenceId,
           qualityGuard: (config.qualityMode ?? (config.qualityGuard ? "verify" : "off")) !== "off",
+          qualityGuard: ttsQualityMode(config) !== "off",
           text: input.spokenText, bleepStrongProfanity: input.story.narrationSettings.bleepStrongProfanity });
         if (!result.audio.length) throw new Error("TTS returned empty summary audio");
         await atomicWrite(paths.raw, result.audio);

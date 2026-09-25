@@ -1,3 +1,5 @@
+import { splitForTTS } from "../split-text.js";
+
 /**
  * Assigns all quoted dialogue to one secondary Fish voice. The quote marks stay
  * in the script as punctuation; only Fish sees the speaker tags.
@@ -72,4 +74,43 @@ export function ensureChunkSpeakers(chunks: string[]): string[] {
     for (const match of text.matchAll(/<\|speaker:([01])\|>/g)) speaker = match[1] === "1" ? 1 : 0;
     return text;
   });
+}
+
+/**
+ * Splits cast dialogue text into chunks that each start with the active speaker tag
+ * and are guaranteed to never exceed maxChars in length.
+ */
+export function prepareFishMultiSpeakerChunks(castText: string, maxChars: number): string[] {
+  if (!castText) return [];
+  const speakerTagLength = 13;
+  const initialChunks = splitForTTS(castText, maxChars);
+  const result: string[] = [];
+  let speaker: 0 | 1 = 0;
+
+  for (const chunk of initialChunks) {
+    const trimmed = chunk.trim();
+    if (!trimmed) continue;
+
+    const startsWithTag = trimmed.startsWith("<|speaker:");
+    if (!startsWithTag && trimmed.length + speakerTagLength > maxChars) {
+      const subChunks = splitForTTS(trimmed, Math.max(1, maxChars - speakerTagLength));
+      for (const sub of subChunks) {
+        const subTrimmed = sub.trim();
+        if (!subTrimmed) continue;
+        const chunkText: string = subTrimmed.startsWith("<|speaker:") ? subTrimmed : `<|speaker:${speaker}|>${subTrimmed}`;
+        result.push(chunkText);
+        for (const match of chunkText.matchAll(/<\|speaker:([01])\|>/g)) {
+          speaker = match[1] === "1" ? 1 : 0;
+        }
+      }
+    } else {
+      const chunkText: string = startsWithTag ? trimmed : `<|speaker:${speaker}|>${trimmed}`;
+      result.push(chunkText);
+      for (const match of chunkText.matchAll(/<\|speaker:([01])\|>/g)) {
+        speaker = match[1] === "1" ? 1 : 0;
+      }
+    }
+  }
+
+  return result;
 }
