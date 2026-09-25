@@ -49,8 +49,18 @@ export type TTSRequest = {
   checkpointDir?: string;
 };
 export type TTSResult = {
-  audio: Uint8Array; segments: Uint8Array[]; requestIds?: string[]; providerRequests?: number;
-  generatedCharacters?: number; generatedUtf8Bytes?: number;
+  audio: Uint8Array;
+  segments: Uint8Array[];
+  /** Request IDs for actual provider calls made during this execution. */
+  requestIds?: string[];
+  /** Historical request IDs from reused checkpoints (provenance only, not counted as calls this run). */
+  reusedRequestIds?: string[];
+  /** Number of actual provider requests made during this execution. */
+  providerRequests?: number;
+  /** Number of chunks reused from previously completed checkpoints. */
+  reusedChunks?: number;
+  generatedCharacters?: number;
+  generatedUtf8Bytes?: number;
   /** Exact chunk texts sent to the provider, aligned 1:1 with `segments`. Omitted
    * when an assembly step (e.g. censor tones) makes that mapping impossible. */
   segmentTexts?: string[];

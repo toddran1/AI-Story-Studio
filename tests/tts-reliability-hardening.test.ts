@@ -27,8 +27,12 @@ import { fingerprint } from "../src/utils/hash.js";
 import { fileFingerprint } from "../src/utils/file-fingerprint.js";
 import { StorageError, ProviderError } from "../src/pipeline/errors.js";
 import type { TTSRequest, TTSResult } from "../src/tts/types.js";
+import type { TTSProvider } from "../src/tts/provider.js";
 import type { AudioMasteringProcessor } from "../src/audio/mastering.js";
-import { MockLLM, testStory } from "./helpers.js";
+import { withUsageScope, TrackedTTSProvider } from "../src/cost/context.js";
+import type { ProviderUsageRecord } from "../src/cost/types.js";
+import { logger } from "../src/utils/logger.js";
+import { MockLLM, MockTTS, testStory } from "./helpers.js";
 
 describe("TTS Reliability & Cost Hardening (Tests 26–35)", () => {
   // Test 26: Fingerprint Version & Stability
@@ -675,6 +679,599 @@ describe("TTS Reliability & Cost Hardening (Tests 26–35)", () => {
       expect(runtime.censor).toBeDefined();
       expect("transcriber" in runtime).toBe(true);
       expect(runtime.pipeline).toBeDefined();
+    });
+  });
+
+  const ttsReq = (overrides: Partial<TTSRequest> & { text: string }): TTSRequest => ({
+    model: "s2-pro",
+    speed: 1,
+    format: "mp3",
+    sampleRate: 44100,
+    bitrate: 128,
+    normalize: true,
+    maxCharsPerRequest: 1750,
+    ...overrides,
+  });
+
+  // Test 24: Censor Checkpoint Namespace
+  describe("Test 24: Censor Checkpoint Namespace", () => {
+    it("allocates separate child checkpoint directories for each censor speech fragment", async () => {
+      const root = await mkdtemp(join(tmpdir(), "tts-censor-checkpoint-"));
+      const checkpointDir = join(root, "tts-working");
+      const calls: TTSRequest[] = [];
+      const tools = {
+        validateAvailability: async () => undefined,
+        ffmpeg: async (args: string[]) => {
+          await atomicWrite(args.at(-1)!, new Uint8Array([1, 2, 3]));
+        },
+      };
+      const provider: TTSProvider = {
+        name: "fish",
+        validateConfiguration: async () => {},
+        synthesize: async (req) => {
+          calls.push(req);
+          return { audio: new Uint8Array([1]), segments: [new Uint8Array([1])], providerRequests: 1 };
+        },
+      };
+      const service = new FfmpegCensorAudioService(tools as any);
+      await service.synthesize(provider, ttsReq({
+        text: "This shit is fucking crazy.",
+        bleepStrongProfanity: true,
+        checkpointDir,
+      }));
+
+      expect(calls).toHaveLength(3);
+      expect(calls[0]?.checkpointDir).toBe(join(checkpointDir, "censor-0001"));
+      expect(calls[1]?.checkpointDir).toBe(join(checkpointDir, "censor-0002"));
+      expect(calls[2]?.checkpointDir).toBe(join(checkpointDir, "censor-0003"));
+    });
+  });
+
+  // Test 25: Censored Resume After Later Failure
+  describe("Test 25: Censored Resume After Later Failure", () => {
+    it("resumes censored chapters by reusing successful speech fragments on retry", async () => {
+      const root = await mkdtemp(join(tmpdir(), "tts-censor-resume-"));
+      const checkpointDir = join(root, "tts-working");
+      const tools = {
+        validateAvailability: async () => undefined,
+        ffmpeg: async (args: string[]) => {
+          await atomicWrite(args.at(-1)!, new Uint8Array([1, 2, 3]));
+        },
+      };
+
+      let attempt = 1;
+      let totalFishCalls = 0;
+      const fetcher = vi.fn(async (_url: unknown, options?: { body?: unknown }) => {
+        totalFishCalls++;
+        const parsed = JSON.parse(String((options as any)?.body ?? "{}"));
+        if (attempt === 1 && parsed.text.includes("crazy")) {
+          return new Response("Simulated failure", { status: 500 });
+        }
+        return new Response(new Uint8Array([0x49, 0x44, 0x33, totalFishCalls]), {
+          status: 200,
+          headers: { "Content-Type": "audio/mpeg", "x-request-id": `req-${totalFishCalls}` },
+        });
+      });
+
+      const provider = new FishAudioProvider("test-key", fetcher as unknown as typeof fetch, 5000, undefined, { retryDelayMs: 1 });
+      const service = new FfmpegCensorAudioService(tools as any);
+
+      // First run: fragments 1 and 2 succeed, fragment 3 fails
+      await expect(service.synthesize(provider, ttsReq({
+        text: "This shit is fucking crazy.",
+        bleepStrongProfanity: true,
+        checkpointDir,
+      }))).rejects.toThrow();
+
+      expect(totalFishCalls).toBeGreaterThanOrEqual(3);
+      const callsBeforeRetry = totalFishCalls;
+
+      // Second run: retry
+      attempt = 2;
+      const result = await service.synthesize(provider, ttsReq({
+        text: "This shit is fucking crazy.",
+        bleepStrongProfanity: true,
+        checkpointDir,
+      }));
+
+      expect(result.assembled).toBe(true);
+      expect(totalFishCalls - callsBeforeRetry).toBe(1);
+      expect(result.reusedChunks).toBe(2);
+      expect(result.providerRequests).toBe(1);
+    });
+  });
+
+  // Test 26: Invalid Content Type Partial Usage
+  describe("Test 26: Invalid Content Type Partial Usage", () => {
+    it("preserves prior chunk usage when a chunk returns HTTP 200 with invalid content-type", async () => {
+      let callCount = 0;
+      const fetcher = vi.fn(async () => {
+        callCount++;
+        if (callCount <= 2) {
+          return new Response(new Uint8Array([1, 2, 3]), {
+            status: 200,
+            headers: { "Content-Type": "audio/mpeg", "x-request-id": `req-${callCount}` },
+          });
+        }
+        return new Response("<html>Bad Gateway / Maintenance</html>", {
+          status: 200,
+          headers: { "Content-Type": "text/html", "x-request-id": "req-3" },
+        });
+      });
+
+      const provider = new FishAudioProvider("test-key", fetcher as unknown as typeof fetch);
+      const records: ProviderUsageRecord[] = [];
+      const tracked = new TrackedTTSProvider(provider, {
+        record: async (record) => { records.push(record); },
+      });
+
+      const progressEvents: any[] = [];
+      let thrownError: any;
+      try {
+        await withUsageScope({ story: "demo", chapter: 1, stage: "tts" }, () =>
+          tracked.synthesize(ttsReq({
+            text: "Short text here",
+            maxCharsPerRequest: 5,
+            onChunkProgress: (progress) => progressEvents.push(progress),
+          }))
+        );
+      } catch (err) {
+        thrownError = err;
+      }
+
+      expect(thrownError).toBeDefined();
+      expect(thrownError.message).toMatch(/Fish s2-pro failed for chunk 3 of \d+/);
+      expect(thrownError.message).toMatch(/unexpected content type/);
+
+      expect(progressEvents.some((p) => p.currentChunk === 3 && p.status === "failed" && p.errorCategory === "provider")).toBe(true);
+
+      expect(thrownError.partialUsage).toBeDefined();
+      expect(thrownError.partialUsage.successfulRequests.providerRequests).toBe(2);
+      expect(thrownError.partialUsage.successfulRequests.requestIds).toEqual(["req-1", "req-2"]);
+      expect(thrownError.partialUsage.failedRequest.requestId).toBe("req-3");
+      expect(thrownError.partialUsage.failedRequest.errorCategory).toBe("provider");
+
+      expect(records).toHaveLength(2);
+      expect(records[0]?.success).toBe(true);
+      expect(records[0]?.providerRequests).toBe(2);
+      expect(records[0]?.requestId).toBe("req-1,req-2");
+      expect(records[1]?.success).toBe(false);
+      expect(records[1]?.requestId).toBe("req-3");
+      expect(records[1]?.errorCategory).toBe("provider");
+    });
+  });
+
+  // Test 27: Empty Response Partial Usage
+  describe("Test 27: Empty Response Partial Usage", () => {
+    it("preserves prior chunk usage when a chunk returns HTTP 200 with an empty body", async () => {
+      let callCount = 0;
+      const fetcher = vi.fn(async () => {
+        callCount++;
+        if (callCount === 1) {
+          return new Response(new Uint8Array([1, 2, 3]), {
+            status: 200,
+            headers: { "Content-Type": "audio/mpeg", "x-request-id": "req-1" },
+          });
+        }
+        return new Response(new Uint8Array(0), {
+          status: 200,
+          headers: { "Content-Type": "audio/mpeg", "x-request-id": "req-2" },
+        });
+      });
+
+      const provider = new FishAudioProvider("test-key", fetcher as unknown as typeof fetch);
+      const progressEvents: any[] = [];
+      let thrownError: any;
+      try {
+        await provider.synthesize(ttsReq({
+          text: "First. Second.",
+          maxCharsPerRequest: 7,
+          onChunkProgress: (p) => progressEvents.push(p),
+        }));
+      } catch (err) {
+        thrownError = err;
+      }
+
+      expect(thrownError).toBeDefined();
+      expect(thrownError.message).toMatch(/chunk 2 of 2/);
+      expect(thrownError.message).toMatch(/empty audio response/);
+      expect(thrownError.partialUsage.successfulRequests.providerRequests).toBe(1);
+      expect(thrownError.partialUsage.successfulRequests.requestIds).toEqual(["req-1"]);
+      expect(thrownError.partialUsage.failedRequest.requestId).toBe("req-2");
+      expect(thrownError.partialUsage.failedRequest.errorCategory).toBe("provider");
+      expect(progressEvents.some((p) => p.currentChunk === 2 && p.status === "failed")).toBe(true);
+    });
+  });
+
+  // Test 28: Transactional Censored Regeneration
+  describe("Test 28: Transactional Censored Regeneration", () => {
+    it("leaves canonical files untouched when staged censor reassembly fails", async () => {
+      const root = await mkdtemp(join(tmpdir(), "tts-regen-staged-fail-"));
+      const story = testStory();
+      const paths = storyPaths(root, story.slug, 1);
+      const oldSegmentAudio = new Uint8Array([0x11, 0x22, 0x33]);
+      const oldRawAudio = new Uint8Array([0xaa, 0xbb, 0xcc]);
+      await atomicWrite(join(paths.segments, "0001.mp3"), oldSegmentAudio);
+      await atomicWrite(paths.audioRaw, oldRawAudio);
+      const censorManifest = { version: 1, items: [{ kind: "speech" as const, speechIndex: 0 }] };
+      await atomicWriteJson(paths.censorManifest, censorManifest);
+      const report: TtsQualityReport = {
+        version: 1,
+        status: "needs_review",
+        retried: 0,
+        segments: [{ index: 0, expectedText: "Speech text", status: "needs_review", issues: [], attempts: [], finalAttempt: 0 }],
+      };
+      await persistChapterTtsQuality({ root, story, chapter: 1, report, maxRetries: 0, transcriber: "mock" });
+
+      const mockProvider: TTSProvider = {
+        name: "fish",
+        validateConfiguration: async () => {},
+        synthesize: async () => ({ audio: new Uint8Array([0x99]), segments: [new Uint8Array([0x99])] }),
+      };
+
+      const reassembleSpy = vi.spyOn(FfmpegCensorAudioService.prototype, "reassemble").mockRejectedValueOnce(new Error("FFmpeg reassembly failed"));
+      try {
+        await expect(regenerateStoredChapterTtsSegment({
+          root,
+          story,
+          chapter: 1,
+          segment: 0,
+          provider: mockProvider,
+          maxRetries: 0,
+        })).rejects.toThrow("FFmpeg reassembly failed");
+
+        expect(new Uint8Array(await readFile(join(paths.segments, "0001.mp3")))).toEqual(oldSegmentAudio);
+        expect(new Uint8Array(await readFile(paths.audioRaw))).toEqual(oldRawAudio);
+      } finally {
+        reassembleSpy.mockRestore();
+      }
+    });
+
+    it("rolls back canonical files and quality metadata if promotion fails in a censored chapter", async () => {
+      const root = await mkdtemp(join(tmpdir(), "tts-regen-promote-fail-"));
+      const story = testStory();
+      const paths = storyPaths(root, story.slug, 1);
+      const oldSegmentAudio = new Uint8Array([0x11, 0x22, 0x33]);
+      const oldRawAudio = new Uint8Array([0xaa, 0xbb, 0xcc]);
+      await atomicWrite(join(paths.segments, "0001.mp3"), oldSegmentAudio);
+      await atomicWrite(paths.audioRaw, oldRawAudio);
+      const censorManifest = { version: 1, items: [{ kind: "speech" as const, speechIndex: 0 }] };
+      await atomicWriteJson(paths.censorManifest, censorManifest);
+      const report: TtsQualityReport = {
+        version: 1,
+        status: "needs_review",
+        retried: 0,
+        segments: [{ index: 0, expectedText: "Speech text", status: "needs_review", issues: [], attempts: [], finalAttempt: 0 }],
+      };
+      await persistChapterTtsQuality({ root, story, chapter: 1, report, maxRetries: 0, transcriber: "mock" });
+
+      const mockProvider: TTSProvider = {
+        name: "fish",
+        validateConfiguration: async () => {},
+        synthesize: async () => ({ audio: new Uint8Array([0x99]), segments: [new Uint8Array([0x99])] }),
+      };
+
+      const reassembleSpy = vi.spyOn(FfmpegCensorAudioService.prototype, "reassemble").mockImplementation(async (_dir, _man, outPath) => {
+        await atomicWrite(outPath, new Uint8Array([0x99, 0x99]));
+      });
+
+      const writeSpy = vi.spyOn(atomicWriteModule, "atomicWriteJson").mockImplementation(async (targetPath, value) => {
+        if (String(targetPath).endsWith("tts-quality.json")) {
+          throw new Error("Disk full on quality write");
+        }
+        return atomicWriteModule.atomicWrite(targetPath, `${JSON.stringify(value, null, 2)}\n`);
+      });
+
+      try {
+        await expect(regenerateStoredChapterTtsSegment({
+          root,
+          story,
+          chapter: 1,
+          segment: 0,
+          provider: mockProvider,
+          maxRetries: 0,
+        })).rejects.toThrow(/Failed to persist quality metadata after regenerating segment; rolled back audio file/);
+
+        expect(new Uint8Array(await readFile(join(paths.segments, "0001.mp3")))).toEqual(oldSegmentAudio);
+        expect(new Uint8Array(await readFile(paths.audioRaw))).toEqual(oldRawAudio);
+      } finally {
+        reassembleSpy.mockRestore();
+        writeSpy.mockRestore();
+      }
+    });
+  });
+
+  // Test 29: FFmpeg Reassembly Cannot Corrupt Canonical Raw Audio
+  describe("Test 29: FFmpeg Reassembly Cannot Corrupt Canonical Raw Audio", () => {
+    it("ensures FFmpeg partial write during staged reassembly cannot corrupt canonical raw audio", async () => {
+      const root = await mkdtemp(join(tmpdir(), "tts-censor-corrupt-raw-"));
+      const story = testStory();
+      const paths = storyPaths(root, story.slug, 1);
+      const originalRawAudio = Buffer.from("OLD_RAW_AUDIO_CANONICAL");
+      await atomicWrite(join(paths.segments, "0001.mp3"), new Uint8Array([1, 2, 3]));
+      await atomicWrite(paths.audioRaw, originalRawAudio);
+      const censorManifest = { version: 1, items: [{ kind: "speech" as const, speechIndex: 0 }] };
+      await atomicWriteJson(paths.censorManifest, censorManifest);
+      const report: TtsQualityReport = {
+        version: 1,
+        status: "needs_review",
+        retried: 0,
+        segments: [{ index: 0, expectedText: "Speech", status: "needs_review", issues: [], attempts: [], finalAttempt: 0 }],
+      };
+      await persistChapterTtsQuality({ root, story, chapter: 1, report, maxRetries: 0, transcriber: "mock" });
+
+      const mockProvider: TTSProvider = {
+        name: "fish",
+        validateConfiguration: async () => {},
+        synthesize: async () => ({ audio: new Uint8Array([4, 5, 6]), segments: [new Uint8Array([4, 5, 6])] }),
+      };
+
+      const reassembleSpy = vi.spyOn(FfmpegCensorAudioService.prototype, "reassemble").mockImplementation(async (_dir, _man, outPath) => {
+        await atomicWrite(outPath, Buffer.from("CORRUPT_PARTIAL_DATA"));
+        throw new Error("FFmpeg killed with SIGSEGV");
+      });
+
+      try {
+        await expect(regenerateStoredChapterTtsSegment({
+          root,
+          story,
+          chapter: 1,
+          segment: 0,
+          provider: mockProvider,
+          maxRetries: 0,
+        })).rejects.toThrow("FFmpeg killed with SIGSEGV");
+
+        const onDiskRaw = await readFile(paths.audioRaw);
+        expect(onDiskRaw.toString()).toBe("OLD_RAW_AUDIO_CANONICAL");
+      } finally {
+        reassembleSpy.mockRestore();
+      }
+    });
+  });
+
+  // Test 30: Segment Set Consistency in Verify
+  describe("Test 30: Segment Set Consistency in Verify", () => {
+    it("detects missing files and surfaces extra segment files during verifyStoredChapterTts", async () => {
+      const root = await mkdtemp(join(tmpdir(), "tts-verify-consistency-"));
+      const story = testStory();
+      const paths = storyPaths(root, story.slug, 1);
+
+      await atomicWrite(join(paths.segments, "0001.mp3"), new Uint8Array([1]));
+      await atomicWrite(join(paths.segments, "0002.mp3"), new Uint8Array([2]));
+      await atomicWrite(join(paths.segments, "0004.mp3"), new Uint8Array([4]));
+
+      const report: TtsQualityReport = {
+        version: 1,
+        status: "unverified",
+        retried: 0,
+        segments: [
+          { index: 0, expectedText: "One", status: "unverified", issues: [], attempts: [], finalAttempt: 0 },
+          { index: 1, expectedText: "Two", status: "unverified", issues: [], attempts: [], finalAttempt: 0 },
+          { index: 2, expectedText: "Three", status: "unverified", issues: [], attempts: [], finalAttempt: 0 },
+        ],
+      };
+      await persistChapterTtsQuality({ root, story, chapter: 1, report, maxRetries: 0, transcriber: "mock" });
+
+      const warnSpy = vi.spyOn(logger, "warn");
+      const mockTranscriber: SpeechTranscriber = {
+        name: "mock",
+        validateConfiguration: async () => {},
+        transcribe: async () => [{ text: "One", start: 0, end: 1 }],
+      };
+
+      try {
+        const verified = await verifyStoredChapterTts({
+          root,
+          story,
+          chapter: 1,
+          transcriber: mockTranscriber,
+        });
+
+        expect(verified.segments[2]?.status).toBe("unverified");
+        expect(verified.segments[2]?.issues[0]?.detail).toBe("Segment audio file is missing");
+
+        expect(warnSpy).toHaveBeenCalledWith(expect.objectContaining({
+          event: "tts.verify.extra_segments_detected",
+          extraFiles: ["0004.mp3"],
+          count: 1,
+        }));
+      } finally {
+        warnSpy.mockRestore();
+      }
+    });
+
+    it("verifies cleanly on exact match and reports empty directory gracefully", async () => {
+      const root = await mkdtemp(join(tmpdir(), "tts-verify-exact-"));
+      const story = testStory();
+      const paths = storyPaths(root, story.slug, 1);
+
+      await atomicWrite(join(paths.segments, "0001.mp3"), new Uint8Array([1]));
+      const report: TtsQualityReport = {
+        version: 1,
+        status: "unverified",
+        retried: 0,
+        segments: [{ index: 0, expectedText: "Exact match speech", status: "unverified", issues: [], attempts: [], finalAttempt: 0 }],
+      };
+      await persistChapterTtsQuality({ root, story, chapter: 1, report, maxRetries: 0, transcriber: "mock" });
+
+      const warnSpy = vi.spyOn(logger, "warn");
+      const mockTranscriber: SpeechTranscriber = {
+        name: "mock",
+        validateConfiguration: async () => {},
+        transcribe: async () => [{ text: "Exact match speech", start: 0, end: 1 }],
+      };
+
+      try {
+        const verified = await verifyStoredChapterTts({
+          root,
+          story,
+          chapter: 1,
+          transcriber: mockTranscriber,
+        });
+
+        expect(verified.segments[0]?.status).toBe("verified");
+        expect(warnSpy).not.toHaveBeenCalledWith(expect.objectContaining({
+          event: "tts.verify.extra_segments_detected",
+        }));
+      } finally {
+        warnSpy.mockRestore();
+      }
+    });
+  });
+
+  // Test 31: Request ID Semantics
+  describe("Test 31: Request ID Semantics", () => {
+    it("separates new request IDs from reused checkpoint request IDs", async () => {
+      const root = await mkdtemp(join(tmpdir(), "tts-request-id-semantics-"));
+      const checkpointDir = join(root, "tts-working");
+
+      let pass1Calls = 0;
+      const pass1Fetcher = vi.fn(async () => {
+        pass1Calls++;
+        if (pass1Calls >= 3) {
+          return new Response("Simulated failure for chunk 3", { status: 500 });
+        }
+        return new Response(new Uint8Array([pass1Calls]), {
+          status: 200,
+          headers: { "Content-Type": "audio/mpeg", "x-request-id": `old-req-${pass1Calls}` },
+        });
+      });
+      const pass1Provider = new FishAudioProvider("test-key", pass1Fetcher as unknown as typeof fetch, 5000, undefined, { retryDelayMs: 0 });
+
+      const text = `${"First paragraph. ".repeat(15)}\n\n${"Second paragraph. ".repeat(15)}\n\n${"Third paragraph. ".repeat(15)}`;
+      await expect(pass1Provider.synthesize(ttsReq({
+        text,
+        checkpointDir,
+        maxCharsPerRequest: 400,
+      }))).rejects.toThrow();
+
+      const pass2Fetcher = vi.fn(async () =>
+        new Response(new Uint8Array([3]), {
+          status: 200,
+          headers: { "Content-Type": "audio/mpeg", "x-request-id": "new-req-3" },
+        })
+      );
+      const pass2Provider = new FishAudioProvider("test-key", pass2Fetcher as unknown as typeof fetch);
+
+      const result = await pass2Provider.synthesize(ttsReq({
+        text,
+        checkpointDir,
+        maxCharsPerRequest: 400,
+      }));
+
+      expect(result.providerRequests).toBe(1);
+      expect(result.requestIds).toEqual(["new-req-3"]);
+      expect(result.reusedRequestIds).toEqual(["old-req-1", "old-req-2"]);
+      expect(result.reusedChunks).toBe(2);
+    });
+  });
+
+  // Test 32: Fully Resumed Usage
+  describe("Test 32: Fully Resumed Usage", () => {
+    it("reports 0 new provider requests and preserves reusedChunks on fully resumed chapter", async () => {
+      const root = await mkdtemp(join(tmpdir(), "tts-fully-resumed-"));
+      const checkpointDir = join(root, "tts-working");
+
+      let pass1Calls = 0;
+      const pass1Fetcher = vi.fn(async () => {
+        pass1Calls++;
+        return new Response(new Uint8Array([pass1Calls]), {
+          status: 200,
+          headers: { "Content-Type": "audio/mpeg", "x-request-id": `req-${pass1Calls}` },
+        });
+      });
+      const pass1Provider = new FishAudioProvider("test-key", pass1Fetcher as unknown as typeof fetch);
+      const text = `${"First paragraph. ".repeat(15)}\n\n${"Second paragraph. ".repeat(15)}`;
+
+      const pass1Result = await pass1Provider.synthesize(ttsReq({
+        text,
+        checkpointDir,
+        maxCharsPerRequest: 400,
+      }));
+      expect(pass1Result.providerRequests).toBe(2);
+
+      const pass2Fetcher = vi.fn(async () => {
+        throw new Error("Should not be called");
+      });
+      const pass2Provider = new FishAudioProvider("test-key", pass2Fetcher as unknown as typeof fetch);
+
+      const result = await pass2Provider.synthesize(ttsReq({
+        text,
+        checkpointDir,
+        maxCharsPerRequest: 400,
+      }));
+
+      expect(pass2Fetcher).not.toHaveBeenCalled();
+      expect(result.providerRequests).toBe(0);
+      expect(result.requestIds).toBeUndefined();
+      expect(result.reusedChunks).toBe(2);
+      expect(result.segments).toHaveLength(2);
+    });
+  });
+
+  // Test 33: Checkpoint Metadata Privacy & Legacy Compatibility
+  describe("Test 33: Checkpoint Metadata Privacy & Legacy Compatibility", () => {
+    it("does not store raw narration text in checkpoint metadata and preserves legacy checkpoint readability", async () => {
+      const root = await mkdtemp(join(tmpdir(), "tts-meta-privacy-"));
+      const checkpointDir = join(root, "tts-working");
+      const fetcher = vi.fn(async () =>
+        new Response(new Uint8Array([1, 2, 3]), {
+          status: 200,
+          headers: { "Content-Type": "audio/mpeg", "x-request-id": "req-1" },
+        })
+      );
+      const provider = new FishAudioProvider("test-key", fetcher as unknown as typeof fetch);
+
+      await provider.synthesize(ttsReq({
+        text: "Private sensitive narration text.",
+        checkpointDir,
+      }));
+
+      const metaPath = join(checkpointDir, "0001.json");
+      const meta = JSON.parse(await readFile(metaPath, "utf8"));
+
+      expect(meta.text).toBeUndefined();
+      expect("text" in meta).toBe(false);
+      expect(meta.textFingerprint).toBeDefined();
+      expect(meta.fingerprint).toBeDefined();
+      expect(meta.characters).toBeDefined();
+      expect(meta.utf8Bytes).toBeDefined();
+
+      meta.text = "Private sensitive narration text.";
+      await atomicWriteJson(metaPath, meta);
+
+      fetcher.mockClear();
+      const legacyResult = await provider.synthesize(ttsReq({
+        text: "Private sensitive narration text.",
+        checkpointDir,
+      }));
+
+      expect(fetcher).not.toHaveBeenCalled();
+      expect(legacyResult.providerRequests).toBe(0);
+      expect(legacyResult.reusedChunks).toBe(1);
+      expect(new Uint8Array(legacyResult.segments[0]!)).toEqual(new Uint8Array([1, 2, 3]));
+    });
+  });
+
+  // Test 15: Successful TTS Promotion Removes Orphan Segment Files
+  describe("Test 15: Successful TTS Promotion Removes Orphan Segment Files", () => {
+    it("removes orphan segment files from disk upon successful TTS stage completion", async () => {
+      const root = await mkdtemp(join(tmpdir(), "tts-orphan-removal-"));
+      const story = testStory();
+      const paths = storyPaths(root, story.slug, 1);
+      await atomicWrite(join(paths.segments, "0099.mp3"), new Uint8Array([0xff]));
+
+      const llm = new MockLLM("gemini", ["English translation", "English narration"]);
+      const tts = new MockTTS();
+      const router = new LLMRouter(new Map([["gemini", llm], ["openai", llm], ["kimi", llm]]));
+      const pipeline = new ChapterPipeline(router, tts);
+      const input = join(root, "chapter.txt");
+      await writeFile(input, "第一章\n\n测试内容", "utf8");
+
+      await pipeline.run({ root, story, chapter: 1, inputPath: input, stopAfter: "tts" });
+
+      const files = await readdir(paths.segments);
+      expect(files).not.toContain("0099.mp3");
     });
   });
 });

@@ -19,7 +19,8 @@ export type FishChunkCheckpointMeta = {
   version: 1;
   chunk: number;
   totalChunks: number;
-  text: string;
+  text?: string;
+  textFingerprint?: string;
   fingerprint: string;
   createdAt: string;
   requestId?: string;
@@ -67,7 +68,10 @@ export class FishAudioProvider implements TTSProvider {
     const secondaryReferenceId = normalizeFishReferenceId(request.secondaryReferenceId);
     const multiSpeaker = request.voiceMode === "narrator-dialogue" && Boolean(referenceId) && Boolean(secondaryReferenceId) && isFishS2Model(request.model);
     const directedSingleVoice = request.voiceMode === "same-voice-dialogue" && request.deliveryIntensity !== "none" && isFishS2Model(request.model);
-    const segments: Uint8Array[] = []; const requestIds: string[] = [];
+    const segments: Uint8Array[] = [];
+    const requestIds: string[] = [];
+    const reusedRequestIds: string[] = [];
+    let reusedChunks = 0;
     const chunks = request.exactChunk
       ? [request.text]
       : (() => {
@@ -120,7 +124,8 @@ export class FishAudioProvider implements TTSProvider {
               logger.info({ event: "tts.fish.chunk_reused", chunk: currentChunk, totalChunks });
               safeProgress(request.onChunkProgress, { currentChunk, totalChunks, status: "reused" });
               segments.push(existingAudio);
-              if (existingMeta.requestId) requestIds.push(existingMeta.requestId);
+              reusedChunks++;
+              if (existingMeta.requestId) reusedRequestIds.push(existingMeta.requestId);
               continue;
             }
           } catch {
@@ -168,29 +173,21 @@ export class FishAudioProvider implements TTSProvider {
             await new Promise((r) => setTimeout(r, delay));
             continue;
           }
-          safeProgress(request.onChunkProgress, { currentChunk, totalChunks, status: "failed", errorCategory: "transient" });
-          logger.warn({ event: "tts.fish.chunk_failure", chunk: currentChunk, totalChunks, model: request.model, error: fetchError instanceof Error ? fetchError.message : String(fetchError) });
-          const cause = Object.assign(new Error(fetchError instanceof Error ? fetchError.message : String(fetchError)), {
-            chunk: currentChunk, totalChunks, chars: [...text].length, model: request.model, errorCategory: "transient",
+          throw this.chunkFailure({
+            message: "Network request failed",
+            currentChunk,
+            totalChunks,
+            text,
+            model: request.model,
+            errorCategory: "transient",
+            causeError: fetchError,
+            newBilledRequests,
+            newBilledCharacters,
+            newBilledBytes,
+            requestIds,
+            newAudioBytes,
+            onChunkProgress: request.onChunkProgress,
           });
-          const err = new ProviderError(`Fish ${request.model} failed for chunk ${currentChunk} of ${totalChunks} (${[...text].length} chars): Network request failed`, { cause });
-          Object.assign(err, {
-            partialUsage: {
-              successfulRequests: {
-                providerRequests: newBilledRequests,
-                generatedCharacters: newBilledCharacters,
-                generatedUtf8Bytes: newBilledBytes,
-                requestIds: [...requestIds],
-                outputBytes: newAudioBytes,
-              },
-              failedRequest: {
-                inputCharacters: [...text].length,
-                inputUtf8Bytes: Buffer.byteLength(text),
-                errorCategory: "transient" as const,
-              },
-            },
-          });
-          throw err;
         }
 
         const resp = response!;
@@ -206,48 +203,77 @@ export class FishAudioProvider implements TTSProvider {
             continue;
           }
           const errorCategory = status === 429 ? "rate_limit" : status >= 500 ? "transient" : "provider";
-          safeProgress(request.onChunkProgress, { currentChunk, totalChunks, status: "failed", errorCategory });
-          logger.warn({ event: "tts.fish.chunk_failure", chunk: currentChunk, totalChunks, model: request.model, status, requestId });
-          const cause = Object.assign(new Error(detail), {
-            status, headers: resp.headers, requestId, chunk: currentChunk, totalChunks, chars: [...text].length, model: request.model, errorCategory,
+          throw this.chunkFailure({
+            message: `HTTP ${status}${detail ? ` - ${detail}` : ""}`,
+            currentChunk,
+            totalChunks,
+            text,
+            model: request.model,
+            status,
+            headers: resp.headers,
+            requestId,
+            errorCategory,
+            causeError: new Error(detail),
+            newBilledRequests,
+            newBilledCharacters,
+            newBilledBytes,
+            requestIds,
+            newAudioBytes,
+            onChunkProgress: request.onChunkProgress,
           });
-          const err = new ProviderError(`Fish ${request.model} failed for chunk ${currentChunk} of ${totalChunks} (${[...text].length} chars): HTTP ${status}${detail ? ` - ${detail}` : ""}`, { cause });
-          Object.assign(err, {
-            partialUsage: {
-              successfulRequests: {
-                providerRequests: newBilledRequests,
-                generatedCharacters: newBilledCharacters,
-                generatedUtf8Bytes: newBilledBytes,
-                requestIds: [...requestIds],
-                outputBytes: newAudioBytes,
-              },
-              failedRequest: {
-                inputCharacters: [...text].length,
-                inputUtf8Bytes: Buffer.byteLength(text),
-                requestId,
-                errorCategory,
-              },
-            },
-          });
-          throw err;
         }
 
-        if (requestId) requestIds.push(requestId);
         const contentType = resp.headers.get("content-type")?.toLowerCase();
         if (contentType && !contentType.startsWith("audio/") && contentType !== "application/octet-stream") {
-          throw new ProviderError(`Fish Audio returned unexpected content type: ${contentType}`);
+          throw this.chunkFailure({
+            message: `Fish Audio returned unexpected content type: ${contentType}`,
+            currentChunk,
+            totalChunks,
+            text,
+            model: request.model,
+            status: resp.status,
+            headers: resp.headers,
+            requestId,
+            errorCategory: "provider",
+            causeError: new Error(`Fish Audio returned unexpected content type: ${contentType}`),
+            newBilledRequests,
+            newBilledCharacters,
+            newBilledBytes,
+            requestIds,
+            newAudioBytes,
+            onChunkProgress: request.onChunkProgress,
+          });
         }
         const audio = new Uint8Array(await resp.arrayBuffer());
         if (!audio.length) {
-          throw new ProviderError("Fish Audio returned an empty audio response");
+          throw this.chunkFailure({
+            message: "Fish Audio returned an empty audio response",
+            currentChunk,
+            totalChunks,
+            text,
+            model: request.model,
+            status: resp.status,
+            headers: resp.headers,
+            requestId,
+            errorCategory: "provider",
+            causeError: new Error("Fish Audio returned an empty audio response"),
+            newBilledRequests,
+            newBilledCharacters,
+            newBilledBytes,
+            requestIds,
+            newAudioBytes,
+            onChunkProgress: request.onChunkProgress,
+          });
         }
+
+        if (requestId) requestIds.push(requestId);
         if (metaPath && audioPath) {
           await atomicWrite(audioPath, audio);
           await atomicWriteJson(metaPath, {
             version: 1,
             chunk: currentChunk,
             totalChunks,
-            text,
+            textFingerprint: fingerprint(text),
             fingerprint: chunkFp,
             createdAt: new Date().toISOString(),
             requestId,
@@ -270,12 +296,86 @@ export class FishAudioProvider implements TTSProvider {
     return {
       audio,
       segments,
-      requestIds,
+      requestIds: requestIds.length ? requestIds : undefined,
+      reusedRequestIds: reusedRequestIds.length ? reusedRequestIds : undefined,
       providerRequests: newBilledRequests,
+      reusedChunks: reusedChunks > 0 ? reusedChunks : undefined,
       generatedCharacters: newBilledCharacters,
       generatedUtf8Bytes: newBilledBytes,
       segmentTexts: chunks,
     };
+  }
+
+  private chunkFailure(options: {
+    message: string;
+    currentChunk: number;
+    totalChunks: number;
+    text: string;
+    model: string;
+    errorCategory: "transient" | "rate_limit" | "provider";
+    causeError?: unknown;
+    status?: number;
+    headers?: Headers;
+    requestId?: string;
+    newBilledRequests: number;
+    newBilledCharacters: number;
+    newBilledBytes: number;
+    requestIds: string[];
+    newAudioBytes: number;
+    onChunkProgress?: TTSRequest["onChunkProgress"];
+  }): ProviderError {
+    safeProgress(options.onChunkProgress, {
+      currentChunk: options.currentChunk,
+      totalChunks: options.totalChunks,
+      status: "failed",
+      errorCategory: options.errorCategory,
+    });
+    logger.warn({
+      event: "tts.fish.chunk_failure",
+      chunk: options.currentChunk,
+      totalChunks: options.totalChunks,
+      model: options.model,
+      status: options.status,
+      requestId: options.requestId,
+      error: options.causeError instanceof Error ? options.causeError.message : (options.causeError ? String(options.causeError) : options.message),
+    });
+    const cause = Object.assign(
+      options.causeError instanceof Error
+        ? options.causeError
+        : new Error(options.message),
+      {
+        status: options.status,
+        headers: options.headers,
+        requestId: options.requestId,
+        chunk: options.currentChunk,
+        totalChunks: options.totalChunks,
+        chars: [...options.text].length,
+        model: options.model,
+        errorCategory: options.errorCategory,
+      },
+    );
+    const err = new ProviderError(
+      `Fish ${options.model} failed for chunk ${options.currentChunk} of ${options.totalChunks} (${[...options.text].length} chars): ${options.message}`,
+      { cause },
+    );
+    Object.assign(err, {
+      partialUsage: {
+        successfulRequests: {
+          providerRequests: options.newBilledRequests,
+          generatedCharacters: options.newBilledCharacters,
+          generatedUtf8Bytes: options.newBilledBytes,
+          requestIds: [...options.requestIds],
+          outputBytes: options.newAudioBytes,
+        },
+        failedRequest: {
+          inputCharacters: [...options.text].length,
+          inputUtf8Bytes: Buffer.byteLength(options.text),
+          requestId: options.requestId,
+          errorCategory: options.errorCategory,
+        },
+      },
+    });
+    return err;
   }
 }
 

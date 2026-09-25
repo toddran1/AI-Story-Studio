@@ -486,10 +486,14 @@ export class ChapterPipeline {
       }
       await rm(paths.ttsWorking, { recursive: true, force: true });
       chapter.stages.tts.usage = {
-        requestId: result.requestIds?.join(","), requests: result.providerRequests ?? (result.censor ? Math.max(0, result.segments.length - result.censor.segments) : result.segments.length),
+        requestId: result.requestIds?.join(",") || undefined,
+        requests: result.providerRequests ?? (result.censor ? Math.max(0, result.segments.length - result.censor.segments) : result.segments.length),
         chunks: result.segments.length,
-        characters: result.generatedCharacters ?? [...speech.normalized.text].length, bytes: result.audio.byteLength,
-        censoredSegments: result.censor?.segments, censorDurationSeconds: result.censor?.durationSeconds,
+        reusedChunks: result.reusedChunks ?? (result.providerRequests !== undefined ? Math.max(0, result.segments.length - result.providerRequests) : undefined),
+        characters: result.generatedCharacters ?? [...speech.normalized.text].length,
+        bytes: result.audio.byteLength,
+        censoredSegments: result.censor?.segments,
+        censorDurationSeconds: result.censor?.durationSeconds,
       };
       if (result.quality) {
         const summary = summarizeQuality(result.quality.segments);

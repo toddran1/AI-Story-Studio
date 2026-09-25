@@ -96,3 +96,9 @@ function safeText(value: string) {
     .replace(/(postgres(?:ql)?:\/\/[^:\s/@]+:)[^@\s]+@/gi, "$1[redacted]@")
     .slice(0, 4_000);
 }
+
+export function safeErrorMessage(error: unknown, max = 300): string {
+  const raw = error instanceof Error ? error.message : String(error ?? "");
+  const oneLine = raw.replace(/[\r\n\t]+/g, " ").trim();
+  return safeText(oneLine).slice(0, max);
+}

@@ -86,7 +86,13 @@ export function buildCensorConcatArgs(manifest: string, output: string, request:
 export interface CensorAudioService {
   readonly version: string;
   synthesize(provider: TTSProvider, request: TTSRequest): Promise<CensorAssembly>;
-  reassemble?(segmentsDir: string, manifest: CensorManifest, output: string, request: Pick<TTSRequest, "sampleRate" | "bitrate">): Promise<void>;
+  reassemble?(
+    segmentsDir: string,
+    manifest: CensorManifest,
+    output: string,
+    request: Pick<TTSRequest, "sampleRate" | "bitrate">,
+    segmentOverrides?: Map<number, string>,
+  ): Promise<void>;
 }
 
 export class FfmpegCensorAudioService implements CensorAudioService {
@@ -106,17 +112,31 @@ export class FfmpegCensorAudioService implements CensorAudioService {
     const speechSegmentTexts: string[] = [];
     const censorManifest: CensorManifest = { version: 1, items: [] };
     const requestIds: string[] = [];
+    const reusedRequestIds: string[] = [];
     let providerRequests = 0;
+    let reusedChunks = 0;
     let generatedCharacters = 0;
     let generatedUtf8Bytes = 0;
+    let speechOrdinal = 0;
     const qualitySegments: import("./quality-guard.js").TtsSegmentQuality[] = [];
     try {
       for (const [index, segment] of plan.entries()) {
         if (segment.kind === "speech") {
           const speechText = speechForSynthesis(plan, index);
-          const result = await provider.synthesize({ ...request, text: speechText, bleepStrongProfanity: false });
+          const fragmentCheckpointDir = request.checkpointDir
+            ? join(request.checkpointDir, `censor-${String(speechOrdinal + 1).padStart(4, "0")}`)
+            : undefined;
+          speechOrdinal++;
+          const result = await provider.synthesize({
+            ...request,
+            text: speechText,
+            bleepStrongProfanity: false,
+            checkpointDir: fragmentCheckpointDir,
+          });
           requestIds.push(...(result.requestIds ?? []));
+          reusedRequestIds.push(...(result.reusedRequestIds ?? []));
           providerRequests += result.providerRequests ?? result.segments.length;
+          reusedChunks += result.reusedChunks ?? 0;
           generatedCharacters += result.generatedCharacters ?? [...speechText].length;
           generatedUtf8Bytes += result.generatedUtf8Bytes ?? Buffer.byteLength(speechText);
           for (const q of result.quality?.segments ?? []) qualitySegments.push({ ...q, index: qualitySegments.length });
@@ -157,7 +177,9 @@ export class FfmpegCensorAudioService implements CensorAudioService {
         segments: speechSegments,
         segmentTexts: speechSegmentTexts,
         requestIds: requestIds.length ? requestIds : undefined,
+        reusedRequestIds: reusedRequestIds.length ? reusedRequestIds : undefined,
         providerRequests,
+        reusedChunks: reusedChunks > 0 ? reusedChunks : undefined,
         generatedCharacters,
         generatedUtf8Bytes,
         assembled: true,
@@ -170,14 +192,20 @@ export class FfmpegCensorAudioService implements CensorAudioService {
     }
   }
 
-  async reassemble(segmentsDir: string, manifest: CensorManifest, output: string, request: Pick<TTSRequest, "sampleRate" | "bitrate">): Promise<void> {
+  async reassemble(
+    segmentsDir: string,
+    manifest: CensorManifest,
+    output: string,
+    request: Pick<TTSRequest, "sampleRate" | "bitrate">,
+    segmentOverrides?: Map<number, string>,
+  ): Promise<void> {
     await this.tools.validateAvailability();
     const directory = await mkdtemp(join(tmpdir(), "ai-story-censor-reassemble-"));
     const files: string[] = [];
     try {
       for (const [index, item] of manifest.items.entries()) {
         if (item.kind === "speech") {
-          const path = join(segmentsDir, `${String(item.speechIndex + 1).padStart(4, "0")}.mp3`);
+          const path = segmentOverrides?.get(item.speechIndex) ?? join(segmentsDir, `${String(item.speechIndex + 1).padStart(4, "0")}.mp3`);
           files.push(path);
         } else {
           const path = join(directory, `tone-${index}.mp3`);
