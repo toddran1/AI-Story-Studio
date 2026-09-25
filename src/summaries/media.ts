@@ -69,8 +69,17 @@ export class SummaryMediaService {
   constructor(private readonly root: string, private readonly llms: LLMRouter,
     private readonly ttsRouter: TTSProviderRouter, private readonly censor: CensorAudioService,
     private readonly mastering: AudioMasteringProcessor) { this.summaries = new SummaryService(root, llms); }
+  constructor(
+    private readonly root: string,
+    private readonly llms: LLMRouter,
+    private readonly ttsRouter: TTSProviderRouter,
+    private readonly censor: CensorAudioService,
     private readonly mastering: AudioMasteringProcessor,
     private readonly speechTranscriber?: SpeechTranscriber | (() => SpeechTranscriber | undefined)) { this.summaries = new SummaryService(root, llms); }
+    private readonly speechTranscriber?: SpeechTranscriber | (() => SpeechTranscriber | undefined)
+  ) {
+    this.summaries = new SummaryService(root, llms);
+  }
 
   private async inputs(slug: string, summary: StorySummary) {
     const story = await loadStory(storyPaths(this.root, slug, 1).storyConfig);
@@ -306,6 +315,22 @@ export class SummaryMediaService {
           manuallyEdited: false, reviewRequired, provider: config.provider, model: config.model, voice: input.referenceId,
           generatedAt: new Date().toISOString(), bytes: result.audio.length, segmentFingerprints, censoredSegments: result.censor?.segments, censorDurationSeconds: result.censor?.durationSeconds,
           quality: result.quality };
+        summary.tts = {
+          status: "current",
+          inputFingerprint: input.ttsFingerprint,
+          outputFingerprint: (await fileFingerprint(paths.raw))!,
+          manuallyEdited: false,
+          reviewRequired,
+          provider: config.provider,
+          model: config.model,
+          voice: input.referenceId,
+          generatedAt: new Date().toISOString(),
+          bytes: result.audio.length,
+          segmentFingerprints,
+          censoredSegments: result.censor?.segments,
+          censorDurationSeconds: result.censor?.durationSeconds,
+          quality: result.quality,
+        };
         if (summary.audio) summary.audio.status = "stale";
         await this.save(slug, summary);
       }
