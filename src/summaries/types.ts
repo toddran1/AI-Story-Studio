@@ -3,7 +3,7 @@ import { productionSceneManifestSchema } from "../scenes/types.js";
 import { alignmentArtifactSchema } from "../alignment/types.js";
 import { scenePacingSchema } from "../scenes/pacing.js";
 import { stageModelConfigSchema } from "../domain/provider.js";
-import { ttsQualityReportSchema } from "../tts/quality-guard.js";
+import { ttsQualityReportSchema } from "../tts/quality-schema.js";
 
 export const summaryTypeSchema = z.enum(["brief", "detailed", "mini-chapter", "arc", "character-focused", "custom"]);
 export const summarySourceModeSchema = z.enum(["original", "translated", "chapter-summaries"]);
