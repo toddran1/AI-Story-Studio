@@ -35,7 +35,7 @@ describe("censor audio", () => {
     const service = new FfmpegCensorAudioService(tools as any); const result = await service.synthesize(fakeProvider(calls), request);
     expect(calls.map((value) => value.text)).toEqual(["This,", "is,", "crazy."]);
     expect(calls.every((value) => value.bleepStrongProfanity === false && !/bleep/i.test(value.text) && !value.text.includes(CENSOR_BLEEP_MARKER))).toBe(true);
-    expect(result.assembled).toBe(true); expect(result.censor).toMatchObject({ segments: 2 }); expect(result.segments).toHaveLength(5);
+    expect(result.assembled).toBe(true); expect(result.censor).toMatchObject({ segments: 2 }); expect(result.segments).toHaveLength(3); expect(result.censorManifest?.items).toHaveLength(5);
     expect(ffmpegArgs.filter((args) => args.includes("lavfi"))).toHaveLength(2); expect(ffmpegArgs.at(-1)).toContain("concat");
     const toneArgs = buildCensorToneArgs("tone.mp3", request, .35).join(" ");
     expect(toneArgs).toContain("sine=frequency=1000"); expect(toneArgs).toContain("afade=t=in"); expect(toneArgs).toContain("afade=t=out");

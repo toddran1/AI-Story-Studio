@@ -37,7 +37,7 @@ export function isTransientError(error: unknown): boolean {
     const code = String(item?.code ?? "").toUpperCase();
     if (["ECONNRESET", "ECONNREFUSED", "ETIMEDOUT", "ENETUNREACH", "EAI_AGAIN", "UND_ERR_CONNECT_TIMEOUT"].includes(code)) return true;
     const message = String(item?.message ?? item ?? "").toLowerCase();
-    if (/\b(408|429|5\d\d)\b|rate.?limit|timed?\s*out|temporar|network|connection reset|unavailable|overloaded/.test(message)) return true;
+    if (/\b(408|429|5\d\d)\b|rate.?limit|timed?\s*out|temporar|network|connection reset|unavailable|overloaded|fetch failed/.test(message)) return true;
     if (/api.?key|unauthori[sz]ed|forbidden|unsupported model|invalid configuration|schema|json/.test(message)) return false;
   }
   return false;

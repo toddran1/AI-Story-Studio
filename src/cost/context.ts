@@ -42,9 +42,63 @@ export class TrackedTTSProvider implements TTSProvider {
   constructor(private readonly inner: TTSProvider, private readonly sink: UsageSink) { this.name = inner.name; this.inputNormalizationVersion = inner.inputNormalizationVersion; this.pronunciationCapabilities = inner.pronunciationCapabilities; this.vocalizationCapabilities = inner.vocalizationCapabilities; }
   vocalizationStrategy(model?: string) { return this.inner.vocalizationStrategy?.(model) ?? { kind: "safe_normalize" as const }; }
   resolveReferenceId(id?: string) { return this.inner.resolveReferenceId?.(id); } validateConfiguration() { return this.inner.validateConfiguration(); }
-  async synthesize(request: TTSRequest) { const scope = next("tts", request.model); if (!scope) return this.inner.synthesize(request); const attemptedAt = new Date().toISOString();
-    try { const result = await this.inner.synthesize(request); await persist(this.sink, { ...base(scope, this.name, request.model, "tts", attemptedAt, true, result.requestIds?.join(",")), inputCharacters: result.generatedCharacters ?? [...request.text].length, inputUtf8Bytes: result.generatedUtf8Bytes ?? Buffer.byteLength(request.text), outputBytes: result.audio.byteLength, providerRequests: result.providerRequests ?? result.segments.length }); return result; }
-    catch (error) { await persist(this.sink, { ...base(scope, this.name, request.model, "tts", attemptedAt, false), inputCharacters: [...request.text].length, inputUtf8Bytes: Buffer.byteLength(request.text), errorCategory: category(error) }); throw error; }
+  async synthesize(request: TTSRequest) {
+    const scope = next("tts", request.model);
+    if (!scope) return this.inner.synthesize(request);
+    const attemptedAt = new Date().toISOString();
+    try {
+      const result = await this.inner.synthesize(request);
+      await persist(this.sink, {
+        ...base(scope, this.name, request.model, "tts", attemptedAt, true, result.requestIds?.join(",")),
+        inputCharacters: result.generatedCharacters ?? [...request.text].length,
+        inputUtf8Bytes: result.generatedUtf8Bytes ?? Buffer.byteLength(request.text),
+        outputBytes: result.audio.byteLength,
+        providerRequests: result.providerRequests ?? result.segments.length,
+      });
+      return result;
+    } catch (error) {
+      const partialUsage = (error as {
+        partialUsage?: {
+          successfulRequests?: {
+            providerRequests: number;
+            generatedCharacters: number;
+            generatedUtf8Bytes: number;
+            requestIds: string[];
+            outputBytes: number;
+          };
+          failedRequest?: {
+            inputCharacters: number;
+            inputUtf8Bytes: number;
+            requestId?: string;
+            errorCategory?: ProviderUsageRecord["errorCategory"];
+          };
+        };
+      }).partialUsage;
+      if (partialUsage?.successfulRequests && partialUsage.successfulRequests.providerRequests > 0) {
+        await persist(this.sink, {
+          ...base(scope, this.name, request.model, "tts", attemptedAt, true, partialUsage.successfulRequests.requestIds.join(",") || undefined),
+          inputCharacters: partialUsage.successfulRequests.generatedCharacters,
+          inputUtf8Bytes: partialUsage.successfulRequests.generatedUtf8Bytes,
+          outputBytes: partialUsage.successfulRequests.outputBytes,
+          providerRequests: partialUsage.successfulRequests.providerRequests,
+        });
+        const failScope = next("tts", request.model) ?? scope;
+        await persist(this.sink, {
+          ...base(failScope, this.name, request.model, "tts", attemptedAt, false, partialUsage.failedRequest?.requestId),
+          inputCharacters: partialUsage.failedRequest?.inputCharacters ?? [...request.text].length,
+          inputUtf8Bytes: partialUsage.failedRequest?.inputUtf8Bytes ?? Buffer.byteLength(request.text),
+          errorCategory: partialUsage.failedRequest?.errorCategory ?? category(error),
+        });
+      } else {
+        await persist(this.sink, {
+          ...base(scope, this.name, request.model, "tts", attemptedAt, false),
+          inputCharacters: [...request.text].length,
+          inputUtf8Bytes: Buffer.byteLength(request.text),
+          errorCategory: category(error),
+        });
+      }
+      throw error;
+    }
   }
 }
 

@@ -25,7 +25,9 @@ export async function masterStoredChapter(options: { root: string; story: Story;
   }
   const warnings: string[] = [];
   if (stageFreshness(chapter, "tts") === "stale") warnings.push(stalePrerequisiteWarning("tts"));
-  const inputs = await masteringInputs(paths.segments, paths.audioRaw); const fp = audioMasteringFingerprint(chapter.stages.tts.outputFingerprint, options.story.audio, options.processor.version, await inputFingerprints(inputs));
+  const isCensored = (await exists(paths.censorManifest)) && (await exists(paths.audioRaw));
+  const inputs = isCensored ? [paths.audioRaw] : await masteringInputs(paths.segments, paths.audioRaw);
+  const fp = audioMasteringFingerprint(chapter.stages.tts.outputFingerprint, options.story.audio, options.processor.version, await inputFingerprints(inputs));
   const currentOutput = await fileFingerprint(paths.audio);
   if (!options.force && chapter.stages.audioMastering.status === "complete" && chapter.stages.audioMastering.fingerprint === fp && currentOutput
     && chapter.stages.audioMastering.outputFingerprint === currentOutput && chapter.audio) {

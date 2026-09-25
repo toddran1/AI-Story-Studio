@@ -1,4 +1,4 @@
-import { access, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -317,7 +317,7 @@ describe("chapter pipeline", () => {
     expect(censorCalls.at(-1)).toMatchObject({ text: "This shit is crazy.", bleepStrongProfanity: true });
     expect(second.stages.tts.usage).toMatchObject({ censoredSegments: 1, censorDurationSeconds: 0.35 });
     expect(Array.from(await readFile(paths.audioRaw))).toEqual([7, 7, 7]);
-    await expect(access(paths.segments)).rejects.toThrow();
+    expect(await readdir(paths.segments)).toHaveLength(3);
   });
 
   it("rejects chapter metadata copied into the wrong chapter directory", async () => {

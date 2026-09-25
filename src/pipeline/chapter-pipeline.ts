@@ -456,19 +456,38 @@ export class ChapterPipeline {
     await runStage("tts", ttsFp, paths.audioRaw, { provider: ttsConfig.provider, model: ttsConfig.model }, async () => {
       const result = await this.censor.synthesize(ttsProvider, { text: speech.normalized.text, model: ttsConfig.model, referenceId, secondaryReferenceId: ttsConfig.secondaryReferenceId,
         voiceMode: ttsConfig.voiceMode, deliveryIntensity: ttsConfig.deliveryIntensity, qualityGuard: qualityMode !== "off", providerQualityGuard: ttsConfig.providerQualityGuard, bleepStrongProfanity,
-        onChunkProgress: ({ currentChunk, totalChunks, status }) => options.onStageEvent?.({ stage: "tts", status: "progress", state: chapter.stages.tts, currentChunk, totalChunks, detail: `Generating audio · Chunk ${currentChunk} of ${totalChunks} · Fish ${ttsConfig.model} · Automatic retries: ${qualityMode === "auto_repair" ? "on" : "off"}${status === "completed" ? " · completed" : ""}` }),
+        checkpointDir: paths.ttsWorking,
+        onChunkProgress: ({ currentChunk, totalChunks, status, errorCategory }) => {
+          const detail = status === "reused"
+            ? `Reusing generated audio · Chunk ${currentChunk} of ${totalChunks}`
+            : status === "failed"
+            ? `Fish generation failed · Chunk ${currentChunk} of ${totalChunks}${errorCategory ? ` · ${errorCategory}` : ""}`
+            : `Generating audio · Chunk ${currentChunk} of ${totalChunks} · Fish ${ttsConfig.model} · Automatic retries: ${qualityMode === "auto_repair" ? "on" : "off"}${status === "completed" ? " · completed" : ""}`;
+          options.onStageEvent?.({
+            stage: "tts",
+            status: status === "reused" ? "reused" : "progress",
+            state: chapter.stages.tts,
+            currentChunk,
+            totalChunks,
+            detail,
+          });
+        },
         onQualityProgress,
         speed: ttsConfig.speed, format: ttsConfig.format, sampleRate: ttsConfig.sampleRate, bitrate: ttsConfig.bitrate,
         normalize: ttsConfig.normalize, maxCharsPerRequest: ttsConfig.maxCharsPerRequest });
       await atomicWrite(paths.audioRaw, result.audio);
       await rm(paths.segments, { recursive: true, force: true });
-      if (!result.assembled) {
-        await mkdir(paths.segments, { recursive: true });
-        await Promise.all(result.segments.map((segment, index) => atomicWrite(join(paths.segments, `${String(index + 1).padStart(4, "0")}.mp3`), segment)));
+      await mkdir(paths.segments, { recursive: true });
+      await Promise.all(result.segments.map((segment, index) => atomicWrite(join(paths.segments, `${String(index + 1).padStart(4, "0")}.mp3`), segment)));
+      if (result.censorManifest) {
+        await atomicWriteJson(paths.censorManifest, result.censorManifest);
+      } else {
+        await rm(paths.censorManifest, { force: true });
       }
+      await rm(paths.ttsWorking, { recursive: true, force: true });
       chapter.stages.tts.usage = {
         requestId: result.requestIds?.join(","), requests: result.providerRequests ?? (result.censor ? Math.max(0, result.segments.length - result.censor.segments) : result.segments.length),
-        chunks: result.assembled ? (result.providerRequests ?? 0) : result.segments.length,
+        chunks: result.segments.length,
         characters: result.generatedCharacters ?? [...speech.normalized.text].length, bytes: result.audio.byteLength,
         censoredSegments: result.censor?.segments, censorDurationSeconds: result.censor?.durationSeconds,
       };
@@ -476,7 +495,7 @@ export class ChapterPipeline {
         const summary = summarizeQuality(result.quality.segments);
         chapter.stages.tts.usage.quality = { status: summary.status, segments: result.quality.segments.length, needsReview: summary.needsReview, retried: summary.retried, manuallyAccepted: summary.manuallyAccepted };
         await persistChapterTtsQuality({ root: options.root, story: options.story, chapter: options.chapter, report: result.quality, maxRetries: ttsConfig.maxQualityRetries, transcriber: this.qualityVerification?.transcriber?.name ?? "unavailable" });
-      } else if (!result.assembled && result.segmentTexts?.length === result.segments.length) {
+      } else if (result.segmentTexts?.length === result.segments.length) {
         // Keep the exact text sent for each saved chunk so manual verification can
         // inspect the existing audio later without another Fish request.
         await persistChapterTtsQuality({

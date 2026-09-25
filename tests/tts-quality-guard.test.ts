@@ -512,8 +512,8 @@ describe("censor flow with quality guard", () => {
     expect(transcriber.calls).toBe(calls.length);
     expect(result.quality?.status).toBe("verified");
     expect(result.quality?.segments.map((segment) => segment.index)).toEqual([0, 1, 2]);
-    expect(result.quality?.segments.map((segment) => segment.expectedText)).toEqual(calls.map((call) => call.text));
-    expect(result.segmentTexts).toBeUndefined(); // tone segments make a 1:1 mapping impossible
+    expect(result.segmentTexts).toEqual(calls.map((call) => call.text));
+    expect(result.censorManifest?.items).toHaveLength(5); // 3 speech chunks + 2 censor tone insertions
   });
 });
 

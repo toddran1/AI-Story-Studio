@@ -1,5 +1,6 @@
-import { rm } from "node:fs/promises";
+import { readFile, readdir, rm } from "node:fs/promises";
 import { join } from "node:path";
+import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { chapterSchema } from "../domain/chapter.js";
 import type { Story } from "../domain/story.js";
@@ -16,6 +17,7 @@ import {
   compareSpokenText, defaultQualityThresholds, hasFishControlCues, summarizeQuality, ttsSegmentQualitySchema, ttsQualitySummaryStatusSchema,
 } from "./quality-guard.js";
 import { scanVocalizations } from "./vocalizations.js";
+import { CensorManifest, FfmpegCensorAudioService } from "./censor-audio.js";
 
 /** Durable per-chapter verification artifact. Provenance and policy live here so
  * re-verification can run later without any TTS call. Never part of canonical
@@ -112,7 +114,7 @@ export async function verifyStoredChapterTts(options: {
   const artifact = await loadChapterTtsQuality(root, story.slug, chapter);
   if (!artifact) throw new StorageError(`Chapter ${chapter} has no TTS quality artifact to verify`);
   const available = await transcriber.validateConfiguration().then(() => true).catch(() => false);
-  const maxRetries = options.maxRetries ?? story.pipeline.tts.maxQualityRetries ?? artifact.verificationPolicy.maxRetries;
+  const maxRetries = 0;
   const thresholds = { ...defaultQualityThresholds, ...artifact.verificationPolicy.thresholds, ...options.thresholds };
   const segments: TtsSegmentQuality[] = [];
   for (const segment of artifact.segments) {
@@ -126,14 +128,25 @@ export async function verifyStoredChapterTts(options: {
       // If audio file changed on disk or is missing, or acceptedAudioFingerprint does not match,
       // manual acceptance is discarded and verification proceeds below.
     }
-    if (!available || !diskFingerprint) {
+    if (!diskFingerprint) {
+      segments.push({
+        ...segment,
+        audioFingerprint: undefined,
+        status: "unverified",
+        score: undefined,
+        transcription: undefined,
+        issues: [{ type: "transcription_failed", severity: 0.5, detail: "Segment audio file is missing" }],
+      });
+      continue;
+    }
+    if (!available) {
       segments.push({
         ...segment,
         audioFingerprint: diskFingerprint,
         status: "unverified",
         score: undefined,
         transcription: undefined,
-        issues: [{ type: "transcription_failed", severity: 0.5, detail: available ? "Segment audio file is missing" : "Speech transcriber is unavailable" }],
+        issues: [{ type: "transcription_failed", severity: 0.5, detail: "Speech transcriber is unavailable" }],
       });
       continue;
     }
@@ -160,7 +173,7 @@ export async function verifyStoredChapterTts(options: {
         status: "unverified",
         score: undefined,
         transcription: undefined,
-        issues: [{ type: "transcription_failed", severity: 0.5, detail: "Segment audio could not be transcribed" }],
+        issues: [{ type: "transcription_failed", severity: 0.5, detail: "Speech transcription failed" }],
       });
     }
   }
@@ -193,6 +206,7 @@ export async function regenerateStoredChapterTtsSegment(options: { root: string;
   if (!current) throw new StorageError(`Chapter ${chapter} has no TTS segment ${options.segment + 1}`);
   const file = segmentFile(root, story.slug, chapter, current.index);
   if (!(await exists(file))) throw new StorageError(`Chapter ${chapter} segment ${current.index + 1} audio is missing; rerun the TTS stage`);
+  const oldAudio = await readFile(file);
   const config = story.pipeline.tts;
   const result = await provider.synthesize({
     text: current.expectedText, exactChunk: true, model: config.model, referenceId: config.referenceId, secondaryReferenceId: config.secondaryReferenceId,
@@ -203,8 +217,10 @@ export async function regenerateStoredChapterTtsSegment(options: { root: string;
   });
   const replacement = result.segments.length === 1 ? result.segments[0]! : result.audio;
   if (!replacement.byteLength) throw new StorageError("Segment regeneration returned empty audio; keeping the previous segment");
-  await atomicWrite(file, replacement);
-  const newFingerprint = await fileFingerprint(file);
+  const stagedPath = `${file}.staged-${randomUUID()}.mp3`;
+  await atomicWrite(stagedPath, replacement);
+  const newFingerprint = await fileFingerprint(stagedPath);
+  await rm(stagedPath, { force: true });
   const verified = result.quality?.segments[0];
   const segments = artifact.segments.map((segment) => segment.index === current.index
     ? {
@@ -217,8 +233,29 @@ export async function regenerateStoredChapterTtsSegment(options: { root: string;
       }
     : segment);
   const updated: TtsQualityArtifact = { ...artifact, segments, status: summarizeQuality(segments).status, updatedAt: new Date().toISOString() };
-  await atomicWriteJson(storyPaths(root, story.slug, chapter).ttsQuality, updated);
-  await syncChapterQualitySummary(root, story.slug, chapter, updated);
+  await atomicWrite(file, replacement);
+  try {
+    await atomicWriteJson(storyPaths(root, story.slug, chapter).ttsQuality, updated);
+    await syncChapterQualitySummary(root, story.slug, chapter, updated);
+  } catch (persistError) {
+    try {
+      await atomicWrite(file, oldAudio);
+    } catch (rollbackError) {
+      throw new StorageError(
+        `Segment metadata persistence failed and rollback of audio file failed: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`,
+        { cause: new AggregateError([persistError, rollbackError]) }
+      );
+    }
+    throw new StorageError(`Failed to persist quality metadata after regenerating segment; rolled back audio file`, { cause: persistError });
+  }
+
+  const paths = storyPaths(root, story.slug, chapter);
+  const censorManifest = await readJsonIfExists<CensorManifest>(paths.censorManifest);
+  if (censorManifest) {
+    const censorService = new FfmpegCensorAudioService();
+    await censorService.reassemble(paths.segments, censorManifest, paths.audioRaw, config);
+  }
+
   // Mastering consumes the segment files; it and its dependents must rerun.
   await markStagesPending(root, story.slug, chapter, ["audioMastering", ...dependentProcessingStages("audioMastering")]);
   return updated;
@@ -234,7 +271,10 @@ export async function acceptStoredChapterTtsSegment(options: { root: string; slu
   if (!current) throw new StorageError(`Chapter ${chapter} has no TTS segment ${options.segment + 1}`);
   const file = segmentFile(root, slug, chapter, current.index);
   const diskFingerprint = await fileFingerprint(file);
-  const acceptedAudioFingerprint = diskFingerprint ?? current.audioFingerprint;
+  if (!diskFingerprint) {
+    throw new StorageError("Segment audio is missing; regenerate or rerun TTS before accepting it.");
+  }
+  const acceptedAudioFingerprint = diskFingerprint;
   const segments = artifact.segments.map((segment) => segment.index === current.index
     ? {
         ...segment,

@@ -1,3 +1,14 @@
+import { logger } from "../utils/logger.js";
+
+export type TtsChunkProgressStatus = "started" | "completed" | "reused" | "failed";
+
+export type TtsChunkProgress = {
+  currentChunk: number;
+  totalChunks: number;
+  status: TtsChunkProgressStatus;
+  errorCategory?: string;
+};
+
 export type TtsQualityProgress = {
   currentChunk: number;
   totalChunks: number;
@@ -5,6 +16,15 @@ export type TtsQualityProgress = {
   attempt?: number;
   phase: "verify" | "retry";
 };
+
+export function safeProgress<T>(callback: ((progress: T) => void) | undefined, event: T): void {
+  if (!callback) return;
+  try {
+    callback(event);
+  } catch (error) {
+    logger.warn({ event: "tts.progress_callback_error", error: error instanceof Error ? error.message : String(error) });
+  }
+}
 
 export type TTSRequest = {
   pronunciation?: import("./pronunciation.js").PronunciationOccurrence[];
@@ -22,9 +42,11 @@ export type TTSRequest = {
    * re-normalizing speech. */
   exactChunk?: boolean;
   /** App-level Fish request progress, including the known logical chunk count. */
-  onChunkProgress?: (progress: { currentChunk: number; totalChunks: number; status: "started" | "completed" }) => void;
+  onChunkProgress?: (progress: TtsChunkProgress) => void;
   /** Quality verification and retry progress across chunks. */
   onQualityProgress?: (progress: TtsQualityProgress) => void;
+  /** In-progress checkpoint directory for safe resumable chunk generation. */
+  checkpointDir?: string;
 };
 export type TTSResult = {
   audio: Uint8Array; segments: Uint8Array[]; requestIds?: string[]; providerRequests?: number;

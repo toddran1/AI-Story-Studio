@@ -8,7 +8,7 @@ import { fingerprint } from "../utils/hash.js";
 import { logger } from "../utils/logger.js";
 import { FISH_S2_CONTROL_CUES } from "./fish/control-cues.js";
 import type { TTSProvider } from "./provider.js";
-import type { TTSRequest, TTSResult, TtsQualityProgress } from "./types.js";
+import { type TTSRequest, type TTSResult, type TtsQualityProgress, safeProgress } from "./types.js";
 import { scanVocalizations } from "./vocalizations.js";
 import { splitOpeningSentenceForTTSRepair } from "./split-text.js";
 
@@ -401,7 +401,7 @@ export class QualityGuardTTSProvider implements TTSProvider {
       const totalChunks = result.segmentTexts.length;
       for (const [index, expectedText] of result.segmentTexts.entries()) {
         const currentChunk = index + 1;
-        onQualityProgress?.({
+        safeProgress(onQualityProgress, {
           phase: "verify",
           currentChunk,
           totalChunks,
@@ -413,7 +413,7 @@ export class QualityGuardTTSProvider implements TTSProvider {
           totalChunks, onQualityProgress,
         });
         quality.push(segmentQuality);
-        onQualityProgress?.({
+        safeProgress(onQualityProgress, {
           phase: "verify",
           currentChunk,
           totalChunks,
@@ -495,7 +495,7 @@ export class QualityGuardTTSProvider implements TTSProvider {
         originalCharacters: expectedText.length, repairChunks: repair.length, firstChunkText: repair[0] });
       const repairedAudio: Uint8Array[] = [];
       const retryRequestIds: string[] = [];
-      onQualityProgress?.({
+      safeProgress(onQualityProgress, {
         phase: "retry",
         currentChunk: index + 1,
         totalChunks,
@@ -510,7 +510,7 @@ export class QualityGuardTTSProvider implements TTSProvider {
         retryRequestIds.push(...(retried.requestIds ?? []));
         repairedAudio.push(retried.segments.length === 1 ? retried.segments[0]! : retried.audio);
       }
-      onQualityProgress?.({
+      safeProgress(onQualityProgress, {
         phase: "retry",
         currentChunk: index + 1,
         totalChunks,
