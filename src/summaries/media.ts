@@ -270,7 +270,7 @@ export class SummaryMediaService {
     return this.save(slug, summary);
   }
 
-  async audio(slug: string, id: string, raw: unknown = {}, progress?: (event: { phase: string; completed: number; total: number }) => void) {
+  async audio(slug: string, id: string, raw: unknown = {}, progress?: (event: { phase: string; completed: number; total: number; detail?: string }) => void) {
     const { force } = summaryMediaInputSchema.parse(raw); let summary = await this.get(slug, id);
     if (summary.narration?.status !== "current") summary = await this.narration(slug, id);
     const pronunciationStory = await loadStory(storyPaths(this.root, slug, 1).storyConfig);
@@ -293,7 +293,27 @@ export class SummaryMediaService {
         const config = input.story.pipeline.tts;
         const result = await this.censor.synthesize(input.provider, { ...config, referenceId: input.referenceId,
           qualityGuard: ttsQualityMode(config) !== "off",
-          text: input.spokenText, bleepStrongProfanity: input.story.narrationSettings.bleepStrongProfanity });
+          text: input.spokenText, bleepStrongProfanity: input.story.narrationSettings.bleepStrongProfanity,
+          onChunkProgress: ({ currentChunk, totalChunks, status }) => {
+            progress?.({
+              phase: "tts",
+              completed: status === "completed" ? currentChunk : currentChunk - 1,
+              total: totalChunks,
+              detail: `Generating audio · Chunk ${currentChunk} of ${totalChunks}`,
+            });
+          },
+          onQualityProgress: (qProgress) => {
+            if (ttsQualityMode(config) === "off") return;
+            progress?.({
+              phase: "tts",
+              completed: qProgress.status === "completed" ? qProgress.currentChunk : qProgress.currentChunk - 1,
+              total: qProgress.totalChunks,
+              detail: qProgress.phase === "retry"
+                ? `Retrying audio · Chunk ${qProgress.currentChunk} of ${qProgress.totalChunks} · Attempt ${qProgress.attempt ?? 2}`
+                : `Checking audio quality · Chunk ${qProgress.currentChunk} of ${qProgress.totalChunks}`,
+            });
+          },
+        });
         if (!result.audio.length) throw new Error("TTS returned empty summary audio");
         await atomicWrite(paths.raw, result.audio);
         await rm(paths.segments, { recursive: true, force: true });

@@ -45,4 +45,44 @@ describe("default chapter Fish synthesis", () => {
     expect(checked.status).toBe("needs_review");
     expect(fetcher).toHaveBeenCalledTimes(chunks.length);
   });
+
+  it("maps distinct generation and verification progress into chapter stage events for verify mode", async () => {
+    const root = await mkdtemp(join(tmpdir(), "tts-chapter-verify-progress-"));
+    const input = join(root, "chapter.txt");
+    await writeFile(input, "第一章\n\n主角进入房间。", "utf8");
+    const narration = Array.from({ length: 4 }, (_, index) => `Paragraph ${index + 1}. The hero walked through corridor ${index + 1}.`).join("\n\n");
+    const llms = new LLMRouter(new Map([
+      ["gemini", new MockLLM("gemini", [narration])],
+      ["openai", new MockLLM("openai", [narration])],
+    ]));
+    const fetcher = vi.fn(async () => new Response(new Uint8Array([0x49, 0x44, 0x33]), { headers: { "content-type": "audio/mpeg", "x-request-id": "mock-fish" } }));
+    const transcriber = {
+      name: "mock-transcriber",
+      async validateConfiguration() {},
+      async transcribe() {
+        return [{ text: "The hero walked through corridor", start: 0, end: 1, confidence: 0.95 }];
+      },
+    };
+    const pipeline = new ChapterPipeline(llms, new FishAudioProvider("test-key", fetcher as typeof fetch), undefined, undefined, { transcriber });
+    const story = testStory({ tts: { ...testStory().pipeline.tts, model: "s2.1-pro", qualityMode: "verify", maxCharsPerRequest: 100 } });
+    const events: PipelineStageEvent[] = [];
+    await pipeline.run({ root, story, chapter: 1, inputPath: input, stopAfter: "tts", onStageEvent: (event) => events.push(event) });
+
+    const progressDetails = events.filter((e) => e.stage === "tts" && e.status === "progress").map((e) => e.detail);
+
+    // Verify generation progress is present and distinct
+    const genDetails = progressDetails.filter((d) => d?.includes("Generating audio"));
+    expect(genDetails.length).toBeGreaterThan(0);
+    expect(genDetails[0]).toMatch(/^Generating audio · Chunk \d+ of \d+/);
+
+    // Verify quality verification progress is present and distinct
+    const checkDetails = progressDetails.filter((d) => d?.includes("Checking audio quality"));
+    expect(checkDetails.length).toBeGreaterThan(0);
+    expect(checkDetails.some((d) => d?.includes("Checking audio quality · Chunk 1 of"))).toBe(true);
+    expect(checkDetails.some((d) => d?.includes("Quality mode: Verify only · Automatic retries: off"))).toBe(true);
+
+    // Ensure they were never collapsed into one generic message
+    expect(genDetails.every((d) => !d?.includes("Checking audio quality"))).toBe(true);
+    expect(checkDetails.every((d) => !d?.includes("Generating audio"))).toBe(true);
+  });
 });

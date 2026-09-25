@@ -14,7 +14,7 @@ import { createEffectiveTtsProvider } from "../src/tts/effective-provider.js";
 import { FishAudioProvider } from "../src/tts/fish/fish-audio.provider.js";
 import { QualityGuardTTSProvider, SpeechTranscriber } from "../src/tts/quality-guard.js";
 import { TTSProvider } from "../src/tts/provider.js";
-import { TTSRequest, TTSResult } from "../src/tts/types.js";
+import { TTSRequest, TTSResult, type TtsQualityProgress } from "../src/tts/types.js";
 import { StudioOperations } from "../apps/server/operations.js";
 import { JobManager } from "../apps/server/job-manager.js";
 import { createBlankStory } from "../src/studio/projects.js";
@@ -64,6 +64,15 @@ const singleSegment = (text: string, marker: string): TTSResult => {
   return { audio, segments: [audio], segmentTexts: [text], providerRequests: 1 };
 };
 
+const multiSegments = (texts: string[]): TTSResult => {
+  const segments = texts.map((_, i) => bytes(`seg_${i + 1}`));
+  const length = segments.reduce((sum, s) => sum + s.length, 0);
+  const audio = new Uint8Array(length);
+  let offset = 0;
+  for (const s of segments) { audio.set(s, offset); offset += s.length; }
+  return { audio, segments, segmentTexts: texts, providerRequests: texts.length };
+};
+
 describe("effective TTS provider construction", () => {
   it("wraps baseProvider with pronunciation and QualityGuard in the correct order", async () => {
     const text = "Mara walked through the gate.";
@@ -89,7 +98,7 @@ describe("effective TTS provider construction", () => {
     const effective = createEffectiveTtsProvider({
       baseProvider: base,
       pronunciationEntities: [entity],
-      qualityGuardEnabled: true,
+      qualityMode: "verify",
       maxQualityRetries: 2,
       language: "en-US",
       transcriber,
@@ -120,7 +129,7 @@ describe("effective TTS provider construction", () => {
     const base = new ScriptedTTS(() => singleSegment("Hello", "a"));
     const effective = createEffectiveTtsProvider({
       baseProvider: base,
-      qualityGuardEnabled: false,
+      qualityMode: "off",
     });
 
     expect(effective.provider).toBe(effective.basePronunciationProvider);
@@ -387,5 +396,174 @@ describe("summary media audio with quality guard", () => {
     expect(updated.tts?.reviewRequired).toBe(true);
     expect(updated.tts?.quality?.status).toBe("needs_review");
     expect(updated.audio?.status).toBe("current");
+  });
+
+  it("emits verify progress in order across multiple segments without retrying in verify mode", async () => {
+    const texts = ["First sentence for verification.", "Second sentence for verification.", "Third sentence for verification."];
+    const base = new ScriptedTTS(() => multiSegments(texts));
+    const transcriber = new FakeTranscriber((audio) => {
+      const str = Buffer.from(audio).toString("utf8");
+      if (str.includes("seg_1")) return say(texts[0]!);
+      if (str.includes("seg_2")) return say(texts[1]!);
+      return say(texts[2]!);
+    });
+    const progressEvents: TtsQualityProgress[] = [];
+    const effective = createEffectiveTtsProvider({
+      baseProvider: base,
+      qualityMode: "verify",
+      maxQualityRetries: 2,
+      language: "en-US",
+      transcriber,
+      onQualityProgress: (p) => progressEvents.push(p),
+    });
+
+    const result = await effective.provider.synthesize({
+      text: texts.join(" "),
+      model: "s2.1-pro",
+      speed: 1,
+      format: "mp3",
+      sampleRate: 44100,
+      bitrate: 128,
+      normalize: true,
+      maxCharsPerRequest: 1750,
+      qualityGuard: true,
+    });
+
+    expect(base.calls).toHaveLength(1);
+    expect(result.providerRequests).toBe(3);
+    expect(transcriber.calls).toBe(3);
+    expect(progressEvents).toEqual([
+      { phase: "verify", currentChunk: 1, totalChunks: 3, status: "started", attempt: 1 },
+      { phase: "verify", currentChunk: 1, totalChunks: 3, status: "completed", attempt: 1 },
+      { phase: "verify", currentChunk: 2, totalChunks: 3, status: "started", attempt: 1 },
+      { phase: "verify", currentChunk: 2, totalChunks: 3, status: "completed", attempt: 1 },
+      { phase: "verify", currentChunk: 3, totalChunks: 3, status: "started", attempt: 1 },
+      { phase: "verify", currentChunk: 3, totalChunks: 3, status: "completed", attempt: 1 },
+    ]);
+  });
+
+  it("emits no quality progress and does not invoke transcriber when qualityMode is off", async () => {
+    const texts = ["Chunk one text.", "Chunk two text."];
+    const base = new ScriptedTTS(() => multiSegments(texts));
+    const transcriber = new FakeTranscriber(() => say("some speech"));
+    const progressEvents: TtsQualityProgress[] = [];
+    const effective = createEffectiveTtsProvider({
+      baseProvider: base,
+      qualityMode: "off",
+      language: "en-US",
+      transcriber,
+      onQualityProgress: (p) => progressEvents.push(p),
+    });
+
+    const result = await effective.provider.synthesize({
+      text: texts.join(" "),
+      model: "s2.1-pro",
+      speed: 1,
+      format: "mp3",
+      sampleRate: 44100,
+      bitrate: 128,
+      normalize: true,
+      maxCharsPerRequest: 1750,
+      qualityGuard: false,
+    });
+
+    expect(base.calls).toHaveLength(1);
+    expect(result.providerRequests).toBe(2);
+    expect(transcriber.calls).toBe(0);
+    expect(progressEvents).toHaveLength(0);
+    expect(result.quality).toBeUndefined();
+  });
+
+  it("emits verify and retry progress when auto_repair encounters and fixes a flawed segment", async () => {
+    const text = "First segment starts here and needs repair.";
+    let attempts = 0;
+    const base = new ScriptedTTS((req) => {
+      attempts++;
+      if (attempts === 1) return singleSegment(text, "initial_bad");
+      return singleSegment(req.text, "fixed_audio");
+    });
+    const transcriber = new FakeTranscriber((audio) => {
+      const str = Buffer.from(audio).toString("utf8");
+      if (str.includes("initial_bad")) return say("unrelated gibberish words that fail comparison completely");
+      return say(text);
+    });
+    const progressEvents: TtsQualityProgress[] = [];
+    const effective = createEffectiveTtsProvider({
+      baseProvider: base,
+      qualityMode: "auto_repair",
+      maxQualityRetries: 2,
+      language: "en-US",
+      transcriber,
+      onQualityProgress: (p) => progressEvents.push(p),
+    });
+
+    const result = await effective.provider.synthesize({
+      text,
+      model: "s2.1-pro",
+      speed: 1,
+      format: "mp3",
+      sampleRate: 44100,
+      bitrate: 128,
+      normalize: true,
+      maxCharsPerRequest: 1750,
+      qualityGuard: true,
+    });
+
+    expect(base.calls.length).toBeGreaterThan(1);
+    expect(result.quality?.segments[0]?.attempts).toHaveLength(2);
+    expect(result.quality?.status).toBe("verified");
+    expect(progressEvents).toEqual([
+      { phase: "verify", currentChunk: 1, totalChunks: 1, status: "started", attempt: 1 },
+      { phase: "retry", currentChunk: 1, totalChunks: 1, status: "started", attempt: 2 },
+      { phase: "retry", currentChunk: 1, totalChunks: 1, status: "completed", attempt: 2 },
+      { phase: "verify", currentChunk: 1, totalChunks: 1, status: "completed", attempt: 2 },
+    ]);
+  });
+
+  it("keeps legacy qualityGuard=true with undefined qualityMode as off across all consumers", async () => {
+    const legacyConfig = {
+      provider: "fish" as const,
+      model: "s2.1-pro",
+      voiceMode: "same-voice-dialogue" as const,
+      deliveryIntensity: "restrained" as const,
+      qualityGuard: true,
+      providerQualityGuard: true,
+      maxQualityRetries: 2,
+      speed: 1,
+      format: "mp3" as const,
+      sampleRate: 44100 as const,
+      bitrate: 128 as const,
+      normalize: true,
+      maxCharsPerRequest: 1750,
+    };
+    expect(ttsQualityMode(legacyConfig)).toBe("off");
+
+    const base = new ScriptedTTS(() => singleSegment("Legacy speech", "audio"));
+    const transcriber = new FakeTranscriber(() => say("transcribed"));
+    const progressEvents: TtsQualityProgress[] = [];
+    const effective = createEffectiveTtsProvider({
+      baseProvider: base,
+      qualityMode: ttsQualityMode(legacyConfig),
+      language: "en-US",
+      transcriber,
+      onQualityProgress: (p) => progressEvents.push(p),
+    });
+
+    const result = await effective.provider.synthesize({
+      text: "Legacy speech",
+      model: "s2.1-pro",
+      speed: 1,
+      format: "mp3",
+      sampleRate: 44100,
+      bitrate: 128,
+      normalize: true,
+      maxCharsPerRequest: 1750,
+      qualityGuard: ttsQualityMode(legacyConfig) !== "off",
+    });
+
+    expect(transcriber.calls).toBe(0);
+    expect(progressEvents).toHaveLength(0);
+    expect(result.quality).toBeUndefined();
+    expect(base.calls).toHaveLength(1);
   });
 });

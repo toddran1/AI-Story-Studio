@@ -1,3 +1,5 @@
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 import { App, applyVideoResolutionPreset, ArtworkEstimateSummary, ArtworkVersionMetadata, artworkModelOptionsFor, BibleReviewQueue, bibleQueryString, CanonicalEntitySheet, canDeleteChapterSceneDraft, chapterPageSize, chapterSceneStructureDirty, chapterScenesDirty, chapterVideoReadinessChecks, deleteChapterSceneDraft, moveChapterSceneDraft, toggleChapterSceneEnabledDraft, ChapterPage, chapterQaStatusView, chunkPresetFor, clearJobDismissal, clearJobMinimized, continuityReferenceTriState, describeContinuityReference, dismissJob, EntityDetailAccordion, EntityStatusField, ErrorBoundary, EXECUTABLE_CHAPTER_STAGES, getStageActionDetails, humanizeContinuityChanges, isJobConsoleMinimized, isJobDismissed, isTerminalJob, JobConsole, paginateRows, Pagination, parseBibleQuery, PreviousHandoffBadge, QaDetail, QaFindingCard, QaResolvedFindings, ReadinessGrid, ReadinessStrip, ResetQaDialog, resolvedBehaviorSummary, ResolvedBehaviorHint, reupscaleAvailable, SceneContinuityPanel, ScenesPage, setJobConsoleMinimized, SettingsPage, shouldRefreshAfterJob, Status, StoryBibleHealthCard, TtsQualityBadge, TtsSegmentRow, VIDEO_RESOLUTION_PRESETS, videoResolutionFor } from "../apps/web/src/App.js";
@@ -2341,6 +2343,15 @@ describe("Milestone 23 — image output quality UI", () => {
       const htmlB = renderToStaticMarkup(<SettingsPage slug="test-story" onJob={() => undefined} initialStory={storyB as any} />);
       expect(htmlB).toContain('value="off" selected=""');
       expect(htmlB).toContain('<b>Provider Quality Guard</b><small>Use the TTS provider&#x27;s native quality-control feature when supported.</small></div><input type="checkbox" checked=""');
+    });
+
+    it("serializes story settings payloads with exactly one qualityMode field defaulting to off", async () => {
+      const appSource = await readFile(join(process.cwd(), "apps/web/src/App.tsx"), "utf8");
+      // Check that there is no duplicate qualityMode in object literals
+      const matches = appSource.match(/qualityMode:\s*story\.pipeline\.tts\.qualityMode/g);
+      // Exactly two payload places: Story Settings save and metadata translation save
+      expect(matches).toHaveLength(2);
+      expect(appSource).not.toContain("qualityGuard ? \"verify\" : \"off\"");
     });
   });
 });

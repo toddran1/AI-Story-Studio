@@ -128,7 +128,7 @@ import { inspectStagesForCurrent, markCurrentInputSchema, markStagesCurrent } fr
 import { executeStagePlan, planStageExecution, planStageExecutionBatch, stageExecutionInputSchema, stageExecutionModeSchema } from "../../src/studio/stage-execution.js";
 import { batchStageSchema } from "../../src/studio/stage-selection.js";
 import { WhisperCppSpeechTranscriber } from "../../src/alignment/transcription.js";
-import { QualityGuardTTSProvider, SpeechTranscriber } from "../../src/tts/quality-guard.js";
+import { QualityGuardTTSProvider, SpeechTranscriber, type TtsQualityProgress } from "../../src/tts/quality-guard.js";
 import { createEffectiveTtsProvider } from "../../src/tts/effective-provider.js";
 import { acceptStoredChapterTtsSegment, loadChapterTtsQuality, regenerateStoredChapterTtsSegment, verifyStoredChapterTts } from "../../src/tts/chapter-quality.js";
 
@@ -1500,7 +1500,7 @@ export class StudioOperations {
   startVoicePreview(slug: string, raw: unknown) {
     slugSchema.parse(slug);
     const input = voicePreviewSchema.parse(raw);
-    return this.jobs.create("voicePreview", slug, async () => {
+    return this.jobs.create("voicePreview", slug, async (control) => {
       const story = await loadStory(storyPaths(this.root, slug, 1).storyConfig);
       const config = story.pipeline.tts;
       const request = {
@@ -1511,6 +1511,16 @@ export class StudioOperations {
         speed: input.speed ?? config.speed,
       };
       const entities = await loadPronunciationEntities(this.root, slug);
+      const onQualityProgress = (progress: TtsQualityProgress) => {
+        if (ttsQualityMode(config) === "off") return;
+        control.update({
+          type: "voicePreview.quality",
+          ...progress,
+          detail: progress.phase === "retry"
+            ? `Retrying audio · Chunk ${progress.currentChunk} of ${progress.totalChunks} · Attempt ${progress.attempt ?? 2}`
+            : `Checking audio quality · Chunk ${progress.currentChunk} of ${progress.totalChunks}`,
+        });
+      };
       const { provider } = createEffectiveTtsProvider({
         baseProvider: this.tts.forName(request.provider),
         pronunciationEntities: entities,
@@ -1518,6 +1528,7 @@ export class StudioOperations {
         maxQualityRetries: config.maxQualityRetries,
         language: story.outputLanguage,
         transcriber: this.optionalSpeechTranscriber(),
+        onQualityProgress,
       });
       const speech = normalizeSpeechForProvider(request.text, story.outputLanguage, story.narrationSettings, provider, request.model);
       const result = await withUsageScope({ story: slug, stage: "voicePreview" }, async () =>
@@ -1537,6 +1548,16 @@ export class StudioOperations {
           bitrate: 192,
           normalize: true,
           maxCharsPerRequest: config.maxCharsPerRequest,
+          onChunkProgress: ({ currentChunk, totalChunks, status }) => {
+            control.update({
+              type: "voicePreview.chunk",
+              currentChunk,
+              totalChunks,
+              status,
+              detail: `Generating audio · Chunk ${currentChunk} of ${totalChunks}`,
+            });
+          },
+          onQualityProgress,
         })
       );
       const saved = await saveVoicePreview(this.root, slug, result.audio, request, result.quality);

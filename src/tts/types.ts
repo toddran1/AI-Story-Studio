@@ -1,3 +1,11 @@
+export type TtsQualityProgress = {
+  currentChunk: number;
+  totalChunks: number;
+  status: "started" | "completed";
+  attempt?: number;
+  phase: "verify" | "retry";
+};
+
 export type TTSRequest = {
   pronunciation?: import("./pronunciation.js").PronunciationOccurrence[];
   text: string; model: string; referenceId?: string; secondaryReferenceId?: string;
@@ -15,6 +23,8 @@ export type TTSRequest = {
   exactChunk?: boolean;
   /** App-level Fish request progress, including the known logical chunk count. */
   onChunkProgress?: (progress: { currentChunk: number; totalChunks: number; status: "started" | "completed" }) => void;
+  /** Quality verification and retry progress across chunks. */
+  onQualityProgress?: (progress: TtsQualityProgress) => void;
 };
 export type TTSResult = {
   audio: Uint8Array; segments: Uint8Array[]; requestIds?: string[]; providerRequests?: number;

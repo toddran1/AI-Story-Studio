@@ -36,7 +36,11 @@ export const fishTtsStageConfigSchema = z.object({
   voiceMode: z.enum(["narrator-only", "same-voice-dialogue", "narrator-dialogue"]).default("same-voice-dialogue"),
   secondaryReferenceId: z.string().min(1).optional(),
   deliveryIntensity: z.enum(["none", "restrained", "expressive"]).default("restrained"),
-  /** Legacy persisted switch: true now means verify only, never automatic repair. */
+  /**
+   * Deprecated legacy field retained for backward-compatible parsing.
+   * It no longer enables post-generation verification by itself.
+   * Explicit qualityMode controls Off / Verify / Auto Repair behavior.
+   */
   qualityGuard: z.boolean().default(false),
   qualityMode: z.enum(["off", "verify", "auto_repair"]).optional(),
   /** Upstream provider-native quality feature (e.g. Fish features: ["quality-guard"]).

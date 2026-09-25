@@ -1,11 +1,12 @@
 import type { CanonicalEntity } from "../domain/story-bible.js";
 import { pronunciationProvider } from "./pronunciation.js";
 import type { TTSProvider } from "./provider.js";
-import { QualityGuardTTSProvider, type QualityGuardOptions, type SpeechTranscriber } from "./quality-guard.js";
+import { QualityGuardTTSProvider, type QualityGuardOptions, type SpeechTranscriber, type TtsQualityProgress } from "./quality-guard.js";
 
 export type CreateEffectiveTtsProviderOptions = {
   baseProvider: TTSProvider;
   pronunciationEntities?: readonly CanonicalEntity[];
+  /** @deprecated Use explicit qualityMode. */
   qualityGuardEnabled?: boolean;
   qualityMode?: "off" | "verify" | "auto_repair";
   maxQualityRetries?: number;
@@ -14,6 +15,7 @@ export type CreateEffectiveTtsProviderOptions = {
   durationProbe?: QualityGuardOptions["durationProbe"];
   thresholds?: QualityGuardOptions["thresholds"];
   toleratedTerms?: QualityGuardOptions["toleratedTerms"];
+  onQualityProgress?: (progress: TtsQualityProgress) => void;
 };
 
 export type EffectiveTtsProvider = {
@@ -32,7 +34,7 @@ export function createEffectiveTtsProvider(options: CreateEffectiveTtsProviderOp
     ? pronunciationProvider(baseProvider, options.pronunciationEntities)
     : baseProvider;
 
-  const qualityMode = options.qualityMode ?? (options.qualityGuardEnabled ? "verify" : "off");
+  const qualityMode = options.qualityMode ?? "off";
   const provider = qualityMode !== "off"
     ? new QualityGuardTTSProvider(basePronunciationProvider, options.transcriber, {
         maxRetries: qualityMode === "auto_repair" ? options.maxQualityRetries ?? 2 : 0,
@@ -40,6 +42,7 @@ export function createEffectiveTtsProvider(options: CreateEffectiveTtsProviderOp
         durationProbe: options.durationProbe,
         thresholds: options.thresholds,
         toleratedTerms: options.toleratedTerms,
+        onQualityProgress: options.onQualityProgress,
       })
     : basePronunciationProvider;
 

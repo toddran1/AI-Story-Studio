@@ -41,7 +41,7 @@ import { withUsageScope } from "../cost/context.js";
 import { loadNarrationNamingEntities, selectNarrationNamingEntities } from "../story-bible/narration-names.js";
 import { loadEligibleSummaryContext } from "../summaries/service.js";
 import { CENSOR_AUDIO_VERSION, CensorAudioService, FfmpegCensorAudioService, censorToneConfig } from "../tts/censor-audio.js";
-import { SpeechTranscriber, summarizeQuality } from "../tts/quality-guard.js";
+import { SpeechTranscriber, summarizeQuality, type TtsQualityProgress } from "../tts/quality-guard.js";
 import { persistChapterTtsQuality, removeChapterTtsQuality } from "../tts/chapter-quality.js";
 import { createEffectiveTtsProvider } from "../tts/effective-provider.js";
 import { normalizeSpeechForProvider } from "../tts/speech-normalization.js";
@@ -420,6 +420,20 @@ export class ChapterPipeline {
     const pronunciationData = await withUsageScope({ story: options.story.slug, chapter: options.chapter, stage: "pronunciation" }, () => enrichStoryPronunciations(options.root, options.story.slug, bible, this.llms.forStage(bibleConfig), bibleConfig, options.story.sourceLanguage, undefined, false, false,
       (progress) => { if (progress.total > 0) options.onStageEvent?.({ stage: "tts", status: "started", state: chapter.stages.tts, detail: `Enriching pronunciations ${progress.processed}/${progress.total}` }); }));
     const qualityMode = ttsQualityMode(ttsConfig);
+    const onQualityProgress = (progress: TtsQualityProgress) => {
+      if (qualityMode === "off") return;
+      const detail = progress.phase === "retry"
+        ? `Retrying audio · Chunk ${progress.currentChunk} of ${progress.totalChunks} · Attempt ${progress.attempt ?? 2}${progress.status === "completed" ? " · completed" : ""}`
+        : `Checking audio quality · Chunk ${progress.currentChunk} of ${progress.totalChunks} · Quality mode: ${qualityMode === "auto_repair" ? "Auto repair" : "Verify only · Automatic retries: off"}${progress.status === "completed" ? " · completed" : ""}`;
+      options.onStageEvent?.({
+        stage: "tts",
+        status: "progress",
+        state: chapter.stages.tts,
+        currentChunk: progress.currentChunk,
+        totalChunks: progress.totalChunks,
+        detail,
+      });
+    };
     const { provider: ttsProvider, basePronunciationProvider: baseTtsProvider } = createEffectiveTtsProvider({
       baseProvider: this.tts.forName(ttsConfig.provider),
       pronunciationEntities: pronunciationData.entities,
@@ -427,6 +441,7 @@ export class ChapterPipeline {
       maxQualityRetries: ttsConfig.maxQualityRetries,
       language: options.story.outputLanguage,
       transcriber: this.qualityVerification?.transcriber,
+      onQualityProgress,
     });
     const speech = normalizeSpeechForProvider(ttsScript, options.story.outputLanguage, options.story.narrationSettings, ttsProvider, ttsConfig.model);
     const pronunciationFp = pronunciationFingerprint(resolvePronunciations(speech.normalized.text, pronunciationData.entities));
@@ -442,6 +457,7 @@ export class ChapterPipeline {
       const result = await this.censor.synthesize(ttsProvider, { text: speech.normalized.text, model: ttsConfig.model, referenceId, secondaryReferenceId: ttsConfig.secondaryReferenceId,
         voiceMode: ttsConfig.voiceMode, deliveryIntensity: ttsConfig.deliveryIntensity, qualityGuard: qualityMode !== "off", providerQualityGuard: ttsConfig.providerQualityGuard, bleepStrongProfanity,
         onChunkProgress: ({ currentChunk, totalChunks, status }) => options.onStageEvent?.({ stage: "tts", status: "progress", state: chapter.stages.tts, currentChunk, totalChunks, detail: `Generating audio · Chunk ${currentChunk} of ${totalChunks} · Fish ${ttsConfig.model} · Automatic retries: ${qualityMode === "auto_repair" ? "on" : "off"}${status === "completed" ? " · completed" : ""}` }),
+        onQualityProgress,
         speed: ttsConfig.speed, format: ttsConfig.format, sampleRate: ttsConfig.sampleRate, bitrate: ttsConfig.bitrate,
         normalize: ttsConfig.normalize, maxCharsPerRequest: ttsConfig.maxCharsPerRequest });
       await atomicWrite(paths.audioRaw, result.audio);

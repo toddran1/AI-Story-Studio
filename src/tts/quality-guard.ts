@@ -8,12 +8,13 @@ import { fingerprint } from "../utils/hash.js";
 import { logger } from "../utils/logger.js";
 import { FISH_S2_CONTROL_CUES } from "./fish/control-cues.js";
 import type { TTSProvider } from "./provider.js";
-import type { TTSRequest, TTSResult } from "./types.js";
+import type { TTSRequest, TTSResult, TtsQualityProgress } from "./types.js";
 import { scanVocalizations } from "./vocalizations.js";
 import { splitOpeningSentenceForTTSRepair } from "./split-text.js";
 
 export const TTS_QUALITY_GUARD_VERSION = "tts-quality-guard-v3";
 
+export type { TtsQualityProgress };
 export * from "./quality-schema.js";
 import type { TtsQualityMetrics, TtsQualityIssue, TtsSegmentQuality, TtsQualitySummaryStatus, TtsQualityAttempt } from "./quality-schema.js";
 
@@ -354,6 +355,7 @@ export type QualityGuardOptions = {
   /** Injectable for tests; defaults to ffprobe on the temporary segment file. */
   durationProbe?: (audioPath: string) => Promise<number | undefined>;
   toleratedTerms?: (expectedText: string) => Array<{ surface: string; spoken: string }>;
+  onQualityProgress?: (progress: TtsQualityProgress) => void;
 };
 
 /** Post-generation verification wrapper. Sits outside the pronunciation wrapper so
@@ -391,12 +393,33 @@ export class QualityGuardTTSProvider implements TTSProvider {
     const maxAttempts = 1 + Math.max(0, Math.min(5, this.options.maxRetries));
     const available = await this.transcriberAvailable();
     const directory = await mkdtemp(join(tmpdir(), "ai-story-tts-quality-"));
+    const onQualityProgress = request.onQualityProgress ?? this.options.onQualityProgress;
     try {
       const segments = [...result.segments];
       const quality: TtsSegmentQuality[] = [];
       const usage = { providerRequests: result.providerRequests ?? result.segments.length, requestIds: [...(result.requestIds ?? [])] };
+      const totalChunks = result.segmentTexts.length;
       for (const [index, expectedText] of result.segmentTexts.entries()) {
-        quality.push(await this.verifySegment({ request, expectedText, index, segments, directory, available, maxAttempts, usage }));
+        const currentChunk = index + 1;
+        onQualityProgress?.({
+          phase: "verify",
+          currentChunk,
+          totalChunks,
+          status: "started",
+          attempt: 1,
+        });
+        const segmentQuality = await this.verifySegment({
+          request, expectedText, index, segments, directory, available, maxAttempts, usage,
+          totalChunks, onQualityProgress,
+        });
+        quality.push(segmentQuality);
+        onQualityProgress?.({
+          phase: "verify",
+          currentChunk,
+          totalChunks,
+          status: "completed",
+          attempt: segmentQuality.finalAttempt,
+        });
       }
       const summary = summarizeQuality(quality);
       return { ...result, audio: concat(segments), segments, providerRequests: usage.providerRequests, requestIds: usage.requestIds,
@@ -407,8 +430,9 @@ export class QualityGuardTTSProvider implements TTSProvider {
   private async verifySegment(context: {
     request: TTSRequest; expectedText: string; index: number; segments: Uint8Array[];
     directory: string; available: boolean; maxAttempts: number; usage: { providerRequests: number; requestIds: string[] };
+    totalChunks: number; onQualityProgress?: (progress: TtsQualityProgress) => void;
   }): Promise<TtsSegmentQuality> {
-    const { request, expectedText, index, segments, directory, maxAttempts, usage } = context;
+    const { request, expectedText, index, segments, directory, maxAttempts, usage, totalChunks, onQualityProgress } = context;
     const configuredIntensity = request.deliveryIntensity ?? "restrained";
     const attempts: TtsQualityAttempt[] = [];
     const initialAudio = segments[index]!;
@@ -471,6 +495,13 @@ export class QualityGuardTTSProvider implements TTSProvider {
         originalCharacters: expectedText.length, repairChunks: repair.length, firstChunkText: repair[0] });
       const repairedAudio: Uint8Array[] = [];
       const retryRequestIds: string[] = [];
+      onQualityProgress?.({
+        phase: "retry",
+        currentChunk: index + 1,
+        totalChunks,
+        status: "started",
+        attempt: attempt + 1,
+      });
       for (const text of retryText) {
         const retried = await this.inner.synthesize({ ...request, text, exactChunk: true,
           deliveryIntensity: retryIntensity, maxCharsPerRequest: request.maxCharsPerRequest });
@@ -479,6 +510,13 @@ export class QualityGuardTTSProvider implements TTSProvider {
         retryRequestIds.push(...(retried.requestIds ?? []));
         repairedAudio.push(retried.segments.length === 1 ? retried.segments[0]! : retried.audio);
       }
+      onQualityProgress?.({
+        phase: "retry",
+        currentChunk: index + 1,
+        totalChunks,
+        status: "completed",
+        attempt: attempt + 1,
+      });
       const requestId = retryRequestIds.join(",") || undefined;
       logger.debug({ event: "tts.quality.segment_retry", segment: index + 1, attempt: attempt + 1,
         deliveryIntensity: retryIntensity, requestId, expectedText, repairChunks: retryText.length });
