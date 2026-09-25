@@ -41,7 +41,6 @@ import { withUsageScope } from "../cost/context.js";
 import { loadNarrationNamingEntities } from "../story-bible/narration-names.js";
 import { loadEligibleSummaryContext } from "../summaries/service.js";
 import { CENSOR_AUDIO_VERSION, CensorAudioService, FfmpegCensorAudioService, censorToneConfig } from "../tts/censor-audio.js";
-import { QualityGuardTTSProvider, SpeechTranscriber, summarizeQuality } from "../tts/quality-guard.js";
 import { SpeechTranscriber, summarizeQuality } from "../tts/quality-guard.js";
 import { persistChapterTtsQuality, removeChapterTtsQuality } from "../tts/chapter-quality.js";
 import { createEffectiveTtsProvider } from "../tts/effective-provider.js";
@@ -275,12 +274,6 @@ export class ChapterPipeline {
         if (issueCount > 4) {
           logger.info({ event: "pipeline.qa.auto_recovery", story: options.story.slug, chapter: options.chapter, issueCount, threshold: 4,
             detail: `QA found ${issueCount} issues. Regenerating Translation, Narration, and QA once.` });
-          await Promise.all([paths.english, paths.narration, paths.narrationTts, paths.qa].map((path) => rm(path, { force: true })));
-          chapter.stages.translation = pending();
-          chapter.stages.narration = pending();
-          chapter.stages.qa = pending();
-          chapter.quality = undefined;
-          await persist();
           const [savedEnglish, savedNarration, savedNarrationTts, savedQa] = await Promise.all([
             readTextIfExists(paths.english),
             readTextIfExists(paths.narration),
@@ -291,7 +284,6 @@ export class ChapterPipeline {
           const recoveryStages = options.executionStages
             ? [...new Set<StageExecutionNode>([...options.executionStages, "translation", "narration", "qa"])]
             : undefined;
-          return this.run({ ...options, executionStages: recoveryStages, force: recoveryStages ? options.force : "translation", qaRecoveryAttempted: true });
           try {
             return await this.run({ ...options, executionStages: recoveryStages, force: recoveryStages ? options.force : "translation", qaRecoveryAttempted: true });
           } catch (recoveryError) {
@@ -377,13 +369,6 @@ export class ChapterPipeline {
     // generated with a different voice.
     const pronunciationData = await withUsageScope({ story: options.story.slug, chapter: options.chapter, stage: "pronunciation" }, () => enrichStoryPronunciations(options.root, options.story.slug, bible, this.llms.forStage(bibleConfig), bibleConfig, options.story.sourceLanguage, undefined, false, false,
       (progress) => { if (progress.total > 0) options.onStageEvent?.({ stage: "tts", status: "started", state: chapter.stages.tts, detail: `Enriching pronunciations ${progress.processed}/${progress.total}` }); }));
-    const baseTtsProvider = pronunciationProvider(this.tts.forName(ttsConfig.provider), pronunciationData.entities);
-    // Verification wraps the pronunciation layer so the guard sees the final
-    // spoken text and per-segment audio; retry calls flow back through the same
-    // tracked provider and are usage-recorded with attempt numbers.
-    const ttsProvider = ttsConfig.qualityGuard
-      ? new QualityGuardTTSProvider(baseTtsProvider, this.qualityVerification?.transcriber, { maxRetries: ttsConfig.maxQualityRetries, language: options.story.outputLanguage })
-      : baseTtsProvider;
     const { provider: ttsProvider, basePronunciationProvider: baseTtsProvider } = createEffectiveTtsProvider({
       baseProvider: this.tts.forName(ttsConfig.provider),
       pronunciationEntities: pronunciationData.entities,

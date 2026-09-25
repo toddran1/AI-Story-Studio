@@ -127,7 +127,6 @@ import { executeStagePlan, planStageExecution, planStageExecutionBatch, stageExe
 import { batchStageSchema } from "../../src/studio/stage-selection.js";
 import { WhisperCppSpeechTranscriber } from "../../src/alignment/transcription.js";
 import { QualityGuardTTSProvider, SpeechTranscriber } from "../../src/tts/quality-guard.js";
-import type { SpeechTranscriber } from "../../src/tts/quality-guard.js";
 import { createEffectiveTtsProvider } from "../../src/tts/effective-provider.js";
 import { acceptStoredChapterTtsSegment, loadChapterTtsQuality, regenerateStoredChapterTtsSegment, verifyStoredChapterTts } from "../../src/tts/chapter-quality.js";
 
@@ -500,7 +499,6 @@ export class StudioOperations {
 
   listSummaries(slug: string, options?: Parameters<SummaryService["list"]>[1]) { slugSchema.parse(slug); return new SummaryService(this.root, this.llm).list(slug, options); }
   listSummaryPage(slug: string, options: Parameters<SummaryService["page"]>[1]) { slugSchema.parse(slug); return new SummaryService(this.root, this.llm).page(slug, options); }
-  summaryMedia() { return new SummaryMediaService(this.root, this.llm, this.tts, this.censor, this.audio); }
   summaryMedia() { return new SummaryMediaService(this.root, this.llm, this.tts, this.censor, this.audio, () => this.optionalSpeechTranscriber()); }
   summaryJobsDirectory() { return join(this.root, ".data", "summary-jobs"); }
   summaryVisuals() { return new SummaryVisualService(this.root, this.summaryMedia(), this.summaryImages, this.video, this.alignConfig, this.aligner); }
@@ -1497,10 +1495,6 @@ export class StudioOperations {
     return result;
   }
 
-  startVoicePreview(slug: string, raw: unknown) { slugSchema.parse(slug); const input = voicePreviewSchema.parse(raw); return this.jobs.create("voicePreview", slug, async () => { const story = await loadStory(storyPaths(this.root, slug, 1).storyConfig); const config = story.pipeline.tts; const request = { ...input, provider: input.provider ?? config.provider, model: input.model ?? config.model, referenceId: input.referenceId ?? config.referenceId, speed: input.speed ?? config.speed }; const provider = pronunciationProvider(this.tts.forName(request.provider), await loadPronunciationEntities(this.root, slug)); const speech = normalizeSpeechForProvider(request.text, story.outputLanguage, story.narrationSettings, provider, request.model); const result = await withUsageScope({story:slug,stage:"voicePreview"},async ()=>this.censor.synthesize(provider, { text: speech.normalized.text, model: request.model, referenceId: request.referenceId,
-    secondaryReferenceId: config.secondaryReferenceId, voiceMode: config.voiceMode, deliveryIntensity: config.deliveryIntensity, qualityGuard: config.qualityGuard, providerQualityGuard: config.providerQualityGuard,
-    bleepStrongProfanity: story.narrationSettings.bleepStrongProfanity,
-    speed: request.speed, format: config.format, sampleRate: 44100, bitrate: 192, normalize: true, maxCharsPerRequest: config.maxCharsPerRequest })); const saved = await saveVoicePreview(this.root, slug, result.audio, request); await recordActivity(this.root, slug, "voice.preview", "Generated a voice preview"); return saved; }); }
   startVoicePreview(slug: string, raw: unknown) {
     slugSchema.parse(slug);
     const input = voicePreviewSchema.parse(raw);
@@ -1620,8 +1614,6 @@ export class StudioOperations {
     return this.jobs.create("ttsSegmentRegenerate", slug, async () => withStoryLock(this.root, slug, "TTS segment regeneration", async () => {
       const story = await loadStory(storyPaths(this.root, slug, chapter).storyConfig);
       const config = story.pipeline.tts;
-      const base = pronunciationProvider(this.tts.forName(config.provider), await loadPronunciationEntities(this.root, slug));
-      const provider = new QualityGuardTTSProvider(base, this.speechTranscriber(), { maxRetries: config.maxQualityRetries, language: story.outputLanguage });
       const entities = await loadPronunciationEntities(this.root, slug);
       const { provider } = createEffectiveTtsProvider({
         baseProvider: this.tts.forName(config.provider),

@@ -7,7 +7,6 @@ import { storyBibleSchema } from "../domain/story-bible.js";
 import { emptyStoryBible } from "../domain/story-bible.js";
 import { enrichStoryPronunciations, loadPronunciationEntities } from "../story-bible/pronunciation.js";
 import { pronunciationProvider, pronunciationFingerprint, resolvePronunciations } from "../tts/pronunciation.js";
-import { pronunciationFingerprint, resolvePronunciations } from "../tts/pronunciation.js";
 import { createEffectiveTtsProvider } from "../tts/effective-provider.js";
 import { ttsSynthesisSettings } from "../domain/provider.js";
 import type { SpeechTranscriber } from "../tts/quality-guard.js";
@@ -66,16 +65,12 @@ export function summaryDownloadName(summary: StorySummary, type: z.infer<typeof 
  * remain the same services used by chapter production. Mutators require a story lock. */
 export class SummaryMediaService {
   private readonly summaries: SummaryService;
-  constructor(private readonly root: string, private readonly llms: LLMRouter,
-    private readonly ttsRouter: TTSProviderRouter, private readonly censor: CensorAudioService,
-    private readonly mastering: AudioMasteringProcessor) { this.summaries = new SummaryService(root, llms); }
   constructor(
     private readonly root: string,
     private readonly llms: LLMRouter,
     private readonly ttsRouter: TTSProviderRouter,
     private readonly censor: CensorAudioService,
     private readonly mastering: AudioMasteringProcessor,
-    private readonly speechTranscriber?: SpeechTranscriber | (() => SpeechTranscriber | undefined)) { this.summaries = new SummaryService(root, llms); }
     private readonly speechTranscriber?: SpeechTranscriber | (() => SpeechTranscriber | undefined)
   ) {
     this.summaries = new SummaryService(root, llms);
@@ -97,7 +92,6 @@ export class SummaryMediaService {
       includeTitle: story.narrationSettings.includeChapterTitle !== false, intensity: config.deliveryIntensity, delivery,
       promptVersion: NARRATION_PROMPT_VERSION, naming: context.canonicalEntities.map(({ id, canonicalName, originalName, aliases, localizedNaming, preferredNarrationName, aliasNarrationRules }) => ({ id, canonicalName, originalName, aliases, localizedNaming, preferredNarrationName, aliasNarrationRules })) });
     const pronunciationEntities = await loadPronunciationEntities(this.root, slug);
-    const provider = pronunciationProvider(this.ttsRouter.forName(config.provider), pronunciationEntities);
     const transcriber = typeof this.speechTranscriber === "function" ? this.speechTranscriber() : this.speechTranscriber;
     const { provider } = createEffectiveTtsProvider({
       baseProvider: this.ttsRouter.forName(config.provider),
@@ -111,7 +105,6 @@ export class SummaryMediaService {
     const pronunciationFp = pronunciationFingerprint(resolvePronunciations(spoken.normalized.text, pronunciationEntities));
     const referenceId = provider.resolveReferenceId?.(config.referenceId) ?? config.referenceId;
     const ttsFingerprint = fingerprint({ version: "summary-tts-v1", text: summary.narration?.ttsText ?? summary.narration?.text, speech: spoken.fingerprint,
-      config: { ...config, referenceId }, normalization: provider.inputNormalizationVersion,
       config: { ...ttsSynthesisSettings(config), referenceId }, normalization: provider.inputNormalizationVersion,
       ...(pronunciationFp ? { pronunciation: pronunciationFp } : {}),
       bleep: story.narrationSettings.bleepStrongProfanity, censor: { version: this.censor.version, config: censorToneConfig } });
@@ -309,12 +302,7 @@ export class SummaryMediaService {
         }
         const segmentFingerprints = await inputFingerprints(await masteringInputs(paths.segments, paths.raw));
         const reviewRequired = result.quality?.status === "needs_review";
-        summary.tts = { status: "current", inputFingerprint: input.ttsFingerprint, outputFingerprint: (await fileFingerprint(paths.raw))!,
-          manuallyEdited: false, reviewRequired: false, provider: config.provider, model: config.model, voice: input.referenceId,
-          generatedAt: new Date().toISOString(), bytes: result.audio.length, segmentFingerprints, censoredSegments: result.censor?.segments, censorDurationSeconds: result.censor?.durationSeconds };
-          manuallyEdited: false, reviewRequired, provider: config.provider, model: config.model, voice: input.referenceId,
-          generatedAt: new Date().toISOString(), bytes: result.audio.length, segmentFingerprints, censoredSegments: result.censor?.segments, censorDurationSeconds: result.censor?.durationSeconds,
-          quality: result.quality };
+
         summary.tts = {
           status: "current",
           inputFingerprint: input.ttsFingerprint,

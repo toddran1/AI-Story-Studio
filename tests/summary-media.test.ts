@@ -151,7 +151,6 @@ describe("summary narration and audio", () => {
     const changed = story(); changed.narrationSettings.bleepStrongProfanity = true; await atomicWriteJson(storyPaths(root, "demo-story", 1).storyConfig, changed);
     const canonical = await create(); await media.editNarration("demo-story", canonical.id, { text: "This shit is fucking crazy." });
     const result = await media.audio("demo-story", canonical.id);
-    expect(censor.synthesize).toHaveBeenCalledWith(tts, expect.objectContaining({ bleepStrongProfanity: true, text: "This shit is fucking crazy." })); expect(result.text).toBe(canonical.text);
     expect(censor.synthesize).toHaveBeenCalledWith(expect.objectContaining({ name: "fish" }), expect.objectContaining({ bleepStrongProfanity: true, text: "This shit is fucking crazy." })); expect(result.text).toBe(canonical.text);
   });
 

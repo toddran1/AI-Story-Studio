@@ -2,7 +2,6 @@ import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { createErrorDiagnostic, ErrorDiagnostic, errorDiagnosticSchema } from "../../src/errors/diagnostic.js";
 import { logger } from "../../src/utils/logger.js";
-import { readdir } from "node:fs/promises";
 import { readdir, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { z } from "zod";
@@ -16,7 +15,6 @@ type JobControl = { update(progress: unknown): void; setPause(handler: () => voi
 export class JobConflictError extends Error {}
 
 export class JobManager {
-  private static readonly maxRetainedJobs = 200;
   private static readonly defaultMaxRetainedJobs = 200;
   private readonly maxRetainedJobs: number;
   private readonly jobs = new Map<string, Job>();
@@ -89,7 +87,6 @@ export class JobManager {
   }
   pause(id: string): boolean { const handler = this.pauseHandlers.get(id); if (!handler) return false; handler(); return true; }
   pauseAll(): void { for (const handler of this.pauseHandlers.values()) handler(); }
-  async flushDurable() { await Promise.all(this.durableWrites.values()); }
   async flushDurable() {
     while (this.durableWrites.size > 0) {
       await Promise.all([...this.durableWrites.values()]);
@@ -124,12 +121,10 @@ export class JobManager {
     const path = this.durablePaths.get(job.id);
     if (path) {
       const snapshot = structuredClone(job);
-      const write = (this.durableWrites.get(job.id) ?? Promise.resolve()).catch(() => undefined).then(() => atomicWriteJson(path, snapshot));
       const write = (this.durableWrites.get(job.id) ?? Promise.resolve())
         .catch(() => undefined)
         .then(() => atomicWriteJson(path, snapshot));
       this.durableWrites.set(job.id, write);
-      void write.catch((error) => logger.error({ error, jobId: job.id }, "Unable to persist summary job"));
       void write
         .catch((error) => logger.error({ error, jobId: job.id }, "Unable to persist summary job"))
         .finally(() => {
@@ -142,7 +137,6 @@ export class JobManager {
   }
   private prune() {
     const terminal = [...this.jobs.values()].filter((job) => isTerminal(job.status)).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
-    for (const job of terminal.slice(JobManager.maxRetainedJobs)) { this.jobs.delete(job.id); this.events.delete(job.id); this.durablePaths.delete(job.id); this.durableWrites.delete(job.id); }
     const excess = terminal.slice(this.maxRetainedJobs);
     for (const job of excess) {
       this.jobs.delete(job.id);

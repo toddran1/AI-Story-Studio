@@ -90,7 +90,6 @@ export function parseSummaryArgs(values: string[]): SummaryCommand {
 async function main() {
   const command = parseSummaryArgs(process.argv.slice(2));
   const env = loadEnvironment(); const root = resolveStudioRoot(env); const runtime = createPipelineRuntime(env); const service = new SummaryService(root, runtime.router);
-  const media = new SummaryMediaService(root, runtime.router, runtime.tts, runtime.censor, runtime.audio);
   const media = new SummaryMediaService(root, runtime.router, runtime.tts, runtime.censor, runtime.audio, runtime.transcriber);
   const config = alignmentConfig(env, root); const visuals = new SummaryVisualService(root, media, runtime.images, new FfmpegVideoProcessor(), config, createAlignmentEngine(config));
   await runSummaryCommand(command, { root, service, media, visuals, stdout: (text) => process.stdout.write(text), stderr: (text) => process.stderr.write(text) });
