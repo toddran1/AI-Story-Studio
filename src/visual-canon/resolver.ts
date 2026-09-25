@@ -22,20 +22,6 @@ export type ResolvedEntityCanon = {
   groundingMode: "approved_profile" | "story_bible_fallback" | "profile_disabled";
 };
 
-/** Ephemeral rendering guidance. These choices never modify entity canon. */
-export type CharacterContrastPlan = {
-  entityId: string;
-  name: string;
-  contrastedAgainst: string[];
-  faceGuidance: string;
-  hairGuidance: string;
-  wardrobeGuidance: string;
-  expressionGuidance: string;
-  bodyLanguageGuidance: string;
-  visualEnergyGuidance: string;
-  signatureExclusions: string[];
-};
-
 export type ResolvedSceneVisualPrompt = {
   prompt: string;
   negativePrompt: string;
@@ -45,51 +31,7 @@ export type ResolvedSceneVisualPrompt = {
   resolvedPromptFingerprint: string;
   visualContinuityFingerprint?: string;
   resolvedEntities: ResolvedEntityCanon[];
-  characterContrast: CharacterContrastPlan[];
 };
-
-function sceneSupportsBetrayer(sceneText: string, name: string): boolean {
-  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  return new RegExp(`(?:betrayed by|betrayal by|traitor(?: is)?|betrays?|turned against)\\s+${escaped}|${escaped}[^.!?]{0,70}\\b(?:betrays?|betrayed|turns? against)\\b`, "i").test(sceneText);
-}
-
-function buildCharacterContrast(scene: Scene, entities: ResolvedEntityCanon[], profiles: Record<string, VisualEntityProfile>): CharacterContrastPlan[] {
-  const characters = entities.filter((entity) => entity.type === "character");
-  const profiled = characters.filter((entity) => entity.groundingMode === "approved_profile");
-  if (characters.length < 2 || !profiled.length) return [];
-  const sceneText = `${scene.summary ?? ""} ${scene.visualPrompt ?? ""}`;
-  const sharedSchoolContext = /\b(school|academy|student|uniform|faction|guild)\b/i.test(`${sceneText} ${characters.map((entity) => entity.description).join(" ")}`);
-  return characters.filter((entity) => entity.groundingMode !== "approved_profile").map((entity) => {
-    const against = profiled.map((item) => item.name);
-    const signatureExclusions: string[] = [];
-    const faceComparisons: string[] = [];
-    const outfitComparisons: string[] = [];
-    for (const item of profiled) {
-      const traits = profiles[item.entityId]?.character;
-      if (!traits) continue;
-      if (traits.faceShape?.trim()) faceComparisons.push(`${item.name}'s ${traits.faceShape.trim()} face shape`);
-      if (traits.defaultOutfit?.trim()) outfitComparisons.push(`${item.name}'s ${traits.defaultOutfit.trim()} outfit`);
-      if (traits.hairstyle?.trim()) signatureExclusions.push(`Do not copy ${item.name}'s ${traits.hairstyle.trim()} hairstyle or its fringe and forehead silhouette.`);
-      const hairTreatment = [traits.hairColor, traits.hairstyle].filter(Boolean).join(" ");
-      if (/streak|stripe|front lock|white|silver|gr[ae]y (?:front|tip|streak)|ash.gr[ae]y/i.test(hairTreatment)) signatureExclusions.push(`Do not copy ${item.name}'s signature hair coloring or streak (${hairTreatment}).`);
-      if (traits.distinguishingFeatures?.trim()) signatureExclusions.push(`Do not copy ${item.name}'s distinguishing features: ${traits.distinguishingFeatures.trim()}.`);
-    }
-    const betrayer = sceneSupportsBetrayer(sceneText, entity.name);
-    const expression = scene.direction?.characterExpressions?.[entity.entityId] ?? scene.direction?.characterExpressions?.[entity.name];
-    return {
-      entityId: entity.entityId,
-      name: entity.name,
-      contrastedAgainst: profiled.map((item) => item.entityId),
-      faceGuidance: `Give ${entity.name} a clearly different jaw contour, cheek structure, eye shape, brow shape, and facial softness or sharpness from ${against.join(" and ")}${faceComparisons.length ? `; do not duplicate ${faceComparisons.join(" or ")}` : ""}. Avoid the same character face archetype.`,
-      hairGuidance: `Use a different hair shape and flow from ${against.join(" and ")}, especially the fringe, hairline, volume, and forehead silhouette; do not merely recolor the same haircut.`,
-      wardrobeGuidance: `${sharedSchoolContext ? "Shared school or faction clothing is allowed, but" : "Unless the scene explicitly requires matching clothing,"} give ${entity.name} a distinct outerwear cut, jacket length, collar treatment, layering, fit, and overall clothing silhouette from ${against.join(" and ")}${outfitComparisons.length ? `; do not duplicate the exact cut or emblem of ${outfitComparisons.join(" or ")}` : ""}.`,
-      expressionGuidance: expression ? `Use ${entity.name}'s scene expression: ${expression}. Keep it distinct from ${against.join(" and ")}.` : betrayer ? `Give ${entity.name} a controlled, cold or smug expression suited to the betrayal; avoid mirroring the vulnerable character's expression.` : `Give ${entity.name} an expression appropriate to the scene role that differs from ${against.join(" and ")}.`,
-      bodyLanguageGuidance: betrayer ? `Keep ${entity.name} upright, stable, and composed as the betrayer; do not mirror the betrayed character's strained or reaching posture.` : `Give ${entity.name} a distinct pose and posture consistent with the scene action; do not mirror ${against.join(" and ")}.`,
-      visualEnergyGuidance: betrayer ? `${entity.name} should read as a controlled, distant betrayer rather than a second desperate protagonist.` : `${entity.name} should have a distinct scene role and visual energy from ${against.join(" and ")}.`,
-      signatureExclusions,
-    };
-  });
-}
 
 /** Fingerprint the effective direction rather than the serialized shape. The
  * editor writes defaults explicitly while older scenes may omit them; those
@@ -178,6 +120,21 @@ function legacyCharacterTextLooksLikePresentation(text: string): boolean {
     "weapon", "weapons", "sword", "staff", "rifle", "bow", "dagger", "spear", "shield",
     "equipment", "gear", "pack", "satchel", "amulet", "necklace", "ring", "belt",
   ].some((term) => tokens.has(term));
+}
+
+/** Canonical descriptions accumulate plot history as a story grows. An image
+ * prompt needs the character's identity and visible traits, not thousands of
+ * later events (often repeating another character's name and appearance). */
+export function fallbackArtworkDescription(description: string): string {
+  const sentences = description.trim().split(/(?<=[.!?])\s+/).filter(Boolean);
+  const appearance = sentences.slice(2).find((sentence) =>
+    /^(?:he|she|they|his|her|their)\b/i.test(sentence) &&
+    /\b(?:hair|eyes|face|skin|complexion|build|height|tall|wears|wearing|outfit|clothing|attire|scar|beard)\b/i.test(sentence)
+  );
+  const concise = [...sentences.slice(0, 2), ...(appearance ? [appearance] : [])].join(" ");
+  if (concise.length <= 650) return concise;
+  const clipped = concise.slice(0, 650);
+  return clipped.slice(0, Math.max(clipped.lastIndexOf(" "), 0)).trimEnd();
 }
 
 export function resolveVisualCanonPrompt(options: {
@@ -325,7 +282,8 @@ export function resolveVisualCanonPrompt(options: {
     } else {
       // Fallback to Story Bible canonical description
       const namePrefix = entity.originalName ? `${entity.canonicalName} (${entity.originalName})` : entity.canonicalName;
-      const desc = entity.description ? `${namePrefix}: ${entity.description}` : namePrefix;
+      const visualDescription = entity.type === "character" ? fallbackArtworkDescription(entity.description ?? "") : entity.description;
+      const desc = visualDescription ? `${namePrefix}: ${visualDescription}` : namePrefix;
       resolvedEntities.push({
         entityId,
         name: entity.canonicalName,
@@ -363,7 +321,6 @@ export function resolveVisualCanonPrompt(options: {
     promptParts.push(`ENTITY VISUAL CANON:\n${entityCanonLines.join("\n")}`);
   }
   const characters = resolvedEntities.filter((entity) => entity.type === "character");
-  const characterContrast = buildCharacterContrast(scene, resolvedEntities, visualProfiles);
   if (characters.length > 1) {
     promptParts.push(`CHARACTER IDENTITY BLOCKS:\n${characters.map((entity) =>
       `CHARACTER IDENTITY — ${entity.name}\nGrounding: ${entity.groundingMode === "approved_profile" ? "Approved Visual Profile" : "Story Bible fallback"}\nAppearance: ${entity.description}`,
@@ -481,6 +438,5 @@ export function resolveVisualCanonPrompt(options: {
     resolvedPromptFingerprint,
     ...(visualContinuityFingerprint ? { visualContinuityFingerprint } : {}),
     resolvedEntities,
-    characterContrast,
   };
 }

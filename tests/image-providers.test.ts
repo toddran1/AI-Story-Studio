@@ -24,7 +24,7 @@ import { artworkSettingsSchema, sceneDirectionSchema, sceneManifestSchema } from
 import { atomicWrite, atomicWriteJson } from "../src/storage/atomic-write.js";
 import { storyPaths, visualProfileRefPath } from "../src/storage/paths.js";
 import { loadVisualProfiles, saveVisualProfiles } from "../src/visual-canon/profiles.js";
-import { resolveVisualCanonPrompt } from "../src/visual-canon/resolver.js";
+import { fallbackArtworkDescription, resolveVisualCanonPrompt } from "../src/visual-canon/resolver.js";
 import { loadStoryArtDirection, resolveActiveArtDirection } from "../src/visual-canon/art-direction.js";
 import { pricingFor, calculateCost } from "../src/cost/pricing.js";
 import { pngWithDims, testStory } from "./helpers.js";
@@ -257,33 +257,33 @@ describe("Gemini image adapter", () => {
 });
 
 describe("artwork routing and provenance", () => {
+  it("keeps fallback artwork identity concise when the Story Bible has accumulated plot history", () => {
+    const description = [
+      "A young academy classmate of Li Chen from a wealthy family.",
+      "He awakens as a Mage.",
+      ...Array.from({ length: 35 }, (_, index) => `Li Chen later confronts him during event ${index}.`),
+      "He has closely cropped brown hair and a square face.",
+    ].join(" ");
+    const result = fallbackArtworkDescription(description);
+    expect(result).toBe("A young academy classmate of Li Chen from a wealthy family. He awakens as a Mage. He has closely cropped brown hair and a square face.");
+    expect(result.length).toBeLessThan(description.length);
+  });
   it("scopes mixed-grounding character references to their owner in provider order", async () => {
     const { root, story, paths } = await fixture({ provider: "gemini", model: "gemini-3.1-flash-image" }, { withCanon: true });
     const fallbackId = "ent_222222222222222222222222";
     const bible = JSON.parse(await readFile(paths.bible, "utf8"));
-    bible.canonicalEntities.push({ id: fallbackId, type: "character", canonicalName: "Zhang Yongxing", aliases: [], description: "A young rival with a guarded manner.", firstAppearance: 1, lastKnownAppearance: 1 });
+    bible.canonicalEntities.push({ id: fallbackId, type: "character", canonicalName: "Zhang Yongxing", aliases: [], description: "A young rival with a guarded manner. He is a Mage. Li Chen later kills him after many battles. Li Chen's clothing is famous.", firstAppearance: 1, lastKnownAppearance: 1 });
     await atomicWriteJson(paths.bible, bible);
     const manifest = sceneManifestSchema.parse(JSON.parse(await readFile(paths.scenesManifest, "utf8")));
     manifest.scenes[0]!.characters = ["Li Chen", "Zhang Yongxing"];
-    manifest.scenes[0]!.summary = "Zhang Yongxing betrays Li Chen at the academy while Li Chen reaches forward from the ground.";
+    manifest.scenes[0]!.summary = "Zhang betrays Li Chen.";
     await atomicWriteJson(paths.scenesManifest, manifest);
     const profiles = await loadVisualProfiles(root, story.slug);
-    profiles[ENTITY_ID]!.character = { apparentAge: "young adult", gender: "male", faceShape: "soft oval", hairColor: "black with a gray front streak", hairstyle: "layered fringe", defaultOutfit: "academy jacket with a teal collar" };
     profiles[ENTITY_ID]!.references.push({ id: "ref-2", entityId: ENTITY_ID, role: "front", imagePath: "ignored/path.png", source: "uploaded", approved: true, createdAt: new Date().toISOString() });
     await saveVisualProfiles(root, story.slug, profiles);
     await atomicWrite(visualProfileRefPath(root, story.slug, ENTITY_ID, "ref-2", "png"), PNG_ALT);
     const artDirection = resolveActiveArtDirection(await loadStoryArtDirection(root, story.slug));
     const resolved = resolveVisualCanonPrompt({ scene: manifest.scenes[0]!, story, bible, artDirection, visualProfiles: profiles });
-    const contrast = resolved.characterContrast[0]!;
-    expect(contrast).toMatchObject({ entityId: fallbackId, contrastedAgainst: [ENTITY_ID] });
-    expect(contrast.signatureExclusions.join(" ")).toContain("layered fringe");
-    expect(contrast.signatureExclusions.join(" ")).toContain("gray front streak");
-    expect(contrast.faceGuidance).toContain("jaw contour");
-    expect(contrast.faceGuidance).toContain("soft oval face shape");
-    expect(contrast.expressionGuidance).toContain("cold or smug");
-    expect(contrast.bodyLanguageGuidance).toContain("upright");
-    expect(contrast.wardrobeGuidance).toContain("Shared school or faction clothing is allowed");
-    expect(contrast.wardrobeGuidance).toContain("academy jacket with a teal collar");
     const loaded = await loadApprovedVisualProfileReferences(root, story, resolved);
     expect(loaded.images.map((image) => ({ entityId: image.entityId, entityName: image.entityName, referenceId: image.referenceId, role: image.role }))).toEqual([
       { entityId: ENTITY_ID, entityName: "Li Chen", referenceId: "ref-1", role: "face_portrait" },
@@ -298,13 +298,12 @@ describe("artwork routing and provenance", () => {
     expect(request.prompt).toContain("Zhang Yongxing: no character reference image");
     expect(request.prompt).toContain("Li Chen and Zhang Yongxing are different people");
     expect(request.prompt).toContain("FINAL CAST IDENTITY LOCK");
-    expect(request.prompt).toContain("Give Zhang Yongxing a clearly different jaw contour");
-    expect(request.prompt).toContain("Do not copy Li Chen's layered fringe hairstyle");
-    expect(request.prompt).toContain("VISUAL CONTRAST SUMMARY");
+    expect(request.prompt).toContain("Zhang Yongxing a visibly different face");
+    expect(request.prompt).toContain("He is a Mage.");
+    expect(request.prompt).not.toContain("Li Chen later kills him");
     expect(request.prompt).not.toContain("Reference image 2 depicts Li Chen");
     const after = sceneManifestSchema.parse(JSON.parse(await readFile(paths.scenesManifest, "utf8")));
-    expect(after.scenes[0]!.artwork.versions[0]!.provenance).toMatchObject({ characterReferences: [{ entityId: ENTITY_ID, referenceId: "ref-1" }], visualGrounding: [{ mode: "approved_profile" }, { mode: "story_bible_fallback" }], characterContrast: [{ entityId: fallbackId, contrastedAgainst: [ENTITY_ID] }] });
-    expect(await loadVisualProfiles(root, story.slug)).toEqual(profiles);
+    expect(after.scenes[0]!.artwork.versions[0]!.provenance).toMatchObject({ characterReferences: [{ entityId: ENTITY_ID, referenceId: "ref-1" }], visualGrounding: [{ mode: "approved_profile" }, { mode: "story_bible_fallback" }] });
     expect(JSON.parse(await readFile(paths.bible, "utf8")).canonicalEntities[1].visualProfilePolicy).toBeUndefined();
     bible.canonicalEntities[1].visualProfilePolicy = { mode: "skip" };
     await atomicWriteJson(paths.bible, bible);
