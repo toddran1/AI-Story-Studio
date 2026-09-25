@@ -1182,6 +1182,14 @@ describe("web UI", () => {
       expect(html).toContain("Pause after chapter");
     });
 
+    it("shows chapter Fish chunk and mastering progress from production events", () => {
+      const chunk = renderToStaticMarkup(<JobConsole job={{ ...runningJob, progress: { type: "production.stage", chapter: 449, stage: "tts", detail: "Generating audio · Chunk 2 of 4 · Fish s2.1-pro · Automatic retries: off", currentChunk: 2, totalChunks: 4 } }} onUpdate={() => undefined} onClose={() => undefined} />);
+      expect(chunk).toContain("Chunk 2 of 4");
+      expect(chunk).toContain("Automatic retries: off");
+      const mastering = renderToStaticMarkup(<JobConsole job={{ ...runningJob, progress: { type: "production.stage", chapter: 449, stage: "audioMastering", detail: "Mastering audio…" } }} onUpdate={() => undefined} onClose={() => undefined} />);
+      expect(mastering).toContain("Mastering audio…");
+    });
+
     it("renders compact strip when minimized with live dot, title, chapter/stage, and expand control", () => {
       const html = renderToStaticMarkup(
         <JobConsole
@@ -2292,13 +2300,13 @@ describe("Milestone 23 — image output quality UI", () => {
       },
     });
 
-    it("renders Post-Generation Quality Guard once and eliminates the obsolete generic Quality guard control", () => {
+    it("renders an explicit post-generation quality mode alongside the separate provider guard", () => {
       const story = createMockStory(true, false);
       const html = renderToStaticMarkup(<SettingsPage slug="test-story" onJob={() => undefined} initialStory={story as any} />);
 
-      // Exactly one Post-Generation Quality Guard control
-      const postGuardMatches = html.match(/Post-Generation Quality Guard/g);
-      expect(postGuardMatches).toHaveLength(1);
+      expect(html.match(/Post-generation audio quality mode/g)).toHaveLength(1);
+      expect(html).toContain('value="verify" selected=""');
+      expect(html).toContain('Auto repair — retry failed chunks');
 
       // Exactly one Provider Quality Guard control
       const providerGuardMatches = html.match(/Provider Quality Guard/g);
@@ -2307,24 +2315,21 @@ describe("Milestone 23 — image output quality UI", () => {
       // Obsolete generic "Quality guard" control is completely gone
       expect(html).not.toContain("<b>Quality guard</b>");
 
-      // Post-generation quality guard description is preserved
-      expect(html).toContain("Transcribes generated audio and checks it against the expected narration to detect missing, incorrect, repeated, or unexpected speech.");
-
-      // Max quality retries is present alongside post-generation quality guard
-      expect(html).toContain("Max quality retries");
+      expect(html).toContain("Existing qualityGuard settings use Verify only");
+      expect(html).not.toContain("Max quality retries");
     });
 
-    it("independently binds qualityGuard and providerQualityGuard states", () => {
+    it("independently binds legacy verification mode and providerQualityGuard states", () => {
       // Case 1: qualityGuard=true, providerQualityGuard=false
       const storyA = createMockStory(true, false);
       const htmlA = renderToStaticMarkup(<SettingsPage slug="test-story" onJob={() => undefined} initialStory={storyA as any} />);
-      expect(htmlA).toContain('<b>Post-Generation Quality Guard</b><small>Transcribes generated audio and checks it against the expected narration to detect missing, incorrect, repeated, or unexpected speech.</small></div><input type="checkbox" checked=""');
+      expect(htmlA).toContain('value="verify" selected=""');
       expect(htmlA).toContain('<b>Provider Quality Guard</b><small>Use the TTS provider&#x27;s native quality-control feature when supported.</small></div><input type="checkbox"/>');
 
       // Case 2: qualityGuard=false, providerQualityGuard=true
       const storyB = createMockStory(false, true);
       const htmlB = renderToStaticMarkup(<SettingsPage slug="test-story" onJob={() => undefined} initialStory={storyB as any} />);
-      expect(htmlB).toContain('<b>Post-Generation Quality Guard</b><small>Transcribes generated audio and checks it against the expected narration to detect missing, incorrect, repeated, or unexpected speech.</small></div><input type="checkbox"/>');
+      expect(htmlB).toContain('value="off" selected=""');
       expect(htmlB).toContain('<b>Provider Quality Guard</b><small>Use the TTS provider&#x27;s native quality-control feature when supported.</small></div><input type="checkbox" checked=""');
     });
   });

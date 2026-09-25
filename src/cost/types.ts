@@ -13,6 +13,7 @@ export const providerUsageRecordSchema = z.object({
   operation: z.enum(["llm_text", "llm_structured", "tts", "image"]), attemptedAt: z.string(), completedAt: z.string(), attempt: z.number().int().positive(),
   inputTokens: z.number().int().nonnegative().optional(), cachedInputTokens: z.number().int().nonnegative().optional(), outputTokens: z.number().int().nonnegative().optional(),
   inputCharacters: z.number().int().nonnegative().optional(), inputUtf8Bytes: z.number().int().nonnegative().optional(), outputBytes: z.number().int().nonnegative().optional(),
+  providerRequests: z.number().int().nonnegative().optional(),
   audioDurationSeconds: z.number().nonnegative().optional(), imageCount: z.number().int().nonnegative().optional(), imageQuality: z.string().optional(), imageSize: z.string().optional(),
   requestId: z.string().optional(), success: z.boolean(), errorCategory: z.string().optional(), retry: z.boolean(),
   costUsd: z.number().nonnegative().optional(), costStatus: z.enum(["calculated", "unavailable"]), pricing: pricingSnapshotSchema.optional(),

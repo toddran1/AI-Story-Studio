@@ -25,7 +25,7 @@ export class FishAudioProvider implements TTSProvider {
     private readonly timeoutMs = 120_000,
     private readonly defaultReferenceId?: string,
     private readonly speechOptions: { tskRendering?: "preserve" | "direction" } = {},
-  ) { this.inputNormalizationVersion = speechOptions.tskRendering === "direction" ? "fish-speech-normalization-v8-tsk-direction" : "fish-speech-normalization-v8"; }
+  ) { this.inputNormalizationVersion = speechOptions.tskRendering === "direction" ? "fish-speech-normalization-v9-large-chunks-tsk-direction" : "fish-speech-normalization-v9-large-chunks"; }
 
   resolveReferenceId(referenceId?: string): string | undefined {
     return normalizeFishReferenceId(referenceId) ?? normalizeFishReferenceId(this.defaultReferenceId);
@@ -52,13 +52,13 @@ export class FishAudioProvider implements TTSProvider {
           const speechText = normalizeFishSpeechText(adaptPronunciationText(request.text, request.pronunciation ?? [], this.pronunciationCapabilities), request.model, this.speechOptions);
           if (!speechText) throw new ProviderError("Fish Audio narration is empty after speech normalization");
           const castText = multiSpeaker ? castQuotedDialogue(speechText) : directedSingleVoice ? directQuotedDialogue(speechText) : speechText;
-          // Keep coherent paragraphs, but cap S2 requests below the general
-          // configured maximum so hallucinations are isolated to smaller segments.
-          const preferredMax = isFishS2Model(request.model) ? Math.min(request.maxCharsPerRequest, 900) : request.maxCharsPerRequest;
-          const splitText = splitForTTS(castText, preferredMax);
-          return multiSpeaker ? ensureChunkSpeakers(splitText) : splitText;
+          const splitText = splitForTTS(castText, request.maxCharsPerRequest - (multiSpeaker ? 13 : 0));
+          const prepared = multiSpeaker ? ensureChunkSpeakers(splitText) : splitText;
+          if (prepared.some((chunk) => chunk.length > request.maxCharsPerRequest)) throw new ProviderError("Fish Audio chunk exceeds the configured character limit after speaker formatting");
+          return prepared;
         })();
     for (const [index, text] of chunks.entries()) {
+      request.onChunkProgress?.({ currentChunk: index + 1, totalChunks: chunks.length, status: "started" });
       logger.debug({ event: "tts.fish.segment_input", segment: index + 1, originalText: request.text, fishSafeText: text, characters: text.length });
       let response: Response;
       try {
@@ -86,11 +86,12 @@ export class FishAudioProvider implements TTSProvider {
       const audio = new Uint8Array(await response.arrayBuffer());
       if (!audio.length) throw new ProviderError("Fish Audio returned an empty audio response");
       segments.push(audio);
+      request.onChunkProgress?.({ currentChunk: index + 1, totalChunks: chunks.length, status: "completed" });
     }
     const length = segments.reduce((sum, segment) => sum + segment.length, 0);
     const audio = new Uint8Array(length); let offset = 0;
     for (const segment of segments) { audio.set(segment, offset); offset += segment.length; }
-    return { audio, segments, requestIds, providerRequests: segments.length, segmentTexts: chunks };
+    return { audio, segments, requestIds, providerRequests: segments.length, generatedCharacters: chunks.reduce((sum, chunk) => sum + [...chunk].length, 0), generatedUtf8Bytes: chunks.reduce((sum, chunk) => sum + Buffer.byteLength(chunk), 0), segmentTexts: chunks };
   }
 }
 

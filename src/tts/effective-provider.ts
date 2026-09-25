@@ -7,6 +7,7 @@ export type CreateEffectiveTtsProviderOptions = {
   baseProvider: TTSProvider;
   pronunciationEntities?: readonly CanonicalEntity[];
   qualityGuardEnabled?: boolean;
+  qualityMode?: "off" | "verify" | "auto_repair";
   maxQualityRetries?: number;
   language?: string;
   transcriber?: SpeechTranscriber;
@@ -31,10 +32,10 @@ export function createEffectiveTtsProvider(options: CreateEffectiveTtsProviderOp
     ? pronunciationProvider(baseProvider, options.pronunciationEntities)
     : baseProvider;
 
-  const qualityGuardEnabled = options.qualityGuardEnabled !== false;
-  const provider = qualityGuardEnabled
+  const qualityMode = options.qualityMode ?? (options.qualityGuardEnabled ? "verify" : "off");
+  const provider = qualityMode !== "off"
     ? new QualityGuardTTSProvider(basePronunciationProvider, options.transcriber, {
-        maxRetries: options.maxQualityRetries ?? 2,
+        maxRetries: qualityMode === "auto_repair" ? options.maxQualityRetries ?? 2 : 0,
         language: options.language ?? "en-US",
         durationProbe: options.durationProbe,
         thresholds: options.thresholds,
@@ -48,4 +49,3 @@ export function createEffectiveTtsProvider(options: CreateEffectiveTtsProviderOp
     baseProvider,
   };
 }
-

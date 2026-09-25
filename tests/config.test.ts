@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { loadEnvironment, requireProviderKey, resolveStudioRoot } from "../src/config/env.js";
 import { defaultStory } from "../src/config/load-config.js";
 import { storySchema } from "../src/domain/story.js";
+import { ttsQualityMode } from "../src/domain/provider.js";
 
 describe("configuration", () => {
   it("loads valid values and defaults", () => {
@@ -13,7 +14,13 @@ describe("configuration", () => {
   it("uses an explicit FISH_AUDIO_MODEL for new stories", () => {
     const env = loadEnvironment({ FISH_AUDIO_MODEL: "s2.1-pro-free" });
     expect(env.FISH_AUDIO_MODEL).toBe("s2.1-pro-free");
-    expect(defaultStory("new-story", env).pipeline.tts).toMatchObject({ model: "s2.1-pro-free", voiceMode: "same-voice-dialogue", deliveryIntensity: "restrained", qualityGuard: true });
+    expect(defaultStory("new-story", env).pipeline.tts).toMatchObject({ model: "s2.1-pro-free", voiceMode: "same-voice-dialogue", deliveryIntensity: "restrained", qualityMode: "off", qualityGuard: false, maxCharsPerRequest: 1750 });
+  });
+
+  it("maps legacy qualityGuard stories to verification without automatic Fish repair", () => {
+    const story = defaultStory("legacy-story", loadEnvironment({}));
+    const legacy = storySchema.parse({ ...story, pipeline: { ...story.pipeline, tts: { ...story.pipeline.tts, qualityMode: undefined, qualityGuard: true, maxQualityRetries: 2 } } });
+    expect(ttsQualityMode(legacy.pipeline.tts)).toBe("verify");
   });
 
   it("reports a missing provider key without revealing secrets", () => {

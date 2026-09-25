@@ -839,6 +839,7 @@ export function ChapterPage({
       </> : <Empty title="No context snapshot yet" text="Process this chapter to create an inspectable bounded Story Bible context." />)}
       {tab === "audio" && <>
         {data.audioStale && <ArtifactStatusNotice status="stale" reason="This master was rendered from older inputs or settings. You can still listen to it, but it will not be treated as current until it is regenerated or marked current." />}
+        {data.metadata?.stages?.tts?.usage && <p className="field-note">Fish requests: {data.metadata.stages.tts.usage.requests ?? "—"} · Chunks generated: {data.metadata.stages.tts.usage.chunks ?? "—"} · Automatic retries: {data.metadata.stages.tts.usage.quality?.retried ?? 0}{data.metadata.stages.tts.usage.quality ? ` · Quality: ${pretty(data.metadata.stages.tts.usage.quality.status)}` : " · Post-generation verification: not run"}</p>}
         <AudioDeck src={data.audioUrl} title={`Chapter ${chapter} master`} />
         <TtsQualityPanel slug={slug} chapter={chapter} onJob={onJob} onChanged={() => void load()} />
       </>}
@@ -979,13 +980,13 @@ export function TtsQualityPanel({ slug, chapter, onJob, onChanged, initialQualit
     }
   };
   if (quality === undefined) return error ? <ErrorBox text={error} /> : null;
-  if (quality === null) return <p className="tts-quality-empty">TTS quality has not been verified for this chapter yet. Verification runs automatically during TTS when the quality guard is enabled.</p>;
+  if (quality === null) return <p className="tts-quality-empty">No segment verification record is available for this chapter. Regenerate TTS to enable verification of saved audio.</p>;
   const busy = Boolean(working);
   return <section className="tts-quality-panel" aria-label="TTS quality">
     <div className="tts-quality-summary">
       <TtsQualityBadge quality={quality} />
       <span className="tts-quality-meta">{quality.provider} · {quality.model} · {quality.segments.length} segment{quality.segments.length === 1 ? "" : "s"}</span>
-      <button type="button" className="button" disabled={busy} title="Re-checks the existing audio against the expected narration without regenerating anything." onClick={() => void runJob("verify", () => verifyChapterTtsQuality(slug, chapter))}>{working === "verify" ? "Verifying…" : "Re-verify"}</button>
+      <button type="button" className="button" disabled={busy} title="Checks the existing audio against the expected narration without regenerating anything." onClick={() => void runJob("verify", () => verifyChapterTtsQuality(slug, chapter))}>{working === "verify" ? "Verifying…" : quality.status === "unverified" ? "Verify Audio" : "Re-verify"}</button>
     </div>
     {error && <ErrorBox text={error} />}
     <details className="tts-segment-list">
@@ -3906,6 +3907,7 @@ export function SettingsPage({ slug, onJob, initialStory, initialEffectiveRoutin
           voiceMode: story.pipeline.tts.voiceMode,
           deliveryIntensity: story.pipeline.tts.deliveryIntensity,
           qualityGuard: story.pipeline.tts.qualityGuard,
+          qualityMode: story.pipeline.tts.qualityMode ?? (story.pipeline.tts.qualityGuard ? "verify" : "off"),
           providerQualityGuard: story.pipeline.tts.providerQualityGuard,
           maxCharsPerRequest: story.pipeline.tts.maxCharsPerRequest,
           maxQualityRetries: story.pipeline.tts.maxQualityRetries,
@@ -3957,6 +3959,7 @@ export function SettingsPage({ slug, onJob, initialStory, initialEffectiveRoutin
           voiceMode: story.pipeline.tts.voiceMode,
           deliveryIntensity: story.pipeline.tts.deliveryIntensity,
           qualityGuard: story.pipeline.tts.qualityGuard,
+          qualityMode: story.pipeline.tts.qualityMode ?? (story.pipeline.tts.qualityGuard ? "verify" : "off"),
           providerQualityGuard: story.pipeline.tts.providerQualityGuard,
           maxCharsPerRequest: story.pipeline.tts.maxCharsPerRequest,
           maxQualityRetries: story.pipeline.tts.maxQualityRetries,
@@ -4205,8 +4208,8 @@ export function SettingsPage({ slug, onJob, initialStory, initialEffectiveRoutin
         <Field label="Delivery intensity"><select value={story.pipeline.tts.deliveryIntensity} onChange={(event) => setStory({ ...story, pipeline: { ...story.pipeline, tts: { ...story.pipeline.tts, deliveryIntensity: event.target.value as "none" | "restrained" | "expressive" } } })}><option value="none">None · no emotion cues</option><option value="restrained">Restrained · consistent</option><option value="expressive">Expressive · more variation</option></select></Field>
         <div className="voice-casting" role="group" aria-label="TTS chunk size"><span>TTS CHUNK SIZE</span>{([{"id":"conservative","label":"Conservative · ~1,000 chars","detail":"More, smaller requests. Smallest blast radius when a request fails.","recommended":false},{"id":"balanced","label":"Balanced · ~1,750 chars","detail":"Recommended default for most voices.","recommended":true},{"id":"long","label":"Long · ~3,000 chars","detail":"Fewer requests; only for very stable voices.","recommended":false},{"id":"custom","label":"Custom","detail":"Choose an exact size between 500 and 20,000 characters.","recommended":false}] as const).map((option) => <button key={option.id} type="button" aria-pressed={chunkPresetFor(story.pipeline.tts.maxCharsPerRequest) === option.id} className={`${chunkPresetFor(story.pipeline.tts.maxCharsPerRequest) === option.id ? "active" : ""} ${option.recommended ? "recommended" : ""}`.trim()} onClick={() => setStory({ ...story, pipeline: { ...story.pipeline, tts: { ...story.pipeline.tts, maxCharsPerRequest: option.id === "conservative" ? 1000 : option.id === "balanced" ? 1750 : option.id === "long" ? 3000 : story.pipeline.tts.maxCharsPerRequest } } })}><b>{option.label}</b><small>{option.detail}</small></button>)}</div>
         {chunkPresetFor(story.pipeline.tts.maxCharsPerRequest) === "custom" && <Field label="Custom chunk size · characters"><input type="number" min="500" max="20000" step="50" value={story.pipeline.tts.maxCharsPerRequest} onChange={(event) => setStory({ ...story, pipeline: { ...story.pipeline, tts: { ...story.pipeline.tts, maxCharsPerRequest: Math.max(500, Math.min(20000, Number(event.target.value) || 500)) } } })} /></Field>}
-        <label className={`narration-policy ${story.pipeline.tts.qualityGuard ? "active" : ""}`}><div><span>QUALITY</span><b>Post-Generation Quality Guard</b><small>Transcribes generated audio and checks it against the expected narration to detect missing, incorrect, repeated, or unexpected speech.</small></div><input type="checkbox" checked={story.pipeline.tts.qualityGuard} onChange={(event) => setStory({ ...story, pipeline: { ...story.pipeline, tts: { ...story.pipeline.tts, qualityGuard: event.target.checked } } })} /><i aria-hidden="true" /></label>
-        <Field label="Max quality retries"><input type="number" min="0" max="5" step="1" value={story.pipeline.tts.maxQualityRetries} onChange={(event) => setStory({ ...story, pipeline: { ...story.pipeline, tts: { ...story.pipeline.tts, maxQualityRetries: Math.max(0, Math.min(5, Math.round(Number(event.target.value) || 0))) } } })} /><small className="field-note">Regenerate only the failed segment, up to this many extra attempts. Verification-only — changing it does not regenerate existing audio.</small></Field>
+        <Field label="Post-generation audio quality mode"><select value={story.pipeline.tts.qualityMode ?? (story.pipeline.tts.qualityGuard ? "verify" : "off")} onChange={(event) => setStory({ ...story, pipeline: { ...story.pipeline, tts: { ...story.pipeline.tts, qualityMode: event.target.value as "off" | "verify" | "auto_repair" } } })}><option value="off">Off — generate once</option><option value="verify">Verify only — no Fish retries</option><option value="auto_repair">Auto repair — retry failed chunks</option></select><small className="field-note">Existing qualityGuard settings use Verify only. Manual segment verification and regeneration remain available.</small></Field>
+        {(story.pipeline.tts.qualityMode === "auto_repair") && <Field label="Max quality retries"><input type="number" min="0" max="5" step="1" value={story.pipeline.tts.maxQualityRetries} onChange={(event) => setStory({ ...story, pipeline: { ...story.pipeline, tts: { ...story.pipeline.tts, maxQualityRetries: Math.max(0, Math.min(5, Math.round(Number(event.target.value) || 0))) } } })} /><small className="field-note">Extra Fish attempts per failed segment when Auto repair is selected.</small></Field>}
         <div className="diagnostic-delivery"><div><span>TROUBLESHOOTING</span><small>Flattens delivery and disables vocalization rendering to isolate unstable voices. Updates this form — save to apply.</small></div><button type="button" className="button" onClick={() => setStory({ ...story, pipeline: { ...story.pipeline, tts: { ...story.pipeline.tts, deliveryIntensity: "none" } }, narrationSettings: { ...story.narrationSettings, speechVocalizations: { ...story.narrationSettings.speechVocalizations, mode: "disabled" } } })}>Use diagnostic delivery (flat, no vocalizations)</button></div>
         <details className="settings-advanced"><summary>Advanced voice settings</summary>
           <label className={`narration-policy ${story.pipeline.tts.providerQualityGuard ? "active" : ""}`}><div><span>PROVIDER QUALITY</span><b>Provider Quality Guard</b><small>Use the TTS provider's native quality-control feature when supported.</small></div><input type="checkbox" checked={story.pipeline.tts.providerQualityGuard} onChange={(event) => setStory({ ...story, pipeline: { ...story.pipeline, tts: { ...story.pipeline.tts, providerQualityGuard: event.target.checked } } })} /><i aria-hidden="true" /></label>
@@ -4304,7 +4307,7 @@ export function JobConsole({ job, onUpdate, onClose, navigate, initialQaComparis
   const diagnostic: ErrorDiagnostic | undefined = job.diagnostic ?? job.progress?.diagnostic;
   const stage = diagnostic?.stage ?? job.progress?.stage ?? job.progress?.event?.stage ?? job.progress?.type?.replace("chapter.", "");
   const chapter = diagnostic?.chapter ?? job.progress?.chapter;
-  const detail = job.progress?.event?.detail;
+  const detail = job.progress?.event?.detail ?? job.progress?.detail;
   // QA-related failures carry the failure-time dependency fingerprint; compare
   // it against the chapter's current QA state so stale failures read as history.
   const qaRelated = Boolean(diagnostic && diagnostic.chapter && (diagnostic.category === "content_qa" || diagnostic.issues?.length));

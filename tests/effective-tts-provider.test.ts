@@ -7,9 +7,10 @@ import { loadEnvironment } from "../src/config/env.js";
 import { canonicalEntitySchema } from "../src/domain/story-bible.js";
 import { TrackedTTSProvider, withUsageScope } from "../src/cost/context.js";
 import { ProviderUsageRecord, UsageSink } from "../src/cost/types.js";
-import { atomicWrite } from "../src/storage/atomic-write.js";
+import { atomicWrite, atomicWriteJson } from "../src/storage/atomic-write.js";
 import { storyPaths, voicePreviewPaths } from "../src/storage/paths.js";
 import { createEffectiveTtsProvider } from "../src/tts/effective-provider.js";
+import { FishAudioProvider } from "../src/tts/fish/fish-audio.provider.js";
 import { QualityGuardTTSProvider, SpeechTranscriber } from "../src/tts/quality-guard.js";
 import { TTSProvider } from "../src/tts/provider.js";
 import { TTSRequest, TTSResult } from "../src/tts/types.js";
@@ -125,6 +126,29 @@ describe("effective TTS provider construction", () => {
     expect(effective.provider).not.toBeInstanceOf(QualityGuardTTSProvider);
   });
 
+  it("verifies a failed segment without spending a second Fish request in legacy verify mode", async () => {
+    const text = "First sentence needs verification.";
+    const base = new ScriptedTTS(() => singleSegment(text, "bad"));
+    const transcriber = new FakeTranscriber(() => say("unrelated random speech"));
+    const effective = createEffectiveTtsProvider({ baseProvider: base, qualityGuardEnabled: true, maxQualityRetries: 2, language: "en-US", transcriber });
+    const result = await effective.provider.synthesize({ text, model: "s2.1-pro", speed: 1, format: "mp3", sampleRate: 44100, bitrate: 128, normalize: true, maxCharsPerRequest: 1750, qualityGuard: true });
+    expect(base.calls).toHaveLength(1);
+    expect(result.providerRequests).toBe(1);
+    expect(result.quality?.segments[0]?.attempts).toHaveLength(1);
+  });
+
+  it("generates each initial S2.1-Pro chunk once with default post-generation checking off", async () => {
+    const fetcher = vi.fn(async () => new Response(bytes("mp3"), { headers: { "content-type": "audio/mpeg", "x-request-id": "fish-request" } }));
+    const transcriber = new FakeTranscriber(() => say("unexpected speech"));
+    const effective = createEffectiveTtsProvider({ baseProvider: new FishAudioProvider("test-key", fetcher as typeof fetch), qualityMode: "off", transcriber });
+    const text = Array.from({ length: 18 }, (_, index) => `Paragraph ${index + 1}. ${"The narrator described the corridor and its shadows. ".repeat(5)}`).join("\n\n");
+    const result = await effective.provider.synthesize({ text, model: "s2.1-pro", speed: 1, format: "mp3", sampleRate: 44100, bitrate: 128, normalize: true, maxCharsPerRequest: 1750 });
+    expect(fetcher).toHaveBeenCalledTimes(result.segments.length);
+    expect(result.providerRequests).toBe(result.segments.length);
+    expect(result.quality).toBeUndefined();
+    expect(transcriber.calls).toBe(0);
+  });
+
   it("tracks retries through the inner provider and preserves usage scope", async () => {
     const text = "First sentence needs retry.";
     let callCount = 0;
@@ -148,7 +172,7 @@ describe("effective TTS provider construction", () => {
 
     const effective = createEffectiveTtsProvider({
       baseProvider: trackedBase,
-      qualityGuardEnabled: true,
+      qualityMode: "auto_repair",
       maxQualityRetries: 2,
       language: "en-US",
       transcriber,
@@ -181,6 +205,7 @@ describe("voice preview with quality guard", () => {
     const root = await mkdtemp(join(tmpdir(), "voice-preview-quality-"));
     const env = loadEnvironment({});
     const story = await createBlankStory(root, env, { title: "Voice Story", slug: "voice-story" });
+    await atomicWriteJson(storyPaths(root, story.slug, 1).storyConfig, { ...story, pipeline: { ...story.pipeline, tts: { ...story.pipeline.tts, qualityMode: "auto_repair" } } });
     const text = "Voice test preview sample.";
 
     let callCount = 0;
@@ -233,6 +258,7 @@ describe("summary media audio with quality guard", () => {
     const root = await mkdtemp(join(tmpdir(), "summary-quality-unverified-"));
     const env = loadEnvironment({});
     const story = await createBlankStory(root, env, { title: "Summary Story", slug: "summary-story" });
+    await atomicWriteJson(storyPaths(root, story.slug, 1).storyConfig, { ...story, pipeline: { ...story.pipeline, tts: { ...story.pipeline.tts, qualityMode: "verify" } } });
     await atomicWrite(storyPaths(root, story.slug, 1).english, "Chapter 1 english content.");
 
     const text = "Summary recap text.";
@@ -279,6 +305,7 @@ describe("summary media audio with quality guard", () => {
     const root = await mkdtemp(join(tmpdir(), "summary-quality-review-"));
     const env = loadEnvironment({});
     const story = await createBlankStory(root, env, { title: "Summary Story", slug: "summary-story" });
+    await atomicWriteJson(storyPaths(root, story.slug, 1).storyConfig, { ...story, pipeline: { ...story.pipeline, tts: { ...story.pipeline.tts, qualityMode: "verify" } } });
     await atomicWrite(storyPaths(root, story.slug, 1).english, "Chapter 1 english content.");
 
     const text = "Summary recap text that fails verification repeatedly.";

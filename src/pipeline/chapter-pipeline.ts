@@ -1,7 +1,7 @@
 import { mkdir, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { Chapter, StageName, StageState, chapterSchema } from "../domain/chapter.js";
-import { ttsSynthesisSettings } from "../domain/provider.js";
+import { ttsQualityMode, ttsSynthesisSettings } from "../domain/provider.js";
 import { Story } from "../domain/story.js";
 import { StoryBibleUpdate, storyBibleUpdateSchema, storyBibleSchema } from "../domain/story-bible.js";
 import { activeQaIssues, QaResult, QaState, qaResultSchema } from "../domain/qa.js";
@@ -50,7 +50,7 @@ import { StageExecutionNode, dependentProcessingStages } from "../studio/stage-e
 import { persistQaStateWithMetadata } from "../qa/persistence.js";
 
 export type ForceStage = "translation" | "narration" | "qa" | "story-bible" | "continuity" | "tts" | "audio" | "all";
-export type PipelineStageEvent = { stage: StageName; status: "started" | "completed" | "reused"; state: StageState; detail?: string };
+export type PipelineStageEvent = { stage: StageName; status: "started" | "progress" | "completed" | "reused"; state: StageState; detail?: string; currentChunk?: number; totalChunks?: number };
 export type PipelineOptions = {
   root: string; story: Story; chapter: number; inputPath: string; force?: ForceStage;
   stopAfter?: StageName;
@@ -129,7 +129,7 @@ export class ChapterPipeline {
       if (stage !== "qa") invalidateDownstream(chapter, stage);
       chapter.stages[stage] = { ...details, status: "running", fingerprint: fp, startedAt: new Date().toISOString() };
       await persist();
-      options.onStageEvent?.({ stage, status: "started", state: chapter.stages[stage] });
+      options.onStageEvent?.({ stage, status: "started", state: chapter.stages[stage], detail: stage === "audioMastering" ? "Mastering audio…" : undefined });
       logger.info({ event: "pipeline.stage.started", story: options.story.slug, chapter: options.chapter, stage, provider: details.provider, model: details.model });
       try {
         const value = await withUsageScope({ story: options.story.slug, chapter: options.chapter, productionRunId: options.productionRunId, queueJobId: options.queueJobId, stage }, action);
@@ -157,7 +157,7 @@ export class ChapterPipeline {
         if (!producedFingerprint) throw new Error(`Stage '${stage}' did not produce a non-empty output at ${outputPath}`);
         chapter.stages[stage] = { ...chapter.stages[stage], status: "complete", outputFingerprint: producedFingerprint, completedAt: new Date().toISOString(), durationMs: Date.now() - started, error: undefined };
         await persist();
-        options.onStageEvent?.({ stage, status: "completed", state: chapter.stages[stage] });
+        options.onStageEvent?.({ stage, status: "completed", state: chapter.stages[stage], detail: stage === "tts" ? `Audio generated · Fish requests: ${chapter.stages.tts.usage?.requests ?? 0} · Automatic retries: ${ttsQualityMode(options.story.pipeline.tts) === "auto_repair" ? "enabled" : "off"}` : stage === "audioMastering" ? "Audio complete" : undefined });
         logger.info({ event: "pipeline.stage.completed", story: options.story.slug, chapter: options.chapter, stage, provider: details.provider, model: details.model, durationMs: Date.now() - started });
         return value;
       } catch (error) {
@@ -419,10 +419,11 @@ export class ChapterPipeline {
     // generated with a different voice.
     const pronunciationData = await withUsageScope({ story: options.story.slug, chapter: options.chapter, stage: "pronunciation" }, () => enrichStoryPronunciations(options.root, options.story.slug, bible, this.llms.forStage(bibleConfig), bibleConfig, options.story.sourceLanguage, undefined, false, false,
       (progress) => { if (progress.total > 0) options.onStageEvent?.({ stage: "tts", status: "started", state: chapter.stages.tts, detail: `Enriching pronunciations ${progress.processed}/${progress.total}` }); }));
+    const qualityMode = ttsQualityMode(ttsConfig);
     const { provider: ttsProvider, basePronunciationProvider: baseTtsProvider } = createEffectiveTtsProvider({
       baseProvider: this.tts.forName(ttsConfig.provider),
       pronunciationEntities: pronunciationData.entities,
-      qualityGuardEnabled: ttsConfig.qualityGuard,
+      qualityMode,
       maxQualityRetries: ttsConfig.maxQualityRetries,
       language: options.story.outputLanguage,
       transcriber: this.qualityVerification?.transcriber,
@@ -439,7 +440,8 @@ export class ChapterPipeline {
       ...(bleepStrongProfanity ? { bleepStrongProfanity: true, censor: { version: this.censor.version || CENSOR_AUDIO_VERSION, config: censorToneConfig } } : {}) });
     await runStage("tts", ttsFp, paths.audioRaw, { provider: ttsConfig.provider, model: ttsConfig.model }, async () => {
       const result = await this.censor.synthesize(ttsProvider, { text: speech.normalized.text, model: ttsConfig.model, referenceId, secondaryReferenceId: ttsConfig.secondaryReferenceId,
-        voiceMode: ttsConfig.voiceMode, deliveryIntensity: ttsConfig.deliveryIntensity, qualityGuard: ttsConfig.qualityGuard, providerQualityGuard: ttsConfig.providerQualityGuard, bleepStrongProfanity,
+        voiceMode: ttsConfig.voiceMode, deliveryIntensity: ttsConfig.deliveryIntensity, qualityGuard: qualityMode !== "off", providerQualityGuard: ttsConfig.providerQualityGuard, bleepStrongProfanity,
+        onChunkProgress: ({ currentChunk, totalChunks, status }) => options.onStageEvent?.({ stage: "tts", status: "progress", state: chapter.stages.tts, currentChunk, totalChunks, detail: `Generating audio · Chunk ${currentChunk} of ${totalChunks} · Fish ${ttsConfig.model} · Automatic retries: ${qualityMode === "auto_repair" ? "on" : "off"}${status === "completed" ? " · completed" : ""}` }),
         speed: ttsConfig.speed, format: ttsConfig.format, sampleRate: ttsConfig.sampleRate, bitrate: ttsConfig.bitrate,
         normalize: ttsConfig.normalize, maxCharsPerRequest: ttsConfig.maxCharsPerRequest });
       await atomicWrite(paths.audioRaw, result.audio);
@@ -450,20 +452,31 @@ export class ChapterPipeline {
       }
       chapter.stages.tts.usage = {
         requestId: result.requestIds?.join(","), requests: result.providerRequests ?? (result.censor ? Math.max(0, result.segments.length - result.censor.segments) : result.segments.length),
-        characters: [...speech.normalized.text].length, bytes: result.audio.byteLength,
+        chunks: result.assembled ? (result.providerRequests ?? 0) : result.segments.length,
+        characters: result.generatedCharacters ?? [...speech.normalized.text].length, bytes: result.audio.byteLength,
         censoredSegments: result.censor?.segments, censorDurationSeconds: result.censor?.durationSeconds,
       };
       if (result.quality) {
         const summary = summarizeQuality(result.quality.segments);
         chapter.stages.tts.usage.quality = { status: summary.status, segments: result.quality.segments.length, needsReview: summary.needsReview, retried: summary.retried, manuallyAccepted: summary.manuallyAccepted };
         await persistChapterTtsQuality({ root: options.root, story: options.story, chapter: options.chapter, report: result.quality, maxRetries: ttsConfig.maxQualityRetries, transcriber: this.qualityVerification?.transcriber?.name ?? "unavailable" });
+      } else if (!result.assembled && result.segmentTexts?.length === result.segments.length) {
+        // Keep the exact text sent for each saved chunk so manual verification can
+        // inspect the existing audio later without another Fish request.
+        await persistChapterTtsQuality({
+          root: options.root, story: options.story, chapter: options.chapter,
+          report: { version: 1, status: "unverified", retried: 0, segments: result.segmentTexts.map((expectedText, index) => ({
+            index, expectedText, status: "unverified", attempts: [], finalAttempt: 0, issues: [],
+          })) },
+          maxRetries: 0, transcriber: "not_run",
+        });
       } else await removeChapterTtsQuality(options.root, options.story.slug, options.chapter);
     });
     if (options.stopAfter === "tts") { await persist(); return chapter; }
 
     if (!shouldRun("audioMastering")) { await persist(); return chapter; }
     const mastered = await masterStoredChapter({ root: options.root, story: options.story, chapter: options.chapter, processor: this.audio,
-      force: Boolean(executionStages?.has("audioMastering")) || isForced(options.force, "audioMastering"), onEvent: (event) => options.onStageEvent?.({ stage: "audioMastering", status: event.status, state: event.state }) });
+      force: Boolean(executionStages?.has("audioMastering")) || isForced(options.force, "audioMastering"), onEvent: (event) => options.onStageEvent?.({ stage: "audioMastering", status: event.status, state: event.state, detail: event.status === "started" ? "Mastering audio…" : event.status === "completed" ? "Audio complete" : undefined }) });
     chapter = mastered.chapter;
 
     return chapter;

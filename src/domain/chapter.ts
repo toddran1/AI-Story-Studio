@@ -10,6 +10,7 @@ const usageSchema = z.object({
   cachedTokens: z.number().optional(),
   requestId: z.string().optional(),
   requests: z.number().optional(),
+  chunks: z.number().int().nonnegative().optional(),
   characters: z.number().optional(),
   bytes: z.number().optional(),
   censoredSegments: z.number().int().nonnegative().optional(),

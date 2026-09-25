@@ -1513,7 +1513,7 @@ export class StudioOperations {
       const { provider } = createEffectiveTtsProvider({
         baseProvider: this.tts.forName(request.provider),
         pronunciationEntities: entities,
-        qualityGuardEnabled: config.qualityGuard,
+        qualityMode: config.qualityMode ?? (config.qualityGuard ? "verify" : "off"),
         maxQualityRetries: config.maxQualityRetries,
         language: story.outputLanguage,
         transcriber: this.optionalSpeechTranscriber(),
@@ -1527,7 +1527,7 @@ export class StudioOperations {
           secondaryReferenceId: config.secondaryReferenceId,
           voiceMode: config.voiceMode,
           deliveryIntensity: config.deliveryIntensity,
-          qualityGuard: config.qualityGuard,
+          qualityGuard: (config.qualityMode ?? (config.qualityGuard ? "verify" : "off")) !== "off",
           providerQualityGuard: config.providerQualityGuard,
           bleepStrongProfanity: story.narrationSettings.bleepStrongProfanity,
           speed: request.speed,
@@ -1619,7 +1619,7 @@ export class StudioOperations {
       const { provider } = createEffectiveTtsProvider({
         baseProvider: this.tts.forName(config.provider),
         pronunciationEntities: entities,
-        qualityGuardEnabled: true,
+        qualityMode: "auto_repair",
         maxQualityRetries: config.maxQualityRetries,
         language: story.outputLanguage,
         transcriber: this.speechTranscriber(),

@@ -3,9 +3,7 @@ export type TTSRequest = {
   text: string; model: string; referenceId?: string; secondaryReferenceId?: string;
   voiceMode?: "narrator-only" | "same-voice-dialogue" | "narrator-dialogue";
   deliveryIntensity?: "none" | "restrained" | "expressive";
-  /** Post-generation quality guard: when true or omitted, speech is transcribed
-   * and verified against expected text by AI Story Studio's QualityGuardTTSProvider.
-   * Set false to disable post-generation verification. */
+  /** Used by the explicit verification wrapper. Ordinary production omits it. */
   qualityGuard?: boolean;
   /** Enables provider-native quality assistance when supported (e.g. Fish features: ["quality-guard"]). */
   providerQualityGuard?: boolean;
@@ -15,9 +13,12 @@ export type TTSRequest = {
    * Providers must synthesize it without re-splitting, re-casting dialogue, or
    * re-normalizing speech. */
   exactChunk?: boolean;
+  /** App-level Fish request progress, including the known logical chunk count. */
+  onChunkProgress?: (progress: { currentChunk: number; totalChunks: number; status: "started" | "completed" }) => void;
 };
 export type TTSResult = {
   audio: Uint8Array; segments: Uint8Array[]; requestIds?: string[]; providerRequests?: number;
+  generatedCharacters?: number; generatedUtf8Bytes?: number;
   /** Exact chunk texts sent to the provider, aligned 1:1 with `segments`. Omitted
    * when an assembly step (e.g. censor tones) makes that mapping impossible. */
   segmentTexts?: string[];

@@ -16,6 +16,13 @@ describe("Fish TTS", () => {
     expect(chunks.join(" ")).toContain('"That is true!"');
   });
 
+  it("never splits a speaker or expression tag or a Latin word", () => {
+    const chunks = splitForTTS(`${"Long spoken sentence with natural pauses. ".repeat(3)}[soft emotion] <|speaker:1|>Another clear sentence follows.`, 80);
+    expect(chunks.every((chunk) => !chunk.includes("[soft") || chunk.includes("[soft emotion]"))).toBe(true);
+    expect(chunks.every((chunk) => !chunk.includes("<|speaker:") || chunk.includes("<|speaker:1|>"))).toBe(true);
+    expect(() => splitForTTS("A".repeat(100), 30)).toThrow(/longer than the configured chunk limit/);
+  });
+
   it("avoids sentence repair when speaker state would be lost", () => {
     expect(splitOpeningSentenceForTTSRepair("<|speaker:1|>Hello there. He answered at length.")).toBeUndefined();
   });
@@ -56,7 +63,7 @@ describe("Fish TTS", () => {
     await provider.synthesize({ text: "**Important:** *whisper this.* [sad] 2 * 2", model: "s2.1-pro", speed: 1, format: "mp3", sampleRate: 44100, bitrate: 128, normalize: true, maxCharsPerRequest: 500 });
     const body = JSON.parse(String((fetcher.mock.calls[0]?.[1] as RequestInit).body));
     expect(body.text).toBe("Important: whisper this. [sad] 2 * 2");
-    expect(provider.inputNormalizationVersion).toBe("fish-speech-normalization-v8");
+    expect(provider.inputNormalizationVersion).toBe("fish-speech-normalization-v9-large-chunks");
   });
 
   it("does not turn profanity into the literal word bleep inside Fish", async () => {
@@ -230,16 +237,22 @@ describe("Fish TTS", () => {
     expect(result.segmentTexts).toHaveLength(result.segments.length);
   });
 
-  it("caps S2 chunks at a preferred size even when the configured limit is larger", async () => {
+  it("uses the configured S2.1-Pro chunk limit and reports initial requests in order", async () => {
     const posted: string[] = [];
+    const progress: string[] = [];
     const fetcher = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
       posted.push(JSON.parse(String(init?.body)).text);
       return new Response(new Uint8Array([1]), { headers: { "content-type": "audio/mpeg" } });
     });
     const provider = new FishAudioProvider("test-key", fetcher as typeof fetch);
-    await provider.synthesize({ text: `${"A coherent sentence with several words. ".repeat(20)}\n\n${"Another paragraph stays together. ".repeat(20)}`, model: "s2-pro", speed: 1, format: "mp3", sampleRate: 44100, bitrate: 128, normalize: true, maxCharsPerRequest: 1750 });
+    const input = Array.from({ length: 5 }, (_, index) => `Paragraph ${index + 1}. ${"A coherent sentence with several words. ".repeat(25)}`).join("\n\n");
+    const result = await provider.synthesize({ text: input, model: "s2.1-pro", speed: 1, format: "mp3", sampleRate: 44100, bitrate: 128, normalize: true, maxCharsPerRequest: 1750, onChunkProgress: ({ currentChunk, totalChunks, status }) => progress.push(`${currentChunk}/${totalChunks}:${status}`) });
     expect(posted.length).toBeGreaterThan(1);
-    expect(posted.every((chunk) => chunk.length <= 900)).toBe(true);
-    expect(posted.some((chunk) => chunk.includes("Another paragraph stays together."))).toBe(true);
+    expect(posted.length).toBeLessThan(splitForTTS(input, 900).length);
+    expect(posted.every((chunk) => chunk.length <= 1750)).toBe(true);
+    expect(posted.some((chunk) => chunk.length > 900)).toBe(true);
+    expect(posted.some((chunk) => chunk.includes("Paragraph 2."))).toBe(true);
+    expect(result.providerRequests).toBe(posted.length);
+    expect(progress).toEqual(posted.flatMap((_, index) => [`${index + 1}/${posted.length}:started`, `${index + 1}/${posted.length}:completed`]));
   });
 });

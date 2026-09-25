@@ -43,7 +43,7 @@ export class TrackedTTSProvider implements TTSProvider {
   vocalizationStrategy(model?: string) { return this.inner.vocalizationStrategy?.(model) ?? { kind: "safe_normalize" as const }; }
   resolveReferenceId(id?: string) { return this.inner.resolveReferenceId?.(id); } validateConfiguration() { return this.inner.validateConfiguration(); }
   async synthesize(request: TTSRequest) { const scope = next("tts", request.model); if (!scope) return this.inner.synthesize(request); const attemptedAt = new Date().toISOString();
-    try { const result = await this.inner.synthesize(request); await persist(this.sink, { ...base(scope, this.name, request.model, "tts", attemptedAt, true, result.requestIds?.join(",")), inputCharacters: [...request.text].length, inputUtf8Bytes: Buffer.byteLength(request.text), outputBytes: result.audio.byteLength }); return result; }
+    try { const result = await this.inner.synthesize(request); await persist(this.sink, { ...base(scope, this.name, request.model, "tts", attemptedAt, true, result.requestIds?.join(",")), inputCharacters: result.generatedCharacters ?? [...request.text].length, inputUtf8Bytes: result.generatedUtf8Bytes ?? Buffer.byteLength(request.text), outputBytes: result.audio.byteLength, providerRequests: result.providerRequests ?? result.segments.length }); return result; }
     catch (error) { await persist(this.sink, { ...base(scope, this.name, request.model, "tts", attemptedAt, false), inputCharacters: [...request.text].length, inputUtf8Bytes: Buffer.byteLength(request.text), errorCategory: category(error) }); throw error; }
   }
 }

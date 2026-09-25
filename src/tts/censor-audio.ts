@@ -80,7 +80,7 @@ export class FfmpegCensorAudioService implements CensorAudioService {
     if (!censored.length) return provider.synthesize(request);
     await this.tools.validateAvailability();
     const directory = await mkdtemp(join(tmpdir(), "ai-story-censor-"));
-    const files: string[] = []; const segments: Uint8Array[] = []; const requestIds: string[] = []; let providerRequests = 0;
+    const files: string[] = []; const segments: Uint8Array[] = []; const requestIds: string[] = []; let providerRequests = 0; let generatedCharacters = 0; let generatedUtf8Bytes = 0;
     const qualitySegments: import("./quality-guard.js").TtsSegmentQuality[] = [];
     try {
       for (const [index, segment] of plan.entries()) {
@@ -90,6 +90,8 @@ export class FfmpegCensorAudioService implements CensorAudioService {
           const result = await provider.synthesize({ ...request, text: speechForSynthesis(plan, index), bleepStrongProfanity: false });
           requestIds.push(...(result.requestIds ?? []));
           providerRequests += result.providerRequests ?? result.segments.length;
+          generatedCharacters += result.generatedCharacters ?? [...speechForSynthesis(plan, index)].length;
+          generatedUtf8Bytes += result.generatedUtf8Bytes ?? Buffer.byteLength(speechForSynthesis(plan, index));
           // Tone segments have no expected text, so a flattened 1:1 segmentTexts
           // mapping is impossible; the per-speech-chunk quality reports still
           // aggregate honestly (reindexed across calls).
@@ -112,7 +114,7 @@ export class FfmpegCensorAudioService implements CensorAudioService {
       if (!audio.length) throw new AudioError("Censor audio assembly produced an empty MP3");
       const summary = qualitySegments.length ? summarizeQuality(qualitySegments) : undefined;
       const quality = summary ? { version: 1 as const, status: summary.status, retried: summary.retried, segments: qualitySegments } : undefined;
-      return { audio, segments, requestIds: requestIds.length ? requestIds : undefined, providerRequests, assembled: true,
+      return { audio, segments, requestIds: requestIds.length ? requestIds : undefined, providerRequests, generatedCharacters, generatedUtf8Bytes, assembled: true,
         ...(quality ? { quality } : {}),
         censor: { segments: censored.length, durationSeconds: censored.reduce((sum, segment) => sum + segment.durationSeconds, 0) } };
     } finally { await rm(directory, { recursive: true, force: true }); }

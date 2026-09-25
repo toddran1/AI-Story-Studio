@@ -96,7 +96,7 @@ export class SummaryMediaService {
     const { provider } = createEffectiveTtsProvider({
       baseProvider: this.ttsRouter.forName(config.provider),
       pronunciationEntities,
-      qualityGuardEnabled: config.qualityGuard,
+      qualityMode: config.qualityMode ?? (config.qualityGuard ? "verify" : "off"),
       maxQualityRetries: config.maxQualityRetries,
       language: story.outputLanguage,
       transcriber,
@@ -292,6 +292,7 @@ export class SummaryMediaService {
         await this.save(slug, summary);
         const config = input.story.pipeline.tts;
         const result = await this.censor.synthesize(input.provider, { ...config, referenceId: input.referenceId,
+          qualityGuard: (config.qualityMode ?? (config.qualityGuard ? "verify" : "off")) !== "off",
           text: input.spokenText, bleepStrongProfanity: input.story.narrationSettings.bleepStrongProfanity });
         if (!result.audio.length) throw new Error("TTS returned empty summary audio");
         await atomicWrite(paths.raw, result.audio);
