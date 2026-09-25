@@ -325,14 +325,15 @@ export class SummaryMediaService {
       progress?.({ phase: "mastering", completed: 1, total: 2 });
       const inputs = await masteringInputs(paths.segments, paths.raw);
       const audioFingerprint = audioMasteringFingerprint(summary.tts!.outputFingerprint, input.story.audio, this.mastering.version, await inputFingerprints(inputs));
-      summary.audio = { ...summary.audio, status: "generating", inputFingerprint: audioFingerprint, manuallyEdited: false, reviewRequired: false };
+      const inheritedReviewRequired = summary.tts?.reviewRequired === true;
+      summary.audio = { ...summary.audio, status: "generating", inputFingerprint: audioFingerprint, manuallyEdited: false, reviewRequired: inheritedReviewRequired };
       await this.save(slug, summary);
       const temporary = join(paths.directory, `.${randomUUID()}.mp3`);
       try {
         const probe = await this.mastering.master(inputs, temporary, input.story.audio);
         await rename(temporary, paths.audio);
         summary.audio = { status: "current", inputFingerprint: audioFingerprint, outputFingerprint: (await fileFingerprint(paths.audio))!,
-          manuallyEdited: false, reviewRequired: false, provider: summary.tts!.provider, model: summary.tts!.model, voice: summary.tts!.voice,
+          manuallyEdited: false, reviewRequired: inheritedReviewRequired, provider: summary.tts!.provider, model: summary.tts!.model, voice: summary.tts!.voice,
           generatedAt: new Date().toISOString(), durationSeconds: probe.durationSeconds, bytes: (await stat(paths.audio)).size };
       } finally { await rm(temporary, { force: true }); }
       progress?.({ phase: "complete", completed: 2, total: 2 }); return await this.save(slug, summary);

@@ -2059,7 +2059,15 @@ export class StudioOperations {
     });
   }
 
-  async close() { clearInterval(this.inspectionTimer); await this.jobs.flushDurable(); await Promise.all([...this.inspections.keys()].map((id) => this.discardInspection(id))); }
+  async close() {
+    clearInterval(this.inspectionTimer);
+    try {
+      await this.jobs.flushDurable();
+    } catch (error) {
+      logger.error({ event: "operations.close.flush_failed", error: error instanceof Error ? error.message : String(error) }, "Failed to flush durable jobs during close");
+    }
+    await Promise.all([...this.inspections.keys()].map((id) => this.discardInspection(id)));
+  }
   private expireInspections() { const cutoff = Date.now() - 30 * 60_000; for (const [id, record] of this.inspections) if (record.createdAt < cutoff) void this.discardInspection(id).catch((error) => logger.warn({ event: "web.inspection.cleanup_failed", inspectionId: id, error: error instanceof Error ? error.message : String(error) })); }
   private async discardInspection(id: string) {
     const record = this.inspections.get(id); if (!record) return;

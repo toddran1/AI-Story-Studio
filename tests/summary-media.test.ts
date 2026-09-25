@@ -24,7 +24,7 @@ describe("summary narration and audio", () => {
   let root: string, llm: MockLLM, tts: MockTTS, summaries: SummaryService, media: SummaryMediaService;
   const story = () => testStory();
   const master = { version: "test-master", master: vi.fn(async (_inputs: string[], output: string) => { await atomicWrite(output, "mastered-mp3"); return { durationSeconds: 10, codec: "mp3", container: "mp3" }; }) };
-  const censor = { version: "test-censor", synthesize: vi.fn(async (provider: MockTTS, request: Parameters<MockTTS["synthesize"]>[0]) => provider.synthesize(request)) };
+  const censor = { version: "test-censor", synthesize: vi.fn<(provider: any, request: any) => Promise<import("../src/tts/censor-audio.js").CensorAssembly>>(async (provider: any, request: any) => provider.synthesize(request)) };
   beforeEach(async () => {
     root = await mkdtemp(join(tmpdir(), "summary-media-")); llm = new MockLLM("openai", ["Su Ming faced the horde.", "Malakai Sterling fell into the monster horde. None noticed Malakai seething. “Hey Malakai!”"]); tts = new MockTTS();
     const router = new LLMRouter(new Map([["openai", llm]])); summaries = new SummaryService(root, router);
@@ -221,5 +221,104 @@ describe("summary narration and audio", () => {
     await vi.waitFor(() => expect(jobs.get(interrupted.id)?.status).toBe("running")); await jobs.flushDurable();
     await restored.restoreDurable(directory); expect(restored.get(interrupted.id)?.status).toBe("paused"); finish();
     await vi.waitFor(() => expect(jobs.get(interrupted.id)?.status).toBe("completed")); await jobs.flushDurable();
+  });
+
+  describe("summary review-state propagation and quality preservation", () => {
+    it("propagates clean TTS (reviewRequired=false) to mastered audio", async () => {
+      const canonical = await create();
+      censor.synthesize.mockResolvedValueOnce({
+        audio: new Uint8Array([1, 2, 3]),
+        assembled: true,
+        segments: [new Uint8Array([1, 2, 3])],
+        quality: {
+          version: 1,
+          status: "verified",
+          retried: 0,
+          segments: [{
+            index: 0,
+            expectedText: "Su Ming faced the horde.",
+            status: "verified",
+            attempts: [],
+            finalAttempt: 1,
+            issues: [],
+          }],
+        },
+      });
+      const result = await media.audio("demo-story", canonical.id);
+      expect(result.tts?.reviewRequired).toBe(false);
+      expect(result.audio?.reviewRequired).toBe(false);
+    });
+
+    it("propagates TTS quality needs_review to summary audio and preserves it on remaster", async () => {
+      const canonical = await create();
+      censor.synthesize.mockResolvedValueOnce({
+        audio: new Uint8Array([1, 2, 3]),
+        assembled: true,
+        segments: [new Uint8Array([1, 2, 3])],
+        quality: {
+          version: 1,
+          status: "needs_review",
+          retried: 0,
+          segments: [{
+            index: 0,
+            expectedText: "Su Ming faced the horde.",
+            status: "needs_review",
+            attempts: [],
+            finalAttempt: 1,
+            issues: [{ type: "unexpected_speech", severity: 0.8, detail: "hallucination" }],
+          }],
+        },
+      });
+      // Initial generation: TTS needs review -> audio inherits reviewRequired
+      const result = await media.audio("demo-story", canonical.id);
+      expect(result.tts?.reviewRequired).toBe(true);
+      expect(result.audio?.reviewRequired).toBe(true);
+      expect(result.tts?.quality?.status).toBe("needs_review");
+
+      // Force remaster: only mastering reruns because TTS is current
+      const current = await media.get("demo-story", canonical.id);
+      current.audio!.status = "stale";
+      await atomicWriteJson(join(summaryMediaPaths(root, "demo-story", canonical.id).directory, "summary.json"), current);
+
+      censor.synthesize.mockClear();
+      const remastered = await media.audio("demo-story", canonical.id);
+      expect(censor.synthesize).not.toHaveBeenCalled();
+      expect(remastered.tts?.reviewRequired).toBe(true);
+      expect(remastered.audio?.reviewRequired).toBe(true);
+
+      // Clean regeneration: force TTS regeneration which produces clean output -> reviewRequired becomes false
+      censor.synthesize.mockResolvedValueOnce({
+        audio: new Uint8Array([1, 2, 3]),
+        assembled: true,
+        segments: [new Uint8Array([1, 2, 3])],
+        quality: {
+          version: 1,
+          status: "verified",
+          retried: 0,
+          segments: [{
+            index: 0,
+            expectedText: "Su Ming faced the horde.",
+            status: "verified",
+            attempts: [],
+            finalAttempt: 1,
+            issues: [],
+          }],
+        },
+      });
+      const regenerated = await media.audio("demo-story", canonical.id, { force: true });
+      expect(regenerated.tts?.reviewRequired).toBe(false);
+      expect(regenerated.audio?.reviewRequired).toBe(false);
+
+      // Preservation on read/staleness check
+      const paths = storyPaths(root, "demo-story", 1);
+      const changed = story();
+      changed.pipeline.tts.speed = 1.35;
+      await atomicWriteJson(paths.storyConfig, changed);
+
+      const stale = await media.get("demo-story", canonical.id);
+      expect(stale.tts?.status).toBe("stale");
+      expect(stale.audio?.status).toBe("stale");
+      expect(stale.tts?.quality).toBeDefined();
+    });
   });
 });

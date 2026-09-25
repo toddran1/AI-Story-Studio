@@ -87,9 +87,26 @@ export class JobManager {
   }
   pause(id: string): boolean { const handler = this.pauseHandlers.get(id); if (!handler) return false; handler(); return true; }
   pauseAll(): void { for (const handler of this.pauseHandlers.values()) handler(); }
-  async flushDurable() {
+  async flushDurable(): Promise<void> {
+    const failures: unknown[] = [];
     while (this.durableWrites.size > 0) {
-      await Promise.all([...this.durableWrites.values()]);
+      const pending = [...this.durableWrites.values()];
+      const results = await Promise.allSettled(pending);
+      for (const result of results) {
+        if (result.status === "rejected") {
+          failures.push(result.reason);
+        }
+      }
+      for (const [id, promise] of this.durableWrites.entries()) {
+        if (pending.includes(promise)) {
+          this.durableWrites.delete(id);
+        }
+      }
+    }
+    if (failures.length > 0) {
+      const message = `Durable job persistence encountered ${failures.length} failure(s)`;
+      logger.error({ event: "job_manager.flush_durable.failed", failures: failures.map((f) => f instanceof Error ? f.message : String(f)) }, message);
+      throw new AggregateError(failures, message);
     }
   }
 
@@ -147,9 +164,12 @@ export class JobManager {
         const cleanupPromise = inFlight
           .catch(() => undefined)
           .then(async () => {
-            await rm(path, { force: true }).catch((error) => {
+            try {
+              await rm(path, { force: true });
+            } catch (error) {
               logger.warn({ error, path, jobId: job.id }, "Failed to delete pruned durable job file");
-            });
+              throw error;
+            }
           })
           .finally(() => {
             this.durablePaths.delete(job.id);

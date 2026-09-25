@@ -126,7 +126,7 @@ export class ChapterPipeline {
       }
       const started = Date.now();
       if (stage === "qa") await resetChapterQaForExecution(paths.qa, chapter);
-      invalidateDownstream(chapter, stage);
+      if (stage !== "qa") invalidateDownstream(chapter, stage);
       chapter.stages[stage] = { ...details, status: "running", fingerprint: fp, startedAt: new Date().toISOString() };
       await persist();
       options.onStageEvent?.({ stage, status: "started", state: chapter.stages[stage] });
@@ -278,7 +278,7 @@ export class ChapterPipeline {
             readTextIfExists(paths.english),
             readTextIfExists(paths.narration),
             readTextIfExists(paths.narrationTts),
-            readJsonIfExists(paths.qa),
+            readTextIfExists(paths.qa),
           ]);
           const previousChapterSnapshot = structuredClone(chapter);
           const recoveryStages = options.executionStages
@@ -289,13 +289,22 @@ export class ChapterPipeline {
           } catch (recoveryError) {
             if (recoveryError instanceof QualityGateError) throw recoveryError;
             logger.warn({ event: "pipeline.qa.auto_recovery_failed", story: options.story.slug, chapter: options.chapter,
-              err: recoveryError instanceof Error ? recoveryError.message : String(recoveryError) }, "QA auto-recovery failed; restoring prior stage artifacts");
-            if (savedEnglish !== undefined) await atomicWrite(paths.english, savedEnglish);
-            if (savedNarration !== undefined) await atomicWrite(paths.narration, savedNarration);
-            if (savedNarrationTts !== undefined) await atomicWrite(paths.narrationTts, savedNarrationTts);
-            if (savedQa !== undefined) await atomicWriteJson(paths.qa, savedQa);
-            chapter.stages.translation = previousChapterSnapshot.stages.translation;
-            chapter.stages.narration = previousChapterSnapshot.stages.narration;
+              err: recoveryError instanceof Error ? recoveryError.message : String(recoveryError) }, "QA auto-recovery failed; restoring prior stage artifacts and metadata");
+            const rollbackErrors: unknown[] = [];
+            const restoreFile = async (path: string, content: string | undefined) => {
+              try {
+                if (content !== undefined) await atomicWrite(path, content);
+                else await rm(path, { force: true });
+              } catch (fileError) {
+                rollbackErrors.push(fileError);
+              }
+            };
+            await restoreFile(paths.english, savedEnglish);
+            await restoreFile(paths.narration, savedNarration);
+            await restoreFile(paths.narrationTts, savedNarrationTts);
+            await restoreFile(paths.qa, savedQa);
+
+            chapter = structuredClone(previousChapterSnapshot);
             chapter.stages.qa = {
               ...previousChapterSnapshot.stages.qa,
               status: "failed",
@@ -305,7 +314,19 @@ export class ChapterPipeline {
               },
             };
             chapter.quality = previousChapterSnapshot.quality;
-            await persist();
+            try {
+              await persist();
+            } catch (persistError) {
+              rollbackErrors.push(persistError);
+            }
+
+            if (rollbackErrors.length) {
+              const aggregate = new AggregateError([recoveryError, ...rollbackErrors],
+                `QA auto-recovery failed and artifact/metadata rollback encountered ${rollbackErrors.length} failure(s)`);
+              logger.error({ event: "pipeline.qa.auto_recovery_rollback_failed", story: options.story.slug, chapter: options.chapter,
+                err: aggregate.message, rollbackErrors: rollbackErrors.map((err) => err instanceof Error ? err.message : String(err)) });
+              throw aggregate;
+            }
             throw recoveryError;
           }
         }

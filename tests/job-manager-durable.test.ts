@@ -130,4 +130,112 @@ describe("JobManager durable summary job lifecycle hardening", () => {
     expect(files).not.toContain(`${job1.id}.json`);
     expect(files).toContain(`${job2.id}.json`);
   });
+
+  describe("flushDurable hardening and allSettled draining", () => {
+    it("A. Multiple successful writes: waits for all and leaves tracking map empty", async () => {
+      const jobs = new JobManager();
+      let done1 = false;
+      let done2 = false;
+      const p1 = new Promise<void>((resolve) => setTimeout(() => { done1 = true; resolve(); }, 20));
+      const p2 = new Promise<void>((resolve) => setTimeout(() => { done2 = true; resolve(); }, 30));
+
+      (jobs as any).durableWrites.set("job-1", p1);
+      (jobs as any).durableWrites.set("job-2", p2);
+
+      await jobs.flushDurable();
+      expect(done1).toBe(true);
+      expect(done2).toBe(true);
+      expect((jobs as any).durableWrites.size).toBe(0);
+    });
+
+    it("B. One rejected write + one delayed successful write: does not exit early on first rejection", async () => {
+      const jobs = new JobManager();
+      let delayedCompleted = false;
+      const rejectedPromise = Promise.reject(new Error("Disk IO failure"));
+      const delayedPromise = new Promise<void>((resolve) => {
+        setTimeout(() => {
+          delayedCompleted = true;
+          resolve();
+        }, 40);
+      });
+
+      (jobs as any).durableWrites.set("failing-job", rejectedPromise);
+      (jobs as any).durableWrites.set("delayed-job", delayedPromise);
+
+      let thrownError: unknown;
+      try {
+        await jobs.flushDurable();
+      } catch (err) {
+        thrownError = err;
+      }
+
+      // CRITICAL: Must not return or reject before the delayed write completes
+      expect(delayedCompleted).toBe(true);
+      expect(thrownError).toBeInstanceOf(AggregateError);
+      const agg = thrownError as AggregateError;
+      expect(agg.errors[0]?.message).toBe("Disk IO failure");
+      expect((jobs as any).durableWrites.size).toBe(0);
+    });
+
+    it("C. Rejected prune cleanup: aggregates deletion error and waits for other cleanups to settle", async () => {
+      const jobs = new JobManager();
+      let cleanup2Done = false;
+      const failingCleanup = Promise.reject(new Error("EACCES: permission denied"));
+      const successfulCleanup = new Promise<void>((resolve) => {
+        setTimeout(() => {
+          cleanup2Done = true;
+          resolve();
+        }, 30);
+      });
+
+      (jobs as any).durableWrites.set("prune-1", failingCleanup);
+      (jobs as any).durableWrites.set("prune-2", successfulCleanup);
+
+      let thrownError: unknown;
+      try {
+        await jobs.flushDurable();
+      } catch (err) {
+        thrownError = err;
+      }
+
+      expect(cleanup2Done).toBe(true);
+      expect(thrownError).toBeInstanceOf(AggregateError);
+      expect((jobs as any).durableWrites.size).toBe(0);
+    });
+
+    it("D. New write added while flushing: while loop drains subsequent batch before returning", async () => {
+      const jobs = new JobManager();
+      let batch1Done = false;
+      let batch2Done = false;
+
+      const batch1Promise = new Promise<void>((resolve) => {
+        setTimeout(() => {
+          batch1Done = true;
+          // While batch 1 is settling, a new durable write is added
+          const batch2Promise = new Promise<void>((res) => {
+            setTimeout(() => {
+              batch2Done = true;
+              res();
+            }, 30);
+          });
+          (jobs as any).durableWrites.set("batch-2-job", batch2Promise);
+          resolve();
+        }, 20);
+      });
+
+      (jobs as any).durableWrites.set("batch-1-job", batch1Promise);
+
+      await jobs.flushDurable();
+      expect(batch1Done).toBe(true);
+      expect(batch2Done).toBe(true);
+      expect((jobs as any).durableWrites.size).toBe(0);
+    });
+
+    it("E. Empty map: flushDurable returns immediately", async () => {
+      const jobs = new JobManager();
+      const start = Date.now();
+      await expect(jobs.flushDurable()).resolves.toBeUndefined();
+      expect(Date.now() - start).toBeLessThan(50);
+    });
+  });
 });
