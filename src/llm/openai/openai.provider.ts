@@ -85,13 +85,14 @@ export class OpenAIProvider implements LLMProvider {
       try {
         value = request.schema.parse(parsedJson);
       } catch (zodErr) {
-        throw new ProviderError("OpenAI structured output failed schema validation", {
-          cause: zodErr,
-          provider: "openai",
-          model: request.model,
-          category: "validation_error",
-          requestId: response.id,
-        });
+        // Strict Responses schemas represent optional object properties as
+        // required-but-nullable. Restore `null` to absence only where Zod says
+        // that exact value has the wrong type. Required fields still fail the
+        // second parse, so this never invents Story Bible facts or defaults.
+        if (zodErr instanceof z.ZodError && removeInvalidOptionalNulls(parsedJson, zodErr)) {
+          try { value = request.schema.parse(parsedJson); }
+          catch { throw structuredValidationError(zodErr, request.model, response.id); }
+        } else throw structuredValidationError(zodErr, request.model, response.id);
       }
       return {
         value,
@@ -108,6 +109,32 @@ export class OpenAIProvider implements LLMProvider {
       throw toOpenAiProviderError(error, "OpenAI structured Responses API request failed", request.model);
     }
   }
+}
+
+function structuredValidationError(cause: unknown, model: string, requestId: string | undefined) {
+  return new ProviderError("OpenAI structured output failed schema validation", {
+    cause, provider: "openai", model, category: "validation_error", requestId,
+  });
+}
+
+/** Only delete invalid null-valued object properties. A subsequent schema
+ * parse decides whether each field was genuinely optional. */
+function removeInvalidOptionalNulls(value: unknown, error: z.ZodError): boolean {
+  let changed = false;
+  for (const issue of error.issues) {
+    if (issue.code !== "invalid_type" || !issue.path.length) continue;
+    let parent: unknown = value;
+    for (const segment of issue.path.slice(0, -1)) {
+      if (!parent || typeof parent !== "object") { parent = undefined; break; }
+      parent = (parent as Record<string | number, unknown>)[segment as string | number];
+    }
+    const key = issue.path.at(-1);
+    if (typeof key === "string" && parent && typeof parent === "object" && !Array.isArray(parent) && (parent as Record<string, unknown>)[key] === null) {
+      delete (parent as Record<string, unknown>)[key];
+      changed = true;
+    }
+  }
+  return changed;
 }
 
 export function toOpenAiTextFormat(schema: z.ZodType, name: string) {

@@ -43,4 +43,5 @@ export function createPipelineRuntime(env: Environment, usage?: UsageSink) {
   const align = alignmentConfig(env, resolveStudioRoot(env));
   const transcriber = align.engine === "disabled" ? undefined : new WhisperCppSpeechTranscriber(align.executable, align.model, align.timeoutMs, undefined, align.device);
   return { router, images, tts, audio, censor, pipeline: new ChapterPipeline(router, tts, audio, censor, { transcriber }) };
+  return { router, images, tts, audio, censor, transcriber, pipeline: new ChapterPipeline(router, tts, audio, censor, { transcriber }) };
 }

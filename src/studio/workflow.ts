@@ -9,6 +9,7 @@ import { readJsonIfExists } from "../storage/story-files.js";
 import { fingerprint } from "../utils/hash.js";
 import { applyCanonicalOverlay, findDuplicateSuggestions } from "../story-bible/canonical.js";
 import { ttsProviderNameSchema } from "../domain/provider.js";
+import type { TtsQualityReport } from "../tts/quality-guard.js";
 
 export const bibleCategorySchema = z.enum(["characters", "locations", "factions", "abilities", "classes", "ranks", "items", "creatures", "systemTerms", "relationships", "translationTerms"]);
 export type BibleCategory = z.infer<typeof bibleCategorySchema>;
@@ -66,6 +67,8 @@ export async function saveChapterTextEdit(root: string, slug: string, chapterNum
 export const voicePreviewSchema = z.object({ text: z.string().trim().min(1).max(1200), provider: ttsProviderNameSchema.optional(), model: z.string().trim().min(1).optional(), referenceId: z.string().trim().optional(), speed: z.number().min(.5).max(2).optional() }).strict();
 export async function saveVoicePreview(root: string, slug: string, audio: Uint8Array, request: z.infer<typeof voicePreviewSchema>) {
   if (!audio.length) throw new Error("Voice provider returned empty audio"); const id = randomUUID(); const paths = voicePreviewPaths(root, slug, id); await mkdir(paths.directory, { recursive: true }); await atomicWrite(paths.audio, audio); await atomicWriteJson(paths.manifest, { version: 1, id, story: slug, createdAt: new Date().toISOString(), request: { ...request, text: undefined, textFingerprint: fingerprint(request.text) }, bytes: audio.byteLength }); return { id, audioUrl: `/api/stories/${slug}/voice-previews/${id}.mp3`, bytes: audio.byteLength };
+export async function saveVoicePreview(root: string, slug: string, audio: Uint8Array, request: z.infer<typeof voicePreviewSchema>, quality?: TtsQualityReport) {
+  if (!audio.length) throw new Error("Voice provider returned empty audio"); const id = randomUUID(); const paths = voicePreviewPaths(root, slug, id); await mkdir(paths.directory, { recursive: true }); await atomicWrite(paths.audio, audio); await atomicWriteJson(paths.manifest, { version: 1, id, story: slug, createdAt: new Date().toISOString(), request: { ...request, text: undefined, textFingerprint: fingerprint(request.text) }, bytes: audio.byteLength, ...(quality ? { quality } : {}) }); return { id, audioUrl: `/api/stories/${slug}/voice-previews/${id}.mp3`, bytes: audio.byteLength, ...(quality ? { quality } : {}) };
 }
 
 function validateBibleValue(base: StoryBible, category: BibleCategory, value: Record<string, unknown>) { storyBibleSchema.parse({ ...base, [category]: [value] }); }

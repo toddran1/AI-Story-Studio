@@ -42,7 +42,9 @@ import { loadNarrationNamingEntities } from "../story-bible/narration-names.js";
 import { loadEligibleSummaryContext } from "../summaries/service.js";
 import { CENSOR_AUDIO_VERSION, CensorAudioService, FfmpegCensorAudioService, censorToneConfig } from "../tts/censor-audio.js";
 import { QualityGuardTTSProvider, SpeechTranscriber, summarizeQuality } from "../tts/quality-guard.js";
+import { SpeechTranscriber, summarizeQuality } from "../tts/quality-guard.js";
 import { persistChapterTtsQuality, removeChapterTtsQuality } from "../tts/chapter-quality.js";
+import { createEffectiveTtsProvider } from "../tts/effective-provider.js";
 import { normalizeSpeechForProvider } from "../tts/speech-normalization.js";
 import { manualAcceptanceFingerprint } from "../studio/stage-acceptance.js";
 import { StageExecutionNode, dependentProcessingStages } from "../studio/stage-execution.js";
@@ -209,11 +211,15 @@ export class ChapterPipeline {
       if (!cleanNarration) throw new PipelineError("Narration delivery cues cannot replace the chapter's spoken narration");
       const previousNarration = await readTextIfExists(paths.narration);
       await atomicWrite(paths.narration, cleanNarration);
+      const previousNarrationTts = await readTextIfExists(paths.narrationTts);
       try {
+        await atomicWrite(paths.narration, cleanNarration);
         await atomicWrite(paths.narrationTts, result.text);
       } catch (error) {
         if (previousNarration === undefined) await rm(paths.narration, { force: true });
         else await atomicWrite(paths.narration, previousNarration);
+        if (previousNarrationTts === undefined) await rm(paths.narrationTts, { force: true });
+        else await atomicWrite(paths.narrationTts, previousNarrationTts);
         throw error;
       }
       chapter.counts.narrationWords = wordCount(cleanNarration);
@@ -275,10 +281,41 @@ export class ChapterPipeline {
           chapter.stages.qa = pending();
           chapter.quality = undefined;
           await persist();
+          const [savedEnglish, savedNarration, savedNarrationTts, savedQa] = await Promise.all([
+            readTextIfExists(paths.english),
+            readTextIfExists(paths.narration),
+            readTextIfExists(paths.narrationTts),
+            readJsonIfExists(paths.qa),
+          ]);
+          const previousChapterSnapshot = structuredClone(chapter);
           const recoveryStages = options.executionStages
             ? [...new Set<StageExecutionNode>([...options.executionStages, "translation", "narration", "qa"])]
             : undefined;
           return this.run({ ...options, executionStages: recoveryStages, force: recoveryStages ? options.force : "translation", qaRecoveryAttempted: true });
+          try {
+            return await this.run({ ...options, executionStages: recoveryStages, force: recoveryStages ? options.force : "translation", qaRecoveryAttempted: true });
+          } catch (recoveryError) {
+            if (recoveryError instanceof QualityGateError) throw recoveryError;
+            logger.warn({ event: "pipeline.qa.auto_recovery_failed", story: options.story.slug, chapter: options.chapter,
+              err: recoveryError instanceof Error ? recoveryError.message : String(recoveryError) }, "QA auto-recovery failed; restoring prior stage artifacts");
+            if (savedEnglish !== undefined) await atomicWrite(paths.english, savedEnglish);
+            if (savedNarration !== undefined) await atomicWrite(paths.narration, savedNarration);
+            if (savedNarrationTts !== undefined) await atomicWrite(paths.narrationTts, savedNarrationTts);
+            if (savedQa !== undefined) await atomicWriteJson(paths.qa, savedQa);
+            chapter.stages.translation = previousChapterSnapshot.stages.translation;
+            chapter.stages.narration = previousChapterSnapshot.stages.narration;
+            chapter.stages.qa = {
+              ...previousChapterSnapshot.stages.qa,
+              status: "failed",
+              error: {
+                message: recoveryError instanceof Error ? recoveryError.message : String(recoveryError),
+                cause: recoveryError instanceof Error && recoveryError.cause ? String(recoveryError.cause) : undefined,
+              },
+            };
+            chapter.quality = previousChapterSnapshot.quality;
+            await persist();
+            throw recoveryError;
+          }
         }
       }
       if (quality.status === "warn") logger.warn({ event: "pipeline.qa.warn", story: options.story.slug, chapter: options.chapter, score: quality.score, issues: quality.issues.length });
@@ -347,6 +384,14 @@ export class ChapterPipeline {
     const ttsProvider = ttsConfig.qualityGuard
       ? new QualityGuardTTSProvider(baseTtsProvider, this.qualityVerification?.transcriber, { maxRetries: ttsConfig.maxQualityRetries, language: options.story.outputLanguage })
       : baseTtsProvider;
+    const { provider: ttsProvider, basePronunciationProvider: baseTtsProvider } = createEffectiveTtsProvider({
+      baseProvider: this.tts.forName(ttsConfig.provider),
+      pronunciationEntities: pronunciationData.entities,
+      qualityGuardEnabled: ttsConfig.qualityGuard,
+      maxQualityRetries: ttsConfig.maxQualityRetries,
+      language: options.story.outputLanguage,
+      transcriber: this.qualityVerification?.transcriber,
+    });
     const speech = normalizeSpeechForProvider(ttsScript, options.story.outputLanguage, options.story.narrationSettings, ttsProvider, ttsConfig.model);
     const pronunciationFp = pronunciationFingerprint(resolvePronunciations(speech.normalized.text, pronunciationData.entities));
     const referenceId = ttsProvider.resolveReferenceId?.(ttsConfig.referenceId) ?? ttsConfig.referenceId;

@@ -3,6 +3,7 @@ import { EventEmitter } from "node:events";
 import { createErrorDiagnostic, ErrorDiagnostic, errorDiagnosticSchema } from "../../src/errors/diagnostic.js";
 import { logger } from "../../src/utils/logger.js";
 import { readdir } from "node:fs/promises";
+import { readdir, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { z } from "zod";
 import { atomicWriteJson } from "../../src/storage/atomic-write.js";
@@ -16,12 +17,18 @@ export class JobConflictError extends Error {}
 
 export class JobManager {
   private static readonly maxRetainedJobs = 200;
+  private static readonly defaultMaxRetainedJobs = 200;
+  private readonly maxRetainedJobs: number;
   private readonly jobs = new Map<string, Job>();
   private readonly events = new Map<string, EventEmitter>();
   private readonly activeStories = new Map<string, string>();
   private readonly pauseHandlers = new Map<string, () => void>();
   private readonly durablePaths = new Map<string, string>();
   private readonly durableWrites = new Map<string, Promise<void>>();
+
+  constructor(options: { maxRetainedJobs?: number } = {}) {
+    this.maxRetainedJobs = options.maxRetainedJobs ?? JobManager.defaultMaxRetainedJobs;
+  }
 
   /** Persist non-chapter jobs without putting story content into the production
    * queue. Interrupted work is paused on startup, never silently replayed/paid. */
@@ -36,9 +43,11 @@ export class JobManager {
       this.jobs.set(job.id, job); this.durablePaths.set(job.id, path);
     }
     this.prune();
+    await this.flushDurable();
   }
 
   async createDurable(directory: string, story: string, runner: (control: JobControl) => Promise<unknown>) {
+    this.prune();
     const active = this.activeStories.get(story); if (active) throw new JobConflictError(`Story '${story}' already has active job ${active}`);
     const now = new Date().toISOString(), job: Job = { id: randomUUID(), type: "summary", story, status: "queued", createdAt: now, updatedAt: now };
     const path = join(directory, `${job.id}.json`);
@@ -81,6 +90,11 @@ export class JobManager {
   pause(id: string): boolean { const handler = this.pauseHandlers.get(id); if (!handler) return false; handler(); return true; }
   pauseAll(): void { for (const handler of this.pauseHandlers.values()) handler(); }
   async flushDurable() { await Promise.all(this.durableWrites.values()); }
+  async flushDurable() {
+    while (this.durableWrites.size > 0) {
+      await Promise.all([...this.durableWrites.values()]);
+    }
+  }
 
   private async run(job: Job, runner: (control: JobControl) => Promise<unknown>) {
     this.set(job, { status: "running" });
@@ -111,14 +125,47 @@ export class JobManager {
     if (path) {
       const snapshot = structuredClone(job);
       const write = (this.durableWrites.get(job.id) ?? Promise.resolve()).catch(() => undefined).then(() => atomicWriteJson(path, snapshot));
+      const write = (this.durableWrites.get(job.id) ?? Promise.resolve())
+        .catch(() => undefined)
+        .then(() => atomicWriteJson(path, snapshot));
       this.durableWrites.set(job.id, write);
       void write.catch((error) => logger.error({ error, jobId: job.id }, "Unable to persist summary job"));
+      void write
+        .catch((error) => logger.error({ error, jobId: job.id }, "Unable to persist summary job"))
+        .finally(() => {
+          if (this.durableWrites.get(job.id) === write) {
+            this.durableWrites.delete(job.id);
+          }
+        });
     }
     this.events.get(job.id)?.emit("update", structuredClone(job));
   }
   private prune() {
     const terminal = [...this.jobs.values()].filter((job) => isTerminal(job.status)).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
     for (const job of terminal.slice(JobManager.maxRetainedJobs)) { this.jobs.delete(job.id); this.events.delete(job.id); this.durablePaths.delete(job.id); this.durableWrites.delete(job.id); }
+    const excess = terminal.slice(this.maxRetainedJobs);
+    for (const job of excess) {
+      this.jobs.delete(job.id);
+      this.events.delete(job.id);
+      const path = this.durablePaths.get(job.id);
+      if (path) {
+        const inFlight = this.durableWrites.get(job.id) ?? Promise.resolve();
+        const cleanupPromise = inFlight
+          .catch(() => undefined)
+          .then(async () => {
+            await rm(path, { force: true }).catch((error) => {
+              logger.warn({ error, path, jobId: job.id }, "Failed to delete pruned durable job file");
+            });
+          })
+          .finally(() => {
+            this.durablePaths.delete(job.id);
+            if (this.durableWrites.get(job.id) === cleanupPromise) {
+              this.durableWrites.delete(job.id);
+            }
+          });
+        this.durableWrites.set(job.id, cleanupPromise);
+      }
+    }
   }
 }
 

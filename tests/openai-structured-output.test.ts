@@ -10,6 +10,7 @@ import {
 } from "../src/llm/openai/openai.provider.js";
 import { ConfigurationError, ProviderError } from "../src/pipeline/errors.js";
 import { OPENAI_TEXT_MODELS } from "../src/llm/openai/models.js";
+import { storyBibleUpdateSchema } from "../src/domain/story-bible.js";
 
 function stubClient(provider: OpenAIProvider, create: (params: Record<string, unknown>) => Promise<unknown>) {
   Object.assign(provider as unknown as Record<string, unknown>, {
@@ -56,6 +57,32 @@ describe("OpenAI structured output schemas", () => {
 });
 
 describe("OpenAIProvider execution & error diagnostics", () => {
+  it("treats null optional Story Bible fields as absent without inventing values", async () => {
+    const provider = new OpenAIProvider("test-key");
+    const output = {
+      chapterSummary: "Two people meet.",
+      characters: [
+        { canonicalEnglishName: "Mara", firstSeenChapter: 541, lastSeenChapter: 541, gender: null },
+        { canonicalEnglishName: "Tao", firstSeenChapter: 541, lastSeenChapter: 541, gender: null },
+      ],
+      locations: [{ canonicalEnglishName: "Tower", firstSeenChapter: 541, lastSeenChapter: 541, notes: null }],
+      systemTerms: [{ canonicalEnglishName: "Gate", firstSeenChapter: 541, lastSeenChapter: 541, notes: null }],
+      relationships: [{ subject: "Mara", object: "Tao", relationship: "ally", firstSeenChapter: 541, lastSeenChapter: 541, endChapter: null }],
+    };
+    stubClient(provider, async () => ({ id: "resp_story", output_text: JSON.stringify(output) }));
+    const result = await provider.generateStructured({ model: "gpt-6-luna", instructions: "Extract", input: "Chapter", schemaName: "story_bible_update", schema: storyBibleUpdateSchema });
+    expect(result.value.characters.map((character) => character.gender)).toEqual([undefined, undefined]);
+    expect(result.value.locations[0]?.notes).toBeUndefined();
+    expect(result.value.systemTerms[0]?.notes).toBeUndefined();
+    expect(result.value.relationships[0]?.endChapter).toBeUndefined();
+    expect(result.value.chapterSummary).toBe("Two people meet.");
+  });
+
+  it("continues to reject null required Story Bible facts", async () => {
+    const provider = new OpenAIProvider("test-key");
+    stubClient(provider, async () => ({ id: "resp_invalid", output_text: JSON.stringify({ chapterSummary: null, characters: [{ canonicalEnglishName: "Mara", firstSeenChapter: 541, lastSeenChapter: 541, gender: null }] }) }));
+    await expect(provider.generateStructured({ model: "gpt-6-luna", instructions: "Extract", input: "Chapter", schemaName: "story_bible_update", schema: storyBibleUpdateSchema })).rejects.toMatchObject({ category: "validation_error", requestId: "resp_invalid" });
+  });
   it.each(["gpt-6-sol", "gpt-6-luna"])("passes %s to Responses for text and structured output", async (model) => {
     expect(OPENAI_TEXT_MODELS).toContain(model);
     const provider = new OpenAIProvider("test-key");

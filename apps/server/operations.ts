@@ -127,6 +127,8 @@ import { executeStagePlan, planStageExecution, planStageExecutionBatch, stageExe
 import { batchStageSchema } from "../../src/studio/stage-selection.js";
 import { WhisperCppSpeechTranscriber } from "../../src/alignment/transcription.js";
 import { QualityGuardTTSProvider, SpeechTranscriber } from "../../src/tts/quality-guard.js";
+import type { SpeechTranscriber } from "../../src/tts/quality-guard.js";
+import { createEffectiveTtsProvider } from "../../src/tts/effective-provider.js";
 import { acceptStoredChapterTtsSegment, loadChapterTtsQuality, regenerateStoredChapterTtsSegment, verifyStoredChapterTts } from "../../src/tts/chapter-quality.js";
 
 const chapterParamSchema = z.number().int().positive();
@@ -499,6 +501,7 @@ export class StudioOperations {
   listSummaries(slug: string, options?: Parameters<SummaryService["list"]>[1]) { slugSchema.parse(slug); return new SummaryService(this.root, this.llm).list(slug, options); }
   listSummaryPage(slug: string, options: Parameters<SummaryService["page"]>[1]) { slugSchema.parse(slug); return new SummaryService(this.root, this.llm).page(slug, options); }
   summaryMedia() { return new SummaryMediaService(this.root, this.llm, this.tts, this.censor, this.audio); }
+  summaryMedia() { return new SummaryMediaService(this.root, this.llm, this.tts, this.censor, this.audio, () => this.optionalSpeechTranscriber()); }
   summaryJobsDirectory() { return join(this.root, ".data", "summary-jobs"); }
   summaryVisuals() { return new SummaryVisualService(this.root, this.summaryMedia(), this.summaryImages, this.video, this.alignConfig, this.aligner); }
   getSummary(slug: string, id: string) { slugSchema.parse(slug); return this.summaryVisuals().get(slug, id); }
@@ -1498,6 +1501,53 @@ export class StudioOperations {
     secondaryReferenceId: config.secondaryReferenceId, voiceMode: config.voiceMode, deliveryIntensity: config.deliveryIntensity, qualityGuard: config.qualityGuard, providerQualityGuard: config.providerQualityGuard,
     bleepStrongProfanity: story.narrationSettings.bleepStrongProfanity,
     speed: request.speed, format: config.format, sampleRate: 44100, bitrate: 192, normalize: true, maxCharsPerRequest: config.maxCharsPerRequest })); const saved = await saveVoicePreview(this.root, slug, result.audio, request); await recordActivity(this.root, slug, "voice.preview", "Generated a voice preview"); return saved; }); }
+  startVoicePreview(slug: string, raw: unknown) {
+    slugSchema.parse(slug);
+    const input = voicePreviewSchema.parse(raw);
+    return this.jobs.create("voicePreview", slug, async () => {
+      const story = await loadStory(storyPaths(this.root, slug, 1).storyConfig);
+      const config = story.pipeline.tts;
+      const request = {
+        ...input,
+        provider: input.provider ?? config.provider,
+        model: input.model ?? config.model,
+        referenceId: input.referenceId ?? config.referenceId,
+        speed: input.speed ?? config.speed,
+      };
+      const entities = await loadPronunciationEntities(this.root, slug);
+      const { provider } = createEffectiveTtsProvider({
+        baseProvider: this.tts.forName(request.provider),
+        pronunciationEntities: entities,
+        qualityGuardEnabled: config.qualityGuard,
+        maxQualityRetries: config.maxQualityRetries,
+        language: story.outputLanguage,
+        transcriber: this.optionalSpeechTranscriber(),
+      });
+      const speech = normalizeSpeechForProvider(request.text, story.outputLanguage, story.narrationSettings, provider, request.model);
+      const result = await withUsageScope({ story: slug, stage: "voicePreview" }, async () =>
+        this.censor.synthesize(provider, {
+          text: speech.normalized.text,
+          model: request.model,
+          referenceId: request.referenceId,
+          secondaryReferenceId: config.secondaryReferenceId,
+          voiceMode: config.voiceMode,
+          deliveryIntensity: config.deliveryIntensity,
+          qualityGuard: config.qualityGuard,
+          providerQualityGuard: config.providerQualityGuard,
+          bleepStrongProfanity: story.narrationSettings.bleepStrongProfanity,
+          speed: request.speed,
+          format: config.format,
+          sampleRate: 44100,
+          bitrate: 192,
+          normalize: true,
+          maxCharsPerRequest: config.maxCharsPerRequest,
+        })
+      );
+      const saved = await saveVoicePreview(this.root, slug, result.audio, request, result.quality);
+      await recordActivity(this.root, slug, "voice.preview", "Generated a voice preview");
+      return saved;
+    });
+  }
 
   startProduction(slug: string, raw: unknown) { slugSchema.parse(slug); const input = productionInputSchema.parse(raw); return this.jobs.create("production", slug, async (control) => withStoryLock(this.root, slug, "end-to-end production", async () => { const story = await loadStory(storyPaths(this.root, slug, 1).storyConfig); const shutdown = new ShutdownController(); control.setPause(() => shutdown.request()); await recordActivity(this.root, slug, "production.started", `Started production for Chapters ${input.from}–${input.to}`); const manifest = (await runProduction({ root: this.root, story, ...input, pause: shutdown, recordedCost: this.usage ? () => this.usage!.recordedCost({ story: slug }) : undefined, onProgress: (event) => control.update(event) }, { pipeline: this.pipeline, loadChapters: async () => (await loadImportedChapters(this.root, slug)).chapters, refresh: (from, to) => refreshProductionRange({ root: this.root, story, from, to, registry: this.registry }), scenePlanner: this.scenePlanner ?? this.runtime.router.forStage(story.pipeline.scenePlanner), image: this.image, video: this.video, videoExport: this.videoExport, audiobook: this.audiobook, alignmentConfig: this.alignConfig, alignmentEngine: this.aligner })).manifest; await invalidateChapterStatusDerivedReads(this.root, slug); await invalidateStoryBibleDerivedReads(this.root, slug); await recordActivity(this.root, slug, `production.${manifest.status}`, `${manifest.status === "completed" ? "Completed" : "Stopped"} production for Chapters ${input.from}–${input.to}`); return manifest; })); }
   async submitProduction(slug:string,raw:unknown){if(this.queue)return this.queue.submit(slug,raw);return this.startProduction(slug,raw);}
@@ -1544,6 +1594,12 @@ export class StudioOperations {
     return new WhisperCppSpeechTranscriber(this.alignConfig.executable, this.alignConfig.model, this.alignConfig.timeoutMs, undefined, this.alignConfig.device);
   }
 
+  private optionalSpeechTranscriber(): SpeechTranscriber | undefined {
+    if (this.transcriber) return this.transcriber;
+    if (this.alignConfig.engine === "disabled") return undefined;
+    return new WhisperCppSpeechTranscriber(this.alignConfig.executable, this.alignConfig.model, this.alignConfig.timeoutMs, undefined, this.alignConfig.device);
+  }
+
   async getChapterTtsQuality(slug: string, chapter: number) {
     slugSchema.parse(slug); chapterParamSchema.parse(chapter);
     return { quality: (await loadChapterTtsQuality(this.root, slug, chapter)) ?? null };
@@ -1566,6 +1622,15 @@ export class StudioOperations {
       const config = story.pipeline.tts;
       const base = pronunciationProvider(this.tts.forName(config.provider), await loadPronunciationEntities(this.root, slug));
       const provider = new QualityGuardTTSProvider(base, this.speechTranscriber(), { maxRetries: config.maxQualityRetries, language: story.outputLanguage });
+      const entities = await loadPronunciationEntities(this.root, slug);
+      const { provider } = createEffectiveTtsProvider({
+        baseProvider: this.tts.forName(config.provider),
+        pronunciationEntities: entities,
+        qualityGuardEnabled: true,
+        maxQualityRetries: config.maxQualityRetries,
+        language: story.outputLanguage,
+        transcriber: this.speechTranscriber(),
+      });
       const quality = await withUsageScope({ story: slug, chapter, stage: "tts" }, () => regenerateStoredChapterTtsSegment({ root: this.root, story, chapter, segment: segment - 1, provider, maxRetries: config.maxQualityRetries }));
       await recordActivity(this.root, slug, "tts.quality.segment_regenerated", `Regenerated TTS segment ${segment} for Chapter ${chapter}`);
       return { quality };
