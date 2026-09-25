@@ -16,7 +16,6 @@ import {
   handleEntityMerge,
   handleEntityDemote,
 } from "../src/visual-canon/profiles.js";
-import { applyVisualProfileProposal, inspectVisualProfile, proposeMissingVisualDetails, resolveVisualProfileConflict } from "../src/visual-canon/completion.js";
 import {
   applyVisualProfileProposal,
   inspectVisualProfile,
@@ -255,7 +254,6 @@ describe("Visual Entity Profiles", () => {
     await atomicWriteJson(storyPaths(root, slug, 1).bible, bible);
     await updateVisualProfile(root, slug, entityId, { character: { hairColor: "silver", eyeColor: "blue" } });
     let calls = 0;
-    const provider = { name: "fake", validateConfiguration: async () => {}, generateText: async () => ({ text: "" }), generateStructured: async () => { calls++; return { value: { values: { "character.build": "lean athletic", "character.faceShape": "angular with a narrow jaw", "character.hairColor": "black" }, rationale: "Role-informed design" } }; } };
     const provider = {
       name: "fake",
       validateConfiguration: async () => {},
@@ -295,7 +293,6 @@ describe("Visual Entity Profiles", () => {
     const inspection = await inspectVisualProfile(root, slug, bible, entityId);
     expect(inspection.protectedFields).toContain("character.hairColor");
     expect(inspection.protectedFields).toContain("character.eyeColor");
-    const provider = { name: "fake", generateStructured: async () => ({ value: { values: { "character.hairColor": "black", "character.eyeColor": "red", "character.build": "lean" }, rationale: "" } }) };
     const provider = {
       name: "fake",
       generateStructured: async () => ({
