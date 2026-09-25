@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
-import { CanonicalEntity, EntityType, StoryBible, canonicalEntitySchema, localizedNamingSchema, storyBibleSchema } from "../domain/story-bible.js";
+import { CanonicalEntity, EntityType, StoryBible, canonicalEntitySchema, localizedNamingSchema, storyBibleSchema, visualEvidenceDecisionSchema } from "../domain/story-bible.js";
 import { atomicWriteJson } from "../storage/atomic-write.js";
 import { isStandardEntityStatus, normalizeEntityStatus, statusKey } from "./entity-status.js";
 import { storyPaths } from "../storage/paths.js";
@@ -41,8 +41,33 @@ export const canonicalOverlaySchema = z.object({
   promotions: z.array(manualPromotionSchema).default([]),
   suppressions: z.array(suppressionSchema).default([]),
   parentAssignments: z.record(z.string(), z.string()).default({}),
+  visualEvidenceDecisions: z.record(z.string(), z.array(visualEvidenceDecisionSchema)).default({}),
 });
 export type CanonicalOverlay = z.infer<typeof canonicalOverlaySchema>;
+export async function decideVisualEvidence(root: string, slug: string, entityId: string, field: z.infer<typeof visualEvidenceDecisionSchema>["field"], evidenceId: string, action: z.infer<typeof visualEvidenceDecisionSchema>["action"] | "clear" | "restore") {
+  const bible = await loadStoryBibleWithCanonicalOverlay(root, slug);
+  const entity = bible.canonicalEntities.find((candidate) => candidate.id === entityId);
+  const evidence = entity?.visualEvidence?.find((item) => item.id === evidenceId && item.field === field && item.persistence !== "temporary");
+  if (!evidence) throw new Error("Visual evidence was not found for this entity and field");
+  const path = storyPaths(root, slug, 1).bibleCanonicalManual;
+  const overlay = canonicalOverlaySchema.parse((await readJsonIfExists(path)) ?? { version: 1 });
+  const decisions = overlay.visualEvidenceDecisions[entityId] ?? [];
+  // A new selection replaces the prior selection for this field. Dismissals
+  // remain independent editorial decisions and retain extracted provenance.
+  overlay.visualEvidenceDecisions[entityId] = [
+    ...decisions.filter((item) => {
+      if (item.action === "dismiss") return !(action === "restore" && item.evidenceId === evidenceId);
+      if (item.field !== field) return true;
+      if (action === "clear") return false;
+      if (action === "select") return item.action === "change";
+      if (action === "change") return item.action === "change" && item.evidenceId !== evidenceId;
+      return true;
+    }),
+    ...(action === "clear" || action === "restore" || (action === "dismiss" && decisions.some((item) => item.action === "dismiss" && item.evidenceId === evidenceId)) ? [] : [visualEvidenceDecisionSchema.parse({ field, evidenceId, action, decidedAt: new Date().toISOString() })]),
+  ];
+  await atomicWriteJson(path, overlay);
+  return overlay.visualEvidenceDecisions[entityId];
+}
 export { type DuplicateSuggestion, findDuplicateSuggestions, duplicateScore } from "./duplicate-detection.js";
 
 export async function applyCanonicalOverlay(root: string, slug: string, input: StoryBible) {
@@ -58,14 +83,20 @@ export async function applyCanonicalOverlay(root: string, slug: string, input: S
     },
   );
   const bible = structuredClone(input);
+  const legacyCreatures = new Set(bible.creatures.flatMap((item) => [item.canonicalEnglishName, item.originalName].map(normalizeEntityName).filter(Boolean)));
+  const legacyItems = new Set(bible.items.flatMap((item) => [item.canonicalEnglishName, item.originalName].map(normalizeEntityName).filter(Boolean)));
   const demotedIds = new Set(overlay.demotions.map((item) => item.entityId));
   const suppressedIds = new Set(overlay.suppressions.map((item) => item.entityId));
   const demotedNames = new Set(overlay.demotions.map((item) => normalizeEntityName(item.name)).filter(Boolean));
 
   const present = new Set(bible.canonicalEntities.map((entity) => entity.id));
   for (const entity of bible.canonicalEntities) {
+    const identity = normalizeEntityName(entity.canonicalName);
+    if (!entity.sourceBucket && legacyCreatures.has(identity)) entity.sourceBucket = "creatures";
+    if (!entity.sourceBucket && legacyItems.has(identity)) entity.sourceBucket = "items";
     const value = overlay.overrides[entity.id];
     if (value) applyOverride(entity, value);
+    entity.visualEvidenceDecisions = overlay.visualEvidenceDecisions[entity.id] ?? entity.visualEvidenceDecisions;
   }
 
   // Automatic extraction can be rebuilt from a shorter chapter range. A protected
@@ -242,6 +273,7 @@ export async function applyCanonicalOverlay(root: string, slug: string, input: S
     target.lastKnownAppearance = Math.max(target.lastKnownAppearance, source.lastKnownAppearance);
     target.provenance = uniqueObjects([...target.provenance, ...source.provenance]);
     target.visualEvidence = uniqueObjects([...(target.visualEvidence ?? []), ...(source.visualEvidence ?? [])]);
+    target.visualEvidenceDecisions = uniqueObjects([...(target.visualEvidenceDecisions ?? []), ...(source.visualEvidenceDecisions ?? [])]);
     target.mergedFromIds = unique([...target.mergedFromIds, source.id, ...source.mergedFromIds]);
     target.origin = "manual";
   }
@@ -257,6 +289,7 @@ export async function applyCanonicalOverlay(root: string, slug: string, input: S
   bible.canonicalRelationships = deduplicateRelationships(bible.canonicalRelationships);
   bible.entityTimeline = uniqueObjects(bible.entityTimeline);
   bible.merges = overlay.merges;
+  for (const entity of bible.canonicalEntities) if (!entity.visualEvidenceDecisions?.length && overlay.visualEvidenceDecisions[entity.id]?.length) entity.visualEvidenceDecisions = overlay.visualEvidenceDecisions[entity.id];
   const canonicalNames = new Set(
     bible.canonicalEntities.flatMap((e) => [e.canonicalName, e.originalName, ...e.aliases].map(normalizeEntityName)).filter(Boolean)
   );

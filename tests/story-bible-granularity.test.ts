@@ -1397,6 +1397,7 @@ describe("Story Bible Entity Granularity & Intelligent Cleanup", () => {
         promotions: [],
         suppressions: [],
         parentAssignments: {},
+        visualEvidenceDecisions: {},
       };
 
       const ch2Update = update(2, {

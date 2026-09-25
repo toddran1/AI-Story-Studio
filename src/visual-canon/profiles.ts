@@ -13,6 +13,7 @@ import {
 import { canonicalEntitySchema } from "../domain/story-bible.js";
 import { requireCanonicalStoryBibleEntity } from "../story-bible/canonical.js";
 import { resolveEntityVisualEvidence } from "../story-bible/visual-evidence.js";
+import { readVisualField, resolveVisualEntityType, validVisualField } from "./fields.js";
 import { Story } from "../domain/story.js";
 import { ImageProvider } from "../artwork/provider.js";
 import { assertImageModelCompatible, imageProviderNameSchema } from "../artwork/providers.js";
@@ -105,7 +106,7 @@ export async function updateVisualProfile(
   entityId: string,
   patch: Partial<VisualEntityProfile> & { visualType?: VisualEntityProfile["visualType"] },
 ): Promise<VisualEntityProfile> {
-  await requireCanonicalStoryBibleEntity(root, slug, entityId);
+  const entity = await requireCanonicalStoryBibleEntity(root, slug, entityId);
   const profiles = await loadVisualProfiles(root, slug);
   const existing = profiles[entityId];
   const now = new Date().toISOString();
@@ -125,7 +126,7 @@ export async function updateVisualProfile(
     next = visualProfileSchema.parse({
       id: `vprof_${randomUUID()}`,
       entityId,
-      visualType: patch.visualType ?? "character",
+      visualType: patch.visualType ?? resolveVisualEntityType(entity),
       status: patch.status ?? "draft",
       appearance: patch.appearance ?? "",
       visualPrompt: patch.visualPrompt ?? "",
@@ -370,11 +371,8 @@ export async function generateStyleSheet(
     profile.location?.recurringLandmarks ? `LANDMARKS: ${profile.location.recurringLandmarks}` : "",
   ].filter(Boolean);
   if (profile.status !== "approved") {
-    const evidence = resolveEntityVisualEvidence(entity, entity.lastKnownAppearance);
-    const sourceFacts = Object.entries(evidence.values).filter(([path]) => {
-      const [section, field] = path.split(".") as ["character" | "location" | "creature" | "item", string];
-      return !(profile[section] as Record<string, string | undefined> | undefined)?.[field]?.trim();
-    }).map(([path, item]) => `${path}: ${item.value}`);
+    const evidence = resolveEntityVisualEvidence(entity, Number.MAX_SAFE_INTEGER);
+    const sourceFacts = Object.entries(evidence.values).filter(([path]) => validVisualField(profile.visualType, path) && !readVisualField(profile, path)).map(([path, item]) => `${path}: ${item.value}`);
     if (sourceFacts.length) entityDetails.push(`SOURCE-BACKED STORY BIBLE VISUAL FACTS (unapproved draft guidance): ${sourceFacts.join("; ")}`);
   }
 

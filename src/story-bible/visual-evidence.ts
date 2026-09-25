@@ -5,8 +5,8 @@ import { fingerprint } from "../utils/hash.js";
 export function normalizeVisualValue(field: string, value: string): string {
   const text = value.normalize("NFKC").toLocaleLowerCase().replace(/[‐‑‒–—-]/g, " ").replace(/\s+/g, " ").trim().replace(/[.!]$/, "");
   if (field === "character.hairColor" || field === "character.eyeColor") {
-    const color = /\b(?:black|brown|blue|green|red|white|silver|gold|blond|blonde|gray|grey|purple|violet|amber|hazel)\b/.exec(text)?.[0];
-    if (color) return color === "grey" ? "gray" : color === "blonde" ? "blond" : color;
+    const simple = /^(?:(?:ink|jet|dark) )?(black|brown|blue|green|red|white|silver|gold|blond|blonde|gray|grey|purple|violet|amber|hazel)(?: (?:hair|eyes?))?$/.exec(text)?.[1];
+    if (simple) return simple === "grey" ? "gray" : simple === "blonde" ? "blond" : simple;
   }
   return text;
 }
@@ -44,8 +44,10 @@ export type ResolvedVisualEvidence = { values: Record<string, VisualEvidence>; c
 export function resolveEntityVisualEvidence(entity: CanonicalEntity, chapter: number): ResolvedVisualEvidence {
   const byField = new Map<string, VisualEvidence[]>();
   const temporary: VisualEvidence[] = [];
+  const decisions = entity.visualEvidenceDecisions ?? [];
   for (const item of entity.visualEvidence ?? []) {
     if (item.chapter > chapter) continue;
+    if (decisions.some((decision) => decision.action === "dismiss" && decision.evidenceId === item.id)) continue;
     if (item.persistence === "temporary") {
       if (item.chapter === chapter) temporary.push(item);
       continue;
@@ -56,8 +58,11 @@ export function resolveEntityVisualEvidence(entity: CanonicalEntity, chapter: nu
   const values: Record<string, VisualEvidence> = {};
   const conflicts: Record<string, VisualEvidence[]> = {};
   for (const [field, records] of byField) {
-    const boundary = Math.max(0, ...records.filter((item) => item.persistence === "changed").map((item) => item.chapter));
+    const selectedDecision = [...decisions].reverse().find((decision) => decision.field === field && decision.action !== "dismiss" && records.some((item) => item.id === decision.evidenceId && item.chapter <= chapter));
+    const selected = selectedDecision ? records.find((item) => item.id === selectedDecision.evidenceId) : undefined;
+    const boundary = Math.max(0, ...records.filter((item) => item.persistence === "changed").map((item) => item.chapter), ...decisions.filter((decision) => decision.field === field && decision.action === "change").map((decision) => records.find((item) => item.id === decision.evidenceId)?.chapter ?? 0));
     const current = records.filter((item) => item.chapter >= boundary);
+    if (selected && selected.chapter >= boundary) { values[field] = selected; continue; }
     const concepts = new Map<string, VisualEvidence[]>();
     for (const item of current) concepts.set(item.normalizedValue, [...(concepts.get(item.normalizedValue) ?? []), item]);
     if (concepts.size > 1) { conflicts[field] = current; continue; }

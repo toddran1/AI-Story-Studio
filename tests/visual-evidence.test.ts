@@ -3,7 +3,7 @@ import { emptyStoryBible, storyBibleUpdateSchema, visualEvidenceSchema } from ".
 import { visualProfileSchema } from "../src/domain/visual-profile.js";
 import { createDefaultArtDirection } from "../src/domain/art-direction.js";
 import { contextBeforeChapter, mergeStoryBible } from "../src/story-bible/updater.js";
-import { resolveEntityVisualEvidence } from "../src/story-bible/visual-evidence.js";
+import { normalizeVisualValue, resolveEntityVisualEvidence } from "../src/story-bible/visual-evidence.js";
 import { extractLocalVisualObservations } from "../src/story-bible/visual-backfill.js";
 import { resolveVisualCanonPrompt } from "../src/visual-canon/resolver.js";
 import { testStory } from "./helpers.js";
@@ -25,6 +25,11 @@ describe("Story Bible visual evidence", () => {
   });
 
   it("strengthens repeated compatible color observations without losing chapter sources", () => {
+    expect(normalizeVisualValue("character.hairColor", "ink-black hair")).toBe("black");
+    expect(normalizeVisualValue("character.hairColor", "grey hair")).toBe("gray");
+    expect(normalizeVisualValue("character.hairColor", "blonde hair")).toBe("blond");
+    expect(normalizeVisualValue("character.hairColor", "dark hair")).toBe("dark hair");
+    expect(normalizeVisualValue("character.eyeColor", "bright eyes")).toBe("bright eyes");
     let bible = merge(emptyStoryBible(), base, 1);
     bible = merge(bible, observe(2, "character.hairColor", "black hair"), 2);
     bible = merge(bible, observe(3, "character.hairColor", "jet-black hair"), 3);
@@ -81,6 +86,11 @@ describe("Story Bible visual evidence", () => {
     const protectedPrompt = resolveVisualCanonPrompt({ ...options, chapter: 500, visualProfiles: { [entity(bible).id]: approved } });
     expect(protectedPrompt.prompt).toContain("Curly auburn hair");
     expect(protectedPrompt.prompt).not.toContain("character.hairstyle: short hair");
+    const later = merge(bible, observe(900, "character.hairstyle", "silver hair", "changed"), 900);
+    const unchanged = resolveVisualCanonPrompt({ ...options, bible: later, chapter: 500 });
+    expect(unchanged.resolvedPromptFingerprint).toBe(future.resolvedPromptFingerprint);
+    const another = merge(later, storyBibleUpdateSchema.parse({ chapterSummary: "Other character", characters: [{ canonicalEnglishName: "Other", originalName: "其他", description: "Companion", firstSeenChapter: 901, lastSeenChapter: 901 }], visualObservations: [{ entity: "Other", field: "character.hairColor", value: "red", chapter: 901, confidence: 0.8, persistence: "persistent", excerpt: "Other had red hair." }] }), 901);
+    expect(resolveVisualCanonPrompt({ ...options, bible: another, chapter: 500 }).resolvedPromptFingerprint).toBe(future.resolvedPromptFingerprint);
   });
 
   it("backfills only directly named, literal facts and treats one-time clothing as temporary", () => {

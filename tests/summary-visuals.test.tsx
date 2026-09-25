@@ -468,7 +468,7 @@ describe("summary visual production", () => {
     const story = testStory(); story.artwork.model = "gpt-image-2.5-flare";
     await atomicWriteJson(storyPaths(root, "demo-story", 1).storyConfig, story);
     const bible = await loadStoryBibleWithCanonicalOverlay(root, "demo-story");
-    bible.canonicalEntities.push({ id: fallbackId, type: "character", canonicalName: "Zhang Yongxing", aliases: [], description: "A young rival who betrays Malakai.", firstAppearance: 1, lastKnownAppearance: 1 });
+    bible.canonicalEntities.push({ id: fallbackId, type: "character", canonicalName: "Zhang Yongxing", aliases: [], description: "A young rival who betrays Malakai.", firstAppearance: 1, lastKnownAppearance: 1, visualEvidence: [{ id: "ve_333333333333333333333333", field: "character.skinTone", value: "pale", normalizedValue: "pale", chapter: 1, lastObservedChapter: 1, confidence: 0.9, persistence: "persistent", status: "current", source: "source_text", provenance: [{ chapter: 1, excerpt: "Zhang Yongxing had pale skin.", confidence: 0.9 }] }] });
     await atomicWriteJson(storyPaths(root, "demo-story", 1).bible, bible);
     const raw = JSON.parse(await readFile(summaryPath(root, "demo-story", id), "utf8"));
     raw.scenePlan.scenes[0].characters = ["Malakai", "Zhang Yongxing"];
@@ -485,6 +485,7 @@ describe("summary visual production", () => {
     expect(request.referenceImages[0]).toMatchObject({ entityId, referenceId: "su-primary" });
     expect(request.prompt).toContain("FINAL CAST IDENTITY LOCK");
     expect(request.prompt).toContain("Zhang Yongxing: no character reference image");
+    expect(request.prompt).toContain("character.skinTone: pale");
     expect(result.scenePlan!.scenes[0]!.artwork.versions!.at(-1)!.provenance).toMatchObject({ characterReferences: [{ entityId, referenceId: "su-primary" }], visualCanon: [{ entityId, source: "approved Visual Profile" }, { entityId: fallbackId, source: "Story Bible fallback (one-time)" }] });
   });
   it("falls back to deterministic timing when local alignment is unavailable", async () => {

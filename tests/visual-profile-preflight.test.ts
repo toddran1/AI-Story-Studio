@@ -122,4 +122,17 @@ describe("Artwork Visual Profile Preflight", () => {
     const preflight = await inspectArtworkVisualPreflight({ root, slug: story.slug, chapters: [1], sceneId: "scene-001" });
     expect(preflight).toMatchObject({ ready: true, entities: [] });
   });
+  it("recognizes a visible creature concept as a creature profile candidate", async () => {
+    const { root, story, paths } = await fixture();
+    const creatureId = "ent_555555555555555555555555";
+    const raw = sceneManifestSchema.parse(JSON.parse(await readFile(paths.scenesManifest, "utf8")));
+    raw.scenes[0]!.entityIds = [creatureId];
+    await atomicWriteJson(paths.scenesManifest, raw);
+    const bible = await loadStoryBibleWithCanonicalOverlay(root, story.slug);
+    bible.canonicalEntities.push(canonicalEntitySchema.parse({ id: creatureId, type: "concept", sourceBucket: "creatures", canonicalName: "Ash Wolf", aliases: [], description: "A beast.", firstAppearance: 1, lastKnownAppearance: 1, visualEvidence: [{ id: "ve_555555555555555555555555", field: "creature.coloration", value: "gray", normalizedValue: "gray", chapter: 1, lastObservedChapter: 1, confidence: 0.9, persistence: "persistent", status: "current", source: "source_text", provenance: [{ chapter: 1, excerpt: "The Ash Wolf had gray fur.", confidence: 0.9 }] }] }));
+    await atomicWriteJson(paths.bible, bible);
+    const preflight = await inspectArtworkVisualPreflight({ root, slug: story.slug, chapters: [1], sceneId: "scene-001" });
+    expect(preflight.entities.find((item) => item.entityId === creatureId)).toMatchObject({ state: "missing_profile" });
+    expect((await updateVisualProfile(root, story.slug, creatureId, {})).visualType).toBe("creature");
+  });
 });

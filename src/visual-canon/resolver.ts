@@ -7,6 +7,7 @@ import { resolveVisualEntities } from "../scenes/identity.js";
 import { fingerprint } from "../utils/hash.js";
 import { artworkCompositionGuidance, resolveArtworkAspectRatio } from "../artwork/composition.js";
 import { resolveEntityVisualEvidence } from "../story-bible/visual-evidence.js";
+import { resolveVisualEntityType, readVisualField } from "./fields.js";
 
 export type ResolvedEntityCanon = {
   entityId: string;
@@ -83,10 +84,10 @@ export function resolveVisuallyRelevantCanonicalEntities(scene: Scene, bible: St
     // An attached ID is explicit visual evidence only for things an image can
     // depict directly. Context-only concepts, abilities, and organizations do
     // not become on-screen just because planning linked them to the scene.
-    if (found && ["character", "item"].includes(found.type)) matchedEntities.set(found.id, found);
+    if (found && found.type !== "ability" && ["character", "creature", "item", "weapon", "object"].includes(resolveVisualEntityType(found))) matchedEntities.set(found.id, found);
   }
   for (const entity of resolveVisualEntities(scene.characters, bible.canonicalEntities)) {
-    matchedEntities.set(entity.id, entity);
+    if (["character", "creature"].includes(resolveVisualEntityType(entity))) matchedEntities.set(entity.id, entity);
   }
   if (scene.location) {
     const normalizedLocation = scene.location.trim().toLowerCase();
@@ -105,6 +106,7 @@ export function resolveVisuallyRelevantCanonicalEntities(scene: Scene, bible: St
  * profile or reference-image decision is required. */
 export function shouldUseVisualProfileForEntity(scene: Scene, entity: CanonicalEntity): boolean {
   if (entity.type === "character") return scene.direction?.useCharacterReferences !== false;
+  if (resolveVisualEntityType(entity) === "creature") return scene.direction?.useCreatureReferences !== false;
   if (entity.type === "location") return scene.direction?.useLocationReferences !== false;
   return true;
 }
@@ -291,8 +293,7 @@ export function resolveVisualCanonPrompt(options: {
       const draft = profile && profile.status !== "approved" ? profile : undefined;
       const manual = Object.entries(draft?.fieldProvenance ?? {}).flatMap(([path, provenance]) => {
         if (!provenance.locked && provenance.source !== "manual_override" && provenance.source !== "user_edit") return [];
-        const [section, field] = path.split(".") as ["character" | "location" | "creature" | "item", string];
-        const value = (draft?.[section] as Record<string, string | undefined> | undefined)?.[field];
+        const value = draft ? readVisualField(draft, path) : undefined;
         return value?.trim() ? [`${path}: ${value.trim()}`] : [];
       });
       const protectedPaths = new Set(manual.map((line) => line.split(":", 1)[0]));
@@ -301,7 +302,7 @@ export function resolveVisualCanonPrompt(options: {
         manual.length ? `MANUAL VISUAL DECISIONS: ${manual.join("; ")}` : "",
         persistent.length ? `PERSISTENT IDENTITY: ${lines(persistent).join("; ")}` : "",
         changing.length ? `CURRENT CHAPTER VISUAL STATE: ${lines(changing).join("; ")}` : "",
-        visualContinuity ? "SCENE-SPECIFIC STATE: follow the current visual continuity and scene overrides below." : "",
+        evidence.temporary.length || visualContinuity ? `SCENE-SPECIFIC STATE: ${evidence.temporary.map((item) => `${item.field}: ${item.value}`).join("; ")}${visualContinuity ? "; follow current visual continuity and scene overrides below" : ""}` : "",
         "UNKNOWN/UNSPECIFIED: Do not borrow another character's reference identity for details absent from this entity's evidence.",
       ].filter(Boolean).join("\n");
       const desc = `${namePrefix}${visualDescription ? `: ${visualDescription}` : ""}${fallbackContext ? `\n${fallbackContext}` : ""}`;

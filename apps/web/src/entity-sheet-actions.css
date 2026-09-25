@@ -945,3 +945,4 @@
     grid-template-columns: 1fr;
   }
 }
+.visual-evidence-panel{display:grid;gap:12px}.visual-evidence-field{border-top:1px solid var(--line);padding-top:10px}.visual-evidence-field p{margin:6px 0}.visual-evidence-field small{color:var(--muted)}.visual-evidence-source{margin:5px 0;padding:5px 8px;border:1px solid var(--line);border-radius:7px}.visual-evidence-source summary{cursor:pointer}.visual-evidence-actions{display:flex;gap:6px;flex-wrap:wrap}.visual-evidence-actions button{border:1px solid var(--line);border-radius:6px;background:transparent;color:var(--ink);padding:5px 8px;cursor:pointer}

@@ -167,6 +167,8 @@ export function VisualProfileModal({
     for (const [path, evidence] of Object.entries(facts)) {
       const [section, field] = path.split(".") as ["character" | "location" | "creature" | "item", string];
       if (!["character", "location", "creature", "item"].includes(section)) continue;
+      if (section !== (["weapon", "object"].includes(profile.visualType) ? "item" : profile.visualType)) continue;
+      if (!completeness?.fields.some((item) => item.path === path)) continue;
       const existing = (next[section] as Record<string, string | undefined> | undefined)?.[field];
       if (existing?.trim() || next.fieldProvenance?.[path]?.locked) continue;
       (next as unknown as Record<string, Record<string, string>>)[section] ??= {};
@@ -496,7 +498,7 @@ export function VisualProfileModal({
 
           {activeTab === "details" && (
             <div className="form-group-stack">
-              {(profile.visualType === "character" || profile.visualType === "location") && (
+              {["character", "location", "creature", "item", "weapon", "object"].includes(profile.visualType) && (
                 <section className="visual-completion-panel">
                   <div>
                     <strong>Persistent visual identity</strong>

@@ -16,6 +16,7 @@ import { loadStory } from "../../src/config/load-config.js";
 import { loadVisualProfiles, getVisualProfile as loadSingleVisualProfile } from "../../src/visual-canon/profiles.js";
 import { loadStoryArtDirection } from "../../src/visual-canon/art-direction.js";
 import { rebuildStoryBibleBeforeChapter, computeStaleExtractionChapters } from "../../src/story-bible/rebuild.js";
+import { resolveEntityVisualEvidence } from "../../src/story-bible/visual-evidence.js";
 import { exportManifestSchema } from "../../src/audio/audiobook.js";
 import { videoExportManifestSchema } from "../../src/video/video-export.js";
 import { SceneManifest, artworkSettingsSchema, sceneManifestSchema, sceneSettingsSchema } from "../../src/scenes/types.js";
@@ -434,6 +435,7 @@ export async function getCanonicalEntityDetail(root: string, slug: string, id: s
   logger.debug({ event: "story_bible.entity_detail", story: slug, entityId: id, durationMs: Date.now() - startedAt });
   return {
     entity,
+    visualEvidenceResolution: resolveEntityVisualEvidence(entity, Number.MAX_SAFE_INTEGER),
     timeline: bible.entityTimeline.filter((item) => item.entityId === id).sort((a, b) => a.chapter - b.chapter),
     relationships: related,
     relatedNames: names,

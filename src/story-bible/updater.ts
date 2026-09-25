@@ -101,6 +101,7 @@ export function contextBeforeChapter(bible: StoryBible, chapter: number, recentS
       const confidence = provenance.reduce((score, source, index) => index ? Math.min(1, score + (1 - score) * source.confidence * 0.5) : source.confidence, 0);
       return { ...item, provenance, confidence, lastObservedChapter: Math.max(...provenance.map((source) => source.chapter)), status: item.persistence === "temporary" ? "temporary" as const : "current" as const };
     });
+    if (entity.visualEvidenceDecisions) entity.visualEvidenceDecisions = entity.visualEvidenceDecisions.filter((decision) => entity.visualEvidence!.some((item) => item.id === decision.evidenceId));
     const resolved = resolveEntityVisualEvidence(entity, chapter - 1);
     for (const item of entity.visualEvidence) {
       if (item.persistence === "temporary") continue;
@@ -123,7 +124,7 @@ export function contextBeforeChapter(bible: StoryBible, chapter: number, recentS
   return result;
 }
 
-const canonicalCategories: Array<[keyof StoryBibleUpdate, EntityType]> = [["characters", "character"], ["factions", "organization"], ["locations", "location"], ["abilities", "ability"], ["items", "item"], ["classes", "concept"], ["ranks", "concept"], ["creatures", "concept"], ["systemTerms", "concept"]];
+const canonicalCategories: Array<[NonNullable<CanonicalEntity["sourceBucket"]>, EntityType]> = [["characters", "character"], ["factions", "organization"], ["locations", "location"], ["abilities", "ability"], ["items", "item"], ["classes", "concept"], ["ranks", "concept"], ["creatures", "concept"], ["systemTerms", "concept"]];
 function mergeCanonicalHistory(existing: StoryBible, update: StoryBibleUpdate, chapter: number, overlay?: CanonicalOverlay) {
   const entities = structuredClone(existing.canonicalEntities);
   const relationships = structuredClone(existing.canonicalRelationships);
@@ -158,6 +159,7 @@ function mergeCanonicalHistory(existing: StoryBible, update: StoryBibleUpdate, c
       const existingEntity = entities.find((candidate) => [candidate.canonicalName, candidate.originalName, ...candidate.aliases].some((value) => keys.has(normalizeName(value))));
       if (existingEntity) {
         const entity = ensure(raw.canonicalEnglishName, type, raw.originalName, raw.description, raw.aliases ?? [], raw.status ?? "unknown", raw.confidence);
+        entity.sourceBucket ??= category;
         addTimeline(timeline, entity.id, chapter, "appearance", `${entity.canonicalName} appears`, undefined, undefined, raw.confidence);
         continue;
       }
@@ -225,6 +227,7 @@ function mergeCanonicalHistory(existing: StoryBible, update: StoryBibleUpdate, c
       }
 
       const entity = ensure(raw.canonicalEnglishName, type, raw.originalName, raw.description, raw.aliases ?? [], raw.status ?? "unknown", raw.confidence);
+      entity.sourceBucket ??= category;
       addTimeline(timeline, entity.id, chapter, "appearance", `${entity.canonicalName} appears`, undefined, undefined, raw.confidence);
     }
   }

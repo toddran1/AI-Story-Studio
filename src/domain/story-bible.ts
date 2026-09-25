@@ -92,6 +92,8 @@ export const visualEvidenceSchema = z.object({
   provenance: z.array(z.object({ chapter: z.number().int().positive(), excerpt: z.string().trim().min(1).max(500), confidence: z.number().min(0).max(1) })).min(1),
 });
 export type VisualEvidence = z.infer<typeof visualEvidenceSchema>;
+export const visualEvidenceDecisionSchema = z.object({ field: visualEvidenceFieldSchema, evidenceId: visualEvidenceSchema.shape.id, action: z.enum(["select", "change", "dismiss"]), decidedAt: z.string().datetime() });
+export type VisualEvidenceDecision = z.infer<typeof visualEvidenceDecisionSchema>;
 
 export const storyBibleUpdateSchema = z.object({
   characters: z.array(character).max(2000).default([]), locations: z.array(namedEntity).max(2000).default([]), factions: z.array(namedEntity).max(2000).default([]), abilities: z.array(namedEntity).max(2000).default([]),
@@ -101,6 +103,7 @@ export const storyBibleUpdateSchema = z.object({
 
 export const canonicalEntitySchema = z.object({
   id: z.string().regex(/^ent_[a-f0-9]{24}$/), type: entityTypeSchema, canonicalName: z.string().min(1).max(300), aliases: z.array(z.string().min(1).max(300)).max(100).default([]), originalName: z.string().max(300).default(""), description: z.string().max(10_000).default(""),
+  sourceBucket: z.enum(["characters", "locations", "factions", "abilities", "items", "creatures", "classes", "ranks", "systemTerms"]).optional(),
   preferredNarrationName: z.string().trim().min(1).max(300).optional(), aliasNarrationRules: z.array(aliasNarrationRuleSchema).max(100).default([]),
   localizedNaming: localizedNamingSchema.optional(),
   pronunciation: pronunciationSchema.optional(),
@@ -108,7 +111,7 @@ export const canonicalEntitySchema = z.object({
   // than encoded as a fake empty Visual Profile.
   visualProfilePolicy: z.object({ mode: z.enum(["prompt", "skip"]) }).optional(),
   firstAppearance: z.number().int().positive(), lastKnownAppearance: z.number().int().positive(), status: z.string().max(500).default("unknown"), notes: z.string().max(10_000).default(""), canonicalNameLocked: z.boolean().default(false),
-  origin: factOriginSchema.default("automatic"), provenance: z.array(provenanceSchema).default([]), mergedFromIds: z.array(z.string()).default([]), visualEvidence: z.array(visualEvidenceSchema).optional(),
+  origin: factOriginSchema.default("automatic"), provenance: z.array(provenanceSchema).default([]), mergedFromIds: z.array(z.string()).default([]), visualEvidence: z.array(visualEvidenceSchema).optional(), visualEvidenceDecisions: z.array(visualEvidenceDecisionSchema).optional(),
 });
 export type CanonicalEntity = z.infer<typeof canonicalEntitySchema>;
 export const timelineEventSchema = z.object({

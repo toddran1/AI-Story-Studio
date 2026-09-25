@@ -16,6 +16,7 @@ import { AudioDeck } from "./AudioDeck.js";
 import { VocalizationList } from "./VocalizationList.js";
 import { getEntityStatusOptions, isStandardEntityStatus, statusKey } from "../../../src/story-bible/entity-status.js";
 import { VisualProfileModal } from "./VisualProfileModal.js";
+import { VisualEvidencePanel } from "./VisualEvidencePanel.js";
 import { VisualProfileCheckDialog } from "./VisualProfileCheckDialog.js";
 import { ArtDirectionModal } from "./ArtDirectionModal.js";
 import { reviewArtworkVersion, reupscaleArtwork, updateSceneContinuity, resetSceneContinuity, ShotType, CameraAngle, CompositionTendency, ARTWORK_PROVIDERS } from "./api.js";
@@ -1988,6 +1989,10 @@ export function CanonicalEntitySheet({ detail, slug, navigate, onClose, onUndo, 
             </button>
           )}
         </section>
+
+        <EntityDetailAccordion key={`${entity.id}-visual-evidence`} id="visual-evidence" title="Visual evidence" badge={`${shown.visualEvidence?.length ?? 0} observations`}>
+          <VisualEvidencePanel slug={slug} entity={shown} chapter={viewing ? history!.chapter : Number.MAX_SAFE_INTEGER} readOnly={viewing} />
+        </EntityDetailAccordion>
 
         <EntityDetailAccordion key={`${entity.id}-naming`} id="naming" title="Naming & Localization" badge={narrationConfigured ? "Narration configured" : "Needs setup"} defaultOpen>
           <section className="entity-detail-section">

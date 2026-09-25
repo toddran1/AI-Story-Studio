@@ -89,7 +89,7 @@ import { alignmentConfig, createAlignmentEngine } from "../../src/alignment/conf
 import { AlignmentEngine } from "../../src/alignment/types.js";
 import { alignStoredChapter } from "../../src/alignment/chapter-alignment.js";
 import { discardManualSubtitles, saveManualSubtitles } from "../../src/subtitles/chapter-subtitles.js";
-import { backfillCanonicalSnapshots, mergeCanonicalEntities, namingMappingConflict, previewCanonicalEntityUpdate, restoreCanonicalEntity, suppressCanonicalEntity, undoCanonicalMerge, updateCanonicalEntity } from "../../src/story-bible/canonical.js";
+import { backfillCanonicalSnapshots, decideVisualEvidence, mergeCanonicalEntities, namingMappingConflict, previewCanonicalEntityUpdate, restoreCanonicalEntity, suppressCanonicalEntity, undoCanonicalMerge, updateCanonicalEntity } from "../../src/story-bible/canonical.js";
 import { analyzeStoryBible, applyCleanupRecommendations, demoteCanonicalEntity, promoteMinorReference, restorePreDemoteStoryBible, snapshotPreDemoteStoryBible, updateMinorReference } from "../../src/story-bible/granularity.js";
 import { continuityFindingSchema, resolveContinuityFinding } from "../../src/story-bible/continuity.js";
 import { appendEntityAudit, type EntityAuditInput } from "../../src/story-bible/entity-audit.js";
@@ -117,7 +117,7 @@ import { resolveStoredQaContext } from "../../src/qa/freshness.js";
 import { persistQaStateWithMetadata } from "../../src/qa/persistence.js";
 import { LLMRouter } from "../../src/llm/router.js";
 import { validateChapterQuality } from "../../src/qa/validator.js";
-import { canonicalEntitySchema, emptyStoryBible, entityTypeSchema, storyBibleSchema, type CanonicalEntity } from "../../src/domain/story-bible.js";
+import { canonicalEntitySchema, emptyStoryBible, entityTypeSchema, storyBibleSchema, visualEvidenceDecisionSchema, type CanonicalEntity } from "../../src/domain/story-bible.js";
 import { SummaryService } from "../../src/summaries/service.js";
 import { SummaryMediaService, summaryMediaInputSchema, summaryNarrationEditSchema, summaryScenesInputSchema } from "../../src/summaries/media.js";
 import { SummaryVisualService, summaryVisualInputSchema, summaryProduceInputSchema } from "../../src/summaries/visuals.js";
@@ -1975,6 +1975,19 @@ export class StudioOperations {
       const result = await resolveVisualProfileConflict(this.root, slug, await getStoryBible(this.root, slug), entityId, conflictId, parsed.action);
       await invalidateStoryBibleDerivedReads(this.root, slug);
       return result;
+    });
+  }
+
+  async decideStoryBibleVisualEvidence(slug: string, entityId: string, input: unknown) {
+    slugSchema.parse(slug);
+    canonicalEntitySchema.shape.id.parse(entityId);
+    const parsed = z.object({ field: visualEvidenceDecisionSchema.shape.field, evidenceId: visualEvidenceDecisionSchema.shape.evidenceId, action: z.enum(["select", "change", "dismiss", "clear", "restore"]) }).strict().parse(input);
+    return withStoryLock(this.root, slug, "review Story Bible visual evidence", async () => {
+      const decisions = await decideVisualEvidence(this.root, slug, entityId, parsed.field, parsed.evidenceId, parsed.action);
+      invalidateCatalogCache(this.root, slug);
+      await invalidateStoryBibleDerivedReads(this.root, slug);
+      await recordActivity(this.root, slug, "bible.visual_evidence.reviewed", `Reviewed ${parsed.field} evidence`);
+      return { decisions };
     });
   }
 

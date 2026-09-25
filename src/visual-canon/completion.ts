@@ -8,10 +8,8 @@ import { storyPaths } from "../storage/paths.js";
 import { fingerprint } from "../utils/hash.js";
 import { getVisualProfile, updateVisualProfile } from "./profiles.js";
 import { resolveEntityVisualEvidence } from "../story-bible/visual-evidence.js";
+import { readVisualField, resolveVisualEntityType, validVisualField, visualFieldsForType, writeVisualField } from "./fields.js";
 
-const characterFields = ["character.apparentAge", "character.gender", "character.height", "character.build", "character.skinTone", "character.faceShape", "character.hairColor", "character.hairstyle", "character.eyeColor", "character.distinguishingFeatures", "character.defaultOutfit", "character.weapons", "character.accessories"] as const;
-const locationFields = ["location.architecture", "location.terrain", "location.vegetation", "location.lighting", "location.atmosphere", "location.colorPalette", "location.recurringLandmarks"] as const;
-const fieldsByType: Partial<Record<VisualEntityType, readonly string[]>> = { character: characterFields, location: locationFields };
 
 export const visualProfileProposalItemSchema = z.object({ field: z.string().trim().min(1), value: z.string().trim().min(1).max(5_000) }).strict();
 export const visualProfileProposalResponseSchema = z.object({ values: z.array(visualProfileProposalItemSchema), rationale: z.string().trim().max(2_000).default("") }).strict();
@@ -24,10 +22,10 @@ export type Inspection = { entity: CanonicalEntity; profile: VisualEntityProfile
 
 function blankProfile(entity: CanonicalEntity): VisualEntityProfile {
   const now = new Date().toISOString();
-  const visualType: VisualEntityType = entity.type === "location" ? "location" : entity.type === "item" ? "item" : entity.type === "ability" ? "object" : "character";
+  const visualType: VisualEntityType = resolveVisualEntityType(entity);
   return visualProfileSchema.parse({ id: `vprof_draft_${entity.id}`, entityId: entity.id, visualType, status: "draft", appearance: "", visualPrompt: "", negativePrompt: "", notes: "", variants: [], references: [], fieldProvenance: {}, conflicts: [], revision: 0, createdAt: now, updatedAt: now });
 }
-function fieldValue(profile: VisualEntityProfile, path: string): string | undefined { const [section, key] = path.split(".") as ["character" | "location", string]; const record = profile[section] as Record<string, string | undefined> | undefined; return record?.[key]?.trim() || undefined; }
+const fieldValue = readVisualField;
 const colour = "white|black|silver|gold(?:en)?|blue|green|red|brown|violet|purple|gray|grey|amber|hazel|emerald|crimson";
 const visualMatchers: Array<[string, RegExp]> = [
   ["character.apparentAge", /\b(?:appears?|looks?)\s+(?:to be\s+)?([^.,;]{1,80}\b(?:years? old|young|middle-aged|elderly|child|teen(?:ager)?))\b/i], ["character.gender", /\b(?:gender|sex|presentation)\s*[:=-]\s*([^.,;]{1,80})/i], ["character.height", /\b((?:very |quite )?(?:tall|short|average[- ]height)|\d(?:\.\d+)?\s*(?:feet|foot|ft|cm|centimeters?))\b/i], ["character.build", /\b((?:slender|lean|muscular|athletic|stocky|broad[- ]shouldered|lithe|frail|burly|well-built)[^.,;]{0,90})\b/i],
@@ -45,7 +43,7 @@ type SourceEvidence = { chapter: number; text: string; visualSignalScore: number
 function explicitFacts(entity: CanonicalEntity, profile: VisualEntityProfile): Record<string, string> {
   const result: Record<string, string> = {};
   for (const [path, provenance] of Object.entries(profile.fieldProvenance ?? {})) { const value = fieldValue(profile, path); if (value && ["source_text", "story_bible", "continuity", "manual_override"].includes(provenance.source)) result[path] = value; }
-  const evidence = resolveEntityVisualEvidence(entity, entity.lastKnownAppearance);
+  const evidence = resolveEntityVisualEvidence(entity, Number.MAX_SAFE_INTEGER);
   for (const [path, observation] of Object.entries(evidence.values)) if (!result[path]) result[path] = observation.value;
   const text = [entity.description, entity.notes].filter(Boolean).join("\n");
   // Labelled Story Bible facts are an explicit editorial statement, unlike a
@@ -88,24 +86,24 @@ function detectConflicts(profile: VisualEntityProfile, facts: Record<string, str
 
 export async function inspectVisualProfile(root: string, slug: string, bible: StoryBible, entityId: string): Promise<Inspection> {
   const entity = bible.canonicalEntities.find((item) => item.id === entityId); if (!entity) throw new Error(`Canonical entity '${entityId}' was not found`);
-  const profile = (await getVisualProfile(root, slug, entityId)) ?? blankProfile(entity); const fields = [...(fieldsByType[profile.visualType] ?? [])];
+  const profile = (await getVisualProfile(root, slug, entityId)) ?? blankProfile(entity); const fields = [...visualFieldsForType(profile.visualType)];
   const relationships = bible.canonicalRelationships.filter((item) => item.sourceEntityId === entityId || item.targetEntityId === entityId).slice(0, 12).map((item) => ({ type: item.type, otherEntityId: item.sourceEntityId === entityId ? item.targetEntityId : item.sourceEntityId }));
   const sources = await sourceEvidence(root, slug, entity); const facts = explicitFacts(entity, profile); const conflicts = detectConflicts(profile, facts);
   const protectedFields = fields.filter((field) => Boolean(fieldValue(profile, field)) || Boolean(profile.fieldProvenance?.[field]?.locked) || Boolean(facts[field])); const eligibleFields = fields.filter((field) => !protectedFields.includes(field));
   const fieldStates = fields.map((path) => { const provenance = profile.fieldProvenance?.[path]; const value = fieldValue(profile, path); const canonical = Boolean(facts[path]); const conflict = conflicts.find((item) => item.status === "needs_review" && item.field === path); return { path, value, source: canonical ? "source-backed" : provenance?.source, locked: Boolean(provenance?.locked), missing: !value && !canonical, canonical, regenerable: Boolean(value && provenance?.source === "ai_generated" && !provenance.locked && !canonical), conflict }; });
   const activeReferences = [...profile.references].filter((ref) => ref.approved).sort((left, right) => Number(right.role === "primary_reference") - Number(left.role === "primary_reference"));
-  const resolvedEvidence = resolveEntityVisualEvidence(entity, entity.lastKnownAppearance);
+  const resolvedEvidence = resolveEntityVisualEvidence(entity, Number.MAX_SAFE_INTEGER);
   const compactEvidence = { values: Object.fromEntries(Object.entries(resolvedEvidence.values).map(([path, item]) => [path, { ...item, provenance: item.provenance.slice(-8) }])), conflicts: Object.fromEntries(Object.entries(resolvedEvidence.conflicts).map(([path, items]) => [path, items.map((item) => ({ ...item, provenance: item.provenance.slice(-8) }))])) };
   const context = { canonicalEntity: { name: entity.canonicalName, originalName: entity.originalName, type: entity.type, description: entity.description, status: entity.status, notes: entity.notes, aliases: entity.aliases, sourceProvenance: entity.provenance }, explicitVisualFacts: facts, storyBibleVisualEvidence: compactEvidence, sourceEvidence: sources, existingVisualProfile: profile, fieldStates, approvedReferences: activeReferences.map((ref) => ({ id: ref.id, role: ref.role, source: ref.source, prompt: ref.prompt, provenance: ref.provenance })), relationships: relationships.map((relationship) => ({ ...relationship, otherName: bible.canonicalEntities.find((item) => item.id === relationship.otherEntityId)?.canonicalName })), relevantContinuity: bible.entityTimeline.filter((event) => event.entityId === entityId).slice(-10), relevantStorySummaries: relevantSummaries(bible, entity, relationships) };
   return { entity, profile, eligibleFields, protectedFields, fields: fieldStates, conflicts, coreComplete: fields.length - eligibleFields.length, coreTotal: fields.length, context, contextFingerprint: fingerprint(context) };
 }
 export async function synchronizeVisualProfileConflicts(root: string, slug: string, bible: StoryBible, entityId: string): Promise<Inspection> { let inspection = await inspectVisualProfile(root, slug, bible, entityId); const stored = inspection.profile.conflicts ?? []; if (JSON.stringify(stored) !== JSON.stringify(inspection.conflicts) && inspection.profile.revision > 0) { await updateVisualProfile(root, slug, entityId, { conflicts: inspection.conflicts, fieldProvenance: inspection.profile.fieldProvenance }); inspection = await inspectVisualProfile(root, slug, bible, entityId); } return inspection; }
 export async function resolveVisualProfileConflict(root: string, slug: string, bible: StoryBible, entityId: string, conflictId: string, action: "accept_canonical" | "retain_manual_override") {
-  const inspection = await synchronizeVisualProfileConflicts(root, slug, bible, entityId); const conflict = (inspection.profile.conflicts ?? []).find((item) => item.id === conflictId && item.status === "needs_review"); if (!conflict) throw new Error("Visual profile conflict was not found or is already resolved"); const next = structuredClone(inspection.profile); const [section, key] = conflict.field.split(".") as ["character" | "location", string]; if (action === "accept_canonical") { (next as Record<string, unknown>)[section] = { ...(next[section] ?? {}), [key]: conflict.canonicalValue }; next.fieldProvenance ??= {}; next.fieldProvenance[conflict.field] = { source: "story_bible", locked: true }; } else { next.fieldProvenance ??= {}; next.fieldProvenance[conflict.field] = { source: "manual_override", locked: true }; } next.conflicts = (next.conflicts ?? []).map((item) => item.id === conflictId ? { ...item, status: "resolved" as const, resolution: action, resolvedAt: new Date().toISOString() } : item); return updateVisualProfile(root, slug, entityId, next);
+  const inspection = await synchronizeVisualProfileConflicts(root, slug, bible, entityId); const conflict = (inspection.profile.conflicts ?? []).find((item) => item.id === conflictId && item.status === "needs_review"); if (!conflict) throw new Error("Visual profile conflict was not found or is already resolved"); const next = structuredClone(inspection.profile); if (!validVisualField(next.visualType, conflict.field)) throw new Error("Visual conflict field does not belong to this profile type"); if (action === "accept_canonical") { writeVisualField(next, conflict.field, conflict.canonicalValue); next.fieldProvenance ??= {}; next.fieldProvenance[conflict.field] = { source: "story_bible", locked: true }; } else { next.fieldProvenance ??= {}; next.fieldProvenance[conflict.field] = { source: "manual_override", locked: true }; } next.conflicts = (next.conflicts ?? []).map((item) => item.id === conflictId ? { ...item, status: "resolved" as const, resolution: action, resolvedAt: new Date().toISOString() } : item); return updateVisualProfile(root, slug, entityId, next);
 }
 export async function proposeMissingVisualDetails(root: string, slug: string, bible: StoryBible, entityId: string, provider: LLMProvider, config: StageModelConfig, options: { fields?: string[]; regenerate?: boolean } = {}): Promise<VisualProfileProposal> {
   const inspection = await synchronizeVisualProfileConflicts(root, slug, bible, entityId);
-  const knownFields = new Set(fieldsByType[inspection.profile.visualType] ?? []);
+  const knownFields = new Set(visualFieldsForType(inspection.profile.visualType));
   const requested = options.fields ? [...new Set(options.fields)] : inspection.eligibleFields;
   if (requested.some((field) => !knownFields.has(field))) throw new Error("One or more requested visual fields are not supported for this profile type");
   if (options.regenerate && !options.fields?.length) throw new Error("Choose one or more AI-generated fields to regenerate");
@@ -146,6 +144,6 @@ export async function proposeMissingVisualDetails(root: string, slug: string, bi
 }
 export async function applyVisualProfileProposal(root: string, slug: string, bible: StoryBible, proposal: VisualProfileProposal, selectedFields: string[]): Promise<VisualEntityProfile> {
   const inspection = await synchronizeVisualProfileConflicts(root, slug, bible, proposal.entityId); if (proposal.contextFingerprint !== inspection.contextFingerprint) throw new Error("The visual profile changed after this proposal was generated. Generate a fresh proposal before applying it."); const next = structuredClone(inspection.profile);
-  for (const path of selectedFields) { const value = proposal.values[path]; if (!value || !proposal.eligibleFields.includes(path)) continue; const state = inspection.fields.find((item) => item.path === path); if (!state || state.canonical || state.locked || (!state.missing && !state.regenerable)) continue; const [section, key] = path.split(".") as ["character" | "location", string]; (next as Record<string, unknown>)[section] = { ...(next[section] ?? {}), [key]: value }; next.fieldProvenance ??= {}; next.fieldProvenance[path] = { source: "ai_generated", locked: false, provider: proposal.provider, model: proposal.model, generatedAt: new Date().toISOString(), contextFingerprint: proposal.contextFingerprint }; }
+  for (const path of selectedFields) { const value = proposal.values[path]; if (!value || !proposal.eligibleFields.includes(path)) continue; const state = inspection.fields.find((item) => item.path === path); if (!state || state.canonical || state.locked || (!state.missing && !state.regenerable)) continue; if (!writeVisualField(next, path, value)) continue; next.fieldProvenance ??= {}; next.fieldProvenance[path] = { source: "ai_generated", locked: false, provider: proposal.provider, model: proposal.model, generatedAt: new Date().toISOString(), contextFingerprint: proposal.contextFingerprint }; }
   return updateVisualProfile(root, slug, proposal.entityId, next);
 }
