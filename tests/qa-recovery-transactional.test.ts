@@ -1,7 +1,7 @@
 import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { loadEnvironment } from "../src/config/env.js";
 import { ChapterPipeline } from "../src/pipeline/chapter-pipeline.js";
@@ -423,5 +423,276 @@ describe("transactional QA auto-recovery", () => {
     expect(await readFile(paths.narration, "utf8")).toBe("Initial narration 1");
     expect(await readFile(paths.narrationTts, "utf8")).toBe("Initial narration 1");
     expect(JSON.parse(await readFile(paths.qa, "utf8")).status).toBe("warn");
+  });
+});
+
+describe("QA recovery stage scope", () => {
+  const makeMockAudio = () => ({
+    master: vi.fn(async (_inputs: string[], output: string) => {
+      await atomicWrite(output, "mastered-mp3");
+      return { durationSeconds: 10, codec: "mp3", container: "mp3" };
+    }),
+  });
+
+  const makeMockCensor = () => ({
+    version: "test-censor",
+    synthesize: vi.fn(async (provider: MockTTS, request: Parameters<MockTTS["synthesize"]>[0]) => provider.synthesize(request)),
+  });
+
+  it("A & B. Full pipeline recovery does not synthesize TTS during recursive recovery, then outer full pipeline continues once", async () => {
+    const root = await mkdtemp(join(tmpdir(), "qa-scope-a-"));
+    const env = loadEnvironment({});
+    const story = await createBlankStory(root, env, { title: "QA Story", slug: "qa-story" });
+    const paths = storyPaths(root, story.slug, 1);
+
+    await atomicWrite(paths.original, "第一章 初始内容");
+
+    let qaCallCount = 0;
+    let qa2Completed = false;
+
+    const llm = new MockLLM("gemini", [
+      "Initial translation 1",
+      "Initial narration 1",
+      "Recovered translation 2",
+      "Recovered narration 2",
+    ]);
+
+    const originalGenerateStructured = llm.generateStructured.bind(llm);
+    llm.generateStructured = async (request) => {
+      if (request.schemaName === "chapter_qa") {
+        qaCallCount++;
+        if (qaCallCount === 1) {
+          return { value: request.schema.parse(makeBadQa(5)), usage: { inputTokens: 10, outputTokens: 5 } };
+        }
+        qa2Completed = true;
+        return { value: request.schema.parse(makeGoodQa()), usage: { inputTokens: 10, outputTokens: 5 } };
+      }
+      return originalGenerateStructured(request);
+    };
+
+    const mockTts = new MockTTS();
+    const mockAudio = makeMockAudio();
+    const mockCensor = makeMockCensor();
+
+    // Track when TTS and Audio are called relative to QA #2
+    let ttsCalledBeforeQa2 = false;
+    let audioCalledBeforeQa2 = false;
+    const originalSynthesize = mockTts.synthesize.bind(mockTts);
+    mockTts.synthesize = async (req) => {
+      if (!qa2Completed) ttsCalledBeforeQa2 = true;
+      return originalSynthesize(req);
+    };
+
+    const originalMaster = mockAudio.master.bind(mockAudio);
+    mockAudio.master = vi.fn(async (inputs, output) => {
+      if (!qa2Completed) audioCalledBeforeQa2 = true;
+      return originalMaster(inputs, output);
+    });
+
+    const router = new LLMRouter(new Map([["gemini", llm], ["openai", llm]]));
+    const pipeline = new ChapterPipeline(router, new TTSProviderRouter(new Map([["fish", mockTts]])), mockAudio as any, mockCensor as any);
+
+    const onStageEvent = vi.fn();
+
+    // Run full pipeline (no executionStages, no stopAfter)
+    const result = await pipeline.run({
+      root,
+      story,
+      chapter: 1,
+      inputPath: paths.original,
+      onStageEvent,
+    });
+
+    // Requirement 12-A: TTS and Mastering were NOT called during recursive recovery before QA #2
+    expect(ttsCalledBeforeQa2).toBe(false);
+    expect(audioCalledBeforeQa2).toBe(false);
+
+    // Requirement 12-B: QA #2 passed, outer full pipeline continued
+    expect(qaCallCount).toBe(2);
+    expect(mockTts.calls).toBe(1);
+    expect(mockAudio.master).toHaveBeenCalledTimes(1);
+    expect(result.stages.storyBible.status).toBe("complete");
+    expect(result.stages.tts.status).toBe("complete");
+    expect(result.stages.audioMastering.status).toBe("complete");
+
+    // Output reflects the recovered narration
+    expect(await readFile(paths.english, "utf8")).toBe("Recovered translation 2");
+    expect(await readFile(paths.narration, "utf8")).toBe("Recovered narration 2");
+  });
+
+  it("C. QA #2 fails: no Story Bible, TTS, or audio runs, and QualityGateError remains authoritative", async () => {
+    const root = await mkdtemp(join(tmpdir(), "qa-scope-c-"));
+    const env = loadEnvironment({});
+    const story = await createBlankStory(root, env, { title: "QA Story", slug: "qa-story" });
+    const paths = storyPaths(root, story.slug, 1);
+
+    await atomicWrite(paths.original, "第一章 初始内容");
+
+    let qaCallCount = 0;
+    const llm = new MockLLM("gemini", [
+      "Initial translation 1",
+      "Initial narration 1",
+      "Recovered translation 2",
+      "Recovered narration 2",
+    ]);
+
+    const persistentFailQa: QaResult = {
+      status: "fail",
+      score: 0.2,
+      issues: makeIssues(6, "fail"),
+      checks: {
+        completeness: "fail",
+        names: "pass",
+        numbers: "pass",
+        terminology: "fail",
+        dialogue: "pass",
+        storyConsistency: "pass",
+        narrationFidelity: "pass",
+      },
+    };
+
+    const originalGenerateStructured = llm.generateStructured.bind(llm);
+    llm.generateStructured = async (request) => {
+      if (request.schemaName === "chapter_qa") {
+        qaCallCount++;
+        if (qaCallCount === 1) {
+          return { value: request.schema.parse(makeBadQa(5)), usage: { inputTokens: 10, outputTokens: 5 } };
+        }
+        return { value: request.schema.parse(persistentFailQa), usage: { inputTokens: 10, outputTokens: 5 } };
+      }
+      return originalGenerateStructured(request);
+    };
+
+    const mockTts = new MockTTS();
+    const mockAudio = makeMockAudio();
+    const mockCensor = makeMockCensor();
+    const router = new LLMRouter(new Map([["gemini", llm], ["openai", llm]]));
+    const pipeline = new ChapterPipeline(router, new TTSProviderRouter(new Map([["fish", mockTts]])), mockAudio as any, mockCensor as any);
+
+    // Run full pipeline
+    await expect(
+      pipeline.run({
+        root,
+        story,
+        chapter: 1,
+        inputPath: paths.original,
+      })
+    ).rejects.toThrow(QualityGateError);
+
+    expect(qaCallCount).toBe(2);
+    expect(mockTts.calls).toBe(0);
+    expect(mockAudio.master).not.toHaveBeenCalled();
+
+    const chapterMeta: Chapter = JSON.parse(await readFile(paths.chapterMeta, "utf8"));
+    expect(chapterMeta.stages.storyBible.status).toBe("pending");
+    expect(chapterMeta.stages.tts.status).toBe("pending");
+    expect(chapterMeta.stages.audioMastering.status).toBe("pending");
+  });
+
+  it("D. Selected-stage QA run: executes only translation, narration, and QA, without downstream execution", async () => {
+    const root = await mkdtemp(join(tmpdir(), "qa-scope-d-"));
+    const env = loadEnvironment({});
+    const story = await createBlankStory(root, env, { title: "QA Story", slug: "qa-story" });
+    const paths = storyPaths(root, story.slug, 1);
+
+    await atomicWrite(paths.original, "第一章 初始内容");
+
+    let qaCallCount = 0;
+    const llm = new MockLLM("gemini", [
+      "Initial translation 1",
+      "Initial narration 1",
+      "Recovered translation 2",
+      "Recovered narration 2",
+    ]);
+
+    const originalGenerateStructured = llm.generateStructured.bind(llm);
+    llm.generateStructured = async (request) => {
+      if (request.schemaName === "chapter_qa") {
+        qaCallCount++;
+        if (qaCallCount === 1) {
+          return { value: request.schema.parse(makeBadQa(5)), usage: { inputTokens: 10, outputTokens: 5 } };
+        }
+        return { value: request.schema.parse(makeGoodQa()), usage: { inputTokens: 10, outputTokens: 5 } };
+      }
+      return originalGenerateStructured(request);
+    };
+
+    const mockTts = new MockTTS();
+    const mockAudio = makeMockAudio();
+    const mockCensor = makeMockCensor();
+    const router = new LLMRouter(new Map([["gemini", llm], ["openai", llm]]));
+    const pipeline = new ChapterPipeline(router, new TTSProviderRouter(new Map([["fish", mockTts]])), mockAudio as any, mockCensor as any);
+
+    // Seed initial chapter through narration so QA has prerequisites
+    await pipeline.run({
+      root,
+      story,
+      chapter: 1,
+      inputPath: paths.original,
+      stopAfter: "narration",
+    });
+
+    const result = await pipeline.run({
+      root,
+      story,
+      chapter: 1,
+      inputPath: paths.original,
+      executionStages: ["qa"],
+    });
+
+    expect(qaCallCount).toBe(2);
+    expect(result.stages.qa.status).toBe("complete");
+    expect(result.quality?.status).toBe("pass");
+    expect(mockTts.calls).toBe(0);
+    expect(mockAudio.master).not.toHaveBeenCalled();
+    expect(result.stages.storyBible.status).toBe("pending");
+    expect(result.stages.tts.status).toBe("pending");
+    expect(result.stages.audioMastering.status).toBe("pending");
+  });
+
+  it("E. One recovery only: does not trigger a second recovery attempt if QA #2 still has >4 issues", async () => {
+    const root = await mkdtemp(join(tmpdir(), "qa-scope-e-"));
+    const env = loadEnvironment({});
+    const story = await createBlankStory(root, env, { title: "QA Story", slug: "qa-story" });
+    const paths = storyPaths(root, story.slug, 1);
+
+    await atomicWrite(paths.original, "第一章 初始内容");
+
+    let qaCallCount = 0;
+    const llm = new MockLLM("gemini", [
+      "Initial translation 1",
+      "Initial narration 1",
+      "Recovered translation 2",
+      "Recovered narration 2",
+    ]);
+
+    const originalGenerateStructured = llm.generateStructured.bind(llm);
+    llm.generateStructured = async (request) => {
+      if (request.schemaName === "chapter_qa") {
+        qaCallCount++;
+        // Both QA 1 and QA 2 return 5 warn issues
+        return { value: request.schema.parse(makeBadQa(5)), usage: { inputTokens: 10, outputTokens: 5 } };
+      }
+      return originalGenerateStructured(request);
+    };
+
+    const mockTts = new MockTTS();
+    const mockAudio = makeMockAudio();
+    const mockCensor = makeMockCensor();
+    const router = new LLMRouter(new Map([["gemini", llm], ["openai", llm]]));
+    const pipeline = new ChapterPipeline(router, new TTSProviderRouter(new Map([["fish", mockTts]])), mockAudio as any, mockCensor as any);
+
+    const result = await pipeline.run({
+      root,
+      story,
+      chapter: 1,
+      inputPath: paths.original,
+      stopAfter: "qa",
+    });
+
+    // Exactly 2 QA calls: initial run + one recovery attempt
+    expect(qaCallCount).toBe(2);
+    expect(result.stages.qa.status).toBe("complete");
+    expect(result.quality?.status).toBe("warn");
   });
 });

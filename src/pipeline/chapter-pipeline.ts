@@ -194,7 +194,7 @@ export class ChapterPipeline {
       chapter.stages.translation.usage = result.usage;
       return result.text;
     });
-    const english = translationResult ?? await requireText(paths.english, "translation");
+    let english = translationResult ?? await requireText(paths.english, "translation");
     if (options.stopAfter === "translation") { await persist(); return chapter; }
 
     const narrationConfig = options.story.pipeline.narration;
@@ -209,23 +209,35 @@ export class ChapterPipeline {
       const cleanNarration = stripDeliveryCues(result.text, ttsConfig.provider, ttsConfig.model);
       if (!cleanNarration) throw new PipelineError("Narration delivery cues cannot replace the chapter's spoken narration");
       const previousNarration = await readTextIfExists(paths.narration);
-      await atomicWrite(paths.narration, cleanNarration);
       const previousNarrationTts = await readTextIfExists(paths.narrationTts);
       try {
         await atomicWrite(paths.narration, cleanNarration);
         await atomicWrite(paths.narrationTts, result.text);
       } catch (error) {
-        if (previousNarration === undefined) await rm(paths.narration, { force: true });
-        else await atomicWrite(paths.narration, previousNarration);
-        if (previousNarrationTts === undefined) await rm(paths.narrationTts, { force: true });
-        else await atomicWrite(paths.narrationTts, previousNarrationTts);
+        const rollbackErrors: unknown[] = [];
+        const restore = async (path: string, content: string | undefined) => {
+          try {
+            if (content !== undefined) await atomicWrite(path, content);
+            else await rm(path, { force: true });
+          } catch (restoreError) {
+            rollbackErrors.push(restoreError);
+          }
+        };
+        await restore(paths.narration, previousNarration);
+        await restore(paths.narrationTts, previousNarrationTts);
+        if (rollbackErrors.length) {
+          throw new AggregateError(
+            [error, ...rollbackErrors],
+            "Narration pair write failed and rollback was incomplete"
+          );
+        }
         throw error;
       }
       chapter.counts.narrationWords = wordCount(cleanNarration);
       chapter.stages.narration.usage = result.usage;
       return cleanNarration;
     });
-    const narration = narrationResult ?? await requireText(paths.narration, "narration");
+    let narration = narrationResult ?? await requireText(paths.narration, "narration");
     if (options.stopAfter === "narration") { await persist(); return chapter; }
 
     const qaConfig = options.story.pipeline.qa;
@@ -265,7 +277,7 @@ export class ChapterPipeline {
       return state;
     });
     if (shouldRun("qa")) {
-      const quality = qaResult ?? qaResultSchema.parse(await readJsonIfExists<QaResult>(paths.qa));
+      let quality = qaResult ?? qaResultSchema.parse(await readJsonIfExists<QaResult>(paths.qa));
       // Legacy/reused QA artifacts may predate the chapter-level summary.
       const expectedQuality = { status: quality.status, score: quality.score, issueCategories: [...new Set(activeQaIssues(quality).map((issue) => issue.category))] };
       if (JSON.stringify(chapter.quality) !== JSON.stringify(expectedQuality)) { chapter.quality = expectedQuality; await persist(); }
@@ -281,11 +293,19 @@ export class ChapterPipeline {
             readTextIfExists(paths.qa),
           ]);
           const previousChapterSnapshot = structuredClone(chapter);
-          const recoveryStages = options.executionStages
-            ? [...new Set<StageExecutionNode>([...options.executionStages, "translation", "narration", "qa"])]
-            : undefined;
+          const recoveryStages: StageExecutionNode[] = ["translation", "narration", "qa"];
           try {
-            return await this.run({ ...options, executionStages: recoveryStages, force: recoveryStages ? options.force : "translation", qaRecoveryAttempted: true });
+            const recoveredChapter = await this.run({
+              ...options,
+              executionStages: recoveryStages,
+              force: "translation",
+              stopAfter: "qa",
+              qaRecoveryAttempted: true,
+            });
+            chapter = recoveredChapter;
+            english = await requireText(paths.english, "translation");
+            narration = await requireText(paths.narration, "narration");
+            quality = qaResultSchema.parse(await readJsonIfExists<QaResult>(paths.qa));
           } catch (recoveryError) {
             if (recoveryError instanceof QualityGateError) throw recoveryError;
             logger.warn({ event: "pipeline.qa.auto_recovery_failed", story: options.story.slug, chapter: options.chapter,
@@ -343,7 +363,10 @@ export class ChapterPipeline {
         throw new QualityGateError(`Chapter ${options.chapter} failed QA`, { ...quality, issues: activeQaIssues(quality) }, { dependencyFingerprint: qaFp });
       }
     }
-    if (options.stopAfter === "qa") { await persist(); return chapter; }
+    const hasRemainingCoreStages = executionStages
+      ? ["storyBible", "continuity", "tts", "audioMastering"].some((stage) => executionStages.has(stage as StageExecutionNode))
+      : true;
+    if (options.stopAfter === "qa" || !hasRemainingCoreStages) { await persist(); return chapter; }
 
     const bibleConfig = options.story.pipeline.storyBible;
     const bibleFp = fingerprint({ narration: fingerprint(narration), config: bibleConfig, prompt: STORY_BIBLE_PROMPT_VERSION, context: priorContext });
