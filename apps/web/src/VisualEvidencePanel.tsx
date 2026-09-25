@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import type { CanonicalEntity, VisualEvidence } from "../../../src/domain/story-bible.js";
-import { resolveEntityVisualEvidence } from "../../../src/story-bible/visual-evidence.js";
+import { resolveEntityVisualEvidence } from "../../../src/story-bible/visual-evidence-resolution.js";
 import { api, post } from "./api.js";
 
 function label(path: string): string {
