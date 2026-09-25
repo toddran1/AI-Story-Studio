@@ -18,42 +18,92 @@ type NamingEntity = {
 export function applyNarrationNamingPreferences(text: string, context?: unknown): string {
   const entities = namingEntities(context);
   const replacements = new Map<string, { source: string; replacement: string }>();
+  const ambiguous = new Set<string>();
+  const preservedAliases = new Set<string>();
+  const add = (source: string | undefined, replacement: string | undefined) => {
+    if (!source || !replacement || source.toLocaleLowerCase() === replacement.toLocaleLowerCase()) return;
+    const key = source.toLocaleLowerCase();
+    if (replacements.has(key) && replacements.get(key)!.replacement.toLocaleLowerCase() !== replacement.toLocaleLowerCase()) ambiguous.add(key);
+    else replacements.set(key, { source, replacement });
+  };
 
   for (const entity of entities) {
-    // First-class localization is contextual and is handled by the narration
-    // model. This deterministic layer remains only for legacy preferences.
-    if (entity.localizedNaming) continue;
-    const preferred = stringValue(entity.preferredNarrationName);
-    if (!preferred) continue;
-    for (const source of [stringValue(entity.canonicalName), stringValue(entity.originalName)]) {
-      if (source && source.toLocaleLowerCase() !== preferred.toLocaleLowerCase()) replacements.set(source.toLocaleLowerCase(), { source, replacement: preferred });
-    }
-
+    const localized = entity.localizedNaming && typeof entity.localizedNaming === "object" ? entity.localizedNaming as { usageMode?: unknown; fullName?: unknown; shortName?: unknown } : undefined;
+    // Contextual and manual localization have no single safe output form.
+    const preferred = localized?.usageMode === "always_full" ? stringValue(localized.fullName) : localized?.usageMode === "always_short" ? stringValue(localized.shortName) : localized ? undefined : stringValue(entity.preferredNarrationName);
     const rules = new Map<string, NamingRule>();
     if (Array.isArray(entity.aliasNarrationRules)) for (const raw of entity.aliasNarrationRules) {
       if (!raw || typeof raw !== "object") continue;
       const rule = raw as NamingRule; const alias = stringValue(rule.alias);
       if (alias) rules.set(alias.toLocaleLowerCase(), rule);
     }
+    for (const source of [stringValue(entity.canonicalName), stringValue(entity.originalName)]) {
+      if (!source) continue;
+      const rule = rules.get(source.toLocaleLowerCase());
+      if (rule?.behavior === "no_override") { preservedAliases.add(source); continue; }
+      add(source, rule?.behavior === "custom" ? stringValue(rule.replacement) : preferred);
+    }
     if (Array.isArray(entity.aliases)) for (const rawAlias of entity.aliases) {
       const alias = stringValue(rawAlias); if (!alias) continue;
       const rule = rules.get(alias.toLocaleLowerCase());
-      if (rule?.behavior === "no_override") continue;
+      if (rule?.behavior === "no_override") { preservedAliases.add(alias); continue; }
       const replacement = rule?.behavior === "custom" ? stringValue(rule.replacement) : preferred;
-      if (replacement && alias.toLocaleLowerCase() !== replacement.toLocaleLowerCase()) replacements.set(alias.toLocaleLowerCase(), { source: alias, replacement });
+      add(alias, replacement);
     }
   }
 
+  for (const key of ambiguous) replacements.delete(key);
   const ordered = [...replacements.values()].sort((left, right) => right.source.length - left.source.length);
   if (!ordered.length) return text;
   const pattern = ordered.map((item) => escapeRegExp(item.source)).join("|");
-  return text.replace(new RegExp(`(?<![\\p{L}\\p{N}_])(${pattern})(?![\\p{L}\\p{N}_])`, "giu"), (match) => replacements.get(match.toLocaleLowerCase())?.replacement ?? match);
+  const sourcePattern = new RegExp(`(?<![\\p{L}\\p{N}_])(${pattern})(?![\\p{L}\\p{N}_])`, "giu");
+  const sourceSpans = [...text.matchAll(sourcePattern)].map((match) => ({ start: match.index, end: match.index + match[0].length }));
+  // Already-correct renderings and system panels are protected before any
+  // shorter alias is replaced (for example King inside Tarkatan King).
+  const protectedSpans: Array<{ start: number; end: number }> = [];
+  for (const target of new Set(ordered.map((item) => item.replacement))) {
+    const targetPattern = new RegExp(`(?<![\\p{L}\\p{N}_])${escapeRegExp(target)}(?![\\p{L}\\p{N}_])`, "giu");
+    for (const match of text.matchAll(targetPattern)) {
+      const end = match.index + match[0].length;
+      if (!sourceSpans.some((span) => span.start <= match.index && span.end >= end && span.end - span.start > match[0].length)) protectedSpans.push({ start: match.index, end });
+    }
+  }
+  for (const alias of preservedAliases) {
+    const aliasPattern = new RegExp(`(?<![\\p{L}\\p{N}_])${escapeRegExp(alias)}(?![\\p{L}\\p{N}_])`, "giu");
+    for (const match of text.matchAll(aliasPattern)) protectedSpans.push({ start: match.index, end: match.index + match[0].length });
+  }
+  for (const match of text.matchAll(/\[[^\]]*\]/gsu)) protectedSpans.push({ start: match.index, end: match.index + match[0].length });
+  return text.replace(sourcePattern, (match, _capture: string, offset: number) => protectedSpans.some((span) => span.start < offset + match.length && span.end > offset) ? match : replacements.get(match.toLocaleLowerCase())?.replacement ?? match);
 }
 
 function namingEntities(context: unknown): NamingEntity[] {
   if (!context || typeof context !== "object") return [];
-  const value = (context as { canonicalEntities?: unknown }).canonicalEntities;
+  const named = context as { canonicalEntities?: unknown; narrationNamingEntities?: unknown };
+  const value = Array.isArray(named.narrationNamingEntities) ? named.narrationNamingEntities : named.canonicalEntities;
   return Array.isArray(value) ? value.filter((item): item is NamingEntity => Boolean(item && typeof item === "object")) : [];
+}
+
+/** Short, visible instructions keep chapter-specific names from being buried
+ * inside the larger Story Bible JSON sent to the narration model. */
+export function narrationNameRequirements(context: unknown): string {
+  const lines = namingEntities(context).flatMap((entity) => {
+    const canonical = stringValue(entity.canonicalName);
+    if (!canonical) return [];
+    const localized = entity.localizedNaming && typeof entity.localizedNaming === "object" ? entity.localizedNaming as { usageMode?: unknown; fullName?: unknown; shortName?: unknown } : undefined;
+    const form = localized?.usageMode === "always_full" ? stringValue(localized.fullName) : localized?.usageMode === "always_short" ? stringValue(localized.shortName) : localized ? undefined : stringValue(entity.preferredNarrationName);
+    const base = form ? `${canonical} → ${form} (required in narration)` : localized ? `${canonical}: localized ${String(localized.usageMode)}; full ${stringValue(localized.fullName) ?? "—"}, short ${stringValue(localized.shortName) ?? "—"} (choose by context)` : "";
+    const aliases = Array.isArray(entity.aliasNarrationRules) ? entity.aliasNarrationRules.flatMap((raw) => {
+      if (!raw || typeof raw !== "object") return [];
+      const rule = raw as NamingRule;
+      const alias = stringValue(rule.alias);
+      if (!alias) return [];
+      if (rule.behavior === "no_override") return [`${alias}: preserve when used contextually`];
+      if (rule.behavior === "custom") return [`${alias} → ${stringValue(rule.replacement) ?? "?"} (required custom alias)`];
+      return form ? [`${alias} → ${form} (required alias)`] : [];
+    }) : [];
+    return [base, ...aliases].filter(Boolean);
+  });
+  return lines.length ? `NARRATION NAME REQUIREMENTS FOR THIS CHAPTER:\n${lines.map((line) => `- ${line}`).join("\n")}` : "";
 }
 
 function stringValue(value: unknown): string | undefined {

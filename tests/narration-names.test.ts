@@ -10,7 +10,7 @@ import { LLMProvider } from "../src/llm/provider.js";
 import { atomicWriteJson } from "../src/storage/atomic-write.js";
 import { storyPaths } from "../src/storage/paths.js";
 import { applyCanonicalOverlay, updateCanonicalEntity } from "../src/story-bible/canonical.js";
-import { invalidateNarrationNamingChange, loadNarrationNamingEntities, narrationNamingChanged } from "../src/story-bible/narration-names.js";
+import { invalidateNarrationNamingChange, loadNarrationNamingEntities, narrationNamingChanged, selectNarrationNamingEntities } from "../src/story-bible/narration-names.js";
 import { retrieveRelevantContext } from "../src/story-bible/retrieval.js";
 import { mergeStoryBible } from "../src/story-bible/updater.js";
 import { qaInstructions } from "../src/qa/prompts.js";
@@ -123,5 +123,32 @@ describe("preferred narration names", () => {
     const narration = `Su Ming entered. “Su Ming?” the registrar asked.`;
     const result = applyNarrationNamingPreferences(narration, { canonicalEntities: [{ canonicalName: "Su Ming", originalName: "苏铭", aliases: [], preferredNarrationName: "Legacy Name", aliasNarrationRules: [], localizedNaming: { locale: "en-US", fullName: "Simon Su", shortName: "Simon", usageMode: "ai_contextual" } }] });
     expect(result).toBe(narration);
+  });
+
+  it("enforces a strict full name throughout narration without duplicating an already correct name", () => {
+    const context = { narrationNamingEntities: [{ canonicalName: "Netherworld King", aliases: ["King", "Dark King"], localizedNaming: { usageMode: "always_full", fullName: "Tarkatan King", shortName: "Tarkatan" }, aliasNarrationRules: [] }] };
+    expect(applyNarrationNamingPreferences("Netherworld King spoke. The King answered the Dark King. Tarkatan King waited. [Name: Netherworld King]", context))
+      .toBe("Tarkatan King spoke. The Tarkatan King answered the Tarkatan King. Tarkatan King waited. [Name: Netherworld King]");
+  });
+
+  it("enforces a strict short name and custom alias while honoring exceptions", () => {
+    const context = { canonicalEntities: [{ canonicalName: "Huo Haitao", aliases: ["Haitao", "Coach Huo", "Huo"], localizedNaming: { usageMode: "always_short", fullName: "Cadien Hao", shortName: "Cadien" }, aliasNarrationRules: [{ alias: "Coach Huo", behavior: "no_override" }, { alias: "Huo", behavior: "custom", replacement: "Coach Cadien" }] }] };
+    expect(applyNarrationNamingPreferences("Huo Haitao's rival called Haitao. Coach Huo answered Huo.", context))
+      .toBe("Cadien's rival called Cadien. Coach Huo answered Coach Cadien.");
+  });
+
+  it("does not guess which identity owns a shared alias", () => {
+    const context = { canonicalEntities: [
+      { canonicalName: "Su Ming", aliases: ["King"], preferredNarrationName: "Simon", aliasNarrationRules: [] },
+      { canonicalName: "Zhang Yongxing", aliases: ["King"], preferredNarrationName: "Zane", aliasNarrationRules: [] },
+    ] };
+    expect(applyNarrationNamingPreferences("King spoke to Su Ming and Zhang Yongxing.", context)).toBe("King spoke to Simon and Zane.");
+  });
+
+  it("selects naming rules mentioned in English translation even when absent from Chinese source", () => {
+    const entity = mergeStoryBible(emptyStoryBible(), update(), 1).canonicalEntities[0]!;
+    const matching = { ...entity, preferredNarrationName: "Big Mike" };
+    expect(selectNarrationNamingEntities([matching], "另一人走进来。 Mike greeted them.", 2)).toHaveLength(1);
+    expect(selectNarrationNamingEntities([matching], "另一人走进来。 MikeyMouse greeted them.", 2)).toHaveLength(0);
   });
 });

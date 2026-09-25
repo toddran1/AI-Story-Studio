@@ -4606,7 +4606,11 @@ export function QaDetail({ slug, chapter, onJob, onEditManually, onChanged, init
         <div className="qa-recheck-split"><button className={`button${stale ? " primary" : ""}`} disabled={Boolean(busy)} onClick={() => void recheck("changed")}>{busy === "recheck" ? "Rechecking…" : "Recheck QA"}</button><details className="qa-recheck-menu"><summary aria-label="Recheck options">▾</summary><div><button disabled={Boolean(busy)} onClick={() => void recheck("changed")}>Recheck changed content</button><button disabled={Boolean(busy)} onClick={() => void recheck("full")}>Full chapter recheck</button><button disabled={Boolean(busy)} onClick={() => setResetOpen(true)}>Reset QA data…</button></div></details></div>
       </div>
     </div>
-    {stale && <ArtifactStatusNotice status="stale" reason="The chapter or its QA dependencies changed since this review. Previous findings are awaiting verification — recheck QA to make this result current." />}
+    {stale && <ArtifactStatusNotice status="stale" reason={data.freshness === "missing"
+      ? "This is a retained QA result without a current evaluation fingerprint. Editing chapter text or marking findings resolved does not rerun QA. Use Recheck QA after your last edit to verify the chapter and make its score current."
+      : data.freshness === "failed"
+        ? "The last QA evaluation failed. The previous score is retained; retry QA to verify the current chapter."
+        : "The chapter or its QA dependencies changed since this review. Previous findings are awaiting verification — recheck QA after your last edit to make this result current."} />}
     {data.repairPrerequisites?.storyContextValid === false && <div className="naming-notice" role="status">{data.repairPrerequisites.storyContextError ?? "AI repair is blocked because this chapter's Story Context is invalid."} <a className="button" href={`/stories/${slug}/bible`}>Open Story Bible</a></div>}
     {data.artifacts?.translationAvailable === false && <div className="naming-notice" role="status">Translation artifact is unavailable. AI repair for translation findings is disabled.</div>}
     {data.artifacts?.narrationAvailable === false && <div className="naming-notice" role="status">Narration artifact is unavailable. AI repair for narration findings is disabled.</div>}

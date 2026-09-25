@@ -38,7 +38,7 @@ import { masterStoredChapter } from "../audio/chapter-audio.js";
 import { retrieveRelevantContext } from "../story-bible/retrieval.js";
 import { analyzeAndPersistContinuity } from "../story-bible/continuity.js";
 import { withUsageScope } from "../cost/context.js";
-import { loadNarrationNamingEntities } from "../story-bible/narration-names.js";
+import { loadNarrationNamingEntities, selectNarrationNamingEntities } from "../story-bible/narration-names.js";
 import { loadEligibleSummaryContext } from "../summaries/service.js";
 import { CENSOR_AUDIO_VERSION, CensorAudioService, FfmpegCensorAudioService, censorToneConfig } from "../tts/censor-audio.js";
 import { SpeechTranscriber, summarizeQuality } from "../tts/quality-guard.js";
@@ -197,15 +197,21 @@ export class ChapterPipeline {
     let english = translationResult ?? await requireText(paths.english, "translation");
     if (options.stopAfter === "translation") { await persist(); return chapter; }
 
+    const narrationContext = {
+      ...retrieveRelevantContext(bible, `${source}\n${english}`, options.chapter, { recentSummaryCount: options.story.context.recentChapterSummaries, narrationNamingEntities }),
+      narrationNamingEntities: selectNarrationNamingEntities(narrationNamingEntities, `${source}\n${english}`, options.chapter),
+      ...(eligibleSummaries.length ? { eligibleSummaries } : {}),
+    };
+
     const narrationConfig = options.story.pipeline.narration;
     const ttsConfig = options.story.pipeline.tts;
     const deliveryProfile = narrationDeliveryProfile(ttsConfig.provider, ttsConfig.model);
     const narrationBehavior = { profanityMode: options.story.narrationSettings.profanityMode, includeChapterTitle: options.story.narrationSettings.includeChapterTitle };
-    const narrationFp = fingerprint({ english: fingerprint(english), context: priorContext, config: narrationConfig, narrationSettings: narrationBehavior, deliveryProfile, deliveryIntensity: ttsConfig.deliveryIntensity, prompt: NARRATION_PROMPT_VERSION });
+    const narrationFp = fingerprint({ english: fingerprint(english), context: narrationContext, config: narrationConfig, narrationSettings: narrationBehavior, deliveryProfile, deliveryIntensity: ttsConfig.deliveryIntensity, prompt: NARRATION_PROMPT_VERSION });
     const narrationResult = await runStage("narration", narrationFp, paths.narration, {
       provider: narrationConfig.provider, model: narrationConfig.model, promptVersion: NARRATION_PROMPT_VERSION,
     }, async () => {
-      const result = await polishNarration(this.llms.forStage(narrationConfig), narrationConfig, english, options.story.outputLanguage, priorContext, ttsConfig.provider, ttsConfig.model, options.story.narrationSettings.profanityMode, ttsConfig.deliveryIntensity, options.story.narrationSettings.includeChapterTitle !== false);
+      const result = await polishNarration(this.llms.forStage(narrationConfig), narrationConfig, english, options.story.outputLanguage, narrationContext, ttsConfig.provider, ttsConfig.model, options.story.narrationSettings.profanityMode, ttsConfig.deliveryIntensity, options.story.narrationSettings.includeChapterTitle !== false);
       const cleanNarration = stripDeliveryCues(result.text, ttsConfig.provider, ttsConfig.model);
       if (!cleanNarration) throw new PipelineError("Narration delivery cues cannot replace the chapter's spoken narration");
       const previousNarration = await readTextIfExists(paths.narration);

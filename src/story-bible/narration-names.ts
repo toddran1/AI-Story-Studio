@@ -17,6 +17,22 @@ export async function loadNarrationNamingEntities(root: string, slug: string) {
   return (await loadStoryBibleWithCanonicalOverlay(root, slug)).canonicalEntities.filter((entity) => entity.localizedNaming || entity.preferredNarrationName || entity.aliasNarrationRules.length);
 }
 
+/** A compact, current-chapter naming roster independent of the general Story
+ * Bible context budget. Translation can introduce an English alias that did
+ * not occur in the Chinese source, so callers pass both texts. */
+export function selectNarrationNamingEntities(entities: CanonicalEntity[], chapterText: string, chapter: number) {
+  const lower = chapterText.toLocaleLowerCase();
+  return entities.filter((entity) => entity.firstAppearance <= chapter && [entity.canonicalName, entity.originalName, ...entity.aliases, entity.preferredNarrationName, entity.localizedNaming?.fullName, entity.localizedNaming?.shortName]
+    .some((name) => {
+      if (!name || name.trim().length < 2) return false;
+      const value = name.trim();
+      if (!/[A-Za-z]/u.test(value)) return lower.includes(value.toLocaleLowerCase());
+      const escaped = value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      return new RegExp(`(?<![\\p{L}\\p{N}_])${escaped}(?![\\p{L}\\p{N}_])`, "iu").test(chapterText);
+    }))
+    .map((entity) => ({ id: entity.id, canonicalName: entity.canonicalName, originalName: entity.originalName, aliases: entity.aliases, preferredNarrationName: entity.preferredNarrationName, localizedNaming: entity.localizedNaming, aliasNarrationRules: entity.aliasNarrationRules }));
+}
+
 async function listChapterNumbers(root: string, slug: string) {
   const chapterRoot = join(storyPaths(root, slug, 1).story, "chapters");
   const entries = await readdir(chapterRoot, { withFileTypes: true }).catch((error: NodeJS.ErrnoException) => { if (error.code === "ENOENT") return []; throw error; });

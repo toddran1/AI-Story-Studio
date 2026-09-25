@@ -211,6 +211,12 @@ describe("web UI", () => {
     );
     expect(staleHtml.match(/class="qa-recheck-split"/g)).toHaveLength(1);
     expect(staleHtml).toContain("button primary");
+    const invalidatedHtml = renderToStaticMarkup(<QaDetail
+      slug="demo-story" chapter={1} onJob={() => undefined} onEditManually={() => undefined} onChanged={() => undefined}
+      initialData={{ ...mockDetail, qaStale: true, freshness: "missing" }}
+    />);
+    expect(invalidatedHtml).toContain("marking findings resolved does not rerun QA");
+    expect(invalidatedHtml).toContain("Use Recheck QA after your last edit");
     const prerequisiteHtml = renderToStaticMarkup(<QaDetail
       slug="demo-story" chapter={1} onJob={() => undefined} onEditManually={() => undefined} onChanged={() => undefined}
       initialData={{ ...mockDetail, artifacts: { translationAvailable: false, narrationAvailable: false }, repairPrerequisites: { storyContextValid: false, storyContextError: "AI repair is blocked because Story Context is invalid." } }}
