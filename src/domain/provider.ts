@@ -60,10 +60,8 @@ export const ttsStageConfigSchema = z.discriminatedUnion("provider", [fishTtsSta
 export type StageModelConfig = z.infer<typeof stageModelConfigSchema>;
 export type TTSStageConfig = z.infer<typeof ttsStageConfigSchema>;
 
-/** Old qualityGuard=true stories remain verifiable without keeping the paid retry loop. */
 /** Legacy stories without explicit qualityMode default to "off". Explicit qualityMode is authoritative. */
 export function ttsQualityMode(config: TTSStageConfig): "off" | "verify" | "auto_repair" {
-  return config.qualityMode ?? (config.qualityGuard ? "verify" : "off");
   return config.qualityMode ?? "off";
 }
 

@@ -88,7 +88,6 @@ describe("summary narration and audio", () => {
   it("uses narration exclusively for TTS and reuses raw audio after mastering-only changes", async () => {
     const canonical = await create(), result = await media.audio("demo-story", canonical.id);
     expect(tts.requests[0]?.text).toBe(result.narration?.ttsText); expect(tts.requests[0]?.model).toBe("s2-pro");
-    expect(tts.requests[0]).toMatchObject({ voiceMode: "same-voice-dialogue", deliveryIntensity: "restrained", qualityGuard: true });
     expect(tts.requests[0]).toMatchObject({ voiceMode: "same-voice-dialogue", deliveryIntensity: "restrained", qualityGuard: false });
     expect(result.audio).toMatchObject({ status: "current", durationSeconds: 10 });
     await media.audio("demo-story", canonical.id); expect(tts.calls).toBe(1); expect(master.master).toHaveBeenCalledTimes(1);

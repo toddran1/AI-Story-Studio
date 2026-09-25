@@ -127,12 +127,10 @@ describe("effective TTS provider construction", () => {
     expect(effective.provider).not.toBeInstanceOf(QualityGuardTTSProvider);
   });
 
-  it("verifies a failed segment without spending a second Fish request in legacy verify mode", async () => {
   it("verifies a failed segment without spending a second Fish request in explicit verify mode", async () => {
     const text = "First sentence needs verification.";
     const base = new ScriptedTTS(() => singleSegment(text, "bad"));
     const transcriber = new FakeTranscriber(() => say("unrelated random speech"));
-    const effective = createEffectiveTtsProvider({ baseProvider: base, qualityGuardEnabled: true, maxQualityRetries: 2, language: "en-US", transcriber });
     const effective = createEffectiveTtsProvider({ baseProvider: base, qualityMode: "verify", maxQualityRetries: 2, language: "en-US", transcriber });
     const result = await effective.provider.synthesize({ text, model: "s2.1-pro", speed: 1, format: "mp3", sampleRate: 44100, bitrate: 128, normalize: true, maxCharsPerRequest: 1750, qualityGuard: true });
     expect(base.calls).toHaveLength(1);

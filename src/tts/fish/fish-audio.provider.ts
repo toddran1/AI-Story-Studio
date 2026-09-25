@@ -3,8 +3,7 @@ import { TTSProvider } from "../provider.js";
 import { TTSRequest } from "../types.js";
 import { splitForTTS } from "../split-text.js";
 import { normalizeFishSpeechText } from "./speech-normalizer.js";
-import { castQuotedDialogue, directQuotedDialogue, ensureChunkSpeakers } from "./dialogue-casting.js";
-import { castQuotedDialogue, directQuotedDialogue, ensureChunkSpeakers, prepareFishMultiSpeakerChunks } from "./dialogue-casting.js";
+import { castQuotedDialogue, directQuotedDialogue, prepareFishMultiSpeakerChunks } from "./dialogue-casting.js";
 import { isFishS2Model } from "./control-cues.js";
 import { adaptPronunciationText } from "../pronunciation.js";
 import type { VocalizationCapabilities, VocalizationRenderStrategy } from "../vocalizations.js";
@@ -53,8 +52,6 @@ export class FishAudioProvider implements TTSProvider {
           const speechText = normalizeFishSpeechText(adaptPronunciationText(request.text, request.pronunciation ?? [], this.pronunciationCapabilities), request.model, this.speechOptions);
           if (!speechText) throw new ProviderError("Fish Audio narration is empty after speech normalization");
           const castText = multiSpeaker ? castQuotedDialogue(speechText) : directedSingleVoice ? directQuotedDialogue(speechText) : speechText;
-          const splitText = splitForTTS(castText, request.maxCharsPerRequest - (multiSpeaker ? 13 : 0));
-          const prepared = multiSpeaker ? ensureChunkSpeakers(splitText) : splitText;
           const prepared = multiSpeaker
             ? prepareFishMultiSpeakerChunks(castText, request.maxCharsPerRequest)
             : splitForTTS(castText, request.maxCharsPerRequest);

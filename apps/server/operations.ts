@@ -1514,7 +1514,6 @@ export class StudioOperations {
       const { provider } = createEffectiveTtsProvider({
         baseProvider: this.tts.forName(request.provider),
         pronunciationEntities: entities,
-        qualityMode: config.qualityMode ?? (config.qualityGuard ? "verify" : "off"),
         qualityMode: ttsQualityMode(config),
         maxQualityRetries: config.maxQualityRetries,
         language: story.outputLanguage,
@@ -1529,7 +1528,6 @@ export class StudioOperations {
           secondaryReferenceId: config.secondaryReferenceId,
           voiceMode: config.voiceMode,
           deliveryIntensity: config.deliveryIntensity,
-          qualityGuard: (config.qualityMode ?? (config.qualityGuard ? "verify" : "off")) !== "off",
           qualityGuard: ttsQualityMode(config) !== "off",
           providerQualityGuard: config.providerQualityGuard,
           bleepStrongProfanity: story.narrationSettings.bleepStrongProfanity,

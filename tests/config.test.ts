@@ -17,11 +17,8 @@ describe("configuration", () => {
     expect(defaultStory("new-story", env).pipeline.tts).toMatchObject({ model: "s2.1-pro-free", voiceMode: "same-voice-dialogue", deliveryIntensity: "restrained", qualityMode: "off", qualityGuard: false, maxCharsPerRequest: 1750 });
   });
 
-  it("maps legacy qualityGuard stories to verification without automatic Fish repair", () => {
   it("defaults legacy stories without explicit qualityMode to off regardless of qualityGuard", () => {
     const story = defaultStory("legacy-story", loadEnvironment({}));
-    const legacy = storySchema.parse({ ...story, pipeline: { ...story.pipeline, tts: { ...story.pipeline.tts, qualityMode: undefined, qualityGuard: true, maxQualityRetries: 2 } } });
-    expect(ttsQualityMode(legacy.pipeline.tts)).toBe("verify");
     // Case A: qualityMode unset, qualityGuard: true -> "off"
     const legacyA = storySchema.parse({ ...story, pipeline: { ...story.pipeline, tts: { ...story.pipeline.tts, qualityMode: undefined, qualityGuard: true, maxQualityRetries: 2 } } });
     expect(ttsQualityMode(legacyA.pipeline.tts)).toBe("off");
