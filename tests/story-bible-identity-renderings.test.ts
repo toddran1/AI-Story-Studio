@@ -4,6 +4,7 @@ import {
   EntityIdentityIndex,
   buildEffectiveIdentityIndex,
   effectiveEntityIdentity,
+  matchesSuppressedIdentity,
   containsIdentityRendering,
   normalizeEntityName,
 } from "../src/story-bible/entity-identity.js";
@@ -17,7 +18,7 @@ import {
 import { MockLLM } from "./helpers.js";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { applyCanonicalOverlay, canonicalOverlaySchema, updateCanonicalEntity } from "../src/story-bible/canonical.js";
 import { readJsonIfExists } from "../src/storage/story-files.js";
 import { atomicWriteJson } from "../src/storage/atomic-write.js";
@@ -537,5 +538,477 @@ describe("Story Bible narration rendering identity", () => {
     };
     const suggestions = findDuplicateSuggestions([zhang, elderZhang]);
     expect(suggestions.some((s) => s.entityIds.includes("ent_daaaaaaaaaaaaaaaaaaaaaaa") && s.entityIds.includes("ent_eaaaaaaaaaaaaaaaaaaaaaaa"))).toBe(true);
+  });
+
+  it("replaces old preferred narration rendering when entity is replaced in identity index", () => {
+    const base = structuredClone(established().canonicalEntities[0]!);
+    base.id = "ent_111111111111111111111111";
+    base.canonicalName = "Luo Xiaoxue";
+    base.preferredNarrationName = "Lucine Luo";
+    base.localizedNaming = undefined;
+    base.aliasNarrationRules = [];
+    base.aliases = [];
+
+    const index = new EntityIdentityIndex([base]);
+    expect(index.resolve(["Lucine Luo"]).status).toBe("matched");
+
+    const updated = {
+      ...base,
+      preferredNarrationName: "Lucina Luo",
+    };
+    index.replace(updated);
+
+    expect(index.resolve(["Lucine Luo"]).status).toBe("none");
+    expect(index.resolve(["Lucina Luo"]).status).toBe("matched");
+    expect(index.resolve(["Luo Xiaoxue"]).status).toBe("matched");
+  });
+
+  it("replaces old aliases and cleans up stale alias entries upon replace", () => {
+    const base = structuredClone(established().canonicalEntities[0]!);
+    base.id = "ent_111111111111111111111112";
+    base.canonicalName = "Luo Xiaoxue";
+    base.aliases = ["Snow"];
+    base.preferredNarrationName = undefined;
+    base.localizedNaming = undefined;
+    base.aliasNarrationRules = [];
+
+    const index = new EntityIdentityIndex([base]);
+    expect(index.resolve(["Snow"]).status).toBe("matched");
+
+    const updated = {
+      ...base,
+      aliases: ["Little Snow"],
+    };
+    index.replace(updated);
+
+    expect(index.resolve(["Snow"]).status).toBe("none");
+    expect(index.resolve(["Little Snow"]).status).toBe("matched");
+  });
+
+  it("updates type filtering and removes stale concept candidate upon replace", () => {
+    const base = structuredClone(established().canonicalEntities[0]!);
+    base.id = "ent_111111111111111111111113";
+    base.canonicalName = "Oracle";
+    base.originalName = "";
+    base.type = "concept";
+    base.aliases = [];
+    base.preferredNarrationName = undefined;
+    base.localizedNaming = undefined;
+    base.aliasNarrationRules = [];
+
+    const index = new EntityIdentityIndex([base]);
+    expect(index.resolve(["Oracle"], { expectedType: "concept" }).status).toBe("matched");
+
+    const updated = {
+      ...base,
+      type: "item" as const,
+    };
+    index.replace(updated);
+
+    const itemResolution = index.resolve(["Oracle"], { expectedType: "item" });
+    expect(itemResolution).toMatchObject({
+      status: "matched",
+      entity: { id: "ent_111111111111111111111113", type: "item" },
+    });
+    const conceptResolution = index.resolve(["Oracle"], { expectedType: "concept" });
+    expect(conceptResolution.status).toBe("none");
+  });
+
+  it("preserves other entity sharing the same rendering when an entity is removed or replaced", () => {
+    const entityA = {
+      ...structuredClone(established().canonicalEntities[0]!),
+      id: "ent_aaaaaaaaaaaaaaaaaaaaaaaa",
+      canonicalName: "First Shadow",
+      aliases: ["Shadow"],
+      preferredNarrationName: undefined,
+      localizedNaming: undefined,
+      aliasNarrationRules: [],
+    };
+    const entityB = {
+      ...structuredClone(established().canonicalEntities[1]!),
+      id: "ent_bbbbbbbbbbbbbbbbbbbbbbbb",
+      canonicalName: "Second Shadow",
+      aliases: ["Shadow"],
+      preferredNarrationName: undefined,
+      localizedNaming: undefined,
+      aliasNarrationRules: [],
+    };
+
+    const index = new EntityIdentityIndex([entityA, entityB]);
+    expect(index.resolve(["Shadow"]).status).toBe("ambiguous");
+
+    index.removeEntity(entityA.id);
+    const resolvedB = index.resolve(["Shadow"]);
+    expect(resolvedB).toMatchObject({
+      status: "matched",
+      entity: { id: "ent_bbbbbbbbbbbbbbbbbbbbbbbb" },
+    });
+  });
+
+  it("handles repeated replace without leaking entries or growing ambiguity", () => {
+    const base = {
+      ...structuredClone(established().canonicalEntities[0]!),
+      id: "ent_cccccccccccccccccccccccc",
+      canonicalName: "Version One",
+      aliases: ["Alpha"],
+      preferredNarrationName: undefined,
+      localizedNaming: undefined,
+      aliasNarrationRules: [],
+    };
+
+    const index = new EntityIdentityIndex([base]);
+    expect(index.resolve(["Alpha"]).status).toBe("matched");
+
+    index.replace({ ...base, canonicalName: "Version Two", aliases: ["Beta"] });
+    expect(index.resolve(["Alpha"]).status).toBe("none");
+    expect(index.resolve(["Beta"]).status).toBe("matched");
+
+    index.replace({ ...base, canonicalName: "Version Three", aliases: ["Gamma"] });
+    expect(index.resolve(["Alpha"]).status).toBe("none");
+    expect(index.resolve(["Beta"]).status).toBe("none");
+    expect(index.resolve(["Gamma"]).status).toBe("matched");
+  });
+
+  it("removes stale character honorific entries upon replace", () => {
+    const base = {
+      ...structuredClone(established().canonicalEntities[0]!),
+      id: "ent_dddddddddddddddddddddddd",
+      canonicalName: "Elder Zhang",
+      originalName: "",
+      type: "character" as const,
+      aliases: [],
+      preferredNarrationName: undefined,
+      localizedNaming: undefined,
+      aliasNarrationRules: [],
+    };
+
+    const index = new EntityIdentityIndex([base]);
+    expect(index.resolve(["Elder Zhang"]).status).toBe("matched");
+    expect(index.resolve(["Zhang"], { expectedType: "character" }).status).toBe("matched");
+
+    index.replace({
+      ...base,
+      canonicalName: "Master Li",
+    });
+
+    expect(index.resolve(["Elder Zhang"]).status).toBe("none");
+    expect(index.resolve(["Zhang"], { expectedType: "character" }).status).toBe("none");
+    expect(index.resolve(["Master Li"]).status).toBe("matched");
+    expect(index.resolve(["Li"], { expectedType: "character" }).status).toBe("matched");
+  });
+
+  it("ensures effectiveEntityIdentity is side-effect free and does not mutate nested structures", () => {
+    const base = established().canonicalEntities[0]!;
+    const originalAliases = [...base.aliases];
+    const originalRules = base.aliasNarrationRules.map((r) => ({ ...r }));
+    const originalLocalized = base.localizedNaming ? { ...base.localizedNaming } : undefined;
+
+    const view = effectiveEntityIdentity(base);
+    view.aliases.push("Mutated Alias");
+    view.aliasNarrationRules.push({ alias: "Mutated", behavior: "custom", replacement: "Mutated Replacement" });
+    if (view.localizedNaming) {
+      view.localizedNaming.fullName = "Mutated Full Name";
+    }
+
+    expect(base.aliases).toEqual(originalAliases);
+    expect(base.aliasNarrationRules).toEqual(originalRules);
+    if (originalLocalized) {
+      expect(base.localizedNaming?.fullName).toBe(originalLocalized.fullName);
+    }
+  });
+
+  it("suppresses canonical entity recreation when chapter extraction uses snapshot alias", () => {
+    const bible = established();
+    const luo = bible.canonicalEntities[0]!;
+    luo.aliases = ["Snow"];
+    const suppression = {
+      entityId: luo.id,
+      name: luo.canonicalName,
+      originalName: luo.originalName,
+      type: luo.type,
+      reason: "duplicate",
+      suppressedAt: new Date().toISOString(),
+      source: "manual" as const,
+      snapshot: structuredClone(luo),
+    };
+    const overlay = canonicalOverlaySchema.parse({
+      version: 1,
+      suppressions: [suppression],
+    });
+
+    const next = mergeStoryBible(
+      bible,
+      storyBibleUpdateSchema.parse({
+        chapterSummary: "Chapter 2",
+        characters: [{ canonicalEnglishName: "Snow", originalName: "", firstSeenChapter: 2, lastSeenChapter: 2 }],
+      }),
+      2,
+      { overlay },
+    );
+
+    expect(next.canonicalEntities.some((e) => e.canonicalName === "Snow")).toBe(false);
+    expect(next.minorReferences.some((r) => r.name === "Snow")).toBe(false);
+  });
+
+  it("suppresses canonical entity recreation when extraction uses custom narration replacement", () => {
+    const bible = established();
+    const luo = bible.canonicalEntities[0]!;
+    luo.originalName = "罗小雪";
+    luo.aliasNarrationRules = [{ alias: "Brother Su", behavior: "custom", replacement: "Brother Ash" }];
+    const suppression = {
+      entityId: luo.id,
+      name: luo.canonicalName,
+      originalName: luo.originalName,
+      type: luo.type,
+      reason: "duplicate",
+      suppressedAt: new Date().toISOString(),
+      source: "manual" as const,
+      snapshot: structuredClone(luo),
+    };
+    const overlay = canonicalOverlaySchema.parse({
+      version: 1,
+      suppressions: [suppression],
+    });
+
+    const next = mergeStoryBible(
+      bible,
+      storyBibleUpdateSchema.parse({
+        chapterSummary: "Chapter 2",
+        characters: [{ canonicalEnglishName: "Brother Ash", originalName: "", firstSeenChapter: 2, lastSeenChapter: 2 }],
+      }),
+      2,
+      { overlay },
+    );
+
+    expect(next.canonicalEntities.some((e) => e.canonicalName === "Brother Ash")).toBe(false);
+    expect(next.minorReferences.some((r) => r.name === "Brother Ash")).toBe(false);
+  });
+
+  it("suppresses canonical entity recreation when extraction uses localized full or short name", () => {
+    const bible = established();
+    const luo = bible.canonicalEntities[0]!;
+    luo.localizedNaming = { locale: "en-US", fullName: "Lucine Luo", shortName: "Lucine", usageMode: "ai_contextual" };
+    const suppression = {
+      entityId: luo.id,
+      name: luo.canonicalName,
+      originalName: luo.originalName,
+      type: luo.type,
+      reason: "manual",
+      suppressedAt: new Date().toISOString(),
+      source: "manual" as const,
+      snapshot: structuredClone(luo),
+    };
+    const overlay = canonicalOverlaySchema.parse({
+      version: 1,
+      suppressions: [suppression],
+    });
+
+    for (const name of ["Lucine Luo", "Lucine"]) {
+      const next = mergeStoryBible(
+        bible,
+        storyBibleUpdateSchema.parse({
+          chapterSummary: "Chapter 2",
+          characters: [{ canonicalEnglishName: name, originalName: "", firstSeenChapter: 2, lastSeenChapter: 2 }],
+        }),
+        2,
+        { overlay },
+      );
+      expect(next.canonicalEntities.some((e) => e.canonicalName === name)).toBe(false);
+      expect(next.minorReferences.some((r) => r.name === name)).toBe(false);
+    }
+  });
+
+  it("respects manual overlay override on suppressed entity tombstone", () => {
+    const bible = established();
+    const luo = bible.canonicalEntities[0]!;
+    const suppression = {
+      entityId: luo.id,
+      name: luo.canonicalName,
+      originalName: luo.originalName,
+      type: luo.type,
+      reason: "manual",
+      suppressedAt: new Date().toISOString(),
+      source: "manual" as const,
+      snapshot: structuredClone(luo),
+    };
+    const override = {
+      preferredNarrationName: "Lucina Luo",
+      updatedAt: new Date().toISOString(),
+    };
+    const overlay = canonicalOverlaySchema.parse({
+      version: 1,
+      overrides: { [luo.id]: override },
+      suppressions: [suppression],
+    });
+
+    const next = mergeStoryBible(
+      bible,
+      storyBibleUpdateSchema.parse({
+        chapterSummary: "Chapter 2",
+        characters: [{ canonicalEnglishName: "Lucina Luo", originalName: "", firstSeenChapter: 2, lastSeenChapter: 2 }],
+      }),
+      2,
+      { overlay },
+    );
+
+    expect(next.canonicalEntities.some((e) => e.canonicalName === "Lucina Luo")).toBe(false);
+    expect(next.minorReferences.some((r) => r.name === "Lucina Luo")).toBe(false);
+  });
+
+  it("does not suppress unrelated entity of an incompatible type sharing the same display name", () => {
+    const charPhoenix = {
+      ...structuredClone(established().canonicalEntities[0]!),
+      id: "ent_eeeeeeeeeeeeeeeeeeeeeeee",
+      canonicalName: "Phoenix",
+      originalName: "凤灵",
+      type: "character" as const,
+    };
+    const suppression = {
+      entityId: charPhoenix.id,
+      name: charPhoenix.canonicalName,
+      originalName: charPhoenix.originalName,
+      type: charPhoenix.type,
+      reason: "noise",
+      suppressedAt: new Date().toISOString(),
+      source: "manual" as const,
+      snapshot: charPhoenix,
+    };
+    const overlay = canonicalOverlaySchema.parse({
+      version: 1,
+      suppressions: [suppression],
+    });
+
+    // Directly verify matchesSuppressedIdentity guard for incompatible types
+    expect(
+      matchesSuppressedIdentity(
+        { name: "Phoenix", originalName: "", type: "location" },
+        suppression,
+      ),
+    ).toBe(false);
+
+    const bible = emptyStoryBible();
+    const next = mergeStoryBible(
+      bible,
+      storyBibleUpdateSchema.parse({
+        chapterSummary: "Chapter 2",
+        locations: [{ canonicalEnglishName: "Phoenix City", originalName: "凤凰城", firstSeenChapter: 2, lastSeenChapter: 2 }],
+      }),
+      2,
+      { overlay },
+    );
+
+    expect(next.canonicalEntities.some((e) => e.canonicalName === "Phoenix City" && e.type === "location")).toBe(true);
+  });
+
+  it("does not resurrect suppressed identity when narration rendering appears only in relationship endpoint", () => {
+    const bible = established();
+    const luo = bible.canonicalEntities[0]!;
+    const suppression = {
+      entityId: luo.id,
+      name: luo.canonicalName,
+      originalName: luo.originalName,
+      type: luo.type,
+      reason: "duplicate",
+      suppressedAt: new Date().toISOString(),
+      source: "manual" as const,
+      snapshot: structuredClone(luo),
+    };
+    const overlay = canonicalOverlaySchema.parse({
+      version: 1,
+      suppressions: [suppression],
+    });
+
+    const next = mergeStoryBible(
+      bible,
+      storyBibleUpdateSchema.parse({
+        chapterSummary: "Chapter 2",
+        characters: [],
+        relationships: [{ subject: "Lucine Luo", object: "Asher", relationship: "ally", firstSeenChapter: 2, lastSeenChapter: 2 }],
+      }),
+      2,
+      { overlay },
+    );
+
+    expect(next.canonicalEntities.some((e) => e.id === luo.id)).toBe(true);
+    expect(next.canonicalRelationships).toHaveLength(0);
+  });
+
+  it("respects suppression tombstone during chronological rebuild", async () => {
+    const root = await mkdtemp(join(tmpdir(), "bible-suppress-rebuild-"));
+    const slug = "tombstone-test";
+
+    const ch1Update = storyBibleUpdateSchema.parse({
+      chapterSummary: "Chapter 1",
+      characters: [{ canonicalEnglishName: "Luo Xiaoxue", originalName: "罗小雪", description: "Young woman", firstSeenChapter: 1, lastSeenChapter: 1 }],
+    });
+    const ch2Update = storyBibleUpdateSchema.parse({
+      chapterSummary: "Chapter 2",
+      characters: [{ canonicalEnglishName: "Lucine Luo", originalName: "", description: "Traveling merchant", firstSeenChapter: 2, lastSeenChapter: 2 }],
+    });
+
+    const paths1 = storyPaths(root, slug, 1);
+    const paths2 = storyPaths(root, slug, 2);
+    await (await import("node:fs/promises")).mkdir(dirname(paths1.bibleUpdate), { recursive: true });
+    await (await import("node:fs/promises")).mkdir(dirname(paths2.bibleUpdate), { recursive: true });
+    await (await import("node:fs/promises")).writeFile(paths1.bibleUpdate, JSON.stringify(ch1Update));
+    await (await import("node:fs/promises")).writeFile(paths2.bibleUpdate, JSON.stringify(ch2Update));
+    await (await import("node:fs/promises")).writeFile(paths1.chapterMeta, JSON.stringify({ stages: { storyBible: { status: "complete" } } }));
+    await (await import("node:fs/promises")).writeFile(paths2.chapterMeta, JSON.stringify({ stages: { storyBible: { status: "complete" } } }));
+
+    const entityId = "ent_ffffffffffffffffffffffff";
+    const snapshot = {
+      ...structuredClone(established().canonicalEntities[0]!),
+      id: entityId,
+      canonicalName: "Luo Xiaoxue",
+      originalName: "罗小雪",
+      preferredNarrationName: "Lucine Luo",
+      localizedNaming: undefined,
+      aliasNarrationRules: [],
+      aliases: [],
+    };
+    const overlay = canonicalOverlaySchema.parse({
+      version: 1,
+      suppressions: [
+        {
+          entityId,
+          name: "Luo Xiaoxue",
+          originalName: "罗小雪",
+          type: "character",
+          reason: "manual suppression",
+          suppressedAt: new Date().toISOString(),
+          source: "manual",
+          snapshot,
+        },
+      ],
+    });
+    await atomicWriteJson(paths1.bibleCanonicalManual, overlay);
+
+    const { rebuildStoryBibleBeforeChapter } = await import("../src/story-bible/rebuild.js");
+    const rebuilt = await rebuildStoryBibleBeforeChapter(root, slug, 3);
+
+    expect(rebuilt.canonicalEntities.some((e) => e.canonicalName === "Lucine Luo")).toBe(false);
+    expect(rebuilt.canonicalEntities.some((e) => e.canonicalName === "Luo Xiaoxue")).toBe(false);
+  });
+
+  it("upgrades concept to item in ensure() and updates identity index without leaving stale concept state", () => {
+    const bible = emptyStoryBible();
+    const update1 = storyBibleUpdateSchema.parse({
+      chapterSummary: "Chapter 1",
+      classes: [{ canonicalEnglishName: "World Mirror", originalName: "宝镜", firstSeenChapter: 1, lastSeenChapter: 1 }],
+    });
+    const merged1 = mergeStoryBible(bible, update1, 1);
+    expect(merged1.canonicalEntities[0]?.type).toBe("concept");
+
+    const update2 = storyBibleUpdateSchema.parse({
+      chapterSummary: "Chapter 2",
+      items: [{ canonicalEnglishName: "World Mirror", originalName: "宝镜", firstSeenChapter: 2, lastSeenChapter: 2 }],
+    });
+    const merged2 = mergeStoryBible(merged1, update2, 2);
+    expect(merged2.canonicalEntities[0]?.type).toBe("item");
+    expect(merged2.canonicalEntities).toHaveLength(1);
+
+    const index = new EntityIdentityIndex(merged2.canonicalEntities);
+    expect(index.resolve(["World Mirror"], { expectedType: "item" }).status).toBe("matched");
+    expect(index.resolve(["World Mirror"], { expectedType: "concept" }).status).toBe("none");
   });
 });

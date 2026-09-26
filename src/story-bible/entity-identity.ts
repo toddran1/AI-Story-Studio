@@ -162,8 +162,13 @@ export type IdentityOverlay = {
 
 /** Match the identity fields produced by the canonical manual overlay. */
 export function effectiveEntityIdentity(entity: CanonicalEntity, override?: IdentityOverride): CanonicalEntity {
-  if (!override) return { ...entity };
-  const view = { ...entity };
+  const view: CanonicalEntity = {
+    ...entity,
+    aliases: [...entity.aliases],
+    aliasNarrationRules: entity.aliasNarrationRules.map((rule) => ({ ...rule })),
+    localizedNaming: entity.localizedNaming ? { ...entity.localizedNaming } : undefined,
+  };
+  if (!override) return view;
   if (override.type !== undefined) view.type = override.type;
   if (override.canonicalName) {
     if (normalizeEntityName(override.canonicalName) !== normalizeEntityName(view.canonicalName)) {
@@ -175,12 +180,87 @@ export function effectiveEntityIdentity(entity: CanonicalEntity, override?: Iden
     view.aliases = uniqueIdentityNames(override.aliases.filter((name) => normalizeEntityName(name) !== normalizeEntityName(view.canonicalName)));
   }
   if (override.preferredNarrationName !== undefined) view.preferredNarrationName = override.preferredNarrationName ?? undefined;
-  if (override.localizedNaming !== undefined) view.localizedNaming = override.localizedNaming ?? undefined;
+  if (override.localizedNaming !== undefined) view.localizedNaming = override.localizedNaming ? { ...override.localizedNaming } : undefined;
   if (override.aliasNarrationRules !== undefined) {
     const aliases = new Set(view.aliases.map(normalizeEntityName));
-    view.aliasNarrationRules = [...new Map(override.aliasNarrationRules.filter((rule) => aliases.has(normalizeEntityName(rule.alias))).map((rule) => [normalizeEntityName(rule.alias), rule])).values()];
+    view.aliasNarrationRules = [...new Map(override.aliasNarrationRules.filter((rule) => aliases.has(normalizeEntityName(rule.alias))).map((rule) => [normalizeEntityName(rule.alias), { ...rule }])).values()];
   }
   return view;
+}
+
+export function matchesSuppressedIdentity(
+  raw: {
+    id?: string;
+    name: string;
+    originalName?: string;
+    aliases?: string[];
+    type: EntityType;
+  },
+  suppression: {
+    entityId: string;
+    name: string;
+    originalName?: string;
+    type?: EntityType;
+    snapshot: CanonicalEntity;
+  },
+  override?: IdentityOverride,
+): boolean {
+  const effectiveSnapshot = effectiveEntityIdentity(suppression.snapshot, override);
+
+  // A. Exact entity ID match
+  if (raw.id && (raw.id === suppression.entityId || raw.id === suppression.snapshot.id || raw.id === effectiveSnapshot.id)) {
+    return true;
+  }
+
+  // Type incompatibility guard: incompatible types never match
+  if (areTypesIncompatible(effectiveSnapshot.type, raw.type)) {
+    return false;
+  }
+
+  // Original identity conflict guard: if both have explicit original names and they differ, they are distinct entities
+  const rawOrigNorm = normalizeEntityName(raw.originalName);
+  const snapOrigNorm = normalizeEntityName(effectiveSnapshot.originalName || suppression.originalName);
+  if (rawOrigNorm && snapOrigNorm && rawOrigNorm !== snapOrigNorm) {
+    return false;
+  }
+
+  // Collect all known renderings of the suppressed entity
+  const suppressedRenderings = new Set<string>();
+  for (const rendering of allIdentityRenderings(effectiveSnapshot)) {
+    const key = normalizeEntityName(rendering);
+    if (key) suppressedRenderings.add(key);
+  }
+  if (suppression.name) {
+    const key = normalizeEntityName(suppression.name);
+    if (key) suppressedRenderings.add(key);
+  }
+  if (suppression.originalName) {
+    const key = normalizeEntityName(suppression.originalName);
+    if (key) suppressedRenderings.add(key);
+  }
+
+  // Check if any of raw's names match any known rendering of the suppressed entity
+  const rawKeys = [raw.name, raw.originalName, ...(raw.aliases ?? [])]
+    .map(normalizeEntityName)
+    .filter(Boolean);
+
+  const hasMatchingRendering = rawKeys.some((k) => suppressedRenderings.has(k));
+  if (!hasMatchingRendering) {
+    return false;
+  }
+
+  // B & C: Supporting original identity match
+  if (rawOrigNorm && snapOrigNorm && rawOrigNorm === snapOrigNorm) {
+    return true;
+  }
+
+  // Same type match
+  if (raw.type === effectiveSnapshot.type) {
+    return true;
+  }
+
+  // D: Rendering-only match across different types is rejected to prevent false suppression
+  return false;
 }
 
 function uniqueIdentityNames(names: string[]): string[] {
@@ -240,6 +320,8 @@ export function containsIdentityRendering(
 export class EntityIdentityIndex {
   private readonly entries = new Map<string, EntityIdentityMatch[]>();
   private readonly characterHonorificEntries = new Map<string, EntityIdentityMatch[]>();
+  private readonly entityKeys = new Map<string, Set<string>>();
+  private readonly honorificEntityKeys = new Map<string, Set<string>>();
 
   constructor(entities: CanonicalEntity[] = []) {
     for (const entity of entities) {
@@ -273,6 +355,13 @@ export class EntityIdentityIndex {
     }
     this.entries.set(key, matches);
 
+    let keys = this.entityKeys.get(entity.id);
+    if (!keys) {
+      keys = new Set<string>();
+      this.entityKeys.set(entity.id, keys);
+    }
+    keys.add(key);
+
     if (entity.type === "character") {
       const hKey = normalizeCharacterHonorificVariant(value);
       if (hKey && hKey !== key) {
@@ -281,8 +370,54 @@ export class EntityIdentityIndex {
           hMatches.push({ entity, matchKind: "honorific_variant", matchedValue: value });
         }
         this.characterHonorificEntries.set(hKey, hMatches);
+
+        let hKeys = this.honorificEntityKeys.get(entity.id);
+        if (!hKeys) {
+          hKeys = new Set<string>();
+          this.honorificEntityKeys.set(entity.id, hKeys);
+        }
+        hKeys.add(hKey);
       }
     }
+  }
+
+  removeEntity(entityId: string): void {
+    const keys = this.entityKeys.get(entityId);
+    if (keys) {
+      for (const key of keys) {
+        const matches = this.entries.get(key);
+        if (matches) {
+          const remaining = matches.filter((m) => m.entity.id !== entityId);
+          if (remaining.length === 0) {
+            this.entries.delete(key);
+          } else {
+            this.entries.set(key, remaining);
+          }
+        }
+      }
+      this.entityKeys.delete(entityId);
+    }
+
+    const hKeys = this.honorificEntityKeys.get(entityId);
+    if (hKeys) {
+      for (const hKey of hKeys) {
+        const hMatches = this.characterHonorificEntries.get(hKey);
+        if (hMatches) {
+          const remaining = hMatches.filter((m) => m.entity.id !== entityId);
+          if (remaining.length === 0) {
+            this.characterHonorificEntries.delete(hKey);
+          } else {
+            this.characterHonorificEntries.set(hKey, remaining);
+          }
+        }
+      }
+      this.honorificEntityKeys.delete(entityId);
+    }
+  }
+
+  replace(entity: CanonicalEntity): void {
+    this.removeEntity(entity.id);
+    this.add(entity);
   }
 
   resolve(

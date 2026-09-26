@@ -4,7 +4,7 @@ import { CanonicalOverlay } from "./canonical.js";
 import { classifyEntityPersistenceSync } from "./granularity.js";
 import { mergeEntityVisualEvidence, resolveEntityVisualEvidence } from "./visual-evidence.js";
 import { boundedMinorReferenceEvidence } from "./minor-reference-evidence.js";
-import { buildEffectiveIdentityIndex, effectiveEntityIdentity, narrationMatchKinds, normalizeEntityName } from "./entity-identity.js";
+import { buildEffectiveIdentityIndex, effectiveEntityIdentity, matchesSuppressedIdentity, narrationMatchKinds, normalizeEntityName } from "./entity-identity.js";
 import { logger } from "../utils/logger.js";
 export { normalizeEntityName } from "./entity-identity.js";
 
@@ -192,11 +192,26 @@ function mergeCanonicalHistory(existing: StoryBible, update: StoryBibleUpdate, c
     } else {
       entity.firstAppearance = Math.min(entity.firstAppearance, chapter);
       entity.lastKnownAppearance = Math.max(entity.lastKnownAppearance, chapter);
-      if (entity.type === "concept" && type !== "concept") entity.type = type;
-      entity.aliases = uniqueNames([...entity.aliases, ...aliases, ...(normalizeName(name) !== normalizeName(entity.canonicalName) && !narrationMatchKinds.has(resolution.status === "matched" ? resolution.matchKind : "canonical") ? [name] : [])]);
-      identityIndex.add(effectiveEntityIdentity(entity, overlay?.overrides?.[entity.id]));
+      let identityChanged = false;
+      if (entity.type === "concept" && type !== "concept") {
+        entity.type = type;
+        identityChanged = true;
+      }
+      const currentAliases = entity.aliases;
+      const updatedAliases = uniqueNames([...currentAliases, ...aliases, ...(normalizeName(name) !== normalizeName(entity.canonicalName) && !narrationMatchKinds.has(resolution.status === "matched" ? resolution.matchKind : "canonical") ? [name] : [])]);
+      if (updatedAliases.length !== currentAliases.length || updatedAliases.some((a, idx) => a !== currentAliases[idx])) {
+        entity.aliases = updatedAliases;
+        identityChanged = true;
+      }
       entity.description = mergeDescription(entity.description, description);
-      if (!entity.originalName && originalName) entity.originalName = originalName;
+      if (!entity.originalName && originalName) {
+        entity.originalName = originalName;
+        identityChanged = true;
+      }
+      if (identityChanged) {
+        identityIndex.replace(effectiveEntityIdentity(entity, overlay?.overrides?.[entity.id]));
+        logger.debug({ event: "story_bible.identity_index_replaced", chapter, entityId: entity.id, type: entity.type });
+      }
       if (status && status !== "unknown" && status !== entity.status) {
         addTimeline(timeline, entity.id, chapter, "status_change", `${entity.canonicalName}: ${entity.status} → ${status}`, undefined, status, confidence);
         entity.status = status;
@@ -208,9 +223,30 @@ function mergeCanonicalHistory(existing: StoryBible, update: StoryBibleUpdate, c
 
   for (const [category, type] of canonicalCategories) {
     for (const raw of update[category] as Array<any>) {
+      const rawEntityId = stableId("ent", { type, identity: normalizeName(raw.originalName || raw.canonicalEnglishName) });
+      const suppressed = overlay?.suppressions?.some((suppression) =>
+        matchesSuppressedIdentity(
+          {
+            id: rawEntityId,
+            name: raw.canonicalEnglishName,
+            originalName: raw.originalName,
+            aliases: raw.aliases,
+            type,
+          },
+          suppression,
+          overlay?.overrides?.[suppression.entityId],
+        ),
+      );
+      if (suppressed) {
+        logger.debug({
+          event: "story_bible.suppressed_identity_matched",
+          chapter,
+          name: raw.canonicalEnglishName,
+          type,
+        });
+        continue;
+      }
       const keys = new Set([raw.canonicalEnglishName, raw.originalName, ...(raw.aliases ?? [])].map(normalizeName).filter(Boolean));
-      const suppressed = overlay?.suppressions?.some((item) => item.entityId === stableId("ent", { type, identity: normalizeName(raw.originalName || raw.canonicalEnglishName) }) || [item.name, item.originalName, item.snapshot.preferredNarrationName, item.snapshot.localizedNaming?.fullName, item.snapshot.localizedNaming?.shortName].some((value) => value && keys.has(normalizeName(value))));
-      if (suppressed) continue;
       const resolution = identityIndex.resolve([raw.canonicalEnglishName, raw.originalName, ...(raw.aliases ?? [])], { expectedType: type });
       if (resolution.status === "matched") {
         logger.debug({ event: "story_bible.identity_resolved", chapter, extractedName: raw.canonicalEnglishName, entityId: resolution.entity.id, matchKind: resolution.matchKind });
