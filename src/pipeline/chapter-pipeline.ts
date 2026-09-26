@@ -23,7 +23,7 @@ import { NARRATION_PROMPT_VERSION } from "../narration/prompts.js";
 import { polishNarration } from "../narration/narration-editor.js";
 import { narrationDeliveryProfile, stripDeliveryCues } from "../narration/tts-direction.js";
 import { STORY_BIBLE_PROMPT_VERSION } from "../story-bible/prompts.js";
-import { extractStoryBible } from "../story-bible/extractor.js";
+import { extractStoryBible, storyBibleExtractionFingerprint } from "../story-bible/extractor.js";
 import { QA_PROMPT_VERSION } from "../qa/prompts.js";
 import { computeQaDependencyFingerprint, computeQaDependencyFingerprints, qaDependencySnapshot, loadQaDeterministicDependencies, resolveStoredQaContext } from "../qa/freshness.js";
 import { validateChapterQuality } from "../qa/validator.js";
@@ -440,7 +440,7 @@ export class ChapterPipeline {
     if (options.stopAfter === "qa" || !hasRemainingCoreStages) { await persist(); return chapter; }
 
     const bibleConfig = options.story.pipeline.storyBible;
-    const bibleFp = fingerprint({ narration: fingerprint(narration), config: bibleConfig, prompt: STORY_BIBLE_PROMPT_VERSION, context: priorContext });
+    const bibleFp = storyBibleExtractionFingerprint({ source, translation: english, narration, config: bibleConfig, bible: priorContext });
     const persistFullBible = async (update: StoryBibleUpdate) => {
       // A rerun of an early chapter starts with only its prior context. Never let
       // that partial context replace the cumulative Story Bible snapshot.
@@ -451,7 +451,7 @@ export class ChapterPipeline {
     const bibleResult = await runStage("storyBible", bibleFp, paths.bibleUpdate, {
       provider: bibleConfig.provider, model: bibleConfig.model, promptVersion: STORY_BIBLE_PROMPT_VERSION,
     }, async () => {
-      const result = await extractStoryBible(this.llms.forStage(bibleConfig), bibleConfig, options.chapter, narration, priorContext);
+      const result = await extractStoryBible(this.llms.forStage(bibleConfig), bibleConfig, { chapter: options.chapter, source, translation: english, narration, bible: priorContext });
       const update = normalizeStoryBibleUpdate(storyBibleUpdateSchema.parse(result.value), options.chapter);
       await atomicWriteJson(paths.bibleUpdate, update);
       await persistFullBible(update);

@@ -86,6 +86,38 @@ describe("advanced Story Bible continuity", () => {
     expect(base.canonicalRelationships).toHaveLength(originalRelationshipCount);
   });
 
+  it("removes a duplicate canonical record while preserving its name as another entity's alias", async () => {
+    const root = await mkdtemp(join(tmpdir(), "canonical-alias-suppress-"));
+    const base = mergeStoryBible(emptyStoryBible(), update(1, { characters: [named("Hades", 1), named("Nether King", 1)] }), 1);
+    const hades = base.canonicalEntities.find((item) => item.canonicalName === "Hades")!;
+    const duplicate = base.canonicalEntities.find((item) => item.canonicalName === "Nether King")!;
+    await updateCanonicalEntity(root, "demo-story", base, hades.id, { aliases: ["Nether King"] });
+    const removed = await suppressCanonicalEntity(root, "demo-story", base, duplicate.id, "Duplicate alias of Hades");
+    expect(removed.bible.canonicalEntities.map((item) => item.id)).toEqual([hades.id]);
+    expect(removed.bible.canonicalEntities[0]?.aliases).toContain("Nether King");
+  });
+
+  it("merges a reviewed narration duplicate without turning its rendering into a story alias", async () => {
+    const root = await mkdtemp(join(tmpdir(), "narration-duplicate-merge-"));
+    const base = mergeStoryBible(emptyStoryBible(), update(1, { characters: [named("Luo Xiaoxue", 1, { originalName: "罗小雪" }), named("Asher", 1)] }), 1);
+    const target = base.canonicalEntities.find((item) => item.canonicalName === "Luo Xiaoxue")!;
+    target.preferredNarrationName = "Lucine Luo";
+    const source = { ...structuredClone(target), id: "ent_aaaaaaaaaaaaaaaaaaaaaaaa", canonicalName: "Lucine Luo", originalName: "", preferredNarrationName: undefined, aliases: [], firstAppearance: 2, lastKnownAppearance: 2, provenance: [{ chapter: 2, kind: "extraction" as const, origin: "automatic" as const }] };
+    base.canonicalEntities.push(source);
+    const asher = base.canonicalEntities.find((item) => item.canonicalName === "Asher")!;
+    base.canonicalRelationships.push({ id: "rel_aaaaaaaaaaaaaaaaaaaaaaaa", sourceEntityId: source.id, targetEntityId: asher.id, type: "ally", startChapter: 2, state: "current", provenance: [], locked: false, origin: "automatic" });
+    const merged = await mergeCanonicalEntities(root, "demo-story", base, target.id, [source.id], "Reviewed narration duplicate", { kind: "narration_rendering_duplicate" });
+    expect(merged.merge.kind).toBe("narration_rendering_duplicate");
+    const survivor = merged.bible.canonicalEntities.find((item) => item.id === target.id)!;
+    expect(merged.bible.canonicalEntities).toHaveLength(2);
+    expect(survivor.canonicalName).toBe("Luo Xiaoxue");
+    expect(survivor.preferredNarrationName).toBe("Lucine Luo");
+    expect(survivor.aliases).not.toContain("Lucine Luo");
+    expect(survivor.mergedFromIds).toContain(source.id);
+    expect(survivor.provenance.some((item) => item.chapter === 2)).toBe(true);
+    expect(merged.bible.canonicalRelationships.some((item) => item.sourceEntityId === target.id && item.targetEntityId === asher.id)).toBe(true);
+  });
+
   it("requires resolving incompatible manual narration names before a merge", async () => {
     const root = await mkdtemp(join(tmpdir(), "canonical-merge-names-"));
     const base = mergeStoryBible(emptyStoryBible(), update(1, { characters: [named("Alpha Hero", 1), named("Beta Hero", 1)] }), 1);

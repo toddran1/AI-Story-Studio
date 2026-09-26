@@ -5,6 +5,12 @@ import { readFileSync } from "node:fs";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App, CanonicalEntitySheet, EntityDetailAccordion, EntityHistorySection, EntityUsageSection } from "../apps/web/src/App.js";
 
+function fillRemovalReason(page: HTMLElement, value: string) {
+  const input = page.querySelector<HTMLInputElement>('input[aria-label="Reason for removal"]')!;
+  Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, value);
+  input.dispatchEvent(new Event("input", { bubbles: true }));
+}
+
 describe("Story Bible entity detail accordion", () => {
   let root: ReturnType<typeof createRoot> | undefined;
   let host: HTMLDivElement | undefined;
@@ -428,14 +434,13 @@ describe("Story Bible entity deep-link integration", () => {
       if (url.endsWith("/entities/entity-a/suppress") && init?.method === "POST") return json({});
       return undefined;
     });
-    vi.stubGlobal("confirm", vi.fn(() => true));
-    vi.stubGlobal("prompt", vi.fn(() => "duplicate record"));
     const page = mount("?entity=entity-a&section=management");
     await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
     await act(async () => {
       [...page.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === "Remove canonical entity…")!.click();
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
+    act(() => fillRemovalReason(page, "duplicate record"));
     await act(async () => {
       [...page.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === "Remove entity")!.click();
       await new Promise((resolve) => setTimeout(resolve, 0));
@@ -454,10 +459,10 @@ describe("Story Bible entity deep-link integration", () => {
       if (url.endsWith("/entities/entity-b/suppress") && init?.method === "POST") { suppressed = true; return json({ status: "suppressed" }); }
       return undefined;
     });
-    vi.stubGlobal("confirm", vi.fn(() => true)); vi.stubGlobal("prompt", vi.fn(() => "duplicate"));
     const page = mount("?entity=entity-b&section=management");
     await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
     await act(async () => { [...page.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === "Remove canonical entity…")!.click(); await new Promise((resolve) => setTimeout(resolve, 0)); });
+    act(() => fillRemovalReason(page, "duplicate"));
     await act(async () => { [...page.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === "Remove entity")!.click(); await new Promise((resolve) => setTimeout(resolve, 0)); });
     expect(page.querySelector(".entity-sheet")).toBeNull();
     expect(new URLSearchParams(location.search).has("entity")).toBe(false);
@@ -472,15 +477,16 @@ describe("Story Bible entity deep-link integration", () => {
       if (url.endsWith("/entities/entity-a/suppress") && init?.method === "POST") return new Response(JSON.stringify({ error: "Suppression failed" }), { status: 500, headers: { "content-type": "application/json" } });
       return undefined;
     });
-    vi.stubGlobal("confirm", vi.fn(() => true)); vi.stubGlobal("prompt", vi.fn(() => "duplicate"));
     const page = mount("?entity=entity-a&section=management");
     await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
     await act(async () => { [...page.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === "Remove canonical entity…")!.click(); await new Promise((resolve) => setTimeout(resolve, 0)); });
+    act(() => fillRemovalReason(page, "duplicate"));
     await act(async () => { [...page.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === "Remove entity")!.click(); await new Promise((resolve) => setTimeout(resolve, 0)); });
     expect(page.querySelector(".entity-sheet")).not.toBeNull();
     expect(new URLSearchParams(location.search).get("entity")).toBe("entity-a");
     expect(page.textContent).not.toContain('Removed "Entity A" from the effective Story Bible');
     expect(page.textContent).toContain("Suppression failed");
+    expect(page.querySelector('[role="dialog"][aria-label="Review estimated impact"] [role="alert"]')?.textContent).toContain("Suppression failed");
   });
 
   it("clears the entity URL when the user manually closes the sheet", async () => {

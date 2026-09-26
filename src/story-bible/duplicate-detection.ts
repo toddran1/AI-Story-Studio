@@ -1,5 +1,6 @@
 import { CanonicalEntity, EntityType, StoryBible } from "../domain/story-bible.js";
 import { normalizeEntityName } from "./updater.js";
+import { narrationRenderings } from "./entity-identity.js";
 
 export type DuplicateSuggestion = {
   id: string;
@@ -9,6 +10,8 @@ export type DuplicateSuggestion = {
   reason: string;
   supportingChapters: number[];
   recommendation?: "merge" | "needs_review";
+  recommendedTargetEntityId?: string;
+  kind?: "narration_rendering_duplicate";
 };
 
 export interface DuplicateScoreResult {
@@ -264,6 +267,10 @@ export function duplicateScore(
       (rel.sourceEntityId === a.id && rel.targetEntityId === b.id) ||
       (rel.sourceEntityId === b.id && rel.targetEntityId === a.id),
   );
+  const narrationMatch = [
+    ...narrationRenderings(a).filter((item) => normalizeEntityName(item.value) === normalizeEntityName(b.canonicalName)).map((item) => ({ owner: a, duplicate: b, ...item })),
+    ...narrationRenderings(b).filter((item) => normalizeEntityName(item.value) === normalizeEntityName(a.canonicalName)).map((item) => ({ owner: b, duplicate: a, ...item })),
+  ][0];
   if (hasDirectRelationship) {
     return {
       confidence: 0,
@@ -329,7 +336,7 @@ export function duplicateScore(
   // If both entities have original Chinese names and they differ, that is strong negative evidence.
   if (aNormOriginal && bNormOriginal && aNormOriginal !== bNormOriginal) {
     // Only permit if one is an explicit alias of the other
-    if (!exactAliasMatch) {
+    if (narrationMatch || !exactAliasMatch) {
       return {
         confidence: 0,
         reason: "Different original-language names indicate separate identities",
@@ -342,7 +349,7 @@ export function duplicateScore(
   // 5. Entity Type Conflict
   if (areTypesIncompatible(a.type, b.type)) {
     // Overridable ONLY by exact Tier 1 evidence (exact original name or exact alias match)
-    if (!exactOriginalMatch && !exactAliasMatch) {
+    if (narrationMatch || (!exactOriginalMatch && !exactAliasMatch)) {
       return {
         confidence: 0,
         reason: `Incompatible entity types (${a.type} vs ${b.type}) with no strong identity evidence`,
@@ -369,6 +376,12 @@ export function duplicateScore(
     };
   }
 
+  if (narrationMatch) return {
+    confidence: 0.97,
+    reason: `${narrationMatch.duplicate.canonicalName} is ${narrationMatch.owner.canonicalName}'s ${narrationMatch.kind.replaceAll("_", " ")}`,
+    recommendation: "needs_review",
+  };
+
   if (exactAliasMatch) {
     const chaptersA = new Set(a.provenance.map((p) => p.chapter));
     const chaptersOverlap = b.provenance.some((p) => chaptersA.has(p.chapter));
@@ -381,6 +394,7 @@ export function duplicateScore(
       recommendation: "merge",
     };
   }
+
 
   // 7. Token-based Analysis & Qualifier Conflict
   const aTokens = tokenizeEntityName(a.canonicalName);
@@ -498,11 +512,17 @@ export function findDuplicateSuggestions(
   context?: DuplicateContext,
 ): DuplicateSuggestion[] {
   const positions = new Map(entities.map((entity, index) => [entity.id, index]));
+  const narrationOwners = new Map<string, Set<string>>();
+  for (const entity of entities) for (const rendering of narrationRenderings(entity)) {
+    const key = normalizeEntityName(rendering.value);
+    if (!key) continue;
+    const owners = narrationOwners.get(key) ?? new Set<string>(); owners.add(entity.id); narrationOwners.set(key, owners);
+  }
 
   // Index 1: Exact name / alias / originalName lookup for O(N) candidate generation
   const exactIndex = new Map<string, CanonicalEntity[]>();
   for (const entity of entities) {
-    const names = [entity.canonicalName, entity.originalName, ...entity.aliases]
+    const names = [entity.canonicalName, entity.originalName, ...entity.aliases, ...narrationRenderings(entity).map((item) => item.value)]
       .map(normalizeEntityName)
       .filter(Boolean);
     for (const name of names) {
@@ -562,9 +582,11 @@ export function findDuplicateSuggestions(
     const scored = duplicateScore(a, b, context);
     // Preserve strict merge scoring while still surfacing identical labels of
     // different classes as a review-only suggestion in the editor.
-    const score = a.type !== b.type && normalizeEntityName(a.canonicalName) === normalizeEntityName(b.canonicalName) && scored.conflict !== "original_name" && scored.conflict !== "relationship"
+    let score = a.type !== b.type && normalizeEntityName(a.canonicalName) === normalizeEntityName(b.canonicalName) && scored.conflict !== "original_name" && scored.conflict !== "relationship"
       ? { confidence: 0.9, reason: `Same normalized canonical name across ${a.type} and ${b.type}; review identity and type`, recommendation: "needs_review" as const }
       : scored;
+    const ambiguousRendering = [a.canonicalName, b.canonicalName].some((name) => (narrationOwners.get(normalizeEntityName(name))?.size ?? 0) > 1);
+    if (ambiguousRendering && score.confidence === 0.97) score = { confidence: 0.85, reason: "Several entities use this narration rendering; review identity before merging", recommendation: "needs_review" };
     if (score.confidence < 0.70) continue;
 
     const chapters = unique(
@@ -584,6 +606,8 @@ export function findDuplicateSuggestions(
       confidence: score.confidence,
       reason: score.reason,
       recommendation: score.recommendation,
+      ...(score.confidence === 0.97 && narrationRenderings(a).some((item) => normalizeEntityName(item.value) === normalizeEntityName(b.canonicalName)) ? { recommendedTargetEntityId: a.id, kind: "narration_rendering_duplicate" as const } : {}),
+      ...(score.confidence === 0.97 && narrationRenderings(b).some((item) => normalizeEntityName(item.value) === normalizeEntityName(a.canonicalName)) ? { recommendedTargetEntityId: b.id, kind: "narration_rendering_duplicate" as const } : {}),
       supportingChapters: chapters,
     });
   }

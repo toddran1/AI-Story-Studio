@@ -5,13 +5,13 @@ import { contextBeforeChapter, mergeStoryBible, normalizeStoryBibleUpdate } from
 
 describe("Story Bible extraction prompt", () => {
   it("covers every schema bucket, relationships, translation terms, and narration-input caveats", () => {
-    expect(STORY_BIBLE_PROMPT_VERSION).toBe("5-visual-evidence");
+    expect(STORY_BIBLE_PROMPT_VERSION).toBe("6-identity-rendering-resolution");
     expect(storyBibleInstructions).toContain("visualObservations");
     for (const bucket of ["characters", "locations", "factions", "abilities", "items", "classes", "ranks", "creatures", "systemTerms"]) expect(storyBibleInstructions).toContain(bucket);
     expect(storyBibleInstructions).toContain("relationships");
     expect(storyBibleInstructions).toContain("translationTerms");
     expect(storyBibleInstructions).not.toContain("important concepts");
-    expect(storyBibleInstructions).toMatch(/POLISHED narration/i);
+    expect(storyBibleInstructions).toMatch(/NARRATION is the POLISHED reader-facing chapter/i);
     expect(storyBibleInstructions).toMatch(/soften strong profanity/i);
     expect(storyBibleInstructions).toMatch(/gender and pronouns unset/i);
   });

@@ -4,8 +4,11 @@ import { CanonicalOverlay } from "./canonical.js";
 import { classifyEntityPersistenceSync } from "./granularity.js";
 import { mergeEntityVisualEvidence, resolveEntityVisualEvidence } from "./visual-evidence.js";
 import { boundedMinorReferenceEvidence } from "./minor-reference-evidence.js";
+import { EntityIdentityIndex, narrationMatchKinds, normalizeEntityName } from "./entity-identity.js";
+import { logger } from "../utils/logger.js";
+export { normalizeEntityName } from "./entity-identity.js";
 
-type Named = { canonicalEnglishName: string; originalName: string; description: string; firstSeenChapter: number; lastSeenChapter: number; aliases?: string[]; gender?: string; pronouns?: string[] };
+type Named = { canonicalEnglishName: string; originalName: string; description: string; firstSeenChapter: number; lastSeenChapter: number; aliases?: string[]; gender?: string; pronouns?: string[]; identityEvidence?: { seenInNarration: boolean; seenInTranslation: boolean; seenInSource: boolean } | null };
 
 function mergeNamed(existing: Named[], incoming: Named[]): Named[] {
   const output = structuredClone(existing);
@@ -33,17 +36,27 @@ export function mergeStoryBible(
   options?: { overlay?: CanonicalOverlay } | CanonicalOverlay,
 ): StoryBible {
   const result = structuredClone(existing) as Record<string, unknown>;
+  const overlay = options && "version" in options ? options : options?.overlay;
+  const canonical = mergeCanonicalHistory(existing, update, chapter, overlay);
+  const legacyIdentity = new EntityIdentityIndex(existing.canonicalEntities);
+  addOverlayIdentityNames(legacyIdentity, existing.canonicalEntities, overlay);
   for (const key of ["characters", "locations", "factions", "abilities", "classes", "ranks", "items", "creatures", "systemTerms"] as const) {
-    result[key] = mergeNamed(existing[key] as Named[], update[key] as Named[]);
+    const incoming = (update[key] as Named[]).flatMap((item) => {
+      const resolution = legacyIdentity.resolve([item.canonicalEnglishName, item.originalName, ...(item.aliases ?? [])]);
+      if (resolution.status === "ambiguous" || (resolution.status === "none" && item.identityEvidence?.seenInNarration && !item.identityEvidence.seenInTranslation && !item.identityEvidence.seenInSource)) return [];
+      if (resolution.status === "matched" && narrationMatchKinds.has(resolution.matchKind)) return [{ ...item, canonicalEnglishName: overlay?.overrides?.[resolution.entity.id]?.canonicalName ?? resolution.entity.canonicalName, originalName: resolution.entity.originalName || item.originalName }];
+      return [item];
+    });
+    result[key] = mergeNamed(existing[key] as Named[], incoming);
   }
   result.relationships = mergeUnique(existing.relationships, update.relationships, (x) => `${x.subject}\0${x.relationship}\0${x.object}`);
   result.translationTerms = mergeTerms(existing.translationTerms, update.translationTerms);
-  const overlay = options && "version" in options ? options : options?.overlay;
-  const canonical = mergeCanonicalHistory(existing, update, chapter, overlay);
+  const visualIdentity = new EntityIdentityIndex(canonical.entities);
+  addOverlayIdentityNames(visualIdentity, canonical.entities, overlay);
   for (const observation of update.visualObservations) {
-    const name = normalizeName(observation.entity);
-    const entity = canonical.entities.find((candidate) => [candidate.canonicalName, candidate.originalName, candidate.preferredNarrationName, candidate.localizedNaming?.fullName, candidate.localizedNaming?.shortName, ...candidate.aliases].some((alias) => normalizeName(alias) === name));
-    if (!entity) continue;
+    const resolution = visualIdentity.resolve([observation.entity]);
+    if (resolution.status !== "matched") continue;
+    const entity = resolution.entity;
     if (observation.field.split(".")[0] !== entity.type && !(observation.field.startsWith("creature.") && entity.type === "concept")) continue;
     mergeEntityVisualEvidence(entity, observation, chapter);
     if (observation.persistence === "changed") addTimeline(canonical.timeline, entity.id, chapter, "appearance", `${entity.canonicalName}: ${observation.field} changed to ${observation.value}`, undefined, undefined, observation.confidence);
@@ -128,21 +141,26 @@ export function contextBeforeChapter(bible: StoryBible, chapter: number, recentS
 const canonicalCategories: Array<[NonNullable<CanonicalEntity["sourceBucket"]>, EntityType]> = [["characters", "character"], ["factions", "organization"], ["locations", "location"], ["abilities", "ability"], ["items", "item"], ["classes", "concept"], ["ranks", "concept"], ["creatures", "concept"], ["systemTerms", "concept"]];
 function mergeCanonicalHistory(existing: StoryBible, update: StoryBibleUpdate, chapter: number, overlay?: CanonicalOverlay) {
   const entities = structuredClone(existing.canonicalEntities);
+  const identityIndex = new EntityIdentityIndex(entities);
+  addOverlayIdentityNames(identityIndex, entities, overlay);
   const relationships = structuredClone(existing.canonicalRelationships);
   const timeline = structuredClone(existing.entityTimeline);
   let minorReferences = structuredClone(existing.minorReferences ?? []);
 
   const ensure = (name: string, type: EntityType = "concept", originalName = "", description = "", aliases: string[] = [], status = "unknown", confidence?: number) => {
-    const keys = new Set([name, originalName, ...aliases].map(normalizeName).filter(Boolean));
-    let entity = entities.find((candidate) => [candidate.canonicalName, candidate.originalName, ...candidate.aliases].some((value) => keys.has(normalizeName(value))));
+    const resolution = identityIndex.resolve([name, originalName, ...aliases]);
+    if (resolution.status === "ambiguous") return undefined;
+    let entity = resolution.status === "matched" ? resolution.entity : undefined;
     if (!entity) {
       entity = { id: stableId("ent", { type, identity: normalizeName(originalName || name) }), type, canonicalName: name, aliases: uniqueNames([name, ...aliases]).filter((value) => normalizeName(value) !== normalizeName(name)), originalName, description, aliasNarrationRules: [], firstAppearance: chapter, lastKnownAppearance: chapter, status, notes: "", canonicalNameLocked: false, origin: "automatic", provenance: [], mergedFromIds: [] };
       entities.push(entity);
+      identityIndex.add(entity);
     } else {
       entity.firstAppearance = Math.min(entity.firstAppearance, chapter);
       entity.lastKnownAppearance = Math.max(entity.lastKnownAppearance, chapter);
       if (entity.type === "concept" && type !== "concept") entity.type = type;
-      entity.aliases = uniqueNames([...entity.aliases, ...aliases, ...(normalizeName(name) !== normalizeName(entity.canonicalName) ? [name] : [])]);
+      entity.aliases = uniqueNames([...entity.aliases, ...aliases, ...(normalizeName(name) !== normalizeName(entity.canonicalName) && !narrationMatchKinds.has(resolution.status === "matched" ? resolution.matchKind : "canonical") ? [name] : [])]);
+      identityIndex.add(entity);
       entity.description = mergeDescription(entity.description, description);
       if (!entity.originalName && originalName) entity.originalName = originalName;
       if (status && status !== "unknown" && status !== entity.status) {
@@ -157,9 +175,13 @@ function mergeCanonicalHistory(existing: StoryBible, update: StoryBibleUpdate, c
   for (const [category, type] of canonicalCategories) {
     for (const raw of update[category] as Array<any>) {
       const keys = new Set([raw.canonicalEnglishName, raw.originalName, ...(raw.aliases ?? [])].map(normalizeName).filter(Boolean));
-      const existingEntity = entities.find((candidate) => [candidate.canonicalName, candidate.originalName, ...candidate.aliases].some((value) => keys.has(normalizeName(value))));
-      if (existingEntity) {
+      const suppressed = overlay?.suppressions?.some((item) => item.entityId === stableId("ent", { type, identity: normalizeName(raw.originalName || raw.canonicalEnglishName) }) || [item.name, item.originalName, item.snapshot.preferredNarrationName, item.snapshot.localizedNaming?.fullName, item.snapshot.localizedNaming?.shortName].some((value) => value && keys.has(normalizeName(value))));
+      if (suppressed) continue;
+      const resolution = identityIndex.resolve([raw.canonicalEnglishName, raw.originalName, ...(raw.aliases ?? [])]);
+      if (resolution.status === "matched") {
+        logger.debug({ event: "story_bible.identity_resolved", chapter, extractedName: raw.canonicalEnglishName, entityId: resolution.entity.id, matchKind: resolution.matchKind });
         const entity = ensure(raw.canonicalEnglishName, type, raw.originalName, raw.description, raw.aliases ?? [], raw.status ?? "unknown", raw.confidence);
+        if (!entity) continue;
         entity.sourceBucket ??= category;
         addTimeline(timeline, entity.id, chapter, "appearance", `${entity.canonicalName} appears`, undefined, undefined, raw.confidence);
         continue;
@@ -203,7 +225,10 @@ function mergeCanonicalHistory(existing: StoryBible, update: StoryBibleUpdate, c
         },
       );
 
-      if (classification.disposition === "minor_reference" || classification.disposition === "needs_review") {
+      const narrationOnly = raw.identityEvidence?.seenInNarration && !raw.identityEvidence.seenInTranslation && !raw.identityEvidence.seenInSource;
+      if (resolution.status === "ambiguous") logger.warn({ event: "story_bible.identity_ambiguous", chapter, extractedName: raw.canonicalEnglishName, candidateIds: resolution.candidates.map((candidate) => candidate.entity.id) });
+      if (narrationOnly) logger.debug({ event: "story_bible.narration_only_identity_deferred", chapter, extractedName: raw.canonicalEnglishName });
+      if (resolution.status === "ambiguous" || narrationOnly || classification.disposition === "minor_reference" || classification.disposition === "needs_review") {
         const refId = `ref_${fingerprint({ name: raw.canonicalEnglishName, type, origin: raw.originalName }).slice(0, 24)}`;
         minorReferences.push({
           id: refId,
@@ -215,10 +240,11 @@ function mergeCanonicalHistory(existing: StoryBible, update: StoryBibleUpdate, c
           firstSeenChapter: chapter,
           lastSeenChapter: chapter,
           occurrenceCount: 1,
-          disposition: classification.disposition === "needs_review" ? "needs_review" : "minor_reference",
+          disposition: resolution.status === "ambiguous" || narrationOnly || classification.disposition === "needs_review" ? "needs_review" : "minor_reference",
           source: "automatic",
           sourceEvidence: [{ chapter }],
-          status: classification.disposition === "needs_review" ? "promotion_candidate" : "minor",
+          contextNotes: narrationOnly ? "Identity appears only in narration; awaiting source or translation confirmation." : undefined,
+          status: resolution.status === "ambiguous" || narrationOnly || classification.disposition === "needs_review" ? "promotion_candidate" : "minor",
           createdAt: new Date().toISOString(),
           updatedAt: new Date().toISOString(),
         });
@@ -226,6 +252,7 @@ function mergeCanonicalHistory(existing: StoryBible, update: StoryBibleUpdate, c
       }
 
       const entity = ensure(raw.canonicalEnglishName, type, raw.originalName, raw.description, raw.aliases ?? [], raw.status ?? "unknown", raw.confidence);
+      if (!entity) continue;
       entity.sourceBucket ??= category;
       addTimeline(timeline, entity.id, chapter, "appearance", `${entity.canonicalName} appears`, undefined, undefined, raw.confidence);
     }
@@ -234,8 +261,9 @@ function mergeCanonicalHistory(existing: StoryBible, update: StoryBibleUpdate, c
   const resolveEntityOrParent = (name: string): CanonicalEntity | undefined => {
     const norm = normalizeName(name);
     if (!norm) return undefined;
-    const existing = entities.find((c) => [c.canonicalName, c.originalName, ...c.aliases].some((v) => normalizeName(v) === norm));
-    if (existing) return existing;
+    const resolution = identityIndex.resolve([name]);
+    if (resolution.status === "matched") return resolution.entity;
+    if (resolution.status === "ambiguous") return undefined;
     const ref = minorReferences.find((r) => normalizeName(r.name) === norm || (r.originalName && normalizeName(r.originalName) === norm) || (r.aliases ?? []).some((a) => normalizeName(a) === norm));
     if (ref) {
       if (ref.parentEntityId) {
@@ -293,11 +321,23 @@ function mergeCanonicalHistory(existing: StoryBible, update: StoryBibleUpdate, c
   return { entities, relationships, timeline, minorReferences };
 }
 
+function addOverlayIdentityNames(index: EntityIdentityIndex, entities: CanonicalEntity[], overlay?: CanonicalOverlay) {
+  for (const entity of entities) {
+    const override = overlay?.overrides?.[entity.id];
+    if (!override) continue;
+    index.addName(entity, override.canonicalName, "canonical");
+    for (const alias of override.aliases ?? []) index.addName(entity, alias, "alias");
+    index.addName(entity, override.preferredNarrationName ?? undefined, "preferred_narration");
+    index.addName(entity, override.localizedNaming?.fullName, "localized_full");
+    index.addName(entity, override.localizedNaming?.shortName, "localized_short");
+    for (const rule of override.aliasNarrationRules ?? []) if (rule.behavior === "custom") index.addName(entity, rule.replacement, "custom_narration_replacement");
+  }
+}
+
 function addTimeline(timeline: StoryBible["entityTimeline"], entityId: string, chapter: number, type: StoryBible["entityTimeline"][number]["type"], summary: string, relatedEntityId?: string, status?: string, confidence?: number) { const id = stableId("evt", { entityId, chapter, type, summary: normalizeName(summary), relatedEntityId }); if (timeline.some((item) => item.id === id)) return; timeline.push({ id, entityId, chapter, type, summary, relatedEntityId, status, confidence, origin: "automatic", provenance: { chapter, kind: "event", confidence, origin: "automatic" } }); }
 function addProvenance(entity: CanonicalEntity, chapter: number, kind: "extraction", confidence?: number) { if (!entity.provenance.some((item) => item.chapter === chapter && item.kind === kind)) entity.provenance.push({ chapter, kind, confidence, origin: "automatic" }); }
 function stableId(prefix: "ent" | "rel" | "evt", value: unknown) { return `${prefix}_${fingerprint(value).slice(0, 24)}`; }
-export function normalizeEntityName(value: string | undefined | null) { return normalizeName(value); }
-function normalizeName(value: string | undefined | null) { return value ? value.normalize("NFKD").toLocaleLowerCase().replace(/\b(?:doctor|dr|young master|master|elder|lord|lady|sir|miss|mr|mrs)\b/gu, "").replace(/[^\p{L}\p{N}]/gu, "") : ""; }
+function normalizeName(value: string | undefined | null) { return normalizeEntityName(value); }
 function uniqueNames(values: string[]) { const seen = new Set<string>(); return values.filter((value) => { const key = value.normalize("NFKD").toLocaleLowerCase().replace(/[^\p{L}\p{N}]/gu, ""); if (!key || seen.has(key)) return false; seen.add(key); return true; }); }
 
 function mergeDescription(existing: string, incoming: string): string {

@@ -1275,12 +1275,13 @@ export class StudioOperations {
     targetEntityId: string,
     sourceEntityIds: string[],
     reason: string,
+    kind: "standard" | "narration_rendering_duplicate" = "standard",
   ) {
     const before = await getStoryBible(this.root, slug);
     const changedEntities = before.canonicalEntities.filter((entity) => entity.id === targetEntityId || sourceEntityIds.includes(entity.id));
     const prepared = await prepareVisualCanonMerge(this.root, slug, targetEntityId, sourceEntityIds);
     const base = await getStoryBible(this.root, slug, { includeCanonicalOverlay: false });
-    const result = await mergeCanonicalEntities(this.root, slug, base, targetEntityId, sourceEntityIds, reason);
+    const result = await mergeCanonicalEntities(this.root, slug, base, targetEntityId, sourceEntityIds, reason, { kind });
     const mergeId = result.merge.id;
 
     try {
@@ -1338,9 +1339,10 @@ export class StudioOperations {
       targetEntityId: z.string(),
       sourceEntityIds: z.array(z.string()).min(1).max(50),
       reason: z.string().trim().min(1).max(1000),
+      kind: z.enum(["standard", "narration_rendering_duplicate"]).optional(),
     }).strict().parse(raw);
     return withStoryLock(this.root, slug, "canonical entity merge", async () => {
-      const result = await this.executeCanonicalEntityMerge(slug, input.targetEntityId, input.sourceEntityIds, input.reason);
+      const result = await this.executeCanonicalEntityMerge(slug, input.targetEntityId, input.sourceEntityIds, input.reason, input.kind);
       await recordActivity(this.root, slug, "bible.entities.merged", `Merged ${input.sourceEntityIds.length} duplicate entity record(s)`);
       return {
         merge: result.merge,

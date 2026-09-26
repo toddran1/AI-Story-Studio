@@ -502,6 +502,7 @@ export interface BibleAnalysisRecommendation {
   parentEntityName?: string;
   targetEntityId?: string;
   targetEntityName?: string;
+  kind?: "narration_rendering_duplicate";
   confidence: number;
   reason: string;
   supportingChapters?: number[];
@@ -562,6 +563,7 @@ export async function analyzeStoryBible(
       confidence: number;
       reason: string;
       recommendation?: "merge" | "needs_review";
+      kind?: "narration_rendering_duplicate";
       supportingChapters?: number[];
     }
   >();
@@ -572,17 +574,22 @@ export async function analyzeStoryBible(
       const first = bible.canonicalEntities.find((e) => e.id === firstId);
       const second = bible.canonicalEntities.find((e) => e.id === secondId);
       if (first && second) {
-        // Target is the earlier or locked one
-        const target =
-          first.canonicalNameLocked || first.firstAppearance <= second.firstAppearance
-            ? first
-            : second;
+        // A rendering duplicate must point at the established identity, even
+        // when the stray rendering was seen earlier or has a locked name.
+        const target = suggestion.recommendedTargetEntityId === first.id
+          ? first
+          : suggestion.recommendedTargetEntityId === second.id
+            ? second
+            : first.canonicalNameLocked || first.firstAppearance <= second.firstAppearance
+              ? first
+              : second;
         const duplicate = target === first ? second : first;
         duplicatePairs.set(duplicate.id, {
           target,
           confidence: suggestion.confidence,
           reason: suggestion.reason,
           recommendation: suggestion.recommendation,
+          kind: suggestion.kind,
           supportingChapters: suggestion.supportingChapters,
         });
       }
@@ -642,6 +649,7 @@ export async function analyzeStoryBible(
         recommendation: isProtected ? "needs_review" : (isActionableMerge ? "merge" : "needs_review"),
         targetEntityId: duplicate.target.id,
         targetEntityName: duplicate.target.canonicalName,
+        kind: duplicate.kind,
         confidence: duplicate.confidence,
         reason: isProtected
           ? `Possible duplicate of '${duplicate.target.canonicalName}', but entity has protected manual configuration.`

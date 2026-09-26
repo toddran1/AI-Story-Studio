@@ -56,6 +56,7 @@ const namedEntity = z.object({
   canonicalEnglishName: z.string().min(1).max(300), originalName: z.string().max(300).default(""), description: z.string().max(10_000).default(""),
   firstSeenChapter: z.number().int().positive(), lastSeenChapter: z.number().int().positive(),
   status: z.string().max(500).optional(), notes: z.string().max(10_000).optional(), confidence: z.number().min(0).max(1).optional(),
+  identityEvidence: z.object({ seenInSource: z.boolean(), seenInTranslation: z.boolean(), seenInNarration: z.boolean() }).nullish(),
 });
 const character = namedEntity.extend({ aliases: z.array(z.string().min(1).max(300)).max(100).default([]), gender: z.string().max(100).optional(), pronouns: z.array(z.string().max(100)).max(20).default([]) });
 const relationship = z.object({
@@ -122,7 +123,7 @@ export const canonicalRelationshipSchema = z.object({
   id: z.string().regex(/^rel_[a-f0-9]{24}$/), sourceEntityId: z.string(), targetEntityId: z.string(), type: z.string().min(1).max(300), startChapter: z.number().int().positive(), endChapter: z.number().int().positive().optional(), state: z.enum(["current", "historical"]).default("current"), confidence: z.number().min(0).max(1).optional(), provenance: z.array(provenanceSchema).default([]), locked: z.boolean().default(false), origin: factOriginSchema.default("automatic"),
 });
 export type CanonicalRelationship = z.infer<typeof canonicalRelationshipSchema>;
-export const mergeRecordSchema = z.object({ id: z.string().uuid(), targetEntityId: z.string(), sourceEntityIds: z.array(z.string()).min(1), reason: z.string(), createdAt: z.string(), undoneAt: z.string().optional() });
+export const mergeRecordSchema = z.object({ id: z.string().uuid(), targetEntityId: z.string(), sourceEntityIds: z.array(z.string()).min(1), reason: z.string(), kind: z.enum(["standard", "narration_rendering_duplicate"]).default("standard"), createdAt: z.string(), undoneAt: z.string().optional() });
 
 export const persistenceDispositionSchema = z.enum(["canonical", "minor_reference", "merge_existing", "needs_review"]);
 export type PersistenceDisposition = z.infer<typeof persistenceDispositionSchema>;
