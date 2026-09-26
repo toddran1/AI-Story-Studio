@@ -224,9 +224,14 @@ export function matchesSuppressedIdentity(
     return false;
   }
 
-  // Collect all known renderings of the suppressed entity
+  // Tombstones retain historical renderings even when a later manual override
+  // removes them from the active identity. Old chapter updates can still carry
+  // those names during a chronological rebuild.
   const suppressedRenderings = new Set<string>();
-  for (const rendering of allIdentityRenderings(effectiveSnapshot)) {
+  for (const rendering of [
+    ...allIdentityRenderings(suppression.snapshot),
+    ...allIdentityRenderings(effectiveSnapshot),
+  ]) {
     const key = normalizeEntityName(rendering);
     if (key) suppressedRenderings.add(key);
   }
@@ -254,13 +259,16 @@ export function matchesSuppressedIdentity(
     return true;
   }
 
-  // Same type match
-  if (raw.type === effectiveSnapshot.type) {
-    return true;
-  }
-
-  // D: Rendering-only match across different types is rejected to prevent false suppression
-  return false;
+  // An unqualified canonical/alias display name can belong to a different
+  // same-type entity. Only an explicitly configured narration rendering has
+  // enough support to match without an original name, and its tombstone must
+  // retain a stable original-language identity.
+  if (!snapOrigNorm || raw.type !== effectiveSnapshot.type) return false;
+  const narrationKeys = new Set([
+    ...narrationRenderings(suppression.snapshot),
+    ...narrationRenderings(effectiveSnapshot),
+  ].map((item) => normalizeEntityName(item.value)).filter(Boolean));
+  return rawKeys.some((key) => narrationKeys.has(key));
 }
 
 function uniqueIdentityNames(names: string[]): string[] {

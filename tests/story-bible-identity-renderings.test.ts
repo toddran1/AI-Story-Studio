@@ -717,7 +717,7 @@ describe("Story Bible narration rendering identity", () => {
     }
   });
 
-  it("suppresses canonical entity recreation when chapter extraction uses snapshot alias", () => {
+  it("suppresses a snapshot alias when chapter extraction also carries matching original identity", () => {
     const bible = established();
     const luo = bible.canonicalEntities[0]!;
     luo.aliases = ["Snow"];
@@ -740,7 +740,7 @@ describe("Story Bible narration rendering identity", () => {
       bible,
       storyBibleUpdateSchema.parse({
         chapterSummary: "Chapter 2",
-        characters: [{ canonicalEnglishName: "Snow", originalName: "", firstSeenChapter: 2, lastSeenChapter: 2 }],
+        characters: [{ canonicalEnglishName: "Snow", originalName: luo.originalName, firstSeenChapter: 2, lastSeenChapter: 2 }],
       }),
       2,
       { overlay },
@@ -900,6 +900,33 @@ describe("Story Bible narration rendering identity", () => {
     expect(next.canonicalEntities.some((e) => e.canonicalName === "Phoenix City" && e.type === "location")).toBe(true);
   });
 
+  it("does not suppress an unrelated same-type entity sharing only a display name", () => {
+    const phoenix = { ...structuredClone(established().canonicalEntities[0]!), id: "ent_eeeeeeeeeeeeeeeeeeeeeeee", canonicalName: "Phoenix", originalName: "凤灵", preferredNarrationName: undefined, localizedNaming: undefined, aliases: [], aliasNarrationRules: [] };
+    const suppression = { entityId: phoenix.id, name: "Phoenix", originalName: "凤灵", type: "character" as const, snapshot: phoenix };
+    expect(matchesSuppressedIdentity({ name: "Phoenix", originalName: "", type: "character" }, suppression)).toBe(false);
+    expect(matchesSuppressedIdentity({ name: "Phoenix", originalName: "凤凰", type: "character" }, suppression)).toBe(false);
+    expect(matchesSuppressedIdentity({ name: "Phoenix", originalName: "凤灵", type: "character" }, suppression)).toBe(true);
+    expect(matchesSuppressedIdentity({ id: phoenix.id, name: "Phoenix", originalName: "", type: "character" }, suppression)).toBe(true);
+    const overlay = canonicalOverlaySchema.parse({ version: 1, suppressions: [{ ...suppression, reason: "manual", suppressedAt: new Date().toISOString(), source: "manual" }] });
+    const next = mergeStoryBible(emptyStoryBible(), update(2, ["Phoenix"]), 2, { overlay });
+    expect(next.canonicalEntities.some((entity) => entity.canonicalName === "Phoenix")).toBe(true);
+  });
+
+  it("keeps historical tombstone renderings after an override removes or replaces them", () => {
+    const snapshot = structuredClone(established().canonicalEntities[0]!);
+    snapshot.aliases = ["Snow"];
+    const suppression = { entityId: snapshot.id, name: snapshot.canonicalName, originalName: snapshot.originalName, type: snapshot.type, snapshot };
+    const cleared = { aliases: [], preferredNarrationName: null, localizedNaming: null, aliasNarrationRules: [] };
+    for (const name of ["Lucine Luo", "Lucine", "Brother Ash"]) {
+      expect(matchesSuppressedIdentity({ name, originalName: "", type: "character" }, suppression, cleared)).toBe(true);
+    }
+    expect(matchesSuppressedIdentity({ name: "Snow", originalName: snapshot.originalName, type: "character" }, suppression, cleared)).toBe(true);
+    expect(matchesSuppressedIdentity({ name: "Snow", originalName: "", type: "character" }, suppression, cleared)).toBe(false);
+    const replaced = { ...cleared, preferredNarrationName: "Lucina Luo" };
+    expect(matchesSuppressedIdentity({ name: "Lucine Luo", type: "character" }, suppression, replaced)).toBe(true);
+    expect(matchesSuppressedIdentity({ name: "Lucina Luo", type: "character" }, suppression, replaced)).toBe(true);
+  });
+
   it("does not resurrect suppressed identity when narration rendering appears only in relationship endpoint", () => {
     const bible = established();
     const luo = bible.canonicalEntities[0]!;
@@ -968,6 +995,7 @@ describe("Story Bible narration rendering identity", () => {
     };
     const overlay = canonicalOverlaySchema.parse({
       version: 1,
+      overrides: { [entityId]: { preferredNarrationName: null, updatedAt: new Date().toISOString() } },
       suppressions: [
         {
           entityId,
