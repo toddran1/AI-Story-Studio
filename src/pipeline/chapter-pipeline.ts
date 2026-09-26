@@ -44,6 +44,7 @@ import { loadEligibleSummaryContext } from "../summaries/service.js";
 import { CENSOR_AUDIO_VERSION, CensorAudioService, FfmpegCensorAudioService, censorManifestSchema, censorToneConfig } from "../tts/censor-audio.js";
 import { SpeechTranscriber, summarizeQuality, type TtsQualityProgress } from "../tts/quality-guard.js";
 import { createChapterTtsQualityArtifact, persistChapterTtsQuality, removeChapterTtsQuality, ttsQualityArtifactSchema, type TtsQualityArtifact } from "../tts/chapter-quality.js";
+import { visibleMp3SegmentFiles } from "../tts/segment-files.js";
 
 import { createEffectiveTtsProvider } from "../tts/effective-provider.js";
 import { normalizeSpeechForProvider } from "../tts/speech-normalization.js";
@@ -598,7 +599,7 @@ export class ChapterPipeline {
             throw new StorageError(`Staged audioRaw is empty at ${stagedAudioRaw}`);
           }
 
-          const stagedFiles = (await readdir(stagedSegmentsDir)).filter((f) => f.endsWith(".mp3")).sort();
+          const stagedFiles = visibleMp3SegmentFiles(await readdir(stagedSegmentsDir));
           if (stagedFiles.length !== result.segments.length) {
             throw new StorageError(
               `Staged segment count (${stagedFiles.length}) does not match expected (${result.segments.length})`
@@ -643,12 +644,8 @@ export class ChapterPipeline {
         const oldSegmentsDirExists = await exists(paths.segments);
         const oldSegments = new Map<string, Buffer>();
         if (oldSegmentsDirExists) {
-          const entries = await readdir(paths.segments);
-          for (const entry of entries) {
-            if (entry.endsWith(".mp3")) {
-              oldSegments.set(entry, await readFile(join(paths.segments, entry)));
-            }
-          }
+          const entries = visibleMp3SegmentFiles(await readdir(paths.segments));
+          for (const entry of entries) oldSegments.set(entry, await readFile(join(paths.segments, entry)));
         }
         const oldCensorExists = await exists(paths.censorManifest);
         const oldCensorJson = oldCensorExists ? await readFile(paths.censorManifest) : undefined;
@@ -868,7 +865,7 @@ async function hasUsablePriorTts(root: string, story: string, chapterNumber: num
   if (await exists(paths.segments)) {
     try {
       const segs = await readdir(paths.segments);
-      if (segs.filter((f) => f.endsWith(".mp3")).length === 0) {
+      if (visibleMp3SegmentFiles(segs).length === 0) {
         return false;
       }
     } catch {
