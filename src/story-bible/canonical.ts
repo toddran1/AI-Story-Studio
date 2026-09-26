@@ -7,6 +7,7 @@ import { storyPaths } from "../storage/paths.js";
 import { readJsonIfExists } from "../storage/story-files.js";
 import { normalizeEntityName } from "./updater.js";
 import { rebuildStoryBibleBeforeChapter } from "./rebuild.js";
+import { boundedMinorReferenceEvidence } from "./minor-reference-evidence.js";
 
 const overrideSchema = z.object({ canonicalName: z.string().trim().min(1).max(300).optional(), type: canonicalEntitySchema.shape.type.optional(), aliases: z.array(z.string().trim().min(1).max(300)).max(100).optional(), canonicalNameLocked: z.boolean().optional(), notes: z.string().max(10_000).optional(), status: z.string().max(500).optional(), preferredNarrationName: z.string().trim().min(1).max(300).nullable().optional(), aliasNarrationRules: canonicalEntitySchema.shape.aliasNarrationRules.optional(), localizedNaming: localizedNamingSchema.nullable().optional(), pronunciation: canonicalEntitySchema.shape.pronunciation.unwrap().nullable().optional(), visualProfilePolicy: canonicalEntitySchema.shape.visualProfilePolicy.optional(), snapshot: canonicalEntitySchema.optional(), updatedAt: z.string() });
 const manualMergeSchema = z.object({ id: z.string().uuid(), targetEntityId: z.string(), sourceEntityIds: z.array(z.string()).min(1), reason: z.string().min(1), createdAt: z.string(), undoneAt: z.string().optional() });
@@ -138,7 +139,7 @@ export async function applyCanonicalOverlay(root: string, slug: string, input: S
           firstSeenChapter: entity.firstAppearance,
           lastSeenChapter: entity.lastKnownAppearance,
           occurrenceCount: Math.max(1, entity.provenance.length),
-          sourceEvidence: entity.provenance.map((p) => ({ chapter: p.chapter })),
+          sourceEvidence: boundedMinorReferenceEvidence(entity.provenance.map((p) => ({ chapter: p.chapter }))),
           disposition: "minor_reference",
           source: "manual_demotion",
           status: "minor",

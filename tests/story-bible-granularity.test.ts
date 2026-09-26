@@ -1695,7 +1695,7 @@ describe("Story Bible Entity Granularity & Intelligent Cleanup", () => {
       expect(sword.disposition).toBe("canonical");
     });
 
-    it("treats recurrence as evidence, not decision: parented sub-location appearing in 20 chapters remains minor", () => {
+    it("keeps recurring minor-reference evidence bounded after 20 chapters without promoting it", () => {
       let bible = emptyStoryBible();
 
       // Chapter 1: Nong Family
@@ -1713,8 +1713,8 @@ describe("Story Bible Entity Granularity & Intelligent Cleanup", () => {
       expect(ref?.parentEntityId).toBeDefined();
       expect(ref?.status).toBe("minor");
 
-      // Chapters 2 to 20 mention Nong Family Conference Hall repeatedly
-      for (let ch = 2; ch <= 20; ch++) {
+      // A long-running minor reference must remain valid beyond the evidence cap.
+      for (let ch = 2; ch <= 25; ch++) {
         bible = mergeStoryBible(
           bible,
           update(ch, {
@@ -1724,10 +1724,12 @@ describe("Story Bible Entity Granularity & Intelligent Cleanup", () => {
         );
       }
 
-      const refAfter20 = bible.minorReferences.find((r) => r.name === "Nong Family Conference Hall")!;
-      expect(refAfter20.occurrenceCount).toBe(20);
+      const refAfter25 = bible.minorReferences.find((r) => r.name === "Nong Family Conference Hall")!;
+      expect(refAfter25.occurrenceCount).toBe(25);
+      expect(refAfter25.sourceEvidence).toHaveLength(20);
+      expect(refAfter25.sourceEvidence.map((item) => item.chapter)).toEqual([1, ...Array.from({ length: 19 }, (_, index) => index + 7)]);
       // Because it has a parentEntityId, it must NOT automatically become a promotion candidate
-      expect(refAfter20.status).toBe("minor");
+      expect(refAfter25.status).toBe("minor");
       // And must NOT have been promoted to canonical
       expect(bible.canonicalEntities.some((e) => e.canonicalName === "Nong Family Conference Hall")).toBe(false);
     });

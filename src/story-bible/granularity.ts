@@ -19,6 +19,7 @@ import { storyPaths } from "../storage/paths.js";
 import { readJsonIfExists } from "../storage/story-files.js";
 import { withStoryLock } from "../storage/story-lock.js";
 import { fingerprint } from "../utils/hash.js";
+import { boundedMinorReferenceEvidence } from "./minor-reference-evidence.js";
 import { logger } from "../utils/logger.js";
 import {
   ManualDemotion,
@@ -885,7 +886,7 @@ export async function demoteCanonicalEntity(
         firstSeenChapter: entity.firstAppearance,
         lastSeenChapter: entity.lastKnownAppearance,
         occurrenceCount: Math.max(1, entity.provenance.length),
-        sourceEvidence: entity.provenance.map((p) => ({ chapter: p.chapter })),
+        sourceEvidence: boundedMinorReferenceEvidence(entity.provenance.map((p) => ({ chapter: p.chapter }))),
         disposition: options.disposition ?? "minor_reference",
         source: "manual_demotion",
         status: "minor",

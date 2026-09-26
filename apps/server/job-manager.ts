@@ -188,6 +188,14 @@ function logFailure(job: Job, diagnostic: ErrorDiagnostic) { logger.error({ even
 
 function diagnosticFromResult(result: unknown): ErrorDiagnostic | undefined {
   if (!result || typeof result !== "object") return undefined;
+  const results = (result as { results?: unknown }).results;
+  for (const item of Array.isArray(results) ? results : []) {
+    if (!item || typeof item !== "object" || (item as { status?: unknown }).status !== "failed") continue;
+    const value = item as { diagnostic?: unknown; error?: unknown; chapter?: unknown };
+    const parsed = errorDiagnosticSchema.safeParse(value.diagnostic);
+    if (parsed.success) return parsed.data;
+    if (typeof value.error === "string") return createErrorDiagnostic(new Error(value.error), { chapter: typeof value.chapter === "number" ? value.chapter : undefined });
+  }
   const chapters = (result as { chapters?: unknown }).chapters;
   for (const value of chapters && typeof chapters === "object" ? Object.values(chapters) : []) {
     if (value && typeof value === "object" && "diagnostic" in value) {

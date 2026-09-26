@@ -15,6 +15,7 @@ import { defaultStory, loadStory } from "../../src/config/load-config.js";
 import { Story, storySchema } from "../../src/domain/story.js";
 import { createPipelineRuntime } from "../../src/pipeline/create-pipeline.js";
 import { ConfigurationError, ReconciliationError, RollbackFailure } from "../../src/pipeline/errors.js";
+import { createErrorDiagnostic, type ErrorDiagnostic } from "../../src/errors/diagnostic.js";
 import { applyPreviewProfile } from "../../src/preview/profile.js";
 import { PreviewRunner } from "../../src/preview/preview-runner.js";
 import { previewPresetSchema } from "../../src/preview/types.js";
@@ -285,7 +286,7 @@ export class StudioOperations {
         }
         throw new ConfigurationError(`${batchPlan.summary.blockedOperations} stage operation${batchPlan.summary.blockedOperations === 1 ? " is" : "s are"} blocked by unavailable prerequisites. Select prerequisite mode and preview again.`);
       }
-      const sources = new Map(selected.map((item) => [item.chapter, item])); const results: Array<{ chapter: number; status: "completed" | "reused" | "blocked" | "failed"; plan: (typeof batchPlan.chapters)[number]; error?: string }> = [];
+      const sources = new Map(selected.map((item) => [item.chapter, item])); const results: Array<{ chapter: number; status: "completed" | "reused" | "blocked" | "failed"; plan: (typeof batchPlan.chapters)[number]; error?: string; diagnostic?: ErrorDiagnostic }> = [];
       for (const plan of batchPlan.chapters) {
         const chapter = plan.chapter; const source = sources.get(chapter)!;
         control.update({ type: "stage-execution.chapter.planned", chapter, plan });
@@ -298,9 +299,9 @@ export class StudioOperations {
           results.push({ chapter, status: "completed", plan });
         } catch (error) {
           if (!input.continueOnError) throw error;
-          const message = error instanceof Error ? error.message : String(error);
-          results.push({ chapter, status: "failed", plan, error: message });
-          control.update({ type: "stage-execution.chapter.failed", chapter, error: message });
+          const diagnostic = createErrorDiagnostic(error, { chapter });
+          results.push({ chapter, status: "failed", plan, error: diagnostic.summary, diagnostic });
+          control.update({ type: "stage-execution.chapter.failed", chapter, error: diagnostic.summary });
         }
       }
       invalidateCatalogCache(this.root, slug); await invalidateChapterStatusDerivedReads(this.root, slug); await invalidateStoryBibleDerivedReads(this.root, slug);

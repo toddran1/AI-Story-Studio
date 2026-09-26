@@ -294,8 +294,9 @@ describe("web service layer", () => {
     const imported = await operations.importInspection("stage-failures-story", inspection.id);
     const finished = await waitForJob(jobs, (operations.startStageExecution(imported.story.slug, { chapters: [1], stages: ["translation"], mode: "prerequisites", force: true, continueOnError: true }) as Job).id);
     expect(finished.status).toBe("failed");
-    expect(finished.error).toContain("1 of 1 chapters failed");
-    expect(finished.result).toMatchObject({ status: "completed_with_errors", summary: { completedOperations: 0, failedChapters: 1 }, results: [{ chapter: 1, status: "failed", error: "QA did not pass" }] });
+    expect(finished.error).toBe("QA did not pass");
+    expect(finished.diagnostic).toMatchObject({ chapter: 1, summary: "QA did not pass" });
+    expect(finished.result).toMatchObject({ status: "completed_with_errors", summary: { completedOperations: 0, failedChapters: 1 }, results: [{ chapter: 1, status: "failed", error: "QA did not pass", diagnostic: { chapter: 1, summary: "QA did not pass" } }] });
     await operations.close();
   });
 

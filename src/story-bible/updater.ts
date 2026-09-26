@@ -3,6 +3,7 @@ import { fingerprint } from "../utils/hash.js";
 import { CanonicalOverlay } from "./canonical.js";
 import { classifyEntityPersistenceSync } from "./granularity.js";
 import { mergeEntityVisualEvidence, resolveEntityVisualEvidence } from "./visual-evidence.js";
+import { boundedMinorReferenceEvidence } from "./minor-reference-evidence.js";
 
 type Named = { canonicalEnglishName: string; originalName: string; description: string; firstSeenChapter: number; lastSeenChapter: number; aliases?: string[]; gender?: string; pronouns?: string[] };
 
@@ -173,9 +174,7 @@ function mergeCanonicalHistory(existing: StoryBible, update: StoryBibleUpdate, c
       if (existingRef) {
         existingRef.lastSeenChapter = Math.max(existingRef.lastSeenChapter ?? chapter, chapter);
         existingRef.occurrenceCount = (existingRef.occurrenceCount ?? 1) + 1;
-        if (!existingRef.sourceEvidence.some((e) => e.chapter === chapter)) {
-          existingRef.sourceEvidence.push({ chapter });
-        }
+        existingRef.sourceEvidence = boundedMinorReferenceEvidence([...existingRef.sourceEvidence, { chapter }]);
         if ((existingRef.occurrenceCount ?? 1) >= 5 && !existingRef.parentEntityId) {
           existingRef.status = "promotion_candidate";
         }
