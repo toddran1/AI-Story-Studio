@@ -29,6 +29,38 @@ function mergeNamed(existing: Named[], incoming: Named[]): Named[] {
   return output;
 }
 
+const canonicalCategories: Array<[NonNullable<CanonicalEntity["sourceBucket"]>, EntityType]> = [
+  ["characters", "character"],
+  ["factions", "organization"],
+  ["locations", "location"],
+  ["abilities", "ability"],
+  ["items", "item"],
+  ["classes", "concept"],
+  ["ranks", "concept"],
+  ["creatures", "concept"],
+  ["systemTerms", "concept"],
+];
+
+const canonicalCategoryTypeMap: Record<NonNullable<CanonicalEntity["sourceBucket"]>, EntityType> = Object.fromEntries(
+  canonicalCategories,
+) as Record<NonNullable<CanonicalEntity["sourceBucket"]>, EntityType>;
+
+function expectedTypeForVisualField(field: string): EntityType | undefined {
+  const prefix = field.split(".")[0];
+  if (prefix === "creature") return "concept";
+  if (
+    prefix === "character" ||
+    prefix === "location" ||
+    prefix === "item" ||
+    prefix === "organization" ||
+    prefix === "ability" ||
+    prefix === "concept"
+  ) {
+    return prefix;
+  }
+  return undefined;
+}
+
 export function mergeStoryBible(
   existing: StoryBible,
   update: StoryBibleUpdate,
@@ -41,8 +73,12 @@ export function mergeStoryBible(
   const legacyIdentity = new EntityIdentityIndex(existing.canonicalEntities);
   addOverlayIdentityNames(legacyIdentity, existing.canonicalEntities, overlay);
   for (const key of ["characters", "locations", "factions", "abilities", "classes", "ranks", "items", "creatures", "systemTerms"] as const) {
+    const expectedType = canonicalCategoryTypeMap[key];
     const incoming = (update[key] as Named[]).flatMap((item) => {
-      const resolution = legacyIdentity.resolve([item.canonicalEnglishName, item.originalName, ...(item.aliases ?? [])]);
+      const resolution = legacyIdentity.resolve(
+        [item.canonicalEnglishName, item.originalName, ...(item.aliases ?? [])],
+        { expectedType },
+      );
       if (resolution.status === "ambiguous" || (resolution.status === "none" && item.identityEvidence?.seenInNarration && !item.identityEvidence.seenInTranslation && !item.identityEvidence.seenInSource)) return [];
       if (resolution.status === "matched" && narrationMatchKinds.has(resolution.matchKind)) return [{ ...item, canonicalEnglishName: overlay?.overrides?.[resolution.entity.id]?.canonicalName ?? resolution.entity.canonicalName, originalName: resolution.entity.originalName || item.originalName }];
       return [item];
@@ -54,7 +90,8 @@ export function mergeStoryBible(
   const visualIdentity = new EntityIdentityIndex(canonical.entities);
   addOverlayIdentityNames(visualIdentity, canonical.entities, overlay);
   for (const observation of update.visualObservations) {
-    const resolution = visualIdentity.resolve([observation.entity]);
+    const expectedType = expectedTypeForVisualField(observation.field);
+    const resolution = visualIdentity.resolve([observation.entity], { expectedType });
     if (resolution.status !== "matched") continue;
     const entity = resolution.entity;
     if (observation.field.split(".")[0] !== entity.type && !(observation.field.startsWith("creature.") && entity.type === "concept")) continue;
@@ -138,7 +175,6 @@ export function contextBeforeChapter(bible: StoryBible, chapter: number, recentS
   return result;
 }
 
-const canonicalCategories: Array<[NonNullable<CanonicalEntity["sourceBucket"]>, EntityType]> = [["characters", "character"], ["factions", "organization"], ["locations", "location"], ["abilities", "ability"], ["items", "item"], ["classes", "concept"], ["ranks", "concept"], ["creatures", "concept"], ["systemTerms", "concept"]];
 function mergeCanonicalHistory(existing: StoryBible, update: StoryBibleUpdate, chapter: number, overlay?: CanonicalOverlay) {
   const entities = structuredClone(existing.canonicalEntities);
   const identityIndex = new EntityIdentityIndex(entities);
@@ -148,7 +184,7 @@ function mergeCanonicalHistory(existing: StoryBible, update: StoryBibleUpdate, c
   let minorReferences = structuredClone(existing.minorReferences ?? []);
 
   const ensure = (name: string, type: EntityType = "concept", originalName = "", description = "", aliases: string[] = [], status = "unknown", confidence?: number) => {
-    const resolution = identityIndex.resolve([name, originalName, ...aliases]);
+    const resolution = identityIndex.resolve([name, originalName, ...aliases], { expectedType: type });
     if (resolution.status === "ambiguous") return undefined;
     let entity = resolution.status === "matched" ? resolution.entity : undefined;
     if (!entity) {
@@ -177,7 +213,7 @@ function mergeCanonicalHistory(existing: StoryBible, update: StoryBibleUpdate, c
       const keys = new Set([raw.canonicalEnglishName, raw.originalName, ...(raw.aliases ?? [])].map(normalizeName).filter(Boolean));
       const suppressed = overlay?.suppressions?.some((item) => item.entityId === stableId("ent", { type, identity: normalizeName(raw.originalName || raw.canonicalEnglishName) }) || [item.name, item.originalName, item.snapshot.preferredNarrationName, item.snapshot.localizedNaming?.fullName, item.snapshot.localizedNaming?.shortName].some((value) => value && keys.has(normalizeName(value))));
       if (suppressed) continue;
-      const resolution = identityIndex.resolve([raw.canonicalEnglishName, raw.originalName, ...(raw.aliases ?? [])]);
+      const resolution = identityIndex.resolve([raw.canonicalEnglishName, raw.originalName, ...(raw.aliases ?? [])], { expectedType: type });
       if (resolution.status === "matched") {
         logger.debug({ event: "story_bible.identity_resolved", chapter, extractedName: raw.canonicalEnglishName, entityId: resolution.entity.id, matchKind: resolution.matchKind });
         const entity = ensure(raw.canonicalEnglishName, type, raw.originalName, raw.description, raw.aliases ?? [], raw.status ?? "unknown", raw.confidence);

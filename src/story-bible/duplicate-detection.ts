@@ -1,6 +1,13 @@
 import { CanonicalEntity, EntityType, StoryBible } from "../domain/story-bible.js";
-import { normalizeEntityName } from "./updater.js";
-import { narrationRenderings } from "./entity-identity.js";
+import {
+  normalizeEntityName,
+  narrationRenderings,
+  PERSON_HONORIFICS,
+  INCOMPATIBLE_TYPE_PAIRS,
+  areTypesIncompatible,
+} from "./entity-identity.js";
+
+export { PERSON_HONORIFICS, INCOMPATIBLE_TYPE_PAIRS, areTypesIncompatible };
 
 export type DuplicateSuggestion = {
   id: string;
@@ -25,26 +32,6 @@ export interface DuplicateContext {
   bible?: StoryBible;
   relationships?: StoryBible["canonicalRelationships"];
 }
-
-export const PERSON_HONORIFICS = new Set([
-  "doctor",
-  "dr",
-  "elder",
-  "master",
-  "young master",
-  "grandmaster",
-  "lord",
-  "lady",
-  "sir",
-  "miss",
-  "mr",
-  "mrs",
-  "madam",
-  "patriarch",
-  "matriarch",
-  "daoist",
-  "abbot",
-]);
 
 export const IDENTIFIER_QUALIFIERS = new Set([
   "encyclopedia",
@@ -149,18 +136,6 @@ const NUMBER_WORDS: Record<string, number> = {
   thousand: 1000,
 };
 
-const INCOMPATIBLE_TYPE_PAIRS: Array<[EntityType, EntityType]> = [
-  ["character", "location"],
-  ["character", "item"],
-  ["character", "ability"],
-  ["organization", "location"],
-  ["ability", "item"],
-  ["location", "ability"],
-  ["location", "item"],
-  ["organization", "item"],
-  ["organization", "ability"],
-];
-
 /**
  * Tokenizes a name into lowercase alphanumeric words.
  */
@@ -237,20 +212,6 @@ function stripHonorificTokens(tokens: string[]): { honorifics: string[]; coreTok
   return { honorifics, coreTokens };
 }
 
-function cleanRawName(value: string | undefined | null): string {
-  return value ? value.normalize("NFKD").toLocaleLowerCase().replace(/[^\p{L}\p{N}]/gu, "") : "";
-}
-
-/**
- * Checks if two entity types are strictly incompatible.
- */
-export function areTypesIncompatible(typeA: EntityType, typeB: EntityType): boolean {
-  if (typeA === typeB) return false;
-  return INCOMPATIBLE_TYPE_PAIRS.some(
-    ([t1, t2]) => (typeA === t1 && typeB === t2) || (typeA === t2 && typeB === t1),
-  );
-}
-
 /**
  * Evaluates duplicate scoring and candidate classification between two canonical entities.
  */
@@ -281,8 +242,8 @@ export function duplicateScore(
   }
 
   // Extract raw clean names (without title stripping)
-  const aRawCanonical = cleanRawName(a.canonicalName);
-  const bRawCanonical = cleanRawName(b.canonicalName);
+  const aRawCanonical = normalizeEntityName(a.canonicalName);
+  const bRawCanonical = normalizeEntityName(b.canonicalName);
 
   // Extract all names (with title stripping)
   const aNormCanonical = normalizeEntityName(a.canonicalName);

@@ -7,6 +7,7 @@ import { storyBibleInstructions } from "./prompts.js";
 import { STORY_BIBLE_PROMPT_VERSION } from "./prompts.js";
 import { fingerprint } from "../utils/hash.js";
 import { resolveEntityVisualEvidence } from "./visual-evidence.js";
+import { allIdentityRenderings, containsIdentityRendering } from "./entity-identity.js";
 
 export function storyBibleExtractionFingerprint(input: { source: string; translation: string; narration: string; config: StageModelConfig; bible: StoryBible; promptVersion?: string }) {
   return fingerprint({ source: fingerprint(input.source), translation: fingerprint(input.translation), narration: fingerprint(input.narration), config: input.config, prompt: input.promptVersion ?? STORY_BIBLE_PROMPT_VERSION, context: input.bible });
@@ -28,14 +29,21 @@ export async function extractStoryBible(provider: LLMProvider, config: StageMode
   });
   const normalizedSource = narration.replace(/\s+/g, " ").toLocaleLowerCase();
   result.value.visualObservations = (result.value.visualObservations ?? []).filter((observation) => normalizedSource.includes(observation.excerpt.replace(/\s+/g, " ").toLocaleLowerCase()));
-  const containsIdentity = (text: string, names: Array<string | undefined>) => {
-    const haystack = text.normalize("NFKD").toLocaleLowerCase();
-    return names.some((name) => name && name.length > 1 && haystack.includes(name.normalize("NFKD").toLocaleLowerCase()));
-  };
+  const hasIdentityEvidence = (text: string, names: Array<string | undefined | null>) =>
+    names.some((name) => Boolean(name && containsIdentityRendering(text, name)));
+
   for (const category of ["characters", "locations", "factions", "abilities", "classes", "ranks", "items", "creatures", "systemTerms"] as const) {
     for (const entity of result.value[category]) {
-      const names = [entity.canonicalEnglishName, entity.originalName, ...(category === "characters" ? (entity as typeof result.value.characters[number]).aliases : [])];
-      entity.identityEvidence = { seenInSource: containsIdentity(source, names), seenInTranslation: containsIdentity(translation, names), seenInNarration: containsIdentity(narration, names) };
+      const names = [
+        entity.canonicalEnglishName,
+        entity.originalName,
+        ...(category === "characters" ? (entity as typeof result.value.characters[number]).aliases : []),
+      ];
+      entity.identityEvidence = {
+        seenInSource: hasIdentityEvidence(source, names),
+        seenInTranslation: hasIdentityEvidence(translation, names),
+        seenInNarration: hasIdentityEvidence(narration, names),
+      };
     }
   }
   return result;
@@ -45,11 +53,21 @@ const visualOnlySchema = z.object({ visualObservations: z.array(extractedVisualO
 
 /** Explicit paid backfill path. Normal chronological rebuilds never call it. */
 export async function extractChapterVisualObservations(provider: LLMProvider, config: StageModelConfig, chapter: number, narration: string, bible: StoryBible) {
-  const lower = narration.toLocaleLowerCase();
-  const relevant = bible.canonicalEntities.filter((entity) => [entity.canonicalName, entity.originalName, ...entity.aliases].some((name) => name && lower.includes(name.toLocaleLowerCase()))).map((entity) => ({ id: entity.id, name: entity.canonicalName, originalName: entity.originalName, aliases: entity.aliases, type: entity.type }));
+  const relevant = bible.canonicalEntities
+    .filter((entity) => allIdentityRenderings(entity).some((name) => containsIdentityRendering(narration, name)))
+    .map((entity) => ({
+      id: entity.id,
+      name: entity.canonicalName,
+      originalName: entity.originalName,
+      aliases: entity.aliases,
+      preferredNarrationName: entity.preferredNarrationName,
+      type: entity.type,
+    }));
   const result = await provider.generateStructured({
-    model: config.model, schemaName: "story_bible_visual_backfill", schema: visualOnlySchema,
-    instructions: `${storyBibleInstructions} Return only visualObservations. An excerpt must be an exact contiguous quote from the chapter. Use the canonical entity name from the supplied entity list. Do not infer unstated colors, body traits, outfits, or permanence.`,
+    model: config.model,
+    schemaName: "story_bible_visual_backfill",
+    schema: visualOnlySchema,
+    instructions: `${storyBibleInstructions} Return only visualObservations. An excerpt must be an exact contiguous quote from the chapter. Use the canonical entity name from the supplied entity list (narration may use authorized narration renderings such as preferred narration names, but visual observations must cite the canonical entity name). Do not infer unstated colors, body traits, outfits, or permanence.`,
     input: JSON.stringify({ chapter, canonicalEntities: relevant, polishedChapter: narration }),
   });
   const normalizedSource = narration.replace(/\s+/g, " ").toLocaleLowerCase();
