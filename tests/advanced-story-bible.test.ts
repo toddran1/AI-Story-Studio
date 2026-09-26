@@ -167,7 +167,7 @@ describe("advanced Story Bible continuity", () => {
   });
 
   it("learns aliases and provenance while canonical records are locked", () => {
-    let bible = mergeStoryBible(emptyStoryBible(), update(1, { characters: [named("Su Ming", 1)], relationships: [{ subject: "Su Ming", object: "Lin Yue", relationship: "friend", firstSeenChapter: 1, lastSeenChapter: 1, locked: true }] }), 1); const su = bible.canonicalEntities.find((item) => item.canonicalName === "Su Ming")!; su.canonicalNameLocked = true;
+    let bible = mergeStoryBible(emptyStoryBible(), update(1, { characters: [named("Su Ming", 1), named("Lin Yue", 1)], relationships: [{ subject: "Su Ming", object: "Lin Yue", relationship: "friend", firstSeenChapter: 1, lastSeenChapter: 1, locked: true }] }), 1); const su = bible.canonicalEntities.find((item) => item.canonicalName === "Su Ming")!; su.canonicalNameLocked = true;
     bible = mergeStoryBible(bible, update(2, { characters: [named("Doctor Su", 2, { aliases: ["Su Ming"] })], relationships: [{ subject: "Su Ming", object: "Lin Yue", relationship: "friend", firstSeenChapter: 2, lastSeenChapter: 2 }] }), 2);
     expect(bible.canonicalEntities.find((item) => item.id === su.id)?.aliases).toContain("Doctor Su"); expect(bible.canonicalRelationships[0]?.provenance.map((item) => item.chapter)).toEqual([1, 2]);
   });

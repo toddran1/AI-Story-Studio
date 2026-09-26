@@ -8,6 +8,7 @@ import { readJsonIfExists } from "../storage/story-files.js";
 import { normalizeEntityName } from "./updater.js";
 import { rebuildStoryBibleBeforeChapter } from "./rebuild.js";
 import { boundedMinorReferenceEvidence } from "./minor-reference-evidence.js";
+import { effectiveEntityIdentity } from "./entity-identity.js";
 
 const overrideSchema = z.object({ canonicalName: z.string().trim().min(1).max(300).optional(), type: canonicalEntitySchema.shape.type.optional(), aliases: z.array(z.string().trim().min(1).max(300)).max(100).optional(), canonicalNameLocked: z.boolean().optional(), notes: z.string().max(10_000).optional(), status: z.string().max(500).optional(), preferredNarrationName: z.string().trim().min(1).max(300).nullable().optional(), aliasNarrationRules: canonicalEntitySchema.shape.aliasNarrationRules.optional(), localizedNaming: localizedNamingSchema.nullable().optional(), pronunciation: canonicalEntitySchema.shape.pronunciation.unwrap().nullable().optional(), visualProfilePolicy: canonicalEntitySchema.shape.visualProfilePolicy.optional(), snapshot: canonicalEntitySchema.optional(), updatedAt: z.string() });
 const manualMergeSchema = z.object({ id: z.string().uuid(), targetEntityId: z.string(), sourceEntityIds: z.array(z.string()).min(1), reason: z.string().min(1), kind: z.enum(["standard", "narration_rendering_duplicate"]).default("standard"), createdAt: z.string(), undoneAt: z.string().optional() });
@@ -413,17 +414,18 @@ export function namingMappingConflict(target: CanonicalEntity, source: Canonical
 }
 
 function applyOverride(entity: CanonicalEntity, value: Partial<z.infer<typeof overrideSchema>>) {
-  if (value.type) entity.type = value.type;
-  if (value.canonicalName) { if (normalizeEntityName(value.canonicalName) !== normalizeEntityName(entity.canonicalName)) entity.aliases = unique([entity.canonicalName, ...entity.aliases]); entity.canonicalName = value.canonicalName; }
-  if (value.aliases) entity.aliases = unique(value.aliases.filter((name) => normalizeEntityName(name) !== normalizeEntityName(entity.canonicalName)));
+  const identity = effectiveEntityIdentity(entity, value);
+  entity.type = identity.type;
+  entity.canonicalName = identity.canonicalName;
+  entity.aliases = identity.aliases;
+  entity.preferredNarrationName = identity.preferredNarrationName;
+  entity.localizedNaming = identity.localizedNaming;
+  entity.aliasNarrationRules = identity.aliasNarrationRules;
   if (value.canonicalNameLocked !== undefined) entity.canonicalNameLocked = value.canonicalNameLocked;
   if (value.notes !== undefined) entity.notes = value.notes;
   if (value.status !== undefined) entity.status = value.status;
-  if (value.preferredNarrationName !== undefined) entity.preferredNarrationName = value.preferredNarrationName ?? undefined;
-  if (value.localizedNaming !== undefined) entity.localizedNaming = value.localizedNaming ?? undefined;
   if (value.pronunciation !== undefined) entity.pronunciation = value.pronunciation ?? undefined;
   if (value.visualProfilePolicy !== undefined) entity.visualProfilePolicy = value.visualProfilePolicy;
-  if (value.aliasNarrationRules) { const aliases = new Set(entity.aliases.map(normalizeEntityName)); entity.aliasNarrationRules = uniqueRules(value.aliasNarrationRules.filter((rule) => aliases.has(normalizeEntityName(rule.alias)))); }
   entity.origin = "manual";
   return entity;
 }

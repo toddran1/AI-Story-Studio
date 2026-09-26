@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import { emptyStoryBible, storyBibleUpdateSchema } from "../src/domain/story-bible.js";
 import {
   EntityIdentityIndex,
+  buildEffectiveIdentityIndex,
+  effectiveEntityIdentity,
   containsIdentityRendering,
   normalizeEntityName,
 } from "../src/story-bible/entity-identity.js";
@@ -39,6 +41,72 @@ function established() {
 }
 
 describe("Story Bible narration rendering identity", () => {
+  it("indexes only effective manual names and type, matching the applied overlay", async () => {
+    const bible = established();
+    const entity = bible.canonicalEntities[0]!;
+    entity.aliases = ["Snow", "Brother Su"];
+    const root = await mkdtemp(join(tmpdir(), "identity-effective-"));
+    const override = { aliases: [], preferredNarrationName: null, localizedNaming: { locale: "en-US" as const, fullName: "Lucina Luo", shortName: "Lucina", usageMode: "ai_contextual" as const }, aliasNarrationRules: [], type: "item" as const, updatedAt: new Date().toISOString() };
+    const overlay = canonicalOverlaySchema.parse({ version: 1, overrides: { [entity.id]: override } });
+    const before = JSON.stringify(entity);
+    const index = buildEffectiveIdentityIndex(bible.canonicalEntities, overlay);
+    for (const oldName of ["Snow", "Brother Su", "Lucine Luo", "Lucine", "Brother Ash"]) expect(index.resolve([oldName], { expectedType: "item" }).status).toBe("none");
+    for (const currentName of ["Luo Xiaoxue", "Lucina Luo", "Lucina"]) expect(index.resolve([currentName], { expectedType: "item" }).status).toBe("matched");
+    expect(index.resolve(["Lucina"], { expectedType: "character" }).status).toBe("none");
+    expect(JSON.stringify(entity)).toBe(before);
+    await atomicWriteJson(storyPaths(root, "demo-story", 1).bibleCanonicalManual, overlay);
+    const applied = (await applyCanonicalOverlay(root, "demo-story", bible)).bible.canonicalEntities.find((item) => item.id === entity.id)!;
+    const view = effectiveEntityIdentity(entity, override);
+    for (const field of ["type", "canonicalName", "aliases", "preferredNarrationName", "localizedNaming", "aliasNarrationRules"] as const) expect(view[field]).toEqual(applied[field]);
+    expect(buildEffectiveIdentityIndex(bible.canonicalEntities, { suppressions: [{ entityId: entity.id }] }).resolve(["Lucine Luo"]).status).toBe("none");
+  });
+
+  it("keeps relationship and timeline names reference-only", () => {
+    const bible = established();
+    const next = mergeStoryBible(bible, update(2, [], {
+      relationships: [{ subject: "Mystery Person", object: "Asher", relationship: "ally", firstSeenChapter: 2, lastSeenChapter: 2 }],
+      timelineEvents: [
+        { entity: "Mystery Person", type: "appearance", summary: "Unknown appears", chapter: 2 },
+        { entity: "Asher", relatedEntity: "Mystery Person", type: "revelation", summary: "Asher learns", chapter: 2 },
+      ],
+    }), 2);
+    expect(next.canonicalEntities).toHaveLength(2);
+    expect(next.canonicalRelationships).toHaveLength(0);
+    expect(next.entityTimeline.some((item) => item.summary === "Unknown appears")).toBe(false);
+    expect(next.entityTimeline.find((item) => item.summary === "Asher learns")?.relatedEntityId).toBeUndefined();
+    const withTyped = mergeStoryBible(bible, update(2, ["Jane"], { relationships: [{ subject: "Jane", object: "Asher", relationship: "ally", firstSeenChapter: 2, lastSeenChapter: 2 }] }), 2);
+    expect(withTyped.canonicalEntities.some((item) => item.canonicalName === "Jane")).toBe(true);
+    expect(withTyped.canonicalRelationships).toHaveLength(1);
+  });
+
+  it("does not revive a cleared preferred name through a relationship", () => {
+    const bible = established();
+    const id = bible.canonicalEntities[0]!.id;
+    bible.canonicalEntities[0]!.localizedNaming = undefined;
+    const overlay = canonicalOverlaySchema.parse({ version: 1, overrides: { [id]: { preferredNarrationName: null, updatedAt: new Date().toISOString() } } });
+    const next = mergeStoryBible(bible, update(2, [], { relationships: [{ subject: "Lucine Luo", object: "Asher", relationship: "ally", firstSeenChapter: 2, lastSeenChapter: 2 }] }), 2, { overlay });
+    expect(next.canonicalEntities).toHaveLength(2);
+    expect(next.canonicalRelationships).toHaveLength(0);
+    expect(buildEffectiveIdentityIndex(next.canonicalEntities, overlay).resolve(["Lucine Luo"]).status).toBe("none");
+  });
+
+  it("does not promote same-chapter minor or ambiguous names through references", () => {
+    const bible = established();
+    bible.canonicalEntities[0]!.preferredNarrationName = "Shadow";
+    bible.canonicalEntities[1]!.preferredNarrationName = "Shadow";
+    const next = mergeStoryBible(bible, update(2, ["Mystery Guard"], {
+      characters: [{ canonicalEnglishName: "Mystery Guard", originalName: "", firstSeenChapter: 2, lastSeenChapter: 2, identityEvidence: { seenInSource: false, seenInTranslation: false, seenInNarration: true } }],
+      relationships: [
+        { subject: "Mystery Guard", object: "Asher", relationship: "protects", firstSeenChapter: 2, lastSeenChapter: 2 },
+        { subject: "Shadow", object: "Asher", relationship: "ally", firstSeenChapter: 2, lastSeenChapter: 2 },
+      ],
+      timelineEvents: [{ entity: "Shadow", type: "appearance", summary: "Shadow appears", chapter: 2 }],
+    }), 2);
+    expect(next.canonicalEntities).toHaveLength(2);
+    expect(next.minorReferences.some((item) => item.name === "Mystery Guard")).toBe(true);
+    expect(next.canonicalRelationships).toHaveLength(0);
+    expect(next.entityTimeline.some((item) => item.summary === "Shadow appears")).toBe(false);
+  });
   it("indexes canonical and narration names separately and reports ambiguity", () => {
     const bible = established();
     const index = new EntityIdentityIndex(bible.canonicalEntities);

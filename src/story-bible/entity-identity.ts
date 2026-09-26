@@ -148,6 +148,61 @@ export function allIdentityRenderings(entity: CanonicalEntity): string[] {
   return [...new Set([...canonical, ...narration])];
 }
 
+export type IdentityOverride = Partial<Pick<CanonicalEntity, "canonicalName" | "type" | "aliases" | "aliasNarrationRules">> & {
+  preferredNarrationName?: string | null;
+  localizedNaming?: CanonicalEntity["localizedNaming"] | null;
+};
+
+export type IdentityOverlay = {
+  overrides?: Record<string, IdentityOverride>;
+  suppressions?: Array<{ entityId: string }>;
+  demotions?: Array<{ entityId: string }>;
+  merges?: Array<{ targetEntityId: string; sourceEntityIds: string[]; undoneAt?: string }>;
+};
+
+/** Match the identity fields produced by the canonical manual overlay. */
+export function effectiveEntityIdentity(entity: CanonicalEntity, override?: IdentityOverride): CanonicalEntity {
+  if (!override) return { ...entity };
+  const view = { ...entity };
+  if (override.type !== undefined) view.type = override.type;
+  if (override.canonicalName) {
+    if (normalizeEntityName(override.canonicalName) !== normalizeEntityName(view.canonicalName)) {
+      view.aliases = uniqueIdentityNames([view.canonicalName, ...view.aliases]);
+    }
+    view.canonicalName = override.canonicalName;
+  }
+  if (override.aliases !== undefined) {
+    view.aliases = uniqueIdentityNames(override.aliases.filter((name) => normalizeEntityName(name) !== normalizeEntityName(view.canonicalName)));
+  }
+  if (override.preferredNarrationName !== undefined) view.preferredNarrationName = override.preferredNarrationName ?? undefined;
+  if (override.localizedNaming !== undefined) view.localizedNaming = override.localizedNaming ?? undefined;
+  if (override.aliasNarrationRules !== undefined) {
+    const aliases = new Set(view.aliases.map(normalizeEntityName));
+    view.aliasNarrationRules = [...new Map(override.aliasNarrationRules.filter((rule) => aliases.has(normalizeEntityName(rule.alias))).map((rule) => [normalizeEntityName(rule.alias), rule])).values()];
+  }
+  return view;
+}
+
+function uniqueIdentityNames(names: string[]): string[] {
+  const seen = new Set<string>();
+  return names.filter((name) => {
+    const key = normalizeEntityName(name);
+    if (!key || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+export function buildEffectiveIdentityIndex(entities: CanonicalEntity[], overlay?: IdentityOverlay): EntityIdentityIndex {
+  const available = new Set(entities.map((entity) => entity.id));
+  const inactive = new Set([
+    ...(overlay?.suppressions ?? []).map((item) => item.entityId),
+    ...(overlay?.demotions ?? []).map((item) => item.entityId),
+    ...(overlay?.merges ?? []).filter((item) => !item.undoneAt && available.has(item.targetEntityId)).flatMap((item) => item.sourceEntityIds),
+  ]);
+  return new EntityIdentityIndex(entities.filter((entity) => !inactive.has(entity.id)).map((entity) => effectiveEntityIdentity(entity, overlay?.overrides?.[entity.id])));
+}
+
 const CJK_REGEX = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u;
 
 function escapeRegex(str: string): string {

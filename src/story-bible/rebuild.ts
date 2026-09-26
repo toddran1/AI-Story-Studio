@@ -19,7 +19,7 @@ export async function rebuildStoryBibleBeforeChapter(root: string, slug: string,
   const paths = storyPaths(root, slug, chapter); const chaptersDir = join(paths.story, "chapters");
   const overlayRaw = await readJsonIfExists(paths.bibleCanonicalManual);
   const parsedOverlay = overlayRaw ? canonicalOverlaySchema.safeParse(overlayRaw) : undefined;
-  const overlay = parsedOverlay?.success ? parsedOverlay.data : undefined;
+  const overlay = options.includeCanonicalOverlay === false ? undefined : parsedOverlay?.success ? parsedOverlay.data : undefined;
   const manifestRaw = await readJsonIfExists<SourceManifest>(paths.sourceManifest);
   const manifest = manifestRaw ? sourceManifestSchema.safeParse(manifestRaw) : undefined;
   let numbers: number[] = [];
