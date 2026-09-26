@@ -17,6 +17,7 @@ import { computeQaDependencyFingerprint, computeQaDependencyFingerprints, qaDepe
 import { QA_PROMPT_VERSION } from "./prompts.js";
 import { validateChapterQuality } from "./validator.js";
 import { runDeterministicQaChecks, type AcceptedContinuity } from "./deterministic.js";
+import { filterQaDetectionsForStory, qaPolicyPrompt } from "./policy.js";
 import { exceptionsPromptSection, filterExceptedFindings, listQaExceptions } from "./exceptions.js";
 import { loadStoryBibleWithCanonicalOverlay } from "../story-bible/canonical.js";
 import { authorizedNarrationNames } from "../narration/naming-preferences.js";
@@ -696,7 +697,7 @@ export async function recheckChapterQa(deps: {
   const currentDependencies = {
     source: fingerprint({ source, sourceLanguage: story.sourceLanguage, outputLanguage: story.outputLanguage }),
     translation: fingerprint(translation), narration: fingerprint(narration), context: qaContext.raw,
-    config, narrationSettings: { profanityMode: story.narrationSettings.profanityMode, includeChapterTitle: story.narrationSettings.includeChapterTitle },
+    config: { model: config, policy: story.qaPolicy }, narrationSettings: { profanityMode: story.narrationSettings.profanityMode, includeChapterTitle: story.narrationSettings.includeChapterTitle },
     prompt: QA_PROMPT_VERSION, mode: story.qaMode, ...deterministicDeps,
   };
   const dependencyFingerprints = computeQaDependencyFingerprints(currentDependencies);
@@ -712,7 +713,7 @@ export async function recheckChapterQa(deps: {
     source, translation, narration, context, authorizedNarrationEntities: effectiveNamingEntities.filter((entity) => entity.localizedNaming || entity.preferredNarrationName || entity.aliasNarrationRules.length),
     profanityMode: story.narrationSettings.profanityMode, includeChapterTitle: story.narrationSettings.includeChapterTitle !== false,
     previousFindingsContext,
-    exceptionsContext: exceptionsPromptSection(exceptions),
+    exceptionsContext: [exceptionsPromptSection(exceptions), qaPolicyPrompt(story)].filter(Boolean).join("\n"),
     mode: story.qaMode,
     recheck: { mode, changedContent },
   });
@@ -721,7 +722,7 @@ export async function recheckChapterQa(deps: {
   // recheck-produced stage compares current against a pipeline-produced one.
   const dependencyFingerprint = dependencyFingerprints.fingerprint;
   const fullContent = `${translation}\n\n${narration}`;
-  const detections = filterExceptedFindings(prepareQaDetections([...deterministic.detections, ...result.value.issues], {
+  const detections = filterExceptedFindings(prepareQaDetections(filterQaDetectionsForStory(story, [...deterministic.detections, ...result.value.issues]), {
     canonicalEntities: context.canonicalEntities, effectiveNamingEntities, translation, narration,
   }), exceptions);
   const { state, outcome } = buildQaState(previous, detections, {

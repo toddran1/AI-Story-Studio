@@ -163,7 +163,7 @@ async function currentFingerprint(root: string, story: ReturnType<typeof testSto
     translation: fingerprint(translation),
     narration: fingerprint(narration),
     context: contextRaw ?? emptyStoryBible(),
-    config: story.pipeline.qa,
+    config: { model: story.pipeline.qa, policy: story.qaPolicy },
     narrationSettings: { profanityMode: story.narrationSettings.profanityMode, includeChapterTitle: story.narrationSettings.includeChapterTitle },
     prompt: QA_PROMPT_VERSION,
     mode: story.qaMode,

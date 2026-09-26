@@ -217,7 +217,7 @@ export async function loadStoredQaDependencies(
     translation: fingerprint(translation),
     narration: fingerprint(narration),
     context: qaContext.raw,
-    config: story.pipeline.qa,
+    config: { model: story.pipeline.qa, policy: story.qaPolicy },
     narrationSettings: { profanityMode: story.narrationSettings.profanityMode, includeChapterTitle: story.narrationSettings.includeChapterTitle },
     prompt: QA_PROMPT_VERSION,
     mode: story.qaMode,

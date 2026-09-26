@@ -6,6 +6,12 @@ import { videoSettingsSchema } from "../video/config.js";
 import { artworkSettingsSchema, sceneSettingsSchema } from "../scenes/types.js";
 import { productionProfilesSchema } from "../production/types.js";
 import { storyNovelSourceSchema } from "../source/novel-provider.js";
+import { qaCategorySchema } from "./qa.js";
+
+export const qaPolicySchema = z.object({
+  disabledCategories: z.array(qaCategorySchema).default([]),
+  disabledRules: z.array(z.enum(["duplicateParagraph"])).default([]),
+}).default({ disabledCategories: [], disabledRules: [] });
 
 export const narrationSettingsSchema = z.object({
   profanityMode: z.enum(["preserve", "soften-strong"]).default("preserve"),
@@ -53,6 +59,7 @@ const rawStorySchema = z.object({
   }).default({ recentChapterSummaries: 5 }),
   narrationSettings: narrationSettingsSchema,
   qaMode: z.enum(["production", "thorough"]).default("production"),
+  qaPolicy: qaPolicySchema,
   audio: audioSettingsSchema,
   subtitles: subtitleSettingsSchema,
   video: videoSettingsSchema,

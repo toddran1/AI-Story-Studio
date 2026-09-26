@@ -237,7 +237,7 @@ export async function runDeterministicQaChecks(deps: {
   ]);
   const detections: FreshQaDetection[] = [
     ...namingDetections(namingEntities, translation, narration),
-    ...duplicateParagraphDetections(translation, narration),
+    ...(story.qaPolicy.disabledRules.includes("duplicateParagraph") ? [] : duplicateParagraphDetections(translation, narration)),
     ...speechReadinessDetections(story, narration),
     ...pronunciationDetections(pronunciationEntities, narration),
   ];

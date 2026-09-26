@@ -82,6 +82,7 @@ export type StoryConfig = {
   sources: Array<{ provider: string; bookId: string; url: string; title?: string; author?: string; addedAt: string; lastInspectedAt?: string; priority: number; enabled: boolean }>;
   context: { recentChapterSummaries: number };
   qaMode: "production" | "thorough";
+  qaPolicy: { disabledCategories: Array<"completeness" | "names" | "numbers" | "terminology" | "dialogue" | "storyConsistency" | "narrationFidelity">; disabledRules: Array<"duplicateParagraph"> };
   narrationSettings: { profanityMode: "preserve" | "soften-strong"; bleepStrongProfanity: boolean; includeChapterTitle?: boolean };
   audio: AudioSettings;
   subtitles: SubtitleSettings; video: VideoSettings; scenes: SceneSettings; artwork: ArtworkSettings;
