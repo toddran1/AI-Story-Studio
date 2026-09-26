@@ -11,6 +11,10 @@ import { masterStoredChapter } from "../src/audio/chapter-audio.js";
 import { storyPaths } from "../src/storage/paths.js";
 import { atomicWrite, atomicWriteJson } from "../src/storage/atomic-write.js";
 import * as atomicWriteModule from "../src/storage/atomic-write.js";
+
+const realAtomicWrite = atomicWriteModule.atomicWrite;
+const realAtomicWriteJson = atomicWriteModule.atomicWriteJson;
+
 import {
   acceptStoredChapterTtsSegment,
   loadChapterTtsQuality,
@@ -1274,4 +1278,514 @@ describe("TTS Reliability & Cost Hardening (Tests 26–35)", () => {
       expect(files).not.toContain("0099.mp3");
     });
   });
+
+  // Test 22: Full TTS Transactional Promotion
+  describe("Test 22: Full TTS Transactional Promotion", () => {
+    it("preserves all old canonical artifacts byte-for-byte when forced TTS rerun fails during segment promotion", async () => {
+      const root = await mkdtemp(join(tmpdir(), "tts-transactional-promotion-"));
+      const story = testStory();
+      const paths = storyPaths(root, story.slug, 1);
+
+      // Create a previously complete chapter with old canonical artifacts
+      const oldAudioRaw = new Uint8Array([0x10, 0x20, 0x30, 0x40]);
+      const oldSegment1 = new Uint8Array([0x10, 0x20]);
+      const oldSegment2 = new Uint8Array([0x30, 0x40]);
+      await atomicWrite(paths.audioRaw, oldAudioRaw);
+      await atomicWrite(join(paths.segments, "0001.mp3"), oldSegment1);
+      await atomicWrite(join(paths.segments, "0002.mp3"), oldSegment2);
+
+      const oldQuality = {
+        version: 1,
+        chapter: 1,
+        createdAt: "2026-01-01T00:00:00.000Z",
+        updatedAt: "2026-01-01T00:00:00.000Z",
+        provider: "fish",
+        model: "s2.1-pro",
+        status: "verified" as const,
+        verificationPolicy: { transcriber: "mock", maxRetries: 0, thresholds: {}, fingerprint: "fp-1" },
+        segments: [
+          { index: 0, expectedText: "Old seg 1", status: "verified" as const, attempts: [], finalAttempt: 0, issues: [] },
+          { index: 1, expectedText: "Old seg 2", status: "verified" as const, attempts: [], finalAttempt: 0, issues: [] },
+        ],
+      };
+      await atomicWriteJson(paths.ttsQuality, oldQuality);
+
+      const oldCensor = { version: 1, items: [{ kind: "speech" as const, speechIndex: 0 }] };
+      await atomicWriteJson(paths.censorManifest, oldCensor);
+
+      const now = new Date().toISOString();
+      const oldChapterMeta = chapterSchema.parse({
+        chapter: 1,
+        sourceLanguage: story.sourceLanguage,
+        outputLanguage: story.outputLanguage,
+        counts: { originalCharacters: 10, englishWords: 10, narrationWords: 10 },
+        createdAt: now,
+        updatedAt: now,
+        stages: {
+          ingestion: { status: "complete" },
+          translation: { status: "complete" },
+          narration: { status: "complete" },
+          storyBible: { status: "complete" },
+          tts: { status: "complete", outputFingerprint: await fileFingerprint(paths.audioRaw) },
+          audioMastering: { status: "pending" },
+          alignment: { status: "pending" },
+          subtitles: { status: "pending" },
+        },
+      });
+      await atomicWriteJson(paths.chapterMeta, oldChapterMeta);
+
+      const llm = new MockLLM("gemini", ["English translation", "English narration"]);
+      const newAudioRaw = new Uint8Array([0x99, 0x88, 0x77]);
+      const newSeg1 = new Uint8Array([0x99]);
+      const newSeg2 = new Uint8Array([0x88, 0x77]);
+      const mockTts: TTSProvider = {
+        name: "fish",
+        validateConfiguration: async () => {},
+        synthesize: async () => ({
+          audio: newAudioRaw,
+          segments: [newSeg1, newSeg2],
+          segmentTexts: ["New seg 1", "New seg 2"],
+        }),
+      };
+      const router = new LLMRouter(new Map([["gemini", llm], ["openai", llm], ["kimi", llm]]));
+      const pipeline = new ChapterPipeline(router, mockTts);
+      const input = join(root, "chapter.txt");
+      await writeFile(input, "第一章\n\n测试内容", "utf8");
+
+      // Inject failure when writing 0002.mp3 in canonical paths.segments
+      let failSegment2 = true;
+      const writeSpy = vi.spyOn(atomicWriteModule, "atomicWrite").mockImplementation(async (targetPath, data) => {
+        if (failSegment2 && String(targetPath) === join(paths.segments, "0002.mp3")) {
+          failSegment2 = false;
+          throw new Error("Simulated disk error during segment 2 promotion");
+        }
+        return realAtomicWrite(targetPath, data);
+      });
+
+      try {
+        await expect(pipeline.run({
+          root,
+          story,
+          chapter: 1,
+          inputPath: input,
+          force: "tts",
+          stopAfter: "tts",
+        })).rejects.toThrow(/Simulated disk error during segment 2 promotion/);
+
+        // Verify all old canonical artifacts remain byte-for-byte unchanged!
+        expect(new Uint8Array(await readFile(paths.audioRaw))).toEqual(oldAudioRaw);
+        expect(new Uint8Array(await readFile(join(paths.segments, "0001.mp3")))).toEqual(oldSegment1);
+        expect(new Uint8Array(await readFile(join(paths.segments, "0002.mp3")))).toEqual(oldSegment2);
+        expect(JSON.parse(await readFile(paths.ttsQuality, "utf8"))).toEqual(oldQuality);
+        expect(JSON.parse(await readFile(paths.censorManifest, "utf8"))).toEqual(oldCensor);
+
+        // Staging directory was cleaned up
+        const chapterFiles = await readdir(paths.chapterDir);
+        expect(chapterFiles.some((f) => f.startsWith(".tts-stage-"))).toBe(false);
+      } finally {
+        writeSpy.mockRestore();
+      }
+    });
+  });
+
+  // Test 23: Successful Full TTS Promotion
+  describe("Test 23: Successful Full TTS Promotion", () => {
+    it("stages and atomically commits the entire new TTS artifact set, removing orphans and staging area", async () => {
+      const root = await mkdtemp(join(tmpdir(), "tts-successful-promotion-"));
+      const story = testStory();
+      const paths = storyPaths(root, story.slug, 1);
+
+      // Pre-create orphan segment and old artifacts
+      await atomicWrite(join(paths.segments, "0099.mp3"), new Uint8Array([0xee, 0xee]));
+      await atomicWrite(paths.audioRaw, new Uint8Array([0x11, 0x11]));
+
+      const llm = new MockLLM("gemini", ["English translation", "English narration"]);
+      const newAudio = new Uint8Array([0x55, 0x66]);
+      const newSeg1 = new Uint8Array([0x55]);
+      const newSeg2 = new Uint8Array([0x66]);
+      const mockTts: TTSProvider = {
+        name: "fish",
+        validateConfiguration: async () => {},
+        synthesize: async () => ({
+          audio: newAudio,
+          segments: [newSeg1, newSeg2],
+          segmentTexts: ["Part 1", "Part 2"],
+          providerRequests: 2,
+        }),
+      };
+      const router = new LLMRouter(new Map([["gemini", llm], ["openai", llm], ["kimi", llm]]));
+      const pipeline = new ChapterPipeline(router, mockTts);
+      const input = join(root, "chapter.txt");
+      await writeFile(input, "第一章\n\n测试内容", "utf8");
+
+      await pipeline.run({
+        root,
+        story,
+        chapter: 1,
+        inputPath: input,
+        stopAfter: "tts",
+      });
+
+      // Assertions:
+      // - new audioRaw present
+      expect(new Uint8Array(await readFile(paths.audioRaw))).toEqual(newAudio);
+      // - only new canonical segments present, old orphan removed
+      const segments = (await readdir(paths.segments)).sort();
+      expect(segments).toEqual(["0001.mp3", "0002.mp3"]);
+      expect(new Uint8Array(await readFile(join(paths.segments, "0001.mp3")))).toEqual(newSeg1);
+      expect(new Uint8Array(await readFile(join(paths.segments, "0002.mp3")))).toEqual(newSeg2);
+      // - quality artifact correct
+      const quality = JSON.parse(await readFile(paths.ttsQuality, "utf8"));
+      expect(quality.segments).toHaveLength(2);
+      // - staging directory removed
+      const chapterFiles = await readdir(paths.chapterDir);
+      expect(chapterFiles.some((f) => f.startsWith(".tts-stage-"))).toBe(false);
+      // - ttsWorking removed only after success
+      expect(chapterFiles.includes("audio")).toBe(false);
+    });
+  });
+
+  // Test 24: Failure Preserves ttsWorking
+  describe("Test 24: Failure Preserves ttsWorking", () => {
+    it("preserves ttsWorking resumable checkpoints if promotion fails so a retry does not pay Fish again", async () => {
+      const root = await mkdtemp(join(tmpdir(), "tts-fail-preserves-working-"));
+      const story = testStory();
+      const paths = storyPaths(root, story.slug, 1);
+
+      let fetchCount = 0;
+      const fetcher = vi.fn(async () => {
+        fetchCount++;
+        return new Response(new Uint8Array([0x49, 0x44, 0x33, 0x00]), {
+          status: 200,
+          headers: { "Content-Type": "audio/mpeg", "x-request-id": `req-${fetchCount}` },
+        });
+      });
+      const fishProvider = new FishAudioProvider("test-key", fetcher as unknown as typeof fetch);
+
+      const llm = new MockLLM("gemini", ["English translation", "English narration"]);
+      const router = new LLMRouter(new Map([["gemini", llm], ["openai", llm], ["kimi", llm]]));
+      const pipeline = new ChapterPipeline(router, fishProvider);
+      const input = join(root, "chapter.txt");
+      await writeFile(input, "第一章\n\n测试内容", "utf8");
+
+      // Inject promotion failure when writing paths.audioRaw
+      let failPromotion = true;
+      const writeSpy = vi.spyOn(atomicWriteModule, "atomicWrite").mockImplementation(async (targetPath, data) => {
+        if (failPromotion && String(targetPath) === paths.audioRaw) {
+          throw new Error("Promotion write error on audioRaw");
+        }
+        return realAtomicWrite(targetPath, data);
+      });
+
+      try {
+        await expect(pipeline.run({
+          root,
+          story,
+          chapter: 1,
+          inputPath: input,
+          stopAfter: "tts",
+        })).rejects.toThrow("Promotion write error on audioRaw");
+
+        // Verify ttsWorking exists and has checkpoint files
+        const checkpointFiles = await readdir(paths.ttsWorking);
+        expect(checkpointFiles).toContain("0001.json");
+        expect(checkpointFiles).toContain("0001.mp3");
+
+        const firstRunFetchCount = fetchCount;
+        expect(firstRunFetchCount).toBeGreaterThan(0);
+
+        // Now retry without injected failure
+        failPromotion = false;
+        fetcher.mockClear();
+
+        await pipeline.run({
+          root,
+          story,
+          chapter: 1,
+          inputPath: input,
+          stopAfter: "tts",
+        });
+
+        // The retry reused the checkpoint without calling Fish again!
+        expect(fetcher).not.toHaveBeenCalled();
+        expect(await fileFingerprint(paths.audioRaw)).toBeDefined();
+      } finally {
+        writeSpy.mockRestore();
+      }
+    });
+  });
+
+  // Test 25: Quality Rollback Flag Bug
+  describe("Test 25: Quality Rollback Flag Bug", () => {
+    it("rolls back quality artifact and audio if syncChapterQualitySummary fails after quality write", async () => {
+      const root = await mkdtemp(join(tmpdir(), "tts-quality-rollback-bug-"));
+      const story = testStory();
+      const paths = storyPaths(root, story.slug, 1);
+
+      const oldSegmentAudio = new Uint8Array([0x11, 0x22, 0x33]);
+      const oldRawAudio = new Uint8Array([0xaa, 0xbb, 0xcc]);
+      await atomicWrite(join(paths.segments, "0001.mp3"), oldSegmentAudio);
+      await atomicWrite(paths.audioRaw, oldRawAudio);
+      const censorManifest = { version: 1, items: [{ kind: "speech" as const, speechIndex: 0 }] };
+      await atomicWriteJson(paths.censorManifest, censorManifest);
+
+      const oldQualityReport: TtsQualityReport = {
+        version: 1,
+        status: "needs_review",
+        retried: 0,
+        segments: [{ index: 0, expectedText: "Initial speech", status: "needs_review", issues: [], attempts: [], finalAttempt: 0 }],
+      };
+      await persistChapterTtsQuality({ root, story, chapter: 1, report: oldQualityReport, maxRetries: 0, transcriber: "mock" });
+      const oldQualityJson = await readFile(paths.ttsQuality, "utf8");
+
+      const now = new Date().toISOString();
+      const oldChapterMeta = chapterSchema.parse({
+        chapter: 1,
+        sourceLanguage: story.sourceLanguage,
+        outputLanguage: story.outputLanguage,
+        counts: { originalCharacters: 10, englishWords: 10, narrationWords: 10 },
+        createdAt: now,
+        updatedAt: now,
+        stages: {
+          ingestion: { status: "complete" },
+          translation: { status: "complete" },
+          narration: { status: "complete" },
+          storyBible: { status: "complete" },
+          tts: { status: "complete", outputFingerprint: await fileFingerprint(paths.audioRaw) },
+          audioMastering: { status: "pending" },
+          alignment: { status: "pending" },
+          subtitles: { status: "pending" },
+        },
+      });
+      await atomicWriteJson(paths.chapterMeta, oldChapterMeta);
+
+      const mockProvider: TTSProvider = {
+        name: "fish",
+        validateConfiguration: async () => {},
+        synthesize: async () => ({ audio: new Uint8Array([0x99]), segments: [new Uint8Array([0x99])] }),
+      };
+
+      const reassembleSpy = vi.spyOn(FfmpegCensorAudioService.prototype, "reassemble").mockImplementation(async (_dir, _man, outPath) => {
+        await atomicWrite(outPath, new Uint8Array([0x99, 0x99]));
+      });
+
+      // Inject failure specifically when syncChapterQualitySummary writes to chapter.json
+      const writeSpy = vi.spyOn(atomicWriteModule, "atomicWriteJson").mockImplementation(async (targetPath, value) => {
+        if (String(targetPath).endsWith("chapter.json")) {
+          throw new Error("Disk error syncing chapter quality summary");
+        }
+        return atomicWriteModule.atomicWrite(targetPath, `${JSON.stringify(value, null, 2)}\n`);
+      });
+
+      try {
+        await expect(regenerateStoredChapterTtsSegment({
+          root,
+          story,
+          chapter: 1,
+          segment: 0,
+          provider: mockProvider,
+          maxRetries: 0,
+        })).rejects.toThrow(/Failed to sync chapter quality summary after regenerating segment; rolled back audio file/);
+
+        // Old quality JSON, segment audio, and raw audio must be restored!
+        expect(await readFile(paths.ttsQuality, "utf8")).toBe(oldQualityJson);
+        expect(new Uint8Array(await readFile(join(paths.segments, "0001.mp3")))).toEqual(oldSegmentAudio);
+        expect(new Uint8Array(await readFile(paths.audioRaw))).toEqual(oldRawAudio);
+        expect(JSON.parse(await readFile(paths.chapterMeta, "utf8"))).toEqual(oldChapterMeta);
+      } finally {
+        reassembleSpy.mockRestore();
+        writeSpy.mockRestore();
+      }
+    });
+  });
+
+  // Test 26: Corrupt Checkpoint JSON
+  describe("Test 26: Corrupt Checkpoint JSON", () => {
+    it("regenerates only the corrupt checkpoint when JSON is malformed and reuses valid chunks", async () => {
+      const root = await mkdtemp(join(tmpdir(), "tts-corrupt-meta-"));
+      const checkpointDir = join(root, "tts-working");
+
+      let fetchCount = 0;
+      const requestedTexts: string[] = [];
+      const fetcher = vi.fn(async (_url, init) => {
+        fetchCount++;
+        const body = JSON.parse(String(init?.body));
+        requestedTexts.push(body.text);
+        return new Response(new Uint8Array([fetchCount, fetchCount]), {
+          status: 200,
+          headers: { "Content-Type": "audio/mpeg", "x-request-id": `req-${fetchCount}` },
+        });
+      });
+
+      const provider = new FishAudioProvider("test-key", fetcher as unknown as typeof fetch);
+      const text = "First sentence to synthesize. Second sentence to synthesize. Third sentence to synthesize.";
+
+      // Initial run: 3 chunks
+      const req = ttsReq({ text, checkpointDir, maxCharsPerRequest: 35 });
+      const initial = await provider.synthesize(req);
+      expect(initial.segments).toHaveLength(3);
+      expect(fetchCount).toBe(3);
+
+      // Verify all 3 checkpoints exist
+      expect(await readFile(join(checkpointDir, "0001.json"), "utf8")).toBeDefined();
+      expect(await readFile(join(checkpointDir, "0002.json"), "utf8")).toBeDefined();
+      expect(await readFile(join(checkpointDir, "0003.json"), "utf8")).toBeDefined();
+
+      // Corrupt chunk 2 checkpoint
+      await writeFile(join(checkpointDir, "0002.json"), "CORRUPT_MALFORMED_JSON{{{", "utf8");
+
+      fetchCount = 0;
+      requestedTexts.length = 0;
+      fetcher.mockClear();
+
+      const secondRun = await provider.synthesize(req);
+
+      // Chunks 1 and 3 reused; only chunk 2 regenerated!
+      expect(secondRun.segments).toHaveLength(3);
+      expect(secondRun.reusedChunks).toBe(2);
+      expect(secondRun.providerRequests).toBe(1);
+      expect(fetcher).toHaveBeenCalledTimes(1);
+      expect(requestedTexts).toEqual([initial.segmentTexts![1]]);
+
+      // Corrupt checkpoint was replaced with valid JSON!
+      const repairedMeta = JSON.parse(await readFile(join(checkpointDir, "0002.json"), "utf8"));
+      expect(repairedMeta.chunk).toBe(2);
+      expect(repairedMeta.totalChunks).toBe(3);
+    });
+  });
+
+  // Test 27: Invalid Checkpoint Schema
+  describe("Test 27: Invalid Checkpoint Schema", () => {
+    it("treats syntactically valid JSON with invalid schema as corrupt and regenerates safely", async () => {
+      const root = await mkdtemp(join(tmpdir(), "tts-invalid-schema-"));
+      const checkpointDir = join(root, "tts-working");
+
+      const fetcher = vi.fn(async () =>
+        new Response(new Uint8Array([1, 2, 3]), {
+          status: 200,
+          headers: { "Content-Type": "audio/mpeg", "x-request-id": "req-1" },
+        })
+      );
+      const provider = new FishAudioProvider("test-key", fetcher as unknown as typeof fetch);
+
+      const req = ttsReq({ text: "Valid sentence.", checkpointDir });
+      await provider.synthesize(req);
+      expect(fetcher).toHaveBeenCalledTimes(1);
+
+      // Write invalid schema JSON into checkpoint
+      await writeFile(join(checkpointDir, "0001.json"), JSON.stringify({ version: 1, chunk: -5 }), "utf8");
+
+      fetcher.mockClear();
+      const rerun = await provider.synthesize(req);
+
+      // Did not trust the invalid checkpoint; regenerated without fatal error
+      expect(fetcher).toHaveBeenCalledTimes(1);
+      expect(rerun.providerRequests).toBe(1);
+      const fixedMeta = JSON.parse(await readFile(join(checkpointDir, "0001.json"), "utf8"));
+      expect(fixedMeta.chunk).toBe(1);
+    });
+  });
+
+  // Test 28: Sanitized HTTP Error
+  describe("Test 28: Sanitized HTTP Error", () => {
+    it("does not expose provider body or narration text in user-facing Fish errors", async () => {
+      const secretNarration = "SECRET NARRATION TEXT DO NOT LEAK";
+      const fetcher = vi.fn(async () =>
+        new Response(`Internal error while processing narration: ${secretNarration}`, {
+          status: 500,
+          headers: { "Content-Type": "text/plain", "x-request-id": "req-secret-fail" },
+        })
+      );
+      const provider = new FishAudioProvider("test-key", fetcher as unknown as typeof fetch, 120_000, undefined, { retryDelayMs: 0 });
+
+      let thrownError: any;
+      try {
+        await provider.synthesize(ttsReq({
+          text: secretNarration,
+          model: "s2.1-pro",
+        }));
+      } catch (err) {
+        thrownError = err;
+      }
+
+      expect(thrownError).toBeDefined();
+      expect(thrownError).toBeInstanceOf(ProviderError);
+
+      // User-facing message:
+      // - includes HTTP 500
+      expect(thrownError.message).toMatch(/HTTP 500/);
+      // - includes chunk index
+      expect(thrownError.message).toMatch(/chunk 1 of 1/);
+      // - includes model
+      expect(thrownError.message).toMatch(/s2\.1-pro/);
+      // - does NOT contain provider body
+      expect(thrownError.message).not.toMatch(/Internal error while processing narration/);
+      // - does NOT contain secret narration text
+      expect(thrownError.message).not.toMatch(/SECRET NARRATION TEXT/);
+
+      // Structured cause / diagnostics contains status and sanitized provider detail
+      expect(thrownError.cause.status).toBe(500);
+      expect(thrownError.cause.requestId).toBe("req-secret-fail");
+      expect(thrownError.cause.providerDetail).toBe(`Internal error while processing narration: ${secretNarration}`);
+    });
+  });
+
+  // Test 29: Retry-After
+  describe("Test 29: Retry-After", () => {
+    it("follows Retry-After header delay on 429 and falls back to exponential backoff when malformed", async () => {
+      const slept: number[] = [];
+      const fakeSleep = async (ms: number) => { slept.push(ms); };
+
+      let attempt = 0;
+      const fetcher = vi.fn(async () => {
+        attempt++;
+        if (attempt === 1) {
+          return new Response("Too Many Requests", {
+            status: 429,
+            headers: { "Retry-After": "2", "x-request-id": "req-429" },
+          });
+        }
+        return new Response(new Uint8Array([1, 2, 3]), {
+          status: 200,
+          headers: { "Content-Type": "audio/mpeg", "x-request-id": "req-ok" },
+        });
+      });
+
+      const provider = new FishAudioProvider("test-key", fetcher as unknown as typeof fetch, 120_000, undefined, {
+        sleep: fakeSleep,
+      });
+
+      const res = await provider.synthesize(ttsReq({ text: "Testing retry-after header." }));
+      expect(res.segments).toHaveLength(1);
+      expect(attempt).toBe(2);
+      expect(slept).toEqual([2000]); // 2 seconds from Retry-After
+
+      // Now test malformed Retry-After falls back to exponential backoff
+      slept.length = 0;
+      attempt = 0;
+      const fetcherMalformed = vi.fn(async () => {
+        attempt++;
+        if (attempt === 1) {
+          return new Response("Too Many Requests", {
+            status: 429,
+            headers: { "Retry-After": "invalid-non-numeric-header", "x-request-id": "req-429-malformed" },
+          });
+        }
+        return new Response(new Uint8Array([4, 5, 6]), {
+          status: 200,
+          headers: { "Content-Type": "audio/mpeg" },
+        });
+      });
+
+      const providerMalformed = new FishAudioProvider("test-key", fetcherMalformed as unknown as typeof fetch, 120_000, undefined, {
+        sleep: fakeSleep,
+      });
+
+      const resMalformed = await providerMalformed.synthesize(ttsReq({ text: "Testing malformed retry-after." }));
+      expect(resMalformed.segments).toHaveLength(1);
+      expect(attempt).toBe(2);
+      expect(slept).toEqual([1000]); // Default attempt 1 exponential delay: 1000 * (2^0) = 1000
+    });
+  });
 });
+

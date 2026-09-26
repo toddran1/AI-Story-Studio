@@ -58,22 +58,25 @@ export async function removeChapterTtsQuality(root: string, slug: string, chapte
   await rm(storyPaths(root, slug, chapter).ttsQuality, { force: true });
 }
 
-export async function persistChapterTtsQuality(options: {
-  root: string; story: Story; chapter: number; report: TtsQualityReport; maxRetries: number; transcriber: string; thresholds?: Partial<QualityThresholds>;
-}): Promise<TtsQualityArtifact> {
-  const paths = storyPaths(options.root, options.story.slug, options.chapter);
-  const previous = await loadChapterTtsQuality(options.root, options.story.slug, options.chapter).catch(() => undefined);
+export function createChapterTtsQualityArtifact(options: {
+  chapter: number;
+  config: Story["pipeline"]["tts"];
+  report: TtsQualityReport;
+  maxRetries: number;
+  transcriber: string;
+  thresholds?: Partial<QualityThresholds>;
+  previous?: TtsQualityArtifact;
+}): TtsQualityArtifact {
   const now = new Date().toISOString();
-  const config = options.story.pipeline.tts;
   const artifact: TtsQualityArtifact = {
-    version: 1, chapter: options.chapter, createdAt: previous?.createdAt ?? now, updatedAt: now,
-    provider: config.provider, model: config.model, referenceId: config.referenceId, voiceMode: config.voiceMode, deliveryIntensity: config.deliveryIntensity,
+    version: 1, chapter: options.chapter, createdAt: options.previous?.createdAt ?? now, updatedAt: now,
+    provider: options.config.provider, model: options.config.model, referenceId: options.config.referenceId, voiceMode: options.config.voiceMode, deliveryIntensity: options.config.deliveryIntensity,
     status: options.report.status,
     verificationPolicy: { transcriber: options.transcriber, maxRetries: options.maxRetries, thresholds: { ...defaultQualityThresholds, ...options.thresholds }, fingerprint: verificationPolicyFingerprint({ transcriber: options.transcriber, maxRetries: options.maxRetries, thresholds: options.thresholds }) },
     // Human acceptances survive regeneration of the verification state UNLESS the
     // audio artifact has changed (acceptedAudioFingerprint does not match segment.audioFingerprint).
     segments: options.report.segments.map((segment) => {
-      const accepted = previous?.segments.find((item) => item.index === segment.index && item.status === "manually_accepted" && item.expectedText === segment.expectedText);
+      const accepted = options.previous?.segments.find((item) => item.index === segment.index && item.status === "manually_accepted" && item.expectedText === segment.expectedText);
       const audioChanged = Boolean(
         accepted?.acceptedAudioFingerprint &&
         segment.audioFingerprint &&
@@ -83,9 +86,27 @@ export async function persistChapterTtsQuality(options: {
     }),
   };
   artifact.status = summarizeQuality(artifact.segments).status;
+  return artifact;
+}
+
+export async function persistChapterTtsQuality(options: {
+  root: string; story: Story; chapter: number; report: TtsQualityReport; maxRetries: number; transcriber: string; thresholds?: Partial<QualityThresholds>;
+}): Promise<TtsQualityArtifact> {
+  const paths = storyPaths(options.root, options.story.slug, options.chapter);
+  const previous = await loadChapterTtsQuality(options.root, options.story.slug, options.chapter).catch(() => undefined);
+  const artifact = createChapterTtsQualityArtifact({
+    chapter: options.chapter,
+    config: options.story.pipeline.tts,
+    report: options.report,
+    maxRetries: options.maxRetries,
+    transcriber: options.transcriber,
+    thresholds: options.thresholds,
+    previous,
+  });
   await atomicWriteJson(paths.ttsQuality, artifact);
   return artifact;
 }
+
 
 async function syncChapterQualitySummary(root: string, slug: string, chapter: number, artifact: TtsQualityArtifact): Promise<void> {
   const paths = storyPaths(root, slug, chapter);
@@ -254,6 +275,7 @@ export async function regenerateStoredChapterTtsSegment(options: { root: string;
   const censorManifest = await readJsonIfExists<CensorManifest>(paths.censorManifest);
   const oldAudioRawExists = await exists(paths.audioRaw);
   const oldAudioRaw = oldAudioRawExists ? await readFile(paths.audioRaw) : undefined;
+  const oldChapterMetaJson = (await exists(paths.chapterMeta)) ? await readFile(paths.chapterMeta) : undefined;
 
   const config = story.pipeline.tts;
   const result = await provider.synthesize({
@@ -299,7 +321,9 @@ export async function regenerateStoredChapterTtsSegment(options: { root: string;
 
     let segmentPromoted = false;
     let audioRawPromoted = false;
-    let qualityPromoted = false;
+    let qualityFilePromoted = false;
+    let chapterSummaryPromoted = false;
+    let downstreamStatePromoted = false;
 
     try {
       await atomicWrite(targetSegmentFile, replacement);
@@ -312,10 +336,13 @@ export async function regenerateStoredChapterTtsSegment(options: { root: string;
       }
 
       await atomicWriteJson(paths.ttsQuality, updated);
+      qualityFilePromoted = true;
+
       await syncChapterQualitySummary(root, story.slug, chapter, updated);
-      qualityPromoted = true;
+      chapterSummaryPromoted = true;
 
       await markStagesPending(root, story.slug, chapter, ["audioMastering", ...dependentProcessingStages("audioMastering")]);
+      downstreamStatePromoted = true;
 
       return updated;
     } catch (promotionError) {
@@ -338,11 +365,18 @@ export async function regenerateStoredChapterTtsSegment(options: { root: string;
           rollbackErrors.push(err);
         }
       }
-      if (qualityPromoted) {
+      if (qualityFilePromoted) {
         try {
           await atomicWrite(paths.ttsQuality, oldQualityJson);
-          const oldParsed = ttsQualityArtifactSchema.parse(JSON.parse(oldQualityJson.toString("utf8")));
-          await syncChapterQualitySummary(root, story.slug, chapter, oldParsed);
+        } catch (err) {
+          rollbackErrors.push(err);
+        }
+      }
+      if (chapterSummaryPromoted || downstreamStatePromoted) {
+        try {
+          if (oldChapterMetaJson !== undefined) {
+            await atomicWrite(paths.chapterMeta, oldChapterMetaJson);
+          }
         } catch (err) {
           rollbackErrors.push(err);
         }
@@ -358,9 +392,11 @@ export async function regenerateStoredChapterTtsSegment(options: { root: string;
         ? `Failed to promote regenerated segment: ${promotionError instanceof Error ? promotionError.message : String(promotionError)}`
         : !audioRawPromoted && stagedRawPath
           ? `Failed to promote censored raw audio; rolled back audio file: ${promotionError instanceof Error ? promotionError.message : String(promotionError)}`
-          : !qualityPromoted
+          : !qualityFilePromoted
             ? `Failed to persist quality metadata after regenerating segment; rolled back audio file: ${promotionError instanceof Error ? promotionError.message : String(promotionError)}`
-            : `Failed to mark downstream stages pending after regenerating segment; rolled back audio file: ${promotionError instanceof Error ? promotionError.message : String(promotionError)}`;
+            : !chapterSummaryPromoted
+              ? `Failed to sync chapter quality summary after regenerating segment; rolled back audio file: ${promotionError instanceof Error ? promotionError.message : String(promotionError)}`
+              : `Failed to mark downstream stages pending after regenerating segment; rolled back audio file: ${promotionError instanceof Error ? promotionError.message : String(promotionError)}`;
       throw new StorageError(failureMessage, { cause: promotionError });
     }
   } finally {

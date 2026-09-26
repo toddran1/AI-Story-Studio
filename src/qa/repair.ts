@@ -103,8 +103,10 @@ export type QaRepairInference = { targets: QaRepairTarget[]; confidence: "high" 
 /** Infer the artifact(s) supported by finding evidence; never guess translation by default. */
 export function inferQaRepairTargets(finding: Pick<QaFinding, "category" | "message" | "evidence" | "provenance" | "origin">, texts: { translation: string; narration: string }): QaRepairInference {
   const description = `${finding.message}\n${finding.evidence}`;
-  if (finding.category === "narrationFidelity") return { targets: ["narration"], confidence: "high", reason: "Narration Fidelity findings belong to the narration artifact." };
   if (/both (?:the )?translation and narration/i.test(description)) return { targets: ["translation", "narration"], confidence: "high", reason: "The finding explicitly identifies both artifacts." };
+  const fault = /\b(?:fault lies in|fault is in|error lies in|issue lies in)\s+(?:the\s+)?(translation|narration)\b/i.exec(description)?.[1]?.toLowerCase();
+  if (fault === "translation" || fault === "narration") return { targets: [fault], confidence: "high", reason: `The finding explicitly attributes the fault to ${fault}.` };
+  if (finding.category === "narrationFidelity") return { targets: ["narration"], confidence: "high", reason: "Narration Fidelity findings belong to the narration artifact." };
   if (finding.provenance?.stage === "translation" || finding.provenance?.stage === "narration") return { targets: [finding.provenance.stage], confidence: "high", reason: `Finding provenance identifies ${finding.provenance.stage}.` };
   if (/\btranslation\s+(?:contains|repeats|uses|adds|omits|changes)\b/i.test(description) && !/\bnarration\s+(?:contains|repeats|uses|adds|omits|changes)\b/i.test(description)) return { targets: ["translation"], confidence: "high", reason: "The finding attributes the defect to translation." };
   if (/\bnarration\s+(?:contains|repeats|uses|adds|omits|changes)\b/i.test(description) && !/\btranslation\s+(?:contains|repeats|uses|adds|omits|changes)\b/i.test(description)) return { targets: ["narration"], confidence: "high", reason: "The finding attributes the defect to narration." };

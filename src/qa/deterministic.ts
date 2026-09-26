@@ -39,35 +39,38 @@ function hasUnauthorizedOccurrence(text: string, written: string, authorized: st
 function namingDetections(entities: CanonicalEntity[], translation: string, narration: string): FreshQaDetection[] {
   const detections: FreshQaDetection[] = [];
   const emitted = new Set<string>();
-  const flag = (entity: CanonicalEntity, written: string, required: string, reason: string, safeToFix: boolean) => {
-    const key = `${entity.id}\0${normalizeQaText(written)}\0${normalizeQaText(required)}`;
+  const flag = (entity: CanonicalEntity, written: string, required: string | string[], reason: string, safeToFix: boolean) => {
+    const forms = Array.isArray(required) ? required : [required];
+    const key = `${entity.id}\0${normalizeQaText(written)}\0${forms.map(normalizeQaText).join("|")}`;
     if (emitted.has(key)) return;
     emitted.add(key);
     const translatedIdentity = [entity.canonicalName, entity.originalName, ...entity.aliases].find((name) => name && containsName(translation, name));
     const translationEvidence = translatedIdentity ?? translation.slice(0, 120);
+    const requiredText = forms.map((form) => `"${form}"`).join(" or ");
     detections.push({
       category: "names", severity: "fail", origin: "deterministic", safeToFix, entityIds: [entity.id],
-      message: `The fault lies in the NARRATION: it uses "${written}" instead of the required "${required}" under the ${reason} rule.`,
-      evidence: `Translation: "${translationEvidence}". Narration: "${written}". Authorized narration rendering: "${required}" (${reason}).`,
+      message: `The fault lies in the NARRATION: it uses "${written}" instead of ${forms.length > 1 ? "an authorized localized form" : "the required"} ${requiredText} under the ${reason} rule.`,
+      evidence: `Translation: "${translationEvidence}". Narration: "${written}". Authorized narration rendering: ${requiredText} (${reason}).`,
     });
   };
   for (const entity of entities) {
     const naming = entity.localizedNaming;
-    const contextualNaming = naming && (naming.usageMode === "ai_contextual" || naming.usageMode === "manual");
     const noOverrideNames = new Set(entity.aliasNarrationRules.filter((rule) => rule.behavior === "no_override").map((rule) => normalizeQaText(rule.alias)));
     const identityForms = [entity.canonicalName, entity.originalName, naming?.fullName ?? "", naming?.shortName ?? ""]
       .filter((name) => name.trim() && !noOverrideNames.has(normalizeQaText(name)));
 
-    // Preferred Narration Name and deterministic localization modes define one
-    // required rendering. ai_contextual/manual modes deliberately do not.
-    if (!contextualNaming) {
+    // Contextual localization permits either configured full or short form, but
+    // it does not permit the unrelated canonical/source name in narration.
+    // Manual mode can authorize additional forms through editorial notes, so
+    // only that mode remains exempt from deterministic enforcement.
+    if (naming?.usageMode !== "manual") {
       for (const written of identityForms) {
         const authorized = authorizedNarrationNames(entity, written);
         const required = authorized[0];
         if (!required || normalizeQaText(written) === normalizeQaText(required)) continue;
         if (hasUnauthorizedOccurrence(narration, written, authorized)) {
           const safe = !naming && entity.preferredNarrationName === required && !required.includes(" ") && !written.includes(" ");
-          flag(entity, written, required, naming ? `localizedNaming ${naming.usageMode}` : "Preferred Narration Name", safe);
+          flag(entity, written, naming?.usageMode === "ai_contextual" ? authorized : required, naming ? `localizedNaming ${naming.usageMode}` : "Preferred Narration Name", safe);
         }
       }
     }
@@ -77,13 +80,13 @@ function namingDetections(entities: CanonicalEntity[], translation: string, narr
     for (const alias of entity.aliases) {
       const rule = entity.aliasNarrationRules.find((candidate) => normalizeQaText(candidate.alias) === normalizeQaText(alias));
       if (rule?.behavior === "no_override") continue;
-      if (contextualNaming && rule?.behavior !== "custom") continue;
+      if (naming?.usageMode === "manual" && rule?.behavior !== "custom") continue;
       const authorized = authorizedNarrationNames(entity, alias);
       const required = rule?.behavior === "custom" ? rule.replacement : authorized[0];
       if (!required || normalizeQaText(alias) === normalizeQaText(required)) continue;
       if (hasUnauthorizedOccurrence(narration, alias, authorized)) {
         const reason = rule?.behavior === "custom" ? "custom alias rule" : rule?.behavior === "use_preferred" ? "use_preferred alias rule" : naming ? `localizedNaming ${naming.usageMode}` : "Preferred Narration Name";
-        flag(entity, alias, required, reason, false);
+        flag(entity, alias, naming?.usageMode === "ai_contextual" && rule?.behavior !== "custom" ? authorized : required, reason, false);
       }
     }
   }

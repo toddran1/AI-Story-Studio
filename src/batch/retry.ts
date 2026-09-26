@@ -52,7 +52,7 @@ function errorChain(error: unknown): Array<Record<string, unknown>> {
   return chain;
 }
 function numeric(value: unknown): number | undefined { const result = Number(value); return Number.isFinite(result) ? result : undefined; }
-function findRetryAfterMs(error: unknown): number | undefined {
+export function findRetryAfterMs(error: unknown): number | undefined {
   for (const item of errorChain(error)) {
     const headers = item.headers as { get?: (name: string) => string | null } | Record<string, string> | undefined;
     const raw = typeof (headers as { get?: unknown } | undefined)?.get === "function"

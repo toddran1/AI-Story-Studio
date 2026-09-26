@@ -50,5 +50,28 @@ export async function validateChapterQuality(
     schemaName: "chapter_qa",
     schema: generatedQaResultSchema,
   });
-  return { ...result, value: normalizeQaResult(result.value) };
+  return { ...result, value: normalizeQaResult(promoteConfirmedMaterialIssues(result.value)) };
+}
+
+/** A model can describe a confirmed material change yet label it a warning.
+ * Promote only explicit, attributable defects; uncertain contextual naming
+ * choices and ordinary tone differences remain review warnings. */
+export function promoteConfirmedMaterialIssues(value: unknown): unknown {
+  const parsed = generatedQaResultSchema.parse(value);
+  const issues = parsed.issues.map((issue) => {
+    const description = `${issue.message} ${issue.evidence}`;
+    const wrongAuthorizedName = issue.category === "names"
+      && /\bnarration\b/i.test(description)
+      && /\b(?:retains?|uses?)\s+(?:the\s+)?canonical\s+names?\b/i.test(description)
+      && /\b(?:authorized|localized|preferred)\b/i.test(description)
+      && /\b(?:required|instead|where|mismatch|violation)\b/i.test(description);
+    const addedInsult = issue.category === "narrationFidelity"
+      && /\bnarration\b/i.test(description)
+      && /\badds?\s+(?:an?\s+)?insult\b/i.test(description)
+      && /\babsent\s+from\b/i.test(description);
+    return wrongAuthorizedName || addedInsult ? { ...issue, severity: "fail" as const } : issue;
+  });
+  const checks = { ...parsed.checks };
+  for (const issue of issues) if (issue.severity === "fail") checks[issue.category] = "fail";
+  return { ...parsed, issues, checks };
 }

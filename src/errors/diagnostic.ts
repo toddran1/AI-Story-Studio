@@ -102,3 +102,11 @@ export function safeErrorMessage(error: unknown, max = 300): string {
   const oneLine = raw.replace(/[\r\n\t]+/g, " ").trim();
   return safeText(oneLine).slice(0, max);
 }
+
+export function safeProviderDetail(detail: unknown, max = 300): string {
+  if (detail === undefined || detail === null) return "";
+  const raw = typeof detail === "string" ? detail : (detail instanceof Error ? detail.message : String(detail));
+  const oneLine = raw.replace(/[\r\n\t]+/g, " ").trim();
+  return safeText(oneLine).slice(0, max);
+}
+

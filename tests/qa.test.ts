@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { activeQaIssues, dismissQaIssues, normalizeQaResult, qaResultSchema, resolveQaIssues } from "../src/domain/qa.js";
 import { emptyStoryBible, storyBibleSchema } from "../src/domain/story-bible.js";
 import { QA_PROMPT_VERSION, authorizedNarrationNaming, qaInstructions, qaInstructionsFor } from "../src/qa/prompts.js";
-import { validateChapterQuality } from "../src/qa/validator.js";
+import { promoteConfirmedMaterialIssues, validateChapterQuality } from "../src/qa/validator.js";
 import { MockLLM } from "./helpers.js";
 
 const checks = { completeness: "pass", names: "pass", numbers: "pass", terminology: "pass", dialogue: "pass", storyConsistency: "pass", narrationFidelity: "pass" } as const;
@@ -14,6 +14,19 @@ describe("QA result", () => {
   });
   it("promotes understated model status to the worst check", () => {
     expect(normalizeQaResult({ status: "pass", score: 0.5, issues: [], checks: { ...checks, numbers: "fail" } }).status).toBe("fail");
+  });
+  it("treats confirmed wrong narration names and added insults as critical", () => {
+    const value = normalizeQaResult(promoteConfirmedMaterialIssues({ status: "warn", score: 0.8, checks: { ...checks, names: "warn", narrationFidelity: "warn" }, issues: [
+      { category: "names", severity: "warn", message: "The fault lies in the NARRATION: it retains canonical names where authorized localized narration forms are required.", evidence: "Translation and narration both say Wang Xiaoming." },
+      { category: "narrationFidelity", severity: "warn", message: "The fault lies in the NARRATION: it adds an insult absent from both the source and approved translation.", evidence: "Translation: Get him! Narration: Get that bastard!" },
+    ] }));
+    expect(value.status).toBe("fail");
+    expect(value.checks).toMatchObject({ names: "fail", narrationFidelity: "fail" });
+    expect(value.issues.map((issue) => issue.severity)).toEqual(["fail", "fail"]);
+    const uncertain = normalizeQaResult(promoteConfirmedMaterialIssues({ status: "warn", score: 0.9, checks: { ...checks, names: "warn" }, issues: [
+      { category: "names", severity: "warn", message: "The ai_contextual choice may be awkward, but the authorized form is uncertain.", evidence: "Narration uses a short name." },
+    ] }));
+    expect(uncertain.issues[0]?.severity).toBe("warn");
   });
   it("retains dismissed evidence while removing it from the active decision", () => {
     const result = dismissQaIssues({ status: "warn", score: 0.86, issues: [
@@ -121,7 +134,7 @@ describe("QA authorized narration naming", () => {
   });
 
   it("records the bumped prompt version", () => {
-    expect(QA_PROMPT_VERSION).toBe("9");
+    expect(QA_PROMPT_VERSION).toBe("11");
   });
 
   it("documents the output contract, severity rubric, and repair-routing phrasing", () => {
@@ -137,7 +150,8 @@ describe("QA authorized narration naming", () => {
     expect(qaInstructions).toContain("names-category FAIL");
     expect(qaInstructions).toContain("each occurrence independently");
     expect(qaInstructions).toContain("always_full or always_short");
-    expect(qaInstructions).toContain("Do not deterministically fail ai_contextual or manual");
+    expect(qaInstructions).toContain("a demonstrated violation of the configured context or notes is also a FAIL");
+    expect(qaInstructions).toContain("an added insult or characterization absent from the source and approved translation");
     expect(qaInstructions).toContain('uses "wrong form" instead of the required "authorized form"');
   });
 

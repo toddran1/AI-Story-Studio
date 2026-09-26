@@ -1,5 +1,6 @@
 import { mkdir, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
+import { z } from "zod";
 import { ConfigurationError, ProviderError } from "../../pipeline/errors.js";
 import { TTSProvider } from "../provider.js";
 import { TTSRequest, safeProgress } from "../types.js";
@@ -11,22 +12,24 @@ import { adaptPronunciationText } from "../pronunciation.js";
 import type { VocalizationCapabilities, VocalizationRenderStrategy } from "../vocalizations.js";
 import { logger } from "../../utils/logger.js";
 import { atomicWrite, atomicWriteJson } from "../../storage/atomic-write.js";
-import { readJsonIfExists } from "../../storage/story-files.js";
+import { readJsonIfExists, readTextIfExists } from "../../storage/story-files.js";
 import { fingerprint } from "../../utils/hash.js";
-import { isTransientError } from "../../batch/retry.js";
+import { findRetryAfterMs, isTransientError } from "../../batch/retry.js";
+import { safeProviderDetail } from "../../errors/diagnostic.js";
 
-export type FishChunkCheckpointMeta = {
-  version: 1;
-  chunk: number;
-  totalChunks: number;
-  text?: string;
-  textFingerprint?: string;
-  fingerprint: string;
-  createdAt: string;
-  requestId?: string;
-  characters: number;
-  utf8Bytes: number;
-};
+export const fishChunkCheckpointSchema = z.object({
+  version: z.literal(1),
+  chunk: z.number().int().positive(),
+  totalChunks: z.number().int().positive(),
+  text: z.string().optional(),
+  textFingerprint: z.string().optional(),
+  fingerprint: z.string().min(1),
+  createdAt: z.string(),
+  requestId: z.string().optional(),
+  characters: z.number().int().nonnegative(),
+  utf8Bytes: z.number().int().nonnegative(),
+});
+export type FishChunkCheckpointMeta = z.infer<typeof fishChunkCheckpointSchema>;
 
 export class FishAudioProvider implements TTSProvider {
   readonly name = "fish" as const;
@@ -43,7 +46,11 @@ export class FishAudioProvider implements TTSProvider {
     private readonly fetcher: typeof fetch = fetch,
     private readonly timeoutMs = 120_000,
     private readonly defaultReferenceId?: string,
-    private readonly speechOptions: { tskRendering?: "preserve" | "direction"; retryDelayMs?: number } = {},
+    private readonly speechOptions: {
+      tskRendering?: "preserve" | "direction";
+      retryDelayMs?: number;
+      sleep?: (ms: number) => Promise<void>;
+    } = {},
   ) {
     this.inputNormalizationVersion = speechOptions.tskRendering === "direction"
       ? "fish-speech-normalization-v10-multispeaker-safe-chunks-tsk-direction"
@@ -93,6 +100,8 @@ export class FishAudioProvider implements TTSProvider {
       await mkdir(request.checkpointDir, { recursive: true });
     }
 
+    const sleep = this.speechOptions.sleep ?? ((ms: number) => new Promise((resolve) => setTimeout(resolve, ms)));
+
     for (const [index, text] of chunks.entries()) {
       const currentChunk = index + 1;
       const totalChunks = chunks.length;
@@ -116,8 +125,37 @@ export class FishAudioProvider implements TTSProvider {
       });
 
       if (metaPath && audioPath) {
-        const existingMeta = await readJsonIfExists<FishChunkCheckpointMeta>(metaPath);
-        if (existingMeta && existingMeta.fingerprint === chunkFp) {
+        let existingMeta: FishChunkCheckpointMeta | undefined;
+        let isCorrupt = false;
+        try {
+          const rawText = await readTextIfExists(metaPath);
+          if (rawText) {
+            const parsedJson = JSON.parse(rawText);
+            const validated = fishChunkCheckpointSchema.safeParse(parsedJson);
+            if (
+              !validated.success ||
+              validated.data.chunk !== currentChunk ||
+              validated.data.totalChunks !== totalChunks
+            ) {
+              isCorrupt = true;
+            } else {
+              existingMeta = validated.data;
+            }
+          }
+        } catch {
+          isCorrupt = true;
+        }
+
+        if (isCorrupt) {
+          logger.warn({
+            event: "tts.fish.checkpoint_corrupt",
+            chunk: currentChunk,
+            totalChunks,
+            metaPath,
+          });
+          await rm(metaPath, { force: true }).catch(() => {});
+          await rm(audioPath, { force: true }).catch(() => {});
+        } else if (existingMeta && existingMeta.fingerprint === chunkFp) {
           try {
             const existingAudio = await readFile(audioPath);
             if (existingAudio.byteLength > 0) {
@@ -133,8 +171,8 @@ export class FishAudioProvider implements TTSProvider {
           }
         } else if (existingMeta) {
           logger.info({ event: "tts.fish.checkpoint_invalidated", chunk: currentChunk, totalChunks, reason: "fingerprint_mismatch" });
-          await rm(metaPath, { force: true });
-          await rm(audioPath, { force: true });
+          await rm(metaPath, { force: true }).catch(() => {});
+          await rm(audioPath, { force: true }).catch(() => {});
         }
       }
 
@@ -168,9 +206,23 @@ export class FishAudioProvider implements TTSProvider {
         if (fetchError !== undefined) {
           const isTransient = isTransientError(fetchError);
           if (isTransient && attempt < 3) {
-            logger.warn({ event: "tts.fish.transient_retry", chunk: currentChunk, totalChunks, attempt, model: request.model, error: fetchError instanceof Error ? fetchError.message : String(fetchError) });
-            const delay = this.speechOptions.retryDelayMs !== undefined ? this.speechOptions.retryDelayMs : Math.min(10_000, 500 * (2 ** (attempt - 1)));
-            await new Promise((r) => setTimeout(r, delay));
+            const retryAfterMs = findRetryAfterMs(fetchError);
+            const delay = this.speechOptions.retryDelayMs !== undefined
+              ? this.speechOptions.retryDelayMs
+              : retryAfterMs !== undefined
+                ? Math.min(15 * 60_000, Math.max(0, retryAfterMs))
+                : Math.min(10_000, 500 * (2 ** (attempt - 1)));
+            logger.warn({
+              event: "tts.fish.transient_retry",
+              chunk: currentChunk,
+              totalChunks,
+              attempt,
+              model: request.model,
+              error: fetchError instanceof Error ? fetchError.message : String(fetchError),
+              retryAfterMs,
+              delayMs: delay,
+            });
+            await sleep(delay);
             continue;
           }
           throw this.chunkFailure({
@@ -193,18 +245,35 @@ export class FishAudioProvider implements TTSProvider {
         const resp = response!;
         const requestId = resp.headers.get("x-request-id") ?? resp.headers.get("trace-id") ?? undefined;
         if (!resp.ok) {
-          const detail = (await resp.text()).slice(0, 1000);
+          const rawDetail = (await resp.text()).slice(0, 1000);
           const status = resp.status;
-          const isTransient = isTransientError({ status, message: detail });
+          const isTransient = isTransientError({ status, headers: resp.headers, message: rawDetail });
           if (isTransient && attempt < 3) {
-            logger.warn({ event: "tts.fish.transient_retry", chunk: currentChunk, totalChunks, attempt, model: request.model, status, requestId });
-            const delay = this.speechOptions.retryDelayMs !== undefined ? this.speechOptions.retryDelayMs : Math.min(10_000, 1000 * (2 ** (attempt - 1)));
-            await new Promise((r) => setTimeout(r, delay));
+            const retryAfterMs = findRetryAfterMs({ headers: resp.headers, message: rawDetail });
+            const delay = this.speechOptions.retryDelayMs !== undefined
+              ? this.speechOptions.retryDelayMs
+              : retryAfterMs !== undefined
+                ? Math.min(15 * 60_000, Math.max(0, retryAfterMs))
+                : Math.min(10_000, 1000 * (2 ** (attempt - 1)));
+            logger.warn({
+              event: "tts.fish.transient_retry",
+              chunk: currentChunk,
+              totalChunks,
+              attempt,
+              model: request.model,
+              status,
+              requestId,
+              retryAfterMs,
+              delayMs: delay,
+            });
+            await sleep(delay);
             continue;
           }
           const errorCategory = status === 429 ? "rate_limit" : status >= 500 ? "transient" : "provider";
+          const userFacingSummary = status === 429 ? "HTTP 429 rate limit" : `HTTP ${status}`;
+          const sanitizedDetail = safeProviderDetail(rawDetail, 300);
           throw this.chunkFailure({
-            message: `HTTP ${status}${detail ? ` - ${detail}` : ""}`,
+            message: userFacingSummary,
             currentChunk,
             totalChunks,
             text,
@@ -213,7 +282,8 @@ export class FishAudioProvider implements TTSProvider {
             headers: resp.headers,
             requestId,
             errorCategory,
-            causeError: new Error(detail),
+            providerDetail: sanitizedDetail,
+            causeError: new Error(userFacingSummary),
             newBilledRequests,
             newBilledCharacters,
             newBilledBytes,
@@ -235,6 +305,7 @@ export class FishAudioProvider implements TTSProvider {
             headers: resp.headers,
             requestId,
             errorCategory: "provider",
+            providerDetail: safeProviderDetail(`Fish Audio returned unexpected content type: ${contentType}`, 300),
             causeError: new Error(`Fish Audio returned unexpected content type: ${contentType}`),
             newBilledRequests,
             newBilledCharacters,
@@ -256,6 +327,7 @@ export class FishAudioProvider implements TTSProvider {
             headers: resp.headers,
             requestId,
             errorCategory: "provider",
+            providerDetail: "Fish Audio returned an empty audio response",
             causeError: new Error("Fish Audio returned an empty audio response"),
             newBilledRequests,
             newBilledCharacters,
@@ -317,6 +389,7 @@ export class FishAudioProvider implements TTSProvider {
     status?: number;
     headers?: Headers;
     requestId?: string;
+    providerDetail?: string;
     newBilledRequests: number;
     newBilledCharacters: number;
     newBilledBytes: number;
@@ -337,7 +410,8 @@ export class FishAudioProvider implements TTSProvider {
       model: options.model,
       status: options.status,
       requestId: options.requestId,
-      error: options.causeError instanceof Error ? options.causeError.message : (options.causeError ? String(options.causeError) : options.message),
+      errorCategory: options.errorCategory,
+      error: options.providerDetail || (options.causeError instanceof Error ? options.causeError.message : String(options.causeError ?? options.message)),
     });
     const cause = Object.assign(
       options.causeError instanceof Error
@@ -352,6 +426,7 @@ export class FishAudioProvider implements TTSProvider {
         chars: [...options.text].length,
         model: options.model,
         errorCategory: options.errorCategory,
+        providerDetail: options.providerDetail,
       },
     );
     const err = new ProviderError(

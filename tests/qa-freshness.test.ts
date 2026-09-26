@@ -45,7 +45,7 @@ describe("QA dependency fingerprint", () => {
       { ...baseDeps(), context: { canonicalEntities: [{ id: "ent_x" }] } },
       { ...baseDeps(), config: { provider: "openai", model: "qa-model-2" } },
       { ...baseDeps(), narrationSettings: { profanityMode: "soften-strong", includeChapterTitle: true } },
-      { ...baseDeps(), prompt: "10" },
+      { ...baseDeps(), prompt: `${QA_PROMPT_VERSION}-changed` },
       { ...baseDeps(), mode: "thorough" as const },
       { ...baseDeps(), naming: [{ id: "ent_a", canonicalName: "Feixue", originalName: "飞雪", aliases: [], aliasNarrationRules: [], canonicalNameLocked: false, preferredNarrationName: "Feixue" }] },
       { ...baseDeps(), pronunciation: [{ id: "ent_a", pronunciation: { mode: "custom" as const, customPronunciation: "Fay-shway" } }] },

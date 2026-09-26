@@ -141,12 +141,26 @@ describe("deterministic naming checks", () => {
     expect((await run(root, story, `${required} stepped forward.`)).detections.filter((detection) => detection.category === "names")).toEqual([]);
   });
 
-  it("does not fail contextual naming variants and does not treat canonical translation text as a narration violation", async () => {
+  it("allows contextual full and short forms but catches a canonical name left in narration or dialogue", async () => {
     const root = await mkdtemp(join(tmpdir(), "qa-det-"));
     const { story } = await setup(root, { entities: [entity({ canonicalName: "Su Ming", originalName: "苏明", localizedNaming: { locale: "en-US", fullName: "Malakai Sterling", shortName: "Malakai", usageMode: "ai_contextual" } })] });
-    for (const narration of ["Malakai Sterling entered the hall.", "Malakai entered the hall.", "Su Ming entered the hall."]) {
+    for (const narration of ["Malakai Sterling entered the hall.", "Malakai entered the hall."]) {
       expect((await run(root, story, narration, "Su Ming entered the hall.")).detections.filter((detection) => detection.category === "names")).toEqual([]);
     }
+    const slipped = (await run(root, story, '"Fine! Fine! Su Ming, just you wait!"', '"Fine! Fine! Su Ming, just you wait!"')).detections.filter((detection) => detection.category === "names");
+    expect(slipped).toMatchObject([{ severity: "fail", message: expect.stringContaining('uses "Su Ming" instead of an authorized localized form "Malakai Sterling" or "Malakai"') }]);
+  });
+
+  it("catches contextual identity aliases while respecting explicit no_override aliases", async () => {
+    const root = await mkdtemp(join(tmpdir(), "qa-det-"));
+    const { story } = await setup(root, { entities: [entity({
+      canonicalName: "Su Ming", originalName: "苏明", aliases: ["Brother Su", "Student Su"],
+      aliasNarrationRules: [{ alias: "Brother Su", behavior: "no_override" }],
+      localizedNaming: { locale: "en-US", fullName: "Malakai Sterling", shortName: "Malakai", usageMode: "ai_contextual" },
+    })] });
+    const findings = (await run(root, story, 'Brother Su greeted Student Su, then called for Malakai.', "Su Ming entered.")).detections.filter((detection) => detection.category === "names");
+    expect(findings).toMatchObject([{ severity: "fail", message: expect.stringContaining('uses "Student Su"') }]);
+    expect(findings.some((finding) => finding.message.includes('uses "Brother Su"'))).toBe(false);
   });
 });
 

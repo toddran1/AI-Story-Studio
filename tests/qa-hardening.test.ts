@@ -57,6 +57,8 @@ describe("QA hardening", () => {
     expect(inferQaRepairTargets({ ...common, evidence: "Translation contains a unique line here." }, { translation: "A unique line here.", narration: "Other natural words." }).targets).toEqual(["translation"]);
     expect(inferQaRepairTargets({ ...common, evidence: "Narration contains a unique spoken line here." }, { translation: "Different words entirely.", narration: "A unique spoken line here." }).targets).toEqual(["narration"]);
     expect(inferQaRepairTargets({ ...common, evidence: "Translation/narration comparison: meaning differs." }, { translation: "One version.", narration: "Another version." }).confidence).toBe("ambiguous");
+    expect(inferQaRepairTargets({ ...common, category: "names", message: "The fault lies in the NARRATION: it retains canonical names where authorized localized forms are required.", evidence: "Translation: Wang Xiaoming. Narration: Wang Xiaoming." }, { translation: "Wang Xiaoming", narration: "Wang Xiaoming" }).targets).toEqual(["narration"]);
+    expect(inferQaRepairTargets({ ...common, category: "narrationFidelity", message: "The fault lies in the NARRATION: it adds an insult absent from the approved translation.", evidence: "Translation: Get him. Narration: Get that bastard." }, { translation: "Get him.", narration: "Get that bastard." }).targets).toEqual(["narration"]);
   });
 
   it("fails closed on malformed existing Story Context and Continuity Review, but allows missing continuity", async () => {

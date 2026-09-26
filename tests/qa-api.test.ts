@@ -250,6 +250,29 @@ describe("chapter QA state endpoint", () => {
 });
 
 describe("finding lifecycle endpoints", () => {
+  it("fixes a narration-attributed finding without asking for a target and verifies the selected issue", async () => {
+    const translation = "The keeper yelled, 'Get him!' before crossing the courtyard.";
+    const narration = "The keeper yelled, 'Get that bastard!' before crossing the courtyard.";
+    const repaired = translation;
+    const issue = detection({
+      category: "narrationFidelity", severity: "fail",
+      message: "The fault lies in the NARRATION: it adds an insult absent from the approved translation.",
+      evidence: `Translation: "${translation}" Narration: "${narration}"`,
+    });
+    const { root, story, paths, state } = await fixture({ detections: [issue], translation, narration });
+    const id = state!.findings[0]!.id;
+    const openai = new MockLLM("openai", [repaired]);
+    const { jobs, operations } = operationsWith(root, openai);
+    const finished = await waitForJob(jobs, (await operations.startQaFindingFix(story.slug, 1, id)).id);
+    expect(finished.status).toBe("completed");
+    expect(finished.result).toMatchObject({ findingId: id, repaired: ["narration"], fixed: true });
+    expect(await readFile(paths.english, "utf8")).toBe(translation);
+    expect(await readFile(paths.narration, "utf8")).toBe(repaired);
+    expect((await readState(paths)).findings.find((finding) => finding.id === id)?.status).toBe("fixed_ai");
+    expect(openai.calls.filter((call) => call.structured)).toHaveLength(1);
+    await operations.close();
+  });
+
   it("fix-ai repairs the text, stales downstream, and marks the finding fixed_ai", async () => {
     const current = "The keeper crossed the quiet courtyard and counted the small blue flames.";
     const repaired = "The keeper crossed the quiet courtyard and counted the small azure flames.";
@@ -272,6 +295,22 @@ describe("finding lifecycle endpoints", () => {
     await operations.close();
   });
 
+  it("keeps the selected finding open when QA still detects the defect after repair", async () => {
+    const current = "The keeper crossed the quiet courtyard and counted the small blue flames.";
+    const repaired = "The keeper crossed the quiet courtyard and counted the small azure flames.";
+    const issue = detection();
+    const { root, story, paths, state } = await fixture({ detections: [issue], translation: current, narration: current });
+    const id = state!.findings[0]!.id;
+    const qaResponse = { status: "warn", score: 0.8, issues: [issue], checks: { ...checks, terminology: "warn" } };
+    const gemini = new MockLLM("gemini", [repaired]);
+    const { jobs, operations } = operationsWith(root, gemini, openaiQa(qaResponse));
+    const finished = await waitForJob(jobs, (await operations.startQaFindingFix(story.slug, 1, id, { target: "translation" })).id);
+    expect(finished.status).toBe("completed");
+    expect(finished.result).toMatchObject({ findingId: id, fixed: false });
+    expect((await readState(paths)).findings.find((finding) => finding.id === id)?.status).toBe("open");
+    await operations.close();
+  });
+
   it("keeps a saved single-finding repair when final QA recheck fails and permits QA-only retry", async () => {
     const current = "The keeper crossed the quiet courtyard and counted the small blue flames.";
     const repaired = "The keeper crossed the quiet courtyard and counted the small azure flames.";
@@ -283,9 +322,9 @@ describe("finding lifecycle endpoints", () => {
     const fixJob = await operations.startQaFindingFix(story.slug, 1, id, { target: "translation" });
     const finished = await waitForJob(jobs, fixJob.id);
     expect(finished.status).toBe("completed");
-    expect(finished.result).toMatchObject({ status: "repair_applied_recheck_failed", findingId: id, repaired: ["translation"], fixed: true, requiresQaRecheck: true, recheck: { attempted: true, success: false, error: "QA provider unavailable" } });
+    expect(finished.result).toMatchObject({ status: "repair_applied_recheck_failed", findingId: id, repaired: ["translation"], fixed: false, requiresQaRecheck: true, recheck: { attempted: true, success: false, error: "QA provider unavailable" } });
     expect(await readFile(paths.english, "utf8")).toBe(repaired);
-    expect((await readState(paths)).findings.find((finding) => finding.id === id)).toMatchObject({ status: "fixed_ai" });
+    expect((await readState(paths)).findings.find((finding) => finding.id === id)).toMatchObject({ status: "open" });
     expect((await operations.getChapterQa(story.slug, 1)).freshness).toBe("needs_recheck");
     expect((await readActivity(root, story.slug))[0]?.message).toMatch(/saved.*verification failed/i);
     expect(gemini.calls).toHaveLength(1);

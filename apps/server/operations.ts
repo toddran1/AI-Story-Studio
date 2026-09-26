@@ -273,6 +273,7 @@ export class StudioOperations {
       const story = await loadStory(storyPaths(this.root, slug, 1).storyConfig); const imported = await loadImportedChapters(this.root, slug);
       const selected = selectChapterNumbers(imported.chapters, input.chapters); const batchPlan = await planStageExecutionBatch({ root: this.root, story: slug, chapters: selected.map((chapter) => chapter.chapter), selectedStages: input.stages, mode: input.mode, force: input.force, executionPolicy: input.executionPolicy, storyConfig: story });
       if (input.expectedPlanFingerprint && input.expectedPlanFingerprint !== batchPlan.fingerprint) throw new ConfigurationError("The execution plan changed after preview. Preview the current plan before running it.");
+      if (batchPlan.summary.operationCount === 0 && batchPlan.summary.blockedOperations === 0) throw new ConfigurationError("The execution plan contains no stages to run. Select stages that need work or enable regeneration, then preview again.");
       if (batchPlan.summary.blockedOperations) {
         if (input.executionPolicy === "chapter-stage") {
           const plan = batchPlan.chapters[0]!;
@@ -297,10 +298,14 @@ export class StudioOperations {
           results.push({ chapter, status: "completed", plan });
         } catch (error) {
           if (!input.continueOnError) throw error;
-          results.push({ chapter, status: "failed", plan, error: error instanceof Error ? error.message : String(error) });
+          const message = error instanceof Error ? error.message : String(error);
+          results.push({ chapter, status: "failed", plan, error: message });
+          control.update({ type: "stage-execution.chapter.failed", chapter, error: message });
         }
       }
-      invalidateCatalogCache(this.root, slug); await invalidateChapterStatusDerivedReads(this.root, slug); await invalidateStoryBibleDerivedReads(this.root, slug); return { fingerprint: batchPlan.fingerprint, results, summary: { ...batchPlan.summary, completedOperations: results.filter((item) => item.status === "completed").reduce((count, item) => count + item.plan.runStages.length, 0), completedChapters: results.filter((item) => item.status === "completed").length, reusedChapters: results.filter((item) => item.status === "reused").length, blockedChapters: results.filter((item) => item.status === "blocked").length, failedChapters: results.filter((item) => item.status === "failed").length } };
+      invalidateCatalogCache(this.root, slug); await invalidateChapterStatusDerivedReads(this.root, slug); await invalidateStoryBibleDerivedReads(this.root, slug);
+      const failedChapters = results.filter((item) => item.status === "failed").length;
+      return { status: failedChapters ? "completed_with_errors" : "completed", stopReason: failedChapters ? `${failedChapters} of ${results.length} chapters failed. See the chapter errors below.` : undefined, fingerprint: batchPlan.fingerprint, results, summary: { ...batchPlan.summary, completedOperations: results.filter((item) => item.status === "completed").reduce((count, item) => count + item.plan.runStages.length, 0), completedChapters: results.filter((item) => item.status === "completed").length, reusedChapters: results.filter((item) => item.status === "reused").length, blockedChapters: results.filter((item) => item.status === "blocked").length, failedChapters } };
     }), input);
   }
 
@@ -867,9 +872,12 @@ export class StudioOperations {
         recheck = await withUsageScope({ story: slug, chapter, stage: "qa" }, () => recheckChapterQa({ root: this.root, story, chapter, provider: this.llm.forStage(story.pipeline.qa), mode: "full" }));
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
+        // A saved text edit is not a verified fix. Keep the finding open until
+        // QA can actually confirm that its described defect is gone.
+        await this.mutateQaFindingState(slug, chapter, id, "reopen", { qaStage: chapterBeforeRepair.stages.qa });
         invalidateCatalogCache(this.root, slug); await invalidateChapterStatusDerivedReads(this.root, slug);
         await recordQaActivityBestEffort(this.root, slug, "chapter.qa_repaired", `AI repair saved for Chapter ${chapter} QA finding ${id}; final QA verification failed and is still required`);
-        return { chapter, findingId: id, repaired, fixed: true, status: "repair_applied_recheck_failed" as const,
+        return { chapter, findingId: id, repaired, fixed: false, status: "repair_applied_recheck_failed" as const,
           recheck: { attempted: true as const, success: false as const, error: message }, requiresQaRecheck: true as const };
       }
       const finalFinding = recheck.state.findings.find((candidate) => candidate.id === id);

@@ -287,6 +287,18 @@ describe("web service layer", () => {
     expect(finished.status).toBe("completed"); expect((finished.result as any).summary.complete).toBe(1); expect((finished.result as any).options.continueOnError).toBe(true);
   });
 
+  it("reports chapter failures instead of completing a continuing stage batch", async () => {
+    const root = await mkdtemp(join(tmpdir(), "story-stage-failures-")); const jobs = new JobManager();
+    const operations = new StudioOperations(root, env, jobs, { pipeline: { run: async () => { throw new Error("QA did not pass"); } } });
+    const inspection = await operations.inspectSource({ filename: "chapter.txt", file: Buffer.from("A chapter."), chapter: 1 });
+    const imported = await operations.importInspection("stage-failures-story", inspection.id);
+    const finished = await waitForJob(jobs, (operations.startStageExecution(imported.story.slug, { chapters: [1], stages: ["translation"], mode: "prerequisites", force: true, continueOnError: true }) as Job).id);
+    expect(finished.status).toBe("failed");
+    expect(finished.error).toContain("1 of 1 chapters failed");
+    expect(finished.result).toMatchObject({ status: "completed_with_errors", summary: { completedOperations: 0, failedChapters: 1 }, results: [{ chapter: 1, status: "failed", error: "QA did not pass" }] });
+    await operations.close();
+  });
+
   it("retries stageExecution with its Chapter policy and target, without the old plan fingerprint", async () => {
     const root = await mkdtemp(join(tmpdir(), "story-stage-retry-")); const jobs = new JobManager();
     const calls: Array<{ executionStages?: readonly string[] }> = [];
