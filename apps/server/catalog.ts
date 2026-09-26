@@ -5,7 +5,7 @@ import { Chapter, chapterSchema } from "../../src/domain/chapter.js";
 import { isQaIssueActive, QaResult, qaResultSchema, qaStateSchema } from "../../src/domain/qa.js";
 import { migrateQaState, openFindings, qaFindingStats } from "../../src/qa/findings.js";
 import { deriveChapterQaFreshness, loadQaDeterministicDependencies } from "../../src/qa/freshness.js";
-import { Story, storySchema } from "../../src/domain/story.js";
+import { Story, qaPolicySchema, storySchema } from "../../src/domain/story.js";
 import { StoryBible, CanonicalEntity, canonicalEntitySchema, emptyStoryBible, hasActivePronunciation, storyBibleSchema } from "../../src/domain/story-bible.js";
 import { SourceManifest, sourceManifestSchema } from "../../src/source/types.js";
 import { atomicWriteJson } from "../../src/storage/atomic-write.js";
@@ -986,6 +986,7 @@ export const settingsUpdateSchema = z.object({
   title: z.string().trim().min(1), author: z.string().trim().optional(), description: z.string().max(10_000).default(""), tags: z.array(z.string()).max(30).default([]), notes: z.string().max(20_000).default(""), sourceLanguage: z.string().trim().min(2), outputLanguage: z.string().trim().min(2),
   recentChapterSummaries: z.number().int().min(0).max(100),
   qaMode: z.enum(["production", "thorough"]).optional(),
+  qaPolicy: qaPolicySchema.unwrap().optional(),
   narrationSettings: z.object({ profanityMode: z.enum(["preserve", "soften-strong"]), bleepStrongProfanity: z.boolean().default(false), includeChapterTitle: z.boolean().optional(), speechNormalization: z.enum(["automatic", "enabled", "disabled"]).default("automatic"), timeSpeechMode: z.enum(["natural_12h", "natural_24h", "preserve"]).default("natural_12h"), speechAbbreviations: z.record(z.string().trim().regex(/^[A-Za-z][A-Za-z0-9-]{0,29}$/), z.string().trim().min(1).max(120)).default({}), speechVocalizations: z.object({ mode: z.enum(["automatic", "preserve", "disabled"]).default("automatic"), fallback: z.enum(["safe_normalize", "omit_unsupported", "preserve"]).default("safe_normalize") }).default({ mode: "automatic", fallback: "safe_normalize" }) }).optional(),
   translation: z.object({ provider: z.enum(["openai", "gemini", "kimi"]), model: z.string().trim().min(1) }),
   narration: z.object({ provider: z.enum(["openai", "gemini", "kimi"]), model: z.string().trim().min(1) }),
@@ -1012,6 +1013,7 @@ export async function updateStorySettings(root: string, slug: string, input: unk
     const story = storySchema.parse({ ...current, title: update.title, author: update.author || undefined, description: update.description, tags: update.tags, notes: update.notes, sourceLanguage: update.sourceLanguage, outputLanguage: update.outputLanguage,
       context: { ...current.context, recentChapterSummaries: update.recentChapterSummaries },
       qaMode: update.qaMode ?? current.qaMode,
+      qaPolicy: update.qaPolicy ?? current.qaPolicy,
       narrationSettings: update.narrationSettings ?? current.narrationSettings,
       audio: { ...current.audio, ...update.audio }, subtitles: { ...current.subtitles, ...update.subtitles }, video: { ...current.video, ...update.video }, scenes: { ...current.scenes, ...update.scenes }, artwork,
       pipeline: {

@@ -11,6 +11,7 @@ import { loadAcceptedContinuity, type AcceptedContinuity } from "./deterministic
 import { listQaExceptions } from "./exceptions.js";
 import { QA_PROMPT_VERSION } from "./prompts.js";
 import { QaPrerequisiteError } from "./errors.js";
+import { qaFingerprintConfig } from "./policy.js";
 
 /** Naming state QA actually consumes, per entity; unrelated Story Bible fields are excluded. */
 export type QaNamingProjection = {
@@ -217,7 +218,7 @@ export async function loadStoredQaDependencies(
     translation: fingerprint(translation),
     narration: fingerprint(narration),
     context: qaContext.raw,
-    config: { model: story.pipeline.qa, policy: story.qaPolicy },
+    config: qaFingerprintConfig(story),
     narrationSettings: { profanityMode: story.narrationSettings.profanityMode, includeChapterTitle: story.narrationSettings.includeChapterTitle },
     prompt: QA_PROMPT_VERSION,
     mode: story.qaMode,

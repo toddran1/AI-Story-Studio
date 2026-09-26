@@ -9,8 +9,8 @@ import { storyNovelSourceSchema } from "../source/novel-provider.js";
 import { qaCategorySchema } from "./qa.js";
 
 export const qaPolicySchema = z.object({
-  disabledCategories: z.array(qaCategorySchema).default([]),
-  disabledRules: z.array(z.enum(["duplicateParagraph"])).default([]),
+  disabledCategories: z.array(qaCategorySchema).max(7).refine((items) => new Set(items).size === items.length).default([]),
+  disabledRules: z.array(z.enum(["duplicateParagraph"])).max(1).default([]),
 }).default({ disabledCategories: [], disabledRules: [] });
 
 export const narrationSettingsSchema = z.object({

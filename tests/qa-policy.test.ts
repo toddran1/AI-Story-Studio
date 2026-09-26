@@ -4,7 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { storySchema } from "../src/domain/story.js";
 import { runDeterministicQaChecks } from "../src/qa/deterministic.js";
-import { filterQaDetectionsForStory } from "../src/qa/policy.js";
+import { filterQaDetectionsForStory, qaFingerprintConfig } from "../src/qa/policy.js";
+import { buildQaState } from "../src/qa/review.js";
 import { testStory } from "./helpers.js";
 
 describe("per-story QA policy", () => {
@@ -12,6 +13,8 @@ describe("per-story QA policy", () => {
     const story = testStory();
     const { qaPolicy: _policy, ...legacy } = story;
     expect(storySchema.parse(legacy).qaPolicy).toEqual({ disabledCategories: [], disabledRules: [] });
+    expect(qaFingerprintConfig(story)).toBe(story.pipeline.qa);
+    expect(qaFingerprintConfig({ ...story, qaPolicy: { disabledCategories: [], disabledRules: ["duplicateParagraph"] } })).not.toEqual(story.pipeline.qa);
   });
 
   it("suppresses repeated paragraphs for one story without weakening other checks", async () => {
@@ -26,7 +29,8 @@ describe("per-story QA policy", () => {
     expect(filterQaDetectionsForStory(scoped, [
       { category: "completeness" as const, message: "The narration repeats a paragraph verbatim" },
       { category: "completeness" as const, message: "The narration omits a sentence" },
-    ])).toHaveLength(1);
+      { category: "completeness" as const, message: "The narration repeats a paragraph and omits the next passage" },
+    ])).toHaveLength(2);
     expect(story.qaPolicy.disabledRules).toEqual([]);
   });
 
@@ -36,5 +40,17 @@ describe("per-story QA policy", () => {
       { category: "dialogue" as const, message: "Dropped line" },
       { category: "numbers" as const, message: "Wrong level" },
     ])).toEqual([{ category: "numbers", message: "Wrong level" }]);
+  });
+
+  it("retires an old AI duplicate-paragraph finding when its rule is disabled", () => {
+    const story = testStory();
+    const options = { chapter: 1, translation: "Repeated line.\n\nRepeated line.", narration: "Repeated line.\n\nRepeated line." };
+    const first = buildQaState(undefined, [{ category: "completeness", severity: "warn", message: "The narration repeats a paragraph verbatim", evidence: "Paragraph 2 duplicates paragraph 1", origin: "llm" }], options);
+    expect(first.state.findings[0]?.status).toBe("open");
+    const policy = { ...story.qaPolicy, disabledRules: ["duplicateParagraph" as const] };
+    const second = buildQaState(first.state, [], { ...options, qaPolicy: policy, dependencyFingerprint: "new-policy", evaluatedContent: `${options.translation}\n\n${options.narration}` });
+    expect(second.state.findings[0]?.status).toBe("obsolete");
+    expect(second.state.checks.completeness).toBe("pass");
+    expect(second.outcome.obsoleted).toBe(1);
   });
 });

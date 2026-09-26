@@ -17,7 +17,7 @@ import { computeQaDependencyFingerprint, computeQaDependencyFingerprints, qaDepe
 import { QA_PROMPT_VERSION } from "./prompts.js";
 import { validateChapterQuality } from "./validator.js";
 import { runDeterministicQaChecks, type AcceptedContinuity } from "./deterministic.js";
-import { filterQaDetectionsForStory, qaPolicyPrompt } from "./policy.js";
+import { filterQaDetectionsForStory, qaFingerprintConfig, qaPolicyPrompt, storedQaFindingEnabled } from "./policy.js";
 import { exceptionsPromptSection, filterExceptedFindings, listQaExceptions } from "./exceptions.js";
 import { loadStoryBibleWithCanonicalOverlay } from "../story-bible/canonical.js";
 import { authorizedNarrationNames } from "../narration/naming-preferences.js";
@@ -224,6 +224,7 @@ export function reconcileQaState(
     dependencyFingerprint?: string;
     /** Content the verification actually evaluated (subset for changed-only rechecks). */
     evaluatedContent?: string;
+    qaPolicy?: Story["qaPolicy"];
   } = {},
 ): { findings: QaFinding[]; outcome: ReconcileOutcome } {
   const now = options.now ?? new Date().toISOString();
@@ -304,6 +305,14 @@ export function reconcileQaState(
 
   for (const prior of unmatched.values()) {
     if (prior.status === "open") {
+      if (options.qaPolicy && !storedQaFindingEnabled(options.qaPolicy, prior)) {
+        prior.status = "obsolete";
+        prior.resolution = { action: "obsolete", reason: "Disabled by this story's QA settings", resolvedAt: now };
+        prior.lastVerifiedAt = now;
+        stampVerification(prior);
+        outcome.obsoleted++;
+        continue;
+      }
       // Evidence-based retirement: dependencies changed since this finding was
       // last verified, the verification covered its anchored region, the
       // finding was not re-detected, and its anchor (or wrong term) is gone
@@ -434,6 +443,7 @@ export function buildQaState(
     dependencyFingerprint?: string;
     dependencySnapshot?: QaDependencySnapshot;
     evaluatedContent?: string;
+    qaPolicy?: Story["qaPolicy"];
   },
 ): { state: QaState; outcome: ReconcileOutcome } {
   const paragraphs = combinedQaParagraphs(options.translation, options.narration).map((paragraph) => paragraph.text);
@@ -466,6 +476,7 @@ export function buildQaState(
     content: `${options.translation}\n\n${options.narration}`,
     dependencyFingerprint: options.dependencyFingerprint,
     evaluatedContent: options.evaluatedContent,
+    qaPolicy: options.qaPolicy,
   });
   const base = {
     score: options.baseScore?.score ?? previous?.score,
@@ -697,7 +708,7 @@ export async function recheckChapterQa(deps: {
   const currentDependencies = {
     source: fingerprint({ source, sourceLanguage: story.sourceLanguage, outputLanguage: story.outputLanguage }),
     translation: fingerprint(translation), narration: fingerprint(narration), context: qaContext.raw,
-    config: { model: config, policy: story.qaPolicy }, narrationSettings: { profanityMode: story.narrationSettings.profanityMode, includeChapterTitle: story.narrationSettings.includeChapterTitle },
+    config: qaFingerprintConfig(story), narrationSettings: { profanityMode: story.narrationSettings.profanityMode, includeChapterTitle: story.narrationSettings.includeChapterTitle },
     prompt: QA_PROMPT_VERSION, mode: story.qaMode, ...deterministicDeps,
   };
   const dependencyFingerprints = computeQaDependencyFingerprints(currentDependencies);
@@ -733,6 +744,7 @@ export async function recheckChapterQa(deps: {
     dependencyFingerprint,
     dependencySnapshot,
     evaluatedContent: mode === "full" ? fullContent : changedContent,
+    qaPolicy: story.qaPolicy,
   });
   await persistQaStateWithMetadata(paths, state, metadata, (outputFingerprint, prior) => ({
     ...prior,

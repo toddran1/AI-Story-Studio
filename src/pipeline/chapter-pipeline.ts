@@ -29,7 +29,7 @@ import { computeQaDependencyFingerprint, computeQaDependencyFingerprints, qaDepe
 import { validateChapterQuality } from "../qa/validator.js";
 import { buildQaState, prepareQaDetections } from "../qa/review.js";
 import { runDeterministicQaChecks } from "../qa/deterministic.js";
-import { filterQaDetectionsForStory, qaPolicyPrompt } from "../qa/policy.js";
+import { filterQaDetectionsForStory, qaFingerprintConfig, qaPolicyPrompt } from "../qa/policy.js";
 import { exceptionsPromptSection, filterExceptedFindings, listQaExceptions } from "../qa/exceptions.js";
 import { mergeStoryBible, normalizeStoryBibleUpdate } from "../story-bible/updater.js";
 import { backfillCanonicalSnapshots, loadStoryBibleWithCanonicalOverlay } from "../story-bible/canonical.js";
@@ -317,7 +317,7 @@ export class ChapterPipeline {
     const qaContext = await resolveStoredQaContext({ storyContext: paths.storyContext, chapter: options.chapter });
     const qaFp = computeQaDependencyFingerprint({
       source: ingestionFp, translation: fingerprint(english), narration: fingerprint(narration),
-      context: qaContext.raw, config: { model: qaConfig, policy: options.story.qaPolicy }, narrationSettings: narrationBehavior, prompt: QA_PROMPT_VERSION, mode: options.story.qaMode,
+      context: qaContext.raw, config: qaFingerprintConfig(options.story), narrationSettings: narrationBehavior, prompt: QA_PROMPT_VERSION, mode: options.story.qaMode,
       ...qaDeterministicDeps,
     });
     const qaResult = await runStage("qa", qaFp, paths.qa, {
@@ -338,11 +338,12 @@ export class ChapterPipeline {
         chapter: options.chapter, canonicalEntities: qaContext.parsed.canonicalEntities, effectiveNamingEntities, translation: english, narration,
         baseScore: { score: result.value.score, originalScore: result.value.originalScore, status: result.value.status, originalStatus: result.value.originalStatus },
         mode: options.story.qaMode,
+        qaPolicy: options.story.qaPolicy,
         acceptedContinuity: deterministic.acceptedContinuity,
         dependencyFingerprint: qaFp,
         dependencySnapshot: qaDependencySnapshot(computeQaDependencyFingerprints({
           source: ingestionFp, translation: fingerprint(english), narration: fingerprint(narration), context: qaContext.raw,
-          config: { model: qaConfig, policy: options.story.qaPolicy }, narrationSettings: narrationBehavior, prompt: QA_PROMPT_VERSION, mode: options.story.qaMode, ...qaDeterministicDeps,
+          config: qaFingerprintConfig(options.story), narrationSettings: narrationBehavior, prompt: QA_PROMPT_VERSION, mode: options.story.qaMode, ...qaDeterministicDeps,
         })),
       });
       chapter.stages.qa.usage = result.usage;
