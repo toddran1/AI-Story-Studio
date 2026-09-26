@@ -110,3 +110,43 @@ export function safeProviderDetail(detail: unknown, max = 300): string {
   return safeText(oneLine).slice(0, max);
 }
 
+export function sanitizeFishProviderDetail(
+  raw: unknown,
+  currentChunkText?: string,
+  max = 300,
+): string | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  let text = safeProviderDetail(raw, max * 2);
+  if (!text) return undefined;
+
+  if (currentChunkText && currentChunkText.trim()) {
+    const normChunk = currentChunkText.replace(/[\r\n\t]+/g, " ").trim();
+    if (normChunk.length > 0) {
+      if (text.includes(normChunk)) {
+        text = text.replaceAll(normChunk, "[REDACTED]");
+      } else if (normChunk.length >= 15) {
+        for (let len = Math.min(normChunk.length, 60); len >= 15; len -= 5) {
+          for (let i = 0; i <= normChunk.length - len; i += 5) {
+            const sub = normChunk.slice(i, i + len);
+            if (text.includes(sub)) {
+              text = text.replaceAll(sub, "[REDACTED]");
+            }
+          }
+        }
+      }
+      const words = normChunk.split(/[\s_\W]+/).filter((w) => w.length >= 8);
+      for (const word of words) {
+        if (text.includes(word)) {
+          text = text.replaceAll(word, "[REDACTED]");
+        }
+      }
+    }
+  }
+
+  text = text.replace(/(\[REDACTED\](?:\s|:\s*)?)+/g, "[REDACTED]").trim();
+  if (!text || text === "[REDACTED]" || text.replace(/\[REDACTED\]/g, "").trim().length === 0) {
+    return undefined;
+  }
+  return text.slice(0, max);
+}
+

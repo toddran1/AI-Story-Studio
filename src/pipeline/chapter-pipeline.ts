@@ -49,6 +49,7 @@ import { createEffectiveTtsProvider } from "../tts/effective-provider.js";
 import { normalizeSpeechForProvider } from "../tts/speech-normalization.js";
 import { manualAcceptanceFingerprint } from "../studio/stage-acceptance.js";
 import { StageExecutionNode, dependentProcessingStages } from "../studio/stage-execution.js";
+import { inspectStageArtifact } from "../studio/artifact-state.js";
 import { persistQaStateWithMetadata } from "../qa/persistence.js";
 
 export type ForceStage = "translation" | "narration" | "qa" | "story-bible" | "continuity" | "tts" | "audio" | "all";
@@ -105,7 +106,14 @@ export class ChapterPipeline {
 
     const persist = async () => { chapter.updatedAt = new Date().toISOString(); await atomicWriteJson(paths.chapterMeta, chapter); };
     if (options.source) await persist();
-    const runStage = async <T>(stage: StageName, fp: string, outputPath: string, details: Partial<StageState>, action: () => Promise<T>): Promise<T | undefined> => {
+    const runStage = async <T>(
+      stage: StageName,
+      fp: string,
+      outputPath: string,
+      details: Partial<StageState>,
+      action: () => Promise<T>,
+      stageOptions?: { actionOwnsCompletion?: boolean },
+    ): Promise<T | undefined> => {
       const state = chapter.stages[stage];
       if (!shouldRun(stage)) return undefined;
       const forced = Boolean(executionStages?.has(stage)) || isForced(options.force, stage);
@@ -135,6 +143,26 @@ export class ChapterPipeline {
       logger.info({ event: "pipeline.stage.started", story: options.story.slug, chapter: options.chapter, stage, provider: details.provider, model: details.model });
       try {
         const value = await withUsageScope({ story: options.story.slug, chapter: options.chapter, productionRunId: options.productionRunId, queueJobId: options.queueJobId, stage }, action);
+        if (stageOptions?.actionOwnsCompletion) {
+          options.onStageEvent?.({
+            stage,
+            status: "completed",
+            state: chapter.stages[stage],
+            detail: stage === "tts"
+              ? `Audio generated · Fish requests: ${chapter.stages.tts.usage?.requests ?? 0} · Automatic retries: ${ttsQualityMode(options.story.pipeline.tts) === "auto_repair" ? "enabled" : "off"}`
+              : undefined,
+          });
+          logger.info({
+            event: "pipeline.stage.completed",
+            story: options.story.slug,
+            chapter: options.chapter,
+            stage,
+            provider: details.provider,
+            model: details.model,
+            durationMs: Date.now() - started,
+          });
+          return value;
+        }
         if (stage === "qa") {
           const qaState = value as QaState;
           chapter.quality = { status: qaState.status, score: qaState.score, issueCategories: [...new Set(activeQaIssues(qaState).map((issue) => issue.category))] };
@@ -163,6 +191,12 @@ export class ChapterPipeline {
         logger.info({ event: "pipeline.stage.completed", story: options.story.slug, chapter: options.chapter, stage, provider: details.provider, model: details.model, durationMs: Date.now() - started });
         return value;
       } catch (error) {
+        if ((error as { preservePriorStageState?: boolean })?.preservePriorStageState) {
+          throw new PipelineError(
+            `Story=${options.story.slug} Chapter=${options.chapter} Stage=${stage} Provider=${details.provider ?? "local"} Model=${details.model ?? "n/a"}: ${error instanceof Error ? error.message : String(error)}`,
+            { cause: error },
+          );
+        }
         chapter.stages[stage] = { ...chapter.stages[stage], status: "failed", durationMs: Date.now() - started,
           error: { message: error instanceof Error ? error.message : String(error), cause: error instanceof Error && error.cause ? String(error.cause) : undefined } };
         await persist();
@@ -455,267 +489,333 @@ export class ChapterPipeline {
     const ttsFp = fingerprint({ narration: fingerprint(ttsScript), speech: speech.fingerprint, config: { ...ttsSynthesisSettings(ttsConfig), referenceId }, deliveryProfile, inputNormalizationVersion: ttsProvider.inputNormalizationVersion,
       ...(pronunciationFp ? { pronunciation: pronunciationFp } : {}),
       ...(bleepStrongProfanity ? { bleepStrongProfanity: true, censor: { version: this.censor.version || CENSOR_AUDIO_VERSION, config: censorToneConfig } } : {}) });
+    const preTtsChapterSnapshot = structuredClone(chapter);
+    const priorTtsUsable = await hasUsablePriorTts(options.root, options.story.slug, options.chapter, chapter);
+
     await runStage("tts", ttsFp, paths.audioRaw, { provider: ttsConfig.provider, model: ttsConfig.model }, async () => {
-      const result = await this.censor.synthesize(ttsProvider, { text: speech.normalized.text, model: ttsConfig.model, referenceId, secondaryReferenceId: ttsConfig.secondaryReferenceId,
-        voiceMode: ttsConfig.voiceMode, deliveryIntensity: ttsConfig.deliveryIntensity, qualityGuard: qualityMode !== "off", providerQualityGuard: ttsConfig.providerQualityGuard, bleepStrongProfanity,
-        checkpointDir: paths.ttsWorking,
-        onChunkProgress: ({ currentChunk, totalChunks, status, errorCategory }) => {
-          const detail = status === "reused"
-            ? `Reusing generated audio · Chunk ${currentChunk} of ${totalChunks}`
-            : status === "failed"
-            ? `Fish generation failed · Chunk ${currentChunk} of ${totalChunks}${errorCategory ? ` · ${errorCategory}` : ""}`
-            : `Generating audio · Chunk ${currentChunk} of ${totalChunks} · Fish ${ttsConfig.model} · Automatic retries: ${qualityMode === "auto_repair" ? "on" : "off"}${status === "completed" ? " · completed" : ""}`;
-          options.onStageEvent?.({
-            stage: "tts",
-            status: status === "reused" ? "reused" : "progress",
-            state: chapter.stages.tts,
-            currentChunk,
-            totalChunks,
-            detail,
-          });
-        },
-        onQualityProgress,
-        speed: ttsConfig.speed, format: ttsConfig.format, sampleRate: ttsConfig.sampleRate, bitrate: ttsConfig.bitrate,
-        normalize: ttsConfig.normalize, maxCharsPerRequest: ttsConfig.maxCharsPerRequest });
-      // 1. Create staging directory
-      const stagingDir = join(paths.chapterDir, `.tts-stage-${randomUUID()}`);
-      const stagedAudioRaw = join(stagingDir, "audio-raw.mp3");
-      const stagedSegmentsDir = join(stagingDir, "audio-segments");
-      const stagedCensorManifest = join(stagingDir, "censor-manifest.json");
-      const stagedTtsQuality = join(stagingDir, "tts-quality.json");
-
-      let stagedQualityArtifact: TtsQualityArtifact | undefined;
-      if (result.quality) {
-        stagedQualityArtifact = createChapterTtsQualityArtifact({
-          chapter: options.chapter,
-          config: ttsConfig,
-          report: result.quality,
-          maxRetries: ttsConfig.maxQualityRetries,
-          transcriber: this.qualityVerification?.transcriber?.name ?? "unavailable",
-        });
-      } else if (result.segmentTexts?.length === result.segments.length) {
-        stagedQualityArtifact = createChapterTtsQualityArtifact({
-          chapter: options.chapter,
-          config: ttsConfig,
-          report: {
-            version: 1,
-            status: "unverified",
-            retried: 0,
-            segments: result.segmentTexts.map((expectedText, index) => ({
-              index,
-              expectedText,
-              status: "unverified",
-              attempts: [],
-              finalAttempt: 0,
-              issues: [],
-            })),
-          },
-          maxRetries: 0,
-          transcriber: "not_run",
-        });
-      }
-
+      const ttsStartedAt = Date.now();
       try {
-        // Stage audio-raw
-        await atomicWrite(stagedAudioRaw, result.audio);
+        const result = await this.censor.synthesize(ttsProvider, {
+          text: speech.normalized.text,
+          model: ttsConfig.model,
+          referenceId,
+          secondaryReferenceId: ttsConfig.secondaryReferenceId,
+          voiceMode: ttsConfig.voiceMode,
+          deliveryIntensity: ttsConfig.deliveryIntensity,
+          qualityGuard: qualityMode !== "off",
+          providerQualityGuard: ttsConfig.providerQualityGuard,
+          bleepStrongProfanity,
+          checkpointDir: paths.ttsWorking,
+          onChunkProgress: ({ currentChunk, totalChunks, status, errorCategory }) => {
+            const detail = status === "reused"
+              ? `Reusing generated audio · Chunk ${currentChunk} of ${totalChunks}`
+              : status === "failed"
+              ? `Fish generation failed · Chunk ${currentChunk} of ${totalChunks}${errorCategory ? ` · ${errorCategory}` : ""}`
+              : `Generating audio · Chunk ${currentChunk} of ${totalChunks} · Fish ${ttsConfig.model} · Automatic retries: ${qualityMode === "auto_repair" ? "on" : "off"}${status === "completed" ? " · completed" : ""}`;
+            options.onStageEvent?.({
+              stage: "tts",
+              status: status === "reused" ? "reused" : "progress",
+              state: chapter.stages.tts,
+              currentChunk,
+              totalChunks,
+              detail,
+            });
+          },
+          onQualityProgress,
+          speed: ttsConfig.speed,
+          format: ttsConfig.format,
+          sampleRate: ttsConfig.sampleRate,
+          bitrate: ttsConfig.bitrate,
+          normalize: ttsConfig.normalize,
+          maxCharsPerRequest: ttsConfig.maxCharsPerRequest,
+        });
 
-        // Stage segments
-        await mkdir(stagedSegmentsDir, { recursive: true });
-        for (let idx = 0; idx < result.segments.length; idx++) {
-          const filename = `${String(idx + 1).padStart(4, "0")}.mp3`;
-          await atomicWrite(join(stagedSegmentsDir, filename), result.segments[idx]!);
+        // 1. Create staging directory
+        const stagingDir = join(paths.chapterDir, `.tts-stage-${randomUUID()}`);
+        const stagedAudioRaw = join(stagingDir, "audio-raw.mp3");
+        const stagedSegmentsDir = join(stagingDir, "audio-segments");
+        const stagedCensorManifest = join(stagingDir, "censor-manifest.json");
+        const stagedTtsQuality = join(stagingDir, "tts-quality.json");
+
+        let stagedQualityArtifact: TtsQualityArtifact | undefined;
+        if (result.quality) {
+          stagedQualityArtifact = createChapterTtsQualityArtifact({
+            chapter: options.chapter,
+            config: ttsConfig,
+            report: result.quality,
+            maxRetries: ttsConfig.maxQualityRetries,
+            transcriber: this.qualityVerification?.transcriber?.name ?? "unavailable",
+          });
+        } else if (result.segmentTexts?.length === result.segments.length) {
+          stagedQualityArtifact = createChapterTtsQualityArtifact({
+            chapter: options.chapter,
+            config: ttsConfig,
+            report: {
+              version: 1,
+              status: "unverified",
+              retried: 0,
+              segments: result.segmentTexts.map((expectedText, index) => ({
+                index,
+                expectedText,
+                status: "unverified",
+                attempts: [],
+                finalAttempt: 0,
+                issues: [],
+              })),
+            },
+            maxRetries: 0,
+            transcriber: "not_run",
+          });
         }
 
-        // Stage censor manifest if applicable
-        if (result.censorManifest) {
-          await atomicWriteJson(stagedCensorManifest, result.censorManifest);
-        }
+        try {
+          // Stage audio-raw
+          await atomicWrite(stagedAudioRaw, result.audio);
 
-        // Stage quality artifact if applicable
-        if (stagedQualityArtifact) {
-          await atomicWriteJson(stagedTtsQuality, stagedQualityArtifact);
-        }
+          // Stage segments
+          await mkdir(stagedSegmentsDir, { recursive: true });
+          for (let idx = 0; idx < result.segments.length; idx++) {
+            const filename = `${String(idx + 1).padStart(4, "0")}.mp3`;
+            await atomicWrite(join(stagedSegmentsDir, filename), result.segments[idx]!);
+          }
 
-        // 2. Validate staged artifacts
-        if (!(await exists(stagedAudioRaw))) {
-          throw new StorageError(`Staged audioRaw is missing at ${stagedAudioRaw}`);
-        }
-        const rawStat = await stat(stagedAudioRaw);
-        if (rawStat.size === 0) {
-          throw new StorageError(`Staged audioRaw is empty at ${stagedAudioRaw}`);
-        }
+          // Stage censor manifest if applicable
+          if (result.censorManifest) {
+            await atomicWriteJson(stagedCensorManifest, result.censorManifest);
+          }
 
-        const stagedFiles = (await readdir(stagedSegmentsDir)).filter((f) => f.endsWith(".mp3")).sort();
-        if (stagedFiles.length !== result.segments.length) {
-          throw new StorageError(
-            `Staged segment count (${stagedFiles.length}) does not match expected (${result.segments.length})`
-          );
-        }
-        for (let i = 0; i < result.segments.length; i++) {
-          const expectedName = `${String(i + 1).padStart(4, "0")}.mp3`;
-          if (stagedFiles[i] !== expectedName) {
+          // Stage quality artifact if applicable
+          if (stagedQualityArtifact) {
+            await atomicWriteJson(stagedTtsQuality, stagedQualityArtifact);
+          }
+
+          // 2. Validate staged artifacts
+          if (!(await exists(stagedAudioRaw))) {
+            throw new StorageError(`Staged audioRaw is missing at ${stagedAudioRaw}`);
+          }
+          const rawStat = await stat(stagedAudioRaw);
+          if (rawStat.size === 0) {
+            throw new StorageError(`Staged audioRaw is empty at ${stagedAudioRaw}`);
+          }
+
+          const stagedFiles = (await readdir(stagedSegmentsDir)).filter((f) => f.endsWith(".mp3")).sort();
+          if (stagedFiles.length !== result.segments.length) {
             throw new StorageError(
-              `Staged segment filenames are not contiguous: expected ${expectedName} but found ${stagedFiles[i]}`
+              `Staged segment count (${stagedFiles.length}) does not match expected (${result.segments.length})`
             );
           }
-          const segStat = await stat(join(stagedSegmentsDir, expectedName));
-          if (segStat.size === 0) {
-            throw new StorageError(`Staged segment ${expectedName} is empty`);
-          }
-        }
-
-        if (result.censorManifest) {
-          if (!(await exists(stagedCensorManifest))) {
-            throw new StorageError(`Expected staged censor manifest at ${stagedCensorManifest}`);
-          }
-          const manifestRaw = await readFile(stagedCensorManifest, "utf8");
-          censorManifestSchema.parse(JSON.parse(manifestRaw));
-        }
-
-        if (stagedQualityArtifact) {
-          if (!(await exists(stagedTtsQuality))) {
-            throw new StorageError(`Expected staged TTS quality artifact at ${stagedTtsQuality}`);
-          }
-          const qualityRaw = await readFile(stagedTtsQuality, "utf8");
-          ttsQualityArtifactSchema.parse(JSON.parse(qualityRaw));
-        }
-      } catch (stagingError) {
-        await rm(stagingDir, { recursive: true, force: true }).catch(() => {});
-        throw stagingError;
-      }
-
-      // 3. Snapshot canonical state before mutation
-      const oldAudioRawExists = await exists(paths.audioRaw);
-      const oldAudioRaw = oldAudioRawExists ? await readFile(paths.audioRaw) : undefined;
-      const oldSegmentsDirExists = await exists(paths.segments);
-      const oldSegments = new Map<string, Buffer>();
-      if (oldSegmentsDirExists) {
-        const entries = await readdir(paths.segments);
-        for (const entry of entries) {
-          if (entry.endsWith(".mp3")) {
-            oldSegments.set(entry, await readFile(join(paths.segments, entry)));
-          }
-        }
-      }
-      const oldCensorExists = await exists(paths.censorManifest);
-      const oldCensorJson = oldCensorExists ? await readFile(paths.censorManifest) : undefined;
-      const oldQualityExists = await exists(paths.ttsQuality);
-      const oldQualityJson = oldQualityExists ? await readFile(paths.ttsQuality) : undefined;
-      const oldChapterMetaJson = (await exists(paths.chapterMeta)) ? await readFile(paths.chapterMeta) : undefined;
-
-      // 4. Commit staged artifacts in transaction
-      let audioRawPromoted = false;
-      let segmentsPromoted = false;
-      let censorManifestPromoted = false;
-      let qualityPromoted = false;
-      let chapterMetaPromoted = false;
-
-      try {
-        const stagedRawBytes = await readFile(stagedAudioRaw);
-        await atomicWrite(paths.audioRaw, stagedRawBytes);
-        audioRawPromoted = true;
-
-        await rm(paths.segments, { recursive: true, force: true });
-        await mkdir(paths.segments, { recursive: true });
-        for (let idx = 0; idx < result.segments.length; idx++) {
-          const filename = `${String(idx + 1).padStart(4, "0")}.mp3`;
-          const segBytes = await readFile(join(stagedSegmentsDir, filename));
-          await atomicWrite(join(paths.segments, filename), segBytes);
-        }
-        segmentsPromoted = true;
-
-        if (result.censorManifest) {
-          const manifestBytes = await readFile(stagedCensorManifest);
-          await atomicWrite(paths.censorManifest, manifestBytes);
-        } else {
-          await rm(paths.censorManifest, { force: true });
-        }
-        censorManifestPromoted = true;
-
-        if (stagedQualityArtifact) {
-          const qualityBytes = await readFile(stagedTtsQuality);
-          await atomicWrite(paths.ttsQuality, qualityBytes);
-        } else {
-          await rm(paths.ttsQuality, { force: true });
-        }
-        qualityPromoted = true;
-
-        chapter.stages.tts.usage = {
-          requestId: result.requestIds?.join(",") || undefined,
-          requests: result.providerRequests ?? (result.censor ? Math.max(0, result.segments.length - result.censor.segments) : result.segments.length),
-          chunks: result.segments.length,
-          reusedChunks: result.reusedChunks ?? (result.providerRequests !== undefined ? Math.max(0, result.segments.length - result.providerRequests) : undefined),
-          characters: result.generatedCharacters ?? [...speech.normalized.text].length,
-          bytes: result.audio.byteLength,
-          censoredSegments: result.censor?.segments,
-          censorDurationSeconds: result.censor?.durationSeconds,
-        };
-        if (result.quality && stagedQualityArtifact) {
-          const summary = summarizeQuality(stagedQualityArtifact.segments);
-          chapter.stages.tts.usage.quality = {
-            status: summary.status,
-            segments: stagedQualityArtifact.segments.length,
-            needsReview: summary.needsReview,
-            retried: summary.retried,
-            manuallyAccepted: summary.manuallyAccepted,
-          };
-        }
-
-        await persist();
-        chapterMetaPromoted = true;
-
-        // Success: Clean up staging and ttsWorking
-        await rm(stagingDir, { recursive: true, force: true }).catch(() => {});
-        await rm(paths.ttsWorking, { recursive: true, force: true }).catch(() => {});
-      } catch (commitError) {
-        const rollbackErrors: unknown[] = [];
-        if (audioRawPromoted) {
-          try {
-            if (oldAudioRaw !== undefined) await atomicWrite(paths.audioRaw, oldAudioRaw);
-            else await rm(paths.audioRaw, { force: true });
-          } catch (err) { rollbackErrors.push(err); }
-        }
-        if (segmentsPromoted || (await exists(paths.segments))) {
-          try {
-            await rm(paths.segments, { recursive: true, force: true });
-            if (oldSegmentsDirExists) {
-              await mkdir(paths.segments, { recursive: true });
-              for (const [filename, bytes] of oldSegments.entries()) {
-                await atomicWrite(join(paths.segments, filename), bytes);
-              }
+          for (let i = 0; i < result.segments.length; i++) {
+            const expectedName = `${String(i + 1).padStart(4, "0")}.mp3`;
+            if (stagedFiles[i] !== expectedName) {
+              throw new StorageError(
+                `Staged segment filenames are not contiguous: expected ${expectedName} but found ${stagedFiles[i]}`
+              );
             }
-          } catch (err) { rollbackErrors.push(err); }
-        }
-        if (censorManifestPromoted) {
-          try {
-            if (oldCensorJson !== undefined) await atomicWrite(paths.censorManifest, oldCensorJson);
-            else await rm(paths.censorManifest, { force: true });
-          } catch (err) { rollbackErrors.push(err); }
-        }
-        if (qualityPromoted) {
-          try {
-            if (oldQualityJson !== undefined) await atomicWrite(paths.ttsQuality, oldQualityJson);
-            else await rm(paths.ttsQuality, { force: true });
-          } catch (err) { rollbackErrors.push(err); }
-        }
-        if (chapterMetaPromoted) {
-          try {
-            if (oldChapterMetaJson !== undefined) await atomicWrite(paths.chapterMeta, oldChapterMetaJson);
-          } catch (err) { rollbackErrors.push(err); }
+            const segStat = await stat(join(stagedSegmentsDir, expectedName));
+            if (segStat.size === 0) {
+              throw new StorageError(`Staged segment ${expectedName} is empty`);
+            }
+          }
+
+          if (result.censorManifest) {
+            if (!(await exists(stagedCensorManifest))) {
+              throw new StorageError(`Expected staged censor manifest at ${stagedCensorManifest}`);
+            }
+            const manifestRaw = await readFile(stagedCensorManifest, "utf8");
+            censorManifestSchema.parse(JSON.parse(manifestRaw));
+          }
+
+          if (stagedQualityArtifact) {
+            if (!(await exists(stagedTtsQuality))) {
+              throw new StorageError(`Expected staged TTS quality artifact at ${stagedTtsQuality}`);
+            }
+            const qualityRaw = await readFile(stagedTtsQuality, "utf8");
+            ttsQualityArtifactSchema.parse(JSON.parse(qualityRaw));
+          }
+        } catch (stagingError) {
+          await rm(stagingDir, { recursive: true, force: true }).catch(() => {});
+          throw stagingError;
         }
 
-        // Clean up staging directory on failure (preserve ttsWorking!)
-        await rm(stagingDir, { recursive: true, force: true }).catch(() => {});
-
-        if (rollbackErrors.length > 0) {
-          throw new StorageError(
-            `TTS artifact promotion failed and rollback of promoted files failed: ${rollbackErrors.map((e) => (e instanceof Error ? e.message : String(e))).join("; ")}`,
-            { cause: new AggregateError([commitError, ...rollbackErrors]) }
-          );
+        // 3. Snapshot canonical state before mutation
+        const oldAudioRawExists = await exists(paths.audioRaw);
+        const oldAudioRaw = oldAudioRawExists ? await readFile(paths.audioRaw) : undefined;
+        const oldSegmentsDirExists = await exists(paths.segments);
+        const oldSegments = new Map<string, Buffer>();
+        if (oldSegmentsDirExists) {
+          const entries = await readdir(paths.segments);
+          for (const entry of entries) {
+            if (entry.endsWith(".mp3")) {
+              oldSegments.set(entry, await readFile(join(paths.segments, entry)));
+            }
+          }
         }
-        throw commitError;
+        const oldCensorExists = await exists(paths.censorManifest);
+        const oldCensorJson = oldCensorExists ? await readFile(paths.censorManifest) : undefined;
+        const oldQualityExists = await exists(paths.ttsQuality);
+        const oldQualityJson = oldQualityExists ? await readFile(paths.ttsQuality) : undefined;
+        const oldChapterMetaJson = (await exists(paths.chapterMeta)) ? await readFile(paths.chapterMeta) : undefined;
+
+        // 4. Commit staged artifacts in transaction
+        let audioRawPromoted = false;
+        let segmentsPromoted = false;
+        let censorManifestPromoted = false;
+        let qualityPromoted = false;
+        let chapterMetaPromoted = false;
+
+        try {
+          const stagedRawBytes = await readFile(stagedAudioRaw);
+          await atomicWrite(paths.audioRaw, stagedRawBytes);
+          audioRawPromoted = true;
+
+          await rm(paths.segments, { recursive: true, force: true });
+          await mkdir(paths.segments, { recursive: true });
+          for (let idx = 0; idx < result.segments.length; idx++) {
+            const filename = `${String(idx + 1).padStart(4, "0")}.mp3`;
+            const segBytes = await readFile(join(stagedSegmentsDir, filename));
+            await atomicWrite(join(paths.segments, filename), segBytes);
+          }
+          segmentsPromoted = true;
+
+          if (result.censorManifest) {
+            const manifestBytes = await readFile(stagedCensorManifest);
+            await atomicWrite(paths.censorManifest, manifestBytes);
+          } else {
+            await rm(paths.censorManifest, { force: true });
+          }
+          censorManifestPromoted = true;
+
+          if (stagedQualityArtifact) {
+            const qualityBytes = await readFile(stagedTtsQuality);
+            await atomicWrite(paths.ttsQuality, qualityBytes);
+          } else {
+            await rm(paths.ttsQuality, { force: true });
+          }
+          qualityPromoted = true;
+
+          // 5. Output fingerprint of canonical audioRaw
+          const outputFingerprint = await fileFingerprint(paths.audioRaw);
+          if (!outputFingerprint) {
+            throw new StorageError(`TTS canonical audio output fingerprint failed for ${paths.audioRaw}`);
+          }
+
+          const ttsUsage = {
+            requestId: result.requestIds?.join(",") || undefined,
+            requests: result.providerRequests ?? (result.censor ? Math.max(0, result.segments.length - result.censor.segments) : result.segments.length),
+            chunks: result.segments.length,
+            reusedChunks: result.reusedChunks ?? (result.providerRequests !== undefined ? Math.max(0, result.segments.length - result.providerRequests) : undefined),
+            characters: result.generatedCharacters ?? [...speech.normalized.text].length,
+            bytes: result.audio.byteLength,
+            censoredSegments: result.censor?.segments,
+            censorDurationSeconds: result.censor?.durationSeconds,
+            ...(result.quality && stagedQualityArtifact ? {
+              quality: (() => {
+                const summary = summarizeQuality(stagedQualityArtifact.segments);
+                return {
+                  status: summary.status,
+                  segments: stagedQualityArtifact.segments.length,
+                  needsReview: summary.needsReview,
+                  retried: summary.retried,
+                  manuallyAccepted: summary.manuallyAccepted,
+                };
+              })(),
+            } : {}),
+          };
+
+          // 6. Set final TTS stage metadata
+          chapter.stages.tts = {
+            ...chapter.stages.tts,
+            status: "complete",
+            fingerprint: ttsFp,
+            outputFingerprint,
+            completedAt: new Date().toISOString(),
+            durationMs: Date.now() - ttsStartedAt,
+            error: undefined,
+            usage: ttsUsage,
+          };
+
+          // 7. Persist completed chapter metadata
+          await persist();
+          chapterMetaPromoted = true;
+
+          // SUCCESS BOUNDARY: Delete staging and ttsWorking ONLY after metadata persistence succeeds!
+          await rm(stagingDir, { recursive: true, force: true }).catch(() => {});
+          await rm(paths.ttsWorking, { recursive: true, force: true }).catch(() => {});
+          return result;
+        } catch (commitError) {
+          const rollbackErrors: unknown[] = [];
+          if (audioRawPromoted) {
+            try {
+              if (oldAudioRaw !== undefined) await atomicWrite(paths.audioRaw, oldAudioRaw);
+              else await rm(paths.audioRaw, { force: true });
+            } catch (err) { rollbackErrors.push(err); }
+          }
+          if (segmentsPromoted || (await exists(paths.segments))) {
+            try {
+              await rm(paths.segments, { recursive: true, force: true });
+              if (oldSegmentsDirExists) {
+                await mkdir(paths.segments, { recursive: true });
+                for (const [filename, bytes] of oldSegments.entries()) {
+                  await atomicWrite(join(paths.segments, filename), bytes);
+                }
+              }
+            } catch (err) { rollbackErrors.push(err); }
+          }
+          if (censorManifestPromoted) {
+            try {
+              if (oldCensorJson !== undefined) await atomicWrite(paths.censorManifest, oldCensorJson);
+              else await rm(paths.censorManifest, { force: true });
+            } catch (err) { rollbackErrors.push(err); }
+          }
+          if (qualityPromoted) {
+            try {
+              if (oldQualityJson !== undefined) await atomicWrite(paths.ttsQuality, oldQualityJson);
+              else await rm(paths.ttsQuality, { force: true });
+            } catch (err) { rollbackErrors.push(err); }
+          }
+          if (chapterMetaPromoted) {
+            try {
+              if (oldChapterMetaJson !== undefined) await atomicWrite(paths.chapterMeta, oldChapterMetaJson);
+            } catch (err) { rollbackErrors.push(err); }
+          }
+
+          // Clean up staging directory on failure (preserve ttsWorking!)
+          await rm(stagingDir, { recursive: true, force: true }).catch(() => {});
+
+          if (rollbackErrors.length > 0) {
+            throw new StorageError(
+              `TTS artifact promotion failed and rollback of promoted files failed: ${rollbackErrors.map((e) => (e instanceof Error ? e.message : String(e))).join("; ")}`,
+              { cause: new AggregateError([commitError, ...rollbackErrors]) }
+            );
+          }
+          throw commitError;
+        }
+      } catch (actionError) {
+        if (priorTtsUsable) {
+          chapter = structuredClone(preTtsChapterSnapshot);
+          try {
+            await persist();
+          } catch (restoreMetaError) {
+            logger.error({
+              event: "pipeline.tts.restore_metadata_failed",
+              story: options.story.slug,
+              chapter: options.chapter,
+              error: restoreMetaError,
+            });
+          }
+          logger.warn({
+            event: "pipeline.tts.regeneration_failed_prior_restored",
+            story: options.story.slug,
+            chapter: options.chapter,
+            error: actionError instanceof Error ? actionError.message : String(actionError),
+          });
+          const errorObj = actionError instanceof Error ? actionError : new Error(String(actionError));
+          Object.assign(errorObj, { preservePriorStageState: true });
+          throw errorObj;
+        }
+        throw actionError;
       }
-    });
+    }, { actionOwnsCompletion: true });
     if (options.stopAfter === "tts") { await persist(); return chapter; }
 
     if (!shouldRun("audioMastering")) { await persist(); return chapter; }
@@ -755,4 +855,25 @@ const sameLanguage = (source: string, output: string) => source.trim().toLowerCa
 function invalidateDownstream(chapter: Chapter, stage: StageName) {
   for (const dependent of dependentProcessingStages(stage)) chapter.stages[dependent] = pending();
   if (["ingestion", "translation", "narration", "qa"].includes(stage)) chapter.quality = undefined;
+}
+
+async function hasUsablePriorTts(root: string, story: string, chapterNumber: number, chapter: Chapter): Promise<boolean> {
+  const state = chapter.stages?.tts;
+  if (!state) return false;
+  const isCompleteOrStale = state.status === "complete" || (Boolean(state.staleReason) && Boolean(state.outputFingerprint));
+  if (!isCompleteOrStale) return false;
+  const artifact = await inspectStageArtifact(root, story, chapterNumber, "tts");
+  if (artifact.availability !== "available") return false;
+  const paths = storyPaths(root, story, chapterNumber);
+  if (await exists(paths.segments)) {
+    try {
+      const segs = await readdir(paths.segments);
+      if (segs.filter((f) => f.endsWith(".mp3")).length === 0) {
+        return false;
+      }
+    } catch {
+      return false;
+    }
+  }
+  return true;
 }

@@ -15,7 +15,7 @@ import { atomicWrite, atomicWriteJson } from "../../storage/atomic-write.js";
 import { readJsonIfExists, readTextIfExists } from "../../storage/story-files.js";
 import { fingerprint } from "../../utils/hash.js";
 import { findRetryAfterMs, isTransientError } from "../../batch/retry.js";
-import { safeProviderDetail } from "../../errors/diagnostic.js";
+import { safeProviderDetail, sanitizeFishProviderDetail } from "../../errors/diagnostic.js";
 
 export const fishChunkCheckpointSchema = z.object({
   version: z.literal(1),
@@ -218,7 +218,7 @@ export class FishAudioProvider implements TTSProvider {
               totalChunks,
               attempt,
               model: request.model,
-              error: fetchError instanceof Error ? fetchError.message : String(fetchError),
+              error: sanitizeFishProviderDetail(fetchError instanceof Error ? fetchError.message : String(fetchError), text, 300) ?? "Network error",
               retryAfterMs,
               delayMs: delay,
             });
@@ -271,7 +271,7 @@ export class FishAudioProvider implements TTSProvider {
           }
           const errorCategory = status === 429 ? "rate_limit" : status >= 500 ? "transient" : "provider";
           const userFacingSummary = status === 429 ? "HTTP 429 rate limit" : `HTTP ${status}`;
-          const sanitizedDetail = safeProviderDetail(rawDetail, 300);
+          const sanitizedDetail = sanitizeFishProviderDetail(rawDetail, text, 300);
           throw this.chunkFailure({
             message: userFacingSummary,
             currentChunk,
@@ -411,7 +411,7 @@ export class FishAudioProvider implements TTSProvider {
       status: options.status,
       requestId: options.requestId,
       errorCategory: options.errorCategory,
-      error: options.providerDetail || (options.causeError instanceof Error ? options.causeError.message : String(options.causeError ?? options.message)),
+      error: options.providerDetail ?? options.message,
     });
     const cause = Object.assign(
       options.causeError instanceof Error
