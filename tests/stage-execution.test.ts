@@ -107,6 +107,19 @@ describe("manual stage execution planner", () => {
     await rm(ctx.root, { recursive: true, force: true });
   });
 
+  it("requires the chapter Story Bible update for TTS and mastering even when context and audio exist", async () => {
+    const ctx = await setup(); await rm(ctx.paths.bibleUpdate);
+    for (const stage of ["tts", "audioMastering"] as const) {
+      const selected = await planStageExecution({ root: ctx.root, story: ctx.story.slug, chapter: 1, selectedStages: [stage], mode: "selected", force: true });
+      expect(selected.blockedStages).toContain("storyBible");
+      expect(selected.runStages).toEqual([]);
+      const withPrerequisites = await planStageExecution({ root: ctx.root, story: ctx.story.slug, chapter: 1, selectedStages: [stage], mode: "prerequisites", force: true });
+      expect(withPrerequisites.runStages).toContain("storyBible");
+      expect(withPrerequisites.runStages).toContain(stage);
+    }
+    await rm(ctx.root, { recursive: true, force: true });
+  });
+
   it("keeps subtitles optional for Chapter Video in burn and none modes", async () => {
     const ctx = await setup();
     const withSubtitles = await chapterPlan(ctx, "video");
@@ -166,6 +179,19 @@ describe("manual stage execution planner", () => {
     const ctx = await setup(); const metadata = JSON.parse(await readFile(ctx.paths.chapterMeta, "utf8")); metadata.stages.storyBible.staleReason = "Changed settings"; await atomicWriteJson(ctx.paths.chapterMeta, metadata);
     const plan = await planStageExecution({ root: ctx.root, story: ctx.story.slug, chapter: 1, selectedStages: ["continuity"], force: true });
     expect(plan.runStages).toEqual(["continuity"]); expect(plan.reusedStages).toContainEqual({ stage: "context", state: "stale" });
+    await rm(ctx.root, { recursive: true, force: true });
+  });
+  it("does not execute QA for a selected-only Story Bible, Continuity, TTS, and Mastering batch", async () => {
+    const ctx = await setup();
+    const plan = await planStageExecution({ root: ctx.root, story: ctx.story.slug, chapter: 1,
+      selectedStages: ["storyBible", "continuity", "tts", "audioMastering"], mode: "selected", force: true });
+    expect(plan.runStages).toEqual(["storyBible", "continuity", "tts", "audioMastering"]);
+    expect(plan.entries.find((entry) => entry.stage === "qa")).toMatchObject({ action: "reuse" });
+    let executedStages: readonly string[] | undefined;
+    await executeStagePlan({ root: ctx.root, story: ctx.story, chapter: 1, inputPath: join(ctx.root, "chapter.txt"), plan,
+      runtime: { pipeline: { run: async (options) => { executedStages = options.executionStages; return undefined; } }, alignment: { config: {} as any }, video: {} as any } });
+    expect(executedStages).toEqual(["storyBible", "continuity", "tts", "audioMastering"]);
+    expect(executedStages).not.toContain("qa");
     await rm(ctx.root, { recursive: true, force: true });
   });
   it("blocks selected-only work instead of silently generating prerequisites", async () => {

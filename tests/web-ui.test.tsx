@@ -98,6 +98,7 @@ describe("web UI", () => {
     });
     const blockedHtml = renderToStaticMarkup(<ExecutionPreview preview={plan(1, [])} />);
     expect(blockedHtml).toContain("1 planned · 1 reused · 1 blocked");
+    expect(blockedHtml).toContain("Reuse reads saved prerequisites, including QA, without rerunning them.");
     expect(blockedHtml).toContain("This plan cannot run because required inputs are missing. Choose “Selected stages + prerequisites” to include the missing prerequisite stages automatically.");
     expect(blockedHtml).not.toContain("Add prerequisites");
     expect(blockedHtml).toContain("Ch. 0005"); expect(blockedHtml).toContain("<span>Run</span>"); expect(blockedHtml).toContain("<span>Reuse</span>"); expect(blockedHtml).toContain("<span>Blocked</span>");

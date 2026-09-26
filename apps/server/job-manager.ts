@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { z } from "zod";
 import { atomicWriteJson } from "../../src/storage/atomic-write.js";
 import { readJsonIfExists } from "../../src/storage/story-files.js";
+import { failedResultDiagnostics, saveJobError } from "./job-error-history.js";
 
 export type JobStatus = "queued" | "running" | "completed" | "failed" | "paused";
 export type Job = { id: string; type: "batch" | "stageExecution" | "preview" | "voicePreview" | "metadataTranslation" | "entityLocalizationSuggestions" | "pronunciation" | "qaRepair" | "qaRecheck" | "summary" | "audio" | "audiobook" | "alignment" | "subtitles" | "video" | "videoExport" | "scenes" | "artwork" | "production" | "ttsQualityVerify" | "ttsSegmentRegenerate"; story: string; status: JobStatus; createdAt: string; updatedAt: string; payload?: unknown; progress?: unknown; result?: unknown; error?: string; diagnostic?: ErrorDiagnostic };
@@ -23,10 +24,12 @@ export class JobManager {
   private readonly pauseHandlers = new Map<string, () => void>();
   private readonly durablePaths = new Map<string, string>();
   private readonly durableWrites = new Map<string, Promise<void>>();
+  private errorHistoryRoot?: string;
 
   constructor(options: { maxRetainedJobs?: number } = {}) {
     this.maxRetainedJobs = options.maxRetainedJobs ?? JobManager.defaultMaxRetainedJobs;
   }
+  configureErrorHistory(root: string) { this.errorHistoryRoot = root; }
 
   /** Persist non-chapter jobs without putting story content into the production
    * queue. Interrupted work is paused on startup, never silently replayed/paid. */
@@ -123,15 +126,31 @@ export class JobManager {
         const reason = typeof (result as { stopReason?: unknown }).stopReason === "string" ? (result as { stopReason: string }).stopReason : `Batch ${resultStatus}`;
         const diagnostic = diagnosticFromResult(result) ?? createErrorDiagnostic(new Error(reason), { summary: reason });
         logFailure(job, diagnostic);
+        await this.recordFailure(job, diagnostic, result);
         this.set(job, { status: "failed", result, error: diagnostic.summary, diagnostic });
       // A batch that was explicitly allowed to continue has completed its
       // range; individual errors remain in its manifest and Needs Review.
-      } else this.set(job, { status: "completed", result });
-    } catch (error) { const diagnostic = createErrorDiagnostic(error); logFailure(job, diagnostic); this.set(job, { status: "failed", error: diagnostic.summary, diagnostic }); }
+      } else {
+        if (resultStatus === "completed_with_errors") {
+          const diagnostic = diagnosticFromResult(result) ?? createErrorDiagnostic(new Error("Batch completed with chapter errors"));
+          await this.recordFailure(job, diagnostic, result);
+        }
+        this.set(job, { status: "completed", result });
+      }
+    } catch (error) { const diagnostic = createErrorDiagnostic(error); logFailure(job, diagnostic); await this.recordFailure(job, diagnostic); this.set(job, { status: "failed", error: diagnostic.summary, diagnostic }); }
     finally {
       this.pauseHandlers.delete(job.id); if (this.activeStories.get(job.story) === job.id) this.activeStories.delete(job.story);
       this.events.delete(job.id); this.prune();
     }
+  }
+  private async recordFailure(job: Job, diagnostic: ErrorDiagnostic, result?: unknown) {
+    if (!this.errorHistoryRoot) return;
+    try {
+      await saveJobError(this.errorHistoryRoot, {
+        jobId: job.id, story: job.story, type: job.type, createdAt: job.createdAt,
+        failedAt: new Date().toISOString(), diagnostic, failures: failedResultDiagnostics(result),
+      });
+    } catch (error) { logger.error({ error, jobId: job.id }, "Unable to save job error history"); }
   }
   private set(job: Job, patch: Partial<Job>) {
     Object.assign(job, patch, { updatedAt: new Date().toISOString() });

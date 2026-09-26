@@ -432,7 +432,9 @@ export class ChapterPipeline {
     });
     if (bibleResult) bible = bibleResult;
     else {
-      const cachedUpdate = storyBibleUpdateSchema.parse(await readJsonIfExists<StoryBibleUpdate>(paths.bibleUpdate));
+      const storedUpdate = await readJsonIfExists<StoryBibleUpdate>(paths.bibleUpdate);
+      if (!storedUpdate) throw new PipelineError(`Chapter ${options.chapter} Story Bible update is missing; run Story Bible before ${options.stopAfter ?? "the next stage"}`);
+      const cachedUpdate = storyBibleUpdateSchema.parse(storedUpdate);
       // Continuity and TTS need this chapter's cumulative Bible in memory, but
       // selected-only mode must not modify reused Story Bible artifacts.
       if (shouldRun("storyBible")) await persistFullBible(cachedUpdate);

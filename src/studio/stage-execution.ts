@@ -82,9 +82,11 @@ const dependencies: Record<StageExecutionNode, StageExecutionNode[]> = {
   qa: ["ingestion", "narration"],
   storyBible: ["narration", "qa"],
   context: ["storyBible"],
-  continuity: ["context"],
-  tts: ["narration", "context"],
-  audioMastering: ["tts"],
+  continuity: ["context", "storyBible"],
+  // The core pipeline loads this chapter's Story Bible update even when
+  // context or synthesized audio is retained from an earlier run.
+  tts: ["narration", "context", "storyBible"],
+  audioMastering: ["tts", "storyBible"],
   alignment: ["audioMastering"],
   subtitles: ["alignment"],
   scenePlanning: ["narration", "context", "audioMastering"],

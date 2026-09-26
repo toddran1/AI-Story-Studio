@@ -8,6 +8,7 @@ import { IncomingMessage, ServerResponse } from "node:http";
 import { z } from "zod";
 import { getAudioDashboard, getAudioSummary, getAudioChapterPage, getCanonicalEntitiesPage, getCanonicalEntityAudit, getCanonicalEntityDetail, getCanonicalEntityHistory, getCanonicalEntityUsage, getChapter, getChapterPage, getContinuityReview, getContinuityPage, getContinuitySummary, getMinorReferencesPage, getOutputsLibrary, getOutputsSummary, getOutputsPage, outputGroupSchema, getQaDashboard, getQaPage, getQaSummary, qaStatusFilterSchema, getScenesDashboard, getScenesIndex, getScenesIndexRow, getScenesChapter, getStoryBibleView, getStoryDashboard, getProductionStatus, getStoryOverview, getSummariesContext, getStoryBibleHealth, getStoryBibleReview, getStoryBibleReviewSummary, getSuppressedCanonicalEntities, getVideoDashboard, getVideoSummary, getVideoChapterPage, listStories, updateStorySettings, chapterFilterSchema, entityReadinessFilterSchema, bibleReviewKindSchema, bibleReviewStatusSchema } from "./catalog.js";
 import { JobConflictError } from "./job-manager.js";
+import { listJobErrors } from "./job-error-history.js";
 import { StudioOperations } from "./operations.js";
 import { exportPaths, mediaDownloadName, padChapterNumber, previewPaths, rangeMediaDownloadName, sanitizeFilenamePart, sceneImagePath, sceneVersionImagePath, storyPaths, videoExportPaths, visualProfileRefPath, voicePreviewPaths } from "../../src/storage/paths.js";
 import { SceneManifest, sceneManifestSchema } from "../../src/scenes/types.js";
@@ -62,6 +63,12 @@ export function createApiHandler(operations: StudioOperations) {
       const backupDownload = /^\/api\/backups\/([a-f0-9-]{36})\.zip$/.exec(url.pathname);
       if (backupDownload && request.method === "GET") return sendFile(request, response, backupPath(operations.root, backupDownload[1]!), "application/zip");
       if (request.method === "GET" && url.pathname === "/api/jobs") return send(response, 200, { jobs: operations.jobs.list().map((job) => publicJob(job, operations.root)) });
+      const errorHistoryMatch = /^\/api\/stories\/([a-z0-9]+(?:-[a-z0-9]+)*)\/job-errors$/.exec(url.pathname);
+      if (errorHistoryMatch && request.method === "GET") {
+        const limit = z.coerce.number().int().min(1).max(500).parse(url.searchParams.get("limit") ?? "100");
+        const query = (url.searchParams.get("query") ?? "").slice(0, 100);
+        return send(response, 200, { errors: publicJob(await listJobErrors(operations.root, errorHistoryMatch[1]!, query, limit), operations.root) });
+      }
       if (request.method === "GET" && url.pathname === "/api/queue/summary") return send(response, 200, await requireQueue(operations).repository.summary());
       if (request.method === "GET" && url.pathname === "/api/queue/jobs") return send(response, 200, await requireQueue(operations).repository.listJobs({ page: integerParam(url.searchParams.get("page"),1), pageSize: boundedPageSize(url.searchParams.get("pageSize")), status: url.searchParams.has("status") ? durableJobStatusSchema.parse(url.searchParams.get("status")) : undefined, story: optionalString(url.searchParams.get("story")) }));
       if (request.method === "GET" && url.pathname === "/api/queue/review") return send(response, 200, await requireQueue(operations).repository.listNeedsReview({ page: integerParam(url.searchParams.get("page"),1), pageSize: boundedPageSize(url.searchParams.get("pageSize")) }));

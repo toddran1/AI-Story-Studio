@@ -198,6 +198,7 @@ export function App({ initialJob, initialRoute }: { initialJob?: Job; initialRou
         {route.page === "review" && <NeedsReviewPage navigate={navigate} />}
         {route.page === "manage" && route.story && <ManageStoryPage slug={route.story} navigate={navigate} />}
         {route.page === "story" && route.story && <StoryPage slug={route.story} navigate={navigate} onJob={updateJob} />}
+        {route.page === "errors" && route.story && <JobErrorHistoryPage slug={route.story} />}
         {route.page === "chapter" && route.story && route.chapter && <ChapterPage slug={route.story} chapter={route.chapter} navigate={navigate} onJob={updateJob} activeJob={job} />}
         {route.page === "qa" && route.story && <QaPage slug={route.story} navigate={navigate} />}
         {route.page === "preview" && route.story && <PreviewPage slug={route.story} onJob={updateJob} />}
@@ -237,6 +238,7 @@ function Sidebar({ stories, active, navigate }: { stories: StoryCard[]; active?:
       <div className="nav-caption">Active story</div>
       <Nav icon="chapters" label="Chapters" disabled={!active} onClick={() => navigate(storyPath(""))} />
       <Nav icon="quality" label="Quality review" disabled={!active} onClick={() => navigate(storyPath("/qa"))} />
+      <Nav icon="quality" label="Error history" disabled={!active} onClick={() => navigate(storyPath("/errors"))} />
       <Nav icon="compare" label="Preview A/B" disabled={!active} onClick={() => navigate(storyPath("/preview"))} />
       <Nav icon="bible" label="Story Bible" disabled={!active} onClick={() => navigate(storyPath("/bible"))} />
       <Nav icon="compare" label="Names / Localization" disabled={!active} onClick={() => navigate(storyPath("/names"))} />
@@ -4677,7 +4679,35 @@ function LoadFailure({ error }: { error: string }) { return <section className="
 function ErrorBox({ text }: { text: string }) { return <div className="error-box"><Icon name="quality" /><span>{text}</span></div>; }
 function Empty({ title, text, action }: { title: string; text: string; action?: ReactNode }) { return <div className="empty"><span className="empty-glyph">¶</span><h3>{title}</h3><p>{text}</p>{action}</div>; }
 function Icon({ name }: { name: string }) { const paths: Record<string, string> = { library: "M4 5.5h5v13H4zM11 5.5h5v13h-5zM18 7h2v11.5h-2z", import: "M12 3v12m0 0 4-4m-4 4-4-4M4 19h16", chapters: "M5 4h12a2 2 0 0 1 2 2v14H7a2 2 0 0 1-2-2zM5 7h14M9 4v16", quality: "M12 3 4 6v5c0 5 3.5 8 8 10 4.5-2 8-5 8-10V6zM9 12l2 2 4-5", compare: "M8 4H4v16h4M16 4h4v16h-4M8 12h8", audio: "M4 15V9m4 9V6m4 15V3m4 15V6m4 9V9", video: "M4 6h11v12H4zM15 10l5-3v10l-5-3z", production: "M4 18V6l8-3 8 3v12l-8 3zM8 8h8M8 12h8M8 16h5", bible: "M4 5.5A3.5 3.5 0 0 1 7.5 2H12v18H7.5A3.5 3.5 0 0 0 4 23zM20 5.5A3.5 3.5 0 0 0 16.5 2H12v18h4.5A3.5 3.5 0 0 1 20 23z", settings: "M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8zM4 12H2m20 0h-2M12 4V2m0 20v-2M6.3 6.3 4.9 4.9m14.2 14.2-1.4-1.4M17.7 6.3l1.4-1.4M4.9 19.1l1.4-1.4", plus: "M12 5v14M5 12h14" }; return <svg viewBox="0 0 24 24" aria-hidden="true"><path d={paths[name] ?? paths.library} /></svg>; }
-function parseRoute(path: string): Route { const parts = path.split("?")[0]!.split("/").filter(Boolean); if (!parts.length) return { page: "stories" }; if (parts[0] === "new") return { page: "new" }; if (parts[0] === "settings") return { page: "app-settings" }; if (parts[0] === "queue") return {page:"queue"}; if(parts[0]==="review")return{page:"review"}; if (parts[0] === "import") return { page: "import" }; if (parts[0] !== "stories" || !parts[1]) return { page: "stories" }; if (parts[2] === "chapters" && parts[3]) return { page: "chapter", story: parts[1], chapter: Number(parts[3]) }; if (["qa", "preview", "bible", "names", "continuity", "summaries", "audio", "video", "scenes", "production", "costs", "outputs", "voice", "settings", "manage", "import"].includes(parts[2] ?? "")) return { page: parts[2]!, story: parts[1] }; return { page: "story", story: parts[1] }; }
+type JobErrorHistoryRecord = { jobId: string; type: string; failedAt: string; diagnostic: ErrorDiagnostic; failures: Array<{ chapter?: number; diagnostic: ErrorDiagnostic }> };
+
+function JobErrorHistoryPage({ slug }: { slug: string }) {
+  const [query, setQuery] = useState("");
+  const [records, setRecords] = useState<JobErrorHistoryRecord[]>([]);
+  const [error, setError] = useState("");
+  useEffect(() => {
+    let cancelled = false;
+    api<{ errors: JobErrorHistoryRecord[] }>(`/stories/${slug}/job-errors?limit=500&query=${encodeURIComponent(query.trim())}`)
+      .then((value) => { if (!cancelled) { setRecords(value.errors); setError(""); } })
+      .catch((cause) => { if (!cancelled) setError(message(cause)); });
+    return () => { cancelled = true; };
+  }, [slug, query]);
+  return <section className="page"><div className="section-heading"><div><span className="eyebrow">Local diagnostics</span><h2>Error history</h2><p>Failed jobs and chapter errors remain here after a notification closes or the server restarts.</p></div></div>
+    <label>Find by job ID or error reference <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Job ID or ERR- reference" /></label>
+    {error && <ErrorBox text={error} />}
+    {!error && records.length === 0 && <p>No saved errors found. New job errors appear here when they occur.</p>}
+    <div className="job-error-history">{records.map((record) => <article className="panel" key={record.jobId}>
+      <p className="eyebrow">{record.type} · {new Date(record.failedAt).toLocaleString()} · {record.diagnostic.id}</p>
+      <h3>{record.diagnostic.summary}</h3><p>{record.diagnostic.recommendedAction}</p>
+      <p className="mono">Job: {record.jobId}{record.diagnostic.chapter ? ` · Chapter ${record.diagnostic.chapter}` : ""}{record.diagnostic.stage ? ` · ${record.diagnostic.stage}` : ""}</p>
+      {record.failures.length > 0 && <details><summary>{record.failures.length} chapter error{record.failures.length === 1 ? "" : "s"}</summary>{record.failures.map((failure, index) => <p key={`${failure.diagnostic.id}-${index}`}>Chapter {failure.chapter ?? failure.diagnostic.chapter ?? "?"}: {failure.diagnostic.summary} ({failure.diagnostic.id})</p>)}</details>}
+      {record.diagnostic.technicalDetails && <details><summary>Technical details</summary><pre>{record.diagnostic.technicalDetails}</pre></details>}
+      <button className="button" onClick={() => void navigator.clipboard.writeText([record.diagnostic.summary, `Next: ${record.diagnostic.recommendedAction}`, `Reference: ${record.diagnostic.id}`, `Job: ${record.jobId}`, record.diagnostic.technicalDetails].filter(Boolean).join("\n"))}>Copy details</button>
+    </article>)}</div>
+  </section>;
+}
+
+function parseRoute(path: string): Route { const parts = path.split("?")[0]!.split("/").filter(Boolean); if (!parts.length) return { page: "stories" }; if (parts[0] === "new") return { page: "new" }; if (parts[0] === "settings") return { page: "app-settings" }; if (parts[0] === "queue") return {page:"queue"}; if(parts[0]==="review")return{page:"review"}; if (parts[0] === "import") return { page: "import" }; if (parts[0] !== "stories" || !parts[1]) return { page: "stories" }; if (parts[2] === "chapters" && parts[3]) return { page: "chapter", story: parts[1], chapter: Number(parts[3]) }; if (["qa", "errors", "preview", "bible", "names", "continuity", "summaries", "audio", "video", "scenes", "production", "costs", "outputs", "voice", "settings", "manage", "import"].includes(parts[2] ?? "")) return { page: parts[2]!, story: parts[1] }; return { page: "story", story: parts[1] }; }
 function pageTitle(page: string) { return ({ stories: "AI Story Studio", import: "Import", new: "New Story", "app-settings": "Studio Settings",queue:"Production Queue",review:"Needs Review" } as Record<string, string>)[page] ?? pretty(page); }
 function message(error: unknown) { return error instanceof Error ? error.message : String(error); }
 function formatDuration(seconds: number) { if (!Number.isFinite(seconds) || seconds <= 0) return "0:00"; const whole = Math.round(seconds); const hours = Math.floor(whole / 3600); const minutes = Math.floor(whole % 3600 / 60); const rest = whole % 60; return hours ? `${hours}:${String(minutes).padStart(2, "0")}:${String(rest).padStart(2, "0")}` : `${minutes}:${String(rest).padStart(2, "0")}`; }
