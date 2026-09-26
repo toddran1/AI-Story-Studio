@@ -672,32 +672,21 @@ export class ChapterPipeline {
           throw stagingError;
         }
 
-        // 3. Backup canonical state on filesystem before mutation (no large in-memory segment or raw audio buffering!)
+        // 3. Snapshot small metadata BEFORE destructive renames
+        const oldCensorJson = await readTextIfExists(paths.censorManifest);
+        const oldQualityJson = await readTextIfExists(paths.ttsQuality);
+        const oldChapterMetaJson = await readTextIfExists(paths.chapterMeta);
+
+        // 4. Enter the main transaction for backup + promotion
         const backupSuffix = randomUUID();
         const backupAudioRawPath = join(paths.chapterDir, `audio-raw.mp3.backup-${backupSuffix}`);
         const backupSegmentsDir = join(paths.chapterDir, `audio-segments.backup-${backupSuffix}`);
 
         const oldAudioRawExists = await exists(paths.audioRaw);
-        let audioRawBackedUp = false;
-        if (oldAudioRawExists) {
-          await renamePath(paths.audioRaw, backupAudioRawPath);
-          audioRawBackedUp = true;
-        }
-
         const oldSegmentsDirExists = await exists(paths.segments);
+
+        let audioRawBackedUp = false;
         let segmentsBackedUp = false;
-        if (oldSegmentsDirExists) {
-          await renamePath(paths.segments, backupSegmentsDir);
-          segmentsBackedUp = true;
-        }
-
-        const oldCensorExists = await exists(paths.censorManifest);
-        const oldCensorJson = oldCensorExists ? await readFile(paths.censorManifest, "utf8") : undefined;
-        const oldQualityExists = await exists(paths.ttsQuality);
-        const oldQualityJson = oldQualityExists ? await readFile(paths.ttsQuality, "utf8") : undefined;
-        const oldChapterMetaJson = (await exists(paths.chapterMeta)) ? await readFile(paths.chapterMeta, "utf8") : undefined;
-
-        // 4. Commit staged artifacts in transaction
         let audioRawPromoted = false;
         let segmentsPromoted = false;
         let censorManifestPromoted = false;
@@ -705,6 +694,16 @@ export class ChapterPipeline {
         let chapterMetaPromoted = false;
 
         try {
+          if (oldAudioRawExists) {
+            await renamePath(paths.audioRaw, backupAudioRawPath);
+            audioRawBackedUp = true;
+          }
+
+          if (oldSegmentsDirExists) {
+            await renamePath(paths.segments, backupSegmentsDir);
+            segmentsBackedUp = true;
+          }
+
           await renamePath(stagedAudioRaw, paths.audioRaw);
           audioRawPromoted = true;
 
@@ -800,21 +799,11 @@ export class ChapterPipeline {
           return result;
         } catch (commitError) {
           const rollbackErrors: unknown[] = [];
-          if (audioRawPromoted) {
-            try {
-              await rm(paths.audioRaw, { force: true });
-            } catch (err) { rollbackErrors.push(err); }
-          }
-          if (audioRawBackedUp) {
-            try {
-              await renamePath(backupAudioRawPath, paths.audioRaw);
-              audioRawBackedUp = false;
-            } catch (err) { rollbackErrors.push(err); }
-          }
 
           if (segmentsPromoted) {
             try {
               await rm(paths.segments, { recursive: true, force: true });
+              segmentsPromoted = false;
             } catch (err) { rollbackErrors.push(err); }
           }
           if (segmentsBackedUp) {
@@ -824,21 +813,37 @@ export class ChapterPipeline {
             } catch (err) { rollbackErrors.push(err); }
           }
 
+          if (audioRawPromoted) {
+            try {
+              await rm(paths.audioRaw, { force: true });
+              audioRawPromoted = false;
+            } catch (err) { rollbackErrors.push(err); }
+          }
+          if (audioRawBackedUp) {
+            try {
+              await renamePath(backupAudioRawPath, paths.audioRaw);
+              audioRawBackedUp = false;
+            } catch (err) { rollbackErrors.push(err); }
+          }
+
           if (censorManifestPromoted) {
             try {
               if (oldCensorJson !== undefined) await atomicWrite(paths.censorManifest, oldCensorJson);
               else await rm(paths.censorManifest, { force: true });
+              censorManifestPromoted = false;
             } catch (err) { rollbackErrors.push(err); }
           }
           if (qualityPromoted) {
             try {
               if (oldQualityJson !== undefined) await atomicWrite(paths.ttsQuality, oldQualityJson);
               else await rm(paths.ttsQuality, { force: true });
+              qualityPromoted = false;
             } catch (err) { rollbackErrors.push(err); }
           }
           if (chapterMetaPromoted) {
             try {
               if (oldChapterMetaJson !== undefined) await atomicWrite(paths.chapterMeta, oldChapterMetaJson);
+              chapterMetaPromoted = false;
             } catch (err) { rollbackErrors.push(err); }
           }
 
@@ -851,10 +856,22 @@ export class ChapterPipeline {
 
           if (rollbackErrors.length > 0) {
             const rollbackStorageError = new StorageError(
-              `TTS artifact promotion failed and rollback of promoted files failed: ${rollbackErrors.map((e) => (e instanceof Error ? e.message : String(e))).join("; ")}`,
+              `TTS artifact transaction failed and rollback was incomplete: ${rollbackErrors.map((e) => (e instanceof Error ? e.message : String(e))).join("; ")}`,
               { cause: new AggregateError([commitError, ...rollbackErrors]) }
             );
             Object.assign(rollbackStorageError, { rollbackFailed: true });
+            logger.error({
+              event: "pipeline.tts.rollback_failed",
+              story: options.story.slug,
+              chapter: options.chapter,
+              audioRawBackedUp,
+              segmentsBackedUp,
+              audioRawPromoted,
+              segmentsPromoted,
+              backupAudioRawPath,
+              backupSegmentsDir,
+              error: safeErrorMessage(rollbackStorageError),
+            });
             throw rollbackStorageError;
           }
           throw commitError;

@@ -21,6 +21,7 @@ const realAtomicWriteJson = atomicWriteModule.atomicWriteJson;
 const realFileFingerprint = fileFingerprintModule.fileFingerprint;
 const realRenamePath = storyFilesModule.renamePath;
 const realRemovePath = storyFilesModule.removePath;
+const realReadTextIfExists = storyFilesModule.readTextIfExists;
 
 import {
   acceptStoredChapterTtsSegment,
@@ -3116,6 +3117,515 @@ describe("TTS Reliability & Cost Hardening (Tests 26–35)", () => {
       const meta = JSON.parse(await readFile(paths.chapterMeta, "utf8"));
       expect(meta.stages.tts.status).toBe("failed");
       expect(meta.stages.tts.error?.message).toContain("Fish provider failed");
+    });
+
+    // Items 14–18: TTS Transaction Boundary Fix — Backup Setup Rollback Protection
+    describe("TTS Transaction Boundary Fix — Backup Setup Rollback Protection (Items 14–18)", () => {
+      // Item 14: First Backup Rename Succeeds, Second Fails
+      it("Item 14: restores canonical audioRaw if audioRaw backup succeeds but segments backup fails", async () => {
+        const root = await mkdtemp(join(tmpdir(), "tts-tx-bk1-fail-"));
+        const story = testStory();
+        const paths = storyPaths(root, story.slug, 1);
+
+        const oldAudioRaw = new Uint8Array([0x49, 0x44, 0x33, 0x01, 0x02]);
+        const oldSeg1 = new Uint8Array([0x49, 0x44, 0x33, 0x01]);
+        await atomicWrite(paths.original, "第一章\n\n测试内容");
+        await atomicWrite(paths.english, "Chapter 1.\n\nTest content.");
+        await atomicWrite(paths.narration, "Chapter 1. Test content.");
+        await atomicWrite(paths.narrationTts, "Chapter 1. Test content.");
+        await atomicWrite(paths.audioRaw, oldAudioRaw);
+        await atomicWrite(join(paths.segments, "0001.mp3"), oldSeg1);
+        await atomicWriteJson(paths.bibleUpdate, { chapterSummary: "Summary", characters: [], relationships: [], terminology: [], locations: [], factions: [], abilities: [], unresolvedThreads: [] });
+        await atomicWriteJson(paths.chapterMeta, {
+          chapter: 1,
+          sourceLanguage: "zh",
+          outputLanguage: "en",
+          counts: { originalCharacters: 10, englishWords: 5, narrationWords: 5 },
+          createdAt: "2026-01-01T00:00:00.000Z",
+          updatedAt: "2026-01-01T00:00:00.000Z",
+          stages: {
+            ingestion: { status: "complete" },
+            translation: { status: "complete" },
+            narration: { status: "complete" },
+            qa: { status: "complete" },
+            storyBible: { status: "complete" },
+            continuity: { status: "complete" },
+            tts: { status: "complete", outputFingerprint: "fp-old" },
+            audioMastering: { status: "pending" },
+            alignment: { status: "pending" },
+            subtitles: { status: "pending" },
+            scenePlanning: { status: "pending" },
+            artwork: { status: "pending" },
+            video: { status: "pending" },
+          },
+        });
+
+        const newAudioRaw = new Uint8Array([0x49, 0x44, 0x33, 0x99, 0x88]);
+        const newSeg1 = new Uint8Array([0x49, 0x44, 0x33, 0x99]);
+        const llm = new MockLLM("gemini", ["English translation", "English narration"]);
+        const mockTts: TTSProvider = {
+          name: "fish",
+          validateConfiguration: async () => {},
+          synthesize: async () => ({
+            audio: newAudioRaw,
+            segments: [newSeg1],
+            segmentTexts: ["New text"],
+            providerRequests: 1,
+          }),
+        };
+        const router = new LLMRouter(new Map([["gemini", llm], ["openai", llm], ["kimi", llm]]));
+        const pipeline = new ChapterPipeline(router, mockTts);
+        const input = join(root, "chapter.txt");
+        await writeFile(input, "第一章\n\n测试内容", "utf8");
+
+        // Inject failure: audioRaw backup succeeds, segments backup throws
+        const renameSpy = vi.spyOn(storyFilesModule, "renamePath").mockImplementation(async (source, dest) => {
+          if (source === paths.segments && dest.includes("audio-segments.backup-")) {
+            throw new Error("Disk error backing up old segments");
+          }
+          return realRenamePath(source, dest);
+        });
+
+        try {
+          await expect(pipeline.run({
+            root,
+            story,
+            chapter: 1,
+            inputPath: input,
+            force: "tts",
+            stopAfter: "tts",
+            executionStages: ["tts"],
+          })).rejects.toThrow("Disk error backing up old segments");
+
+          // 1. Canonical audioRaw was rolled back and exists with exact original bytes
+          expect(await exists(paths.audioRaw)).toBe(true);
+          expect(new Uint8Array(await readFile(paths.audioRaw))).toEqual(oldAudioRaw);
+
+          // 2. Canonical segments exists with exact original files
+          expect(await exists(join(paths.segments, "0001.mp3"))).toBe(true);
+          expect(new Uint8Array(await readFile(join(paths.segments, "0001.mp3")))).toEqual(oldSeg1);
+
+          // 3. No backup files remain
+          const chapterEntries = await readdir(paths.chapterDir);
+          expect(chapterEntries.some((e) => e.includes(".backup-"))).toBe(false);
+
+          // 4. Old metadata is preserved
+          const restored = JSON.parse(await readFile(paths.chapterMeta, "utf8"));
+          expect(restored.stages.tts.status).toBe("complete");
+          expect(restored.stages.tts.outputFingerprint).toBe("fp-old");
+        } finally {
+          renameSpy.mockRestore();
+        }
+      });
+
+      // Item 15: Both Backups Succeed, Promotion Fails
+      it("Item 15: restores canonical audioRaw and segments if backups succeed but promotion fails", async () => {
+        const root = await mkdtemp(join(tmpdir(), "tts-tx-promo-fail-"));
+        const story = testStory();
+        const paths = storyPaths(root, story.slug, 1);
+
+        const oldAudioRaw = new Uint8Array([0x49, 0x44, 0x33, 0x01, 0x02]);
+        const oldSeg1 = new Uint8Array([0x49, 0x44, 0x33, 0x01]);
+        await atomicWrite(paths.original, "第一章\n\n测试内容");
+        await atomicWrite(paths.english, "Chapter 1.\n\nTest content.");
+        await atomicWrite(paths.narration, "Chapter 1. Test content.");
+        await atomicWrite(paths.narrationTts, "Chapter 1. Test content.");
+        await atomicWrite(paths.audioRaw, oldAudioRaw);
+        await atomicWrite(join(paths.segments, "0001.mp3"), oldSeg1);
+        await atomicWriteJson(paths.bibleUpdate, { chapterSummary: "Summary", characters: [], relationships: [], terminology: [], locations: [], factions: [], abilities: [], unresolvedThreads: [] });
+        await atomicWriteJson(paths.chapterMeta, {
+          chapter: 1,
+          sourceLanguage: "zh",
+          outputLanguage: "en",
+          counts: { originalCharacters: 10, englishWords: 5, narrationWords: 5 },
+          createdAt: "2026-01-01T00:00:00.000Z",
+          updatedAt: "2026-01-01T00:00:00.000Z",
+          stages: {
+            ingestion: { status: "complete" },
+            translation: { status: "complete" },
+            narration: { status: "complete" },
+            qa: { status: "complete" },
+            storyBible: { status: "complete" },
+            continuity: { status: "complete" },
+            tts: { status: "complete", outputFingerprint: "fp-old" },
+            audioMastering: { status: "pending" },
+            alignment: { status: "pending" },
+            subtitles: { status: "pending" },
+            scenePlanning: { status: "pending" },
+            artwork: { status: "pending" },
+            video: { status: "pending" },
+          },
+        });
+
+        const newAudioRaw = new Uint8Array([0x49, 0x44, 0x33, 0x99, 0x88]);
+        const newSeg1 = new Uint8Array([0x49, 0x44, 0x33, 0x99]);
+        const llm = new MockLLM("gemini", ["English translation", "English narration"]);
+        const mockTts: TTSProvider = {
+          name: "fish",
+          validateConfiguration: async () => {},
+          synthesize: async (req) => {
+            if (req.checkpointDir) {
+              await mkdir(req.checkpointDir, { recursive: true });
+              await writeFile(join(req.checkpointDir, "chunk_0001.json"), "chk");
+            }
+            return {
+              audio: newAudioRaw,
+              segments: [newSeg1],
+              segmentTexts: ["New text"],
+              providerRequests: 1,
+            };
+          },
+        };
+        const router = new LLMRouter(new Map([["gemini", llm], ["openai", llm], ["kimi", llm]]));
+        const pipeline = new ChapterPipeline(router, mockTts);
+        const input = join(root, "chapter.txt");
+        await writeFile(input, "第一章\n\n测试内容", "utf8");
+
+        // Inject failure when promoting staged audioRaw to canonical paths.audioRaw
+        const renameSpy = vi.spyOn(storyFilesModule, "renamePath").mockImplementation(async (source, dest) => {
+          if (dest === paths.audioRaw && source.includes(".tts-stage-")) {
+            throw new Error("Disk error promoting staged audio-raw");
+          }
+          return realRenamePath(source, dest);
+        });
+
+        try {
+          await expect(pipeline.run({
+            root,
+            story,
+            chapter: 1,
+            inputPath: input,
+            force: "tts",
+            stopAfter: "tts",
+            executionStages: ["tts"],
+          })).rejects.toThrow("Disk error promoting staged audio-raw");
+
+          // 1. Both canonical audioRaw and segments are restored
+          expect(await exists(paths.audioRaw)).toBe(true);
+          expect(new Uint8Array(await readFile(paths.audioRaw))).toEqual(oldAudioRaw);
+          expect(await exists(join(paths.segments, "0001.mp3"))).toBe(true);
+          expect(new Uint8Array(await readFile(join(paths.segments, "0001.mp3")))).toEqual(oldSeg1);
+
+          // 2. Backup paths no longer exist on disk
+          const chapterEntries = await readdir(paths.chapterDir);
+          expect(chapterEntries.some((e) => e.includes(".backup-"))).toBe(false);
+
+          // 3. ttsWorking remains intact for resume
+          expect(await exists(join(paths.ttsWorking, "chunk_0001.json"))).toBe(true);
+
+          // 4. Old metadata restored
+          const restored = JSON.parse(await readFile(paths.chapterMeta, "utf8"));
+          expect(restored.stages.tts.status).toBe("complete");
+          expect(restored.stages.tts.outputFingerprint).toBe("fp-old");
+        } finally {
+          renameSpy.mockRestore();
+        }
+      });
+
+      // Item 16: Metadata Snapshot Failure Happens Before Backup
+      it("Item 16: fails cleanly before touching canonical audio if reading metadata snapshot throws", async () => {
+        const root = await mkdtemp(join(tmpdir(), "tts-tx-snapshot-fail-"));
+        const story = testStory();
+        const paths = storyPaths(root, story.slug, 1);
+
+        const oldAudioRaw = new Uint8Array([0x49, 0x44, 0x33, 0x01, 0x02]);
+        const oldSeg1 = new Uint8Array([0x49, 0x44, 0x33, 0x01]);
+        await atomicWrite(paths.original, "第一章\n\n测试内容");
+        await atomicWrite(paths.english, "Chapter 1.\n\nTest content.");
+        await atomicWrite(paths.narration, "Chapter 1. Test content.");
+        await atomicWrite(paths.narrationTts, "Chapter 1. Test content.");
+        await atomicWrite(paths.audioRaw, oldAudioRaw);
+        await atomicWrite(join(paths.segments, "0001.mp3"), oldSeg1);
+        await atomicWriteJson(paths.bibleUpdate, { chapterSummary: "Summary", characters: [], relationships: [], terminology: [], locations: [], factions: [], abilities: [], unresolvedThreads: [] });
+        await atomicWriteJson(paths.chapterMeta, {
+          chapter: 1,
+          sourceLanguage: "zh",
+          outputLanguage: "en",
+          counts: { originalCharacters: 10, englishWords: 5, narrationWords: 5 },
+          createdAt: "2026-01-01T00:00:00.000Z",
+          updatedAt: "2026-01-01T00:00:00.000Z",
+          stages: {
+            ingestion: { status: "complete" },
+            translation: { status: "complete" },
+            narration: { status: "complete" },
+            qa: { status: "complete" },
+            storyBible: { status: "complete" },
+            continuity: { status: "complete" },
+            tts: { status: "complete", outputFingerprint: "fp-old" },
+            audioMastering: { status: "pending" },
+            alignment: { status: "pending" },
+            subtitles: { status: "pending" },
+            scenePlanning: { status: "pending" },
+            artwork: { status: "pending" },
+            video: { status: "pending" },
+          },
+        });
+
+        const newAudioRaw = new Uint8Array([0x49, 0x44, 0x33, 0x99, 0x88]);
+        const newSeg1 = new Uint8Array([0x49, 0x44, 0x33, 0x99]);
+        const llm = new MockLLM("gemini", ["English translation", "English narration"]);
+        const mockTts: TTSProvider = {
+          name: "fish",
+          validateConfiguration: async () => {},
+          synthesize: async () => ({
+            audio: newAudioRaw,
+            segments: [newSeg1],
+            segmentTexts: ["New text"],
+            providerRequests: 1,
+          }),
+        };
+        const router = new LLMRouter(new Map([["gemini", llm], ["openai", llm], ["kimi", llm]]));
+        const pipeline = new ChapterPipeline(router, mockTts);
+        const input = join(root, "chapter.txt");
+        await writeFile(input, "第一章\n\n测试内容", "utf8");
+
+        let readAttempted = false;
+        const readSpy = vi.spyOn(storyFilesModule, "readTextIfExists").mockImplementation(async (targetPath) => {
+          if (targetPath === paths.censorManifest) {
+            readAttempted = true;
+            throw new Error("I/O error snapshotting censor manifest");
+          }
+          return realReadTextIfExists(targetPath);
+        });
+
+        const renameSpy = vi.spyOn(storyFilesModule, "renamePath");
+
+        try {
+          await expect(pipeline.run({
+            root,
+            story,
+            chapter: 1,
+            inputPath: input,
+            force: "tts",
+            stopAfter: "tts",
+            executionStages: ["tts"],
+          })).rejects.toThrow("I/O error snapshotting censor manifest");
+
+          expect(readAttempted).toBe(true);
+
+          // renamePath was NEVER called for backup or promotion!
+          expect(renameSpy).not.toHaveBeenCalled();
+
+          // Canonical audio and segments are 100% untouched
+          expect(await exists(paths.audioRaw)).toBe(true);
+          expect(new Uint8Array(await readFile(paths.audioRaw))).toEqual(oldAudioRaw);
+          expect(await exists(join(paths.segments, "0001.mp3"))).toBe(true);
+
+          // No backup files created
+          const chapterEntries = await readdir(paths.chapterDir);
+          expect(chapterEntries.some((e) => e.includes(".backup-"))).toBe(false);
+        } finally {
+          readSpy.mockRestore();
+          renameSpy.mockRestore();
+        }
+      });
+
+      // Item 17: Rollback Rename Failure Keeps Backup
+      it("Item 17: keeps backup files on disk, logs pipeline.tts.rollback_failed, and attaches rollbackFailed if rollback restore fails", async () => {
+        const root = await mkdtemp(join(tmpdir(), "tts-tx-rb-fail-"));
+        const story = testStory();
+        const paths = storyPaths(root, story.slug, 1);
+
+        const oldAudioRaw = new Uint8Array([0x49, 0x44, 0x33, 0x01, 0x02]);
+        const oldSeg1 = new Uint8Array([0x49, 0x44, 0x33, 0x01]);
+        await atomicWrite(paths.original, "第一章\n\n测试内容");
+        await atomicWrite(paths.english, "Chapter 1.\n\nTest content.");
+        await atomicWrite(paths.narration, "Chapter 1. Test content.");
+        await atomicWrite(paths.narrationTts, "Chapter 1. Test content.");
+        await atomicWrite(paths.audioRaw, oldAudioRaw);
+        await atomicWrite(join(paths.segments, "0001.mp3"), oldSeg1);
+        await atomicWriteJson(paths.bibleUpdate, { chapterSummary: "Summary", characters: [], relationships: [], terminology: [], locations: [], factions: [], abilities: [], unresolvedThreads: [] });
+        await atomicWriteJson(paths.chapterMeta, {
+          chapter: 1,
+          sourceLanguage: "zh",
+          outputLanguage: "en",
+          counts: { originalCharacters: 10, englishWords: 5, narrationWords: 5 },
+          createdAt: "2026-01-01T00:00:00.000Z",
+          updatedAt: "2026-01-01T00:00:00.000Z",
+          stages: {
+            ingestion: { status: "complete" },
+            translation: { status: "complete" },
+            narration: { status: "complete" },
+            qa: { status: "complete" },
+            storyBible: { status: "complete" },
+            continuity: { status: "complete" },
+            tts: { status: "complete", outputFingerprint: "fp-old" },
+            audioMastering: { status: "pending" },
+            alignment: { status: "pending" },
+            subtitles: { status: "pending" },
+            scenePlanning: { status: "pending" },
+            artwork: { status: "pending" },
+            video: { status: "pending" },
+          },
+        });
+
+        const newAudioRaw = new Uint8Array([0x49, 0x44, 0x33, 0x99, 0x88]);
+        const newSeg1 = new Uint8Array([0x49, 0x44, 0x33, 0x99]);
+        const llm = new MockLLM("gemini", ["English translation", "English narration"]);
+        const mockTts: TTSProvider = {
+          name: "fish",
+          validateConfiguration: async () => {},
+          synthesize: async () => ({
+            audio: newAudioRaw,
+            segments: [newSeg1],
+            segmentTexts: ["New text"],
+            providerRequests: 1,
+          }),
+        };
+        const router = new LLMRouter(new Map([["gemini", llm], ["openai", llm], ["kimi", llm]]));
+        const pipeline = new ChapterPipeline(router, mockTts);
+        const input = join(root, "chapter.txt");
+        await writeFile(input, "第一章\n\n测试内容", "utf8");
+
+        // Inject: promotion of segments fails, and rollback of backupSegments throws
+        const renameSpy = vi.spyOn(storyFilesModule, "renamePath").mockImplementation(async (source, dest) => {
+          if (dest === paths.segments && source.includes(".tts-stage-")) {
+            throw new Error("Promotion of segments failed");
+          }
+          if (dest === paths.segments && source.includes("audio-segments.backup-")) {
+            throw new Error("Fatal disk failure restoring backupSegments");
+          }
+          return realRenamePath(source, dest);
+        });
+
+        const errSpy = vi.spyOn(logger, "error");
+
+        let caughtErr: any;
+        try {
+          await pipeline.run({
+            root,
+            story,
+            chapter: 1,
+            inputPath: input,
+            force: "tts",
+            stopAfter: "tts",
+            executionStages: ["tts"],
+          });
+        } catch (err) {
+          caughtErr = err;
+        }
+
+        try {
+          expect(caughtErr).toBeDefined();
+          expect(caughtErr).toBeInstanceOf(StorageError);
+          expect(caughtErr.message).toContain("TTS artifact transaction failed and rollback was incomplete");
+          expect(caughtErr.rollbackFailed).toBe(true);
+          expect(caughtErr.preservePriorStageState).toBeUndefined();
+
+          // Aggregate cause has both promotion and rollback failures
+          expect(caughtErr.cause).toBeInstanceOf(AggregateError);
+          const agg = caughtErr.cause as AggregateError;
+          expect(agg.errors[0]?.message).toContain("Promotion of segments failed");
+          expect(agg.errors.some((e: any) => e.message?.includes("Fatal disk failure restoring backupSegments"))).toBe(true);
+
+          // Verify backup directory was NOT deleted
+          const chapterEntries = await readdir(paths.chapterDir);
+          const backupDir = chapterEntries.find((e) => e.startsWith("audio-segments.backup-"));
+          expect(backupDir).toBeDefined();
+          const filesInBackup = await readdir(join(paths.chapterDir, backupDir!));
+          expect(filesInBackup).toEqual(["0001.mp3"]);
+
+          // Verify logger logged pipeline.tts.rollback_failed
+          const logCall = errSpy.mock.calls.find((c) => (c[0] as any)?.event === "pipeline.tts.rollback_failed");
+          expect(logCall).toBeDefined();
+          expect((logCall![0] as any).segmentsBackedUp).toBe(true);
+          expect((logCall![0] as any).backupSegmentsDir).toContain("audio-segments.backup-");
+        } finally {
+          renameSpy.mockRestore();
+          errSpy.mockRestore();
+        }
+      });
+
+      // Item 18: Backup Phase Failure Does Not Leave Canonical Paths Missing
+      it("Item 18: ensures no canonical path remains missing when failure occurs on audioRaw backup", async () => {
+        const root = await mkdtemp(join(tmpdir(), "tts-tx-bk-audio-fail-"));
+        const story = testStory();
+        const paths = storyPaths(root, story.slug, 1);
+
+        const oldAudioRaw = new Uint8Array([0x49, 0x44, 0x33, 0x01, 0x02]);
+        const oldSeg1 = new Uint8Array([0x49, 0x44, 0x33, 0x01]);
+        await atomicWrite(paths.original, "第一章\n\n测试内容");
+        await atomicWrite(paths.english, "Chapter 1.\n\nTest content.");
+        await atomicWrite(paths.narration, "Chapter 1. Test content.");
+        await atomicWrite(paths.narrationTts, "Chapter 1. Test content.");
+        await atomicWrite(paths.audioRaw, oldAudioRaw);
+        await atomicWrite(join(paths.segments, "0001.mp3"), oldSeg1);
+        await atomicWriteJson(paths.bibleUpdate, { chapterSummary: "Summary", characters: [], relationships: [], terminology: [], locations: [], factions: [], abilities: [], unresolvedThreads: [] });
+        await atomicWriteJson(paths.chapterMeta, {
+          chapter: 1,
+          sourceLanguage: "zh",
+          outputLanguage: "en",
+          counts: { originalCharacters: 10, englishWords: 5, narrationWords: 5 },
+          createdAt: "2026-01-01T00:00:00.000Z",
+          updatedAt: "2026-01-01T00:00:00.000Z",
+          stages: {
+            ingestion: { status: "complete" },
+            translation: { status: "complete" },
+            narration: { status: "complete" },
+            qa: { status: "complete" },
+            storyBible: { status: "complete" },
+            continuity: { status: "complete" },
+            tts: { status: "complete", outputFingerprint: "fp-old" },
+            audioMastering: { status: "pending" },
+            alignment: { status: "pending" },
+            subtitles: { status: "pending" },
+            scenePlanning: { status: "pending" },
+            artwork: { status: "pending" },
+            video: { status: "pending" },
+          },
+        });
+
+        const newAudioRaw = new Uint8Array([0x49, 0x44, 0x33, 0x99, 0x88]);
+        const newSeg1 = new Uint8Array([0x49, 0x44, 0x33, 0x99]);
+        const llm = new MockLLM("gemini", ["English translation", "English narration"]);
+        const mockTts: TTSProvider = {
+          name: "fish",
+          validateConfiguration: async () => {},
+          synthesize: async () => ({
+            audio: newAudioRaw,
+            segments: [newSeg1],
+            segmentTexts: ["New text"],
+            providerRequests: 1,
+          }),
+        };
+        const router = new LLMRouter(new Map([["gemini", llm], ["openai", llm], ["kimi", llm]]));
+        const pipeline = new ChapterPipeline(router, mockTts);
+        const input = join(root, "chapter.txt");
+        await writeFile(input, "第一章\n\n测试内容", "utf8");
+
+        // Inject error during the very first rename (audioRaw -> backupAudioRawPath)
+        const renameSpy = vi.spyOn(storyFilesModule, "renamePath").mockImplementation(async (source, dest) => {
+          if (source === paths.audioRaw && dest.includes("audio-raw.mp3.backup-")) {
+            throw new Error("Disk full backing up audio-raw");
+          }
+          return realRenamePath(source, dest);
+        });
+
+        try {
+          await expect(pipeline.run({
+            root,
+            story,
+            chapter: 1,
+            inputPath: input,
+            force: "tts",
+            stopAfter: "tts",
+            executionStages: ["tts"],
+          })).rejects.toThrow("Disk full backing up audio-raw");
+
+          // Canonical audio and segments are fully intact
+          expect(await exists(paths.audioRaw)).toBe(true);
+          expect(new Uint8Array(await readFile(paths.audioRaw))).toEqual(oldAudioRaw);
+          expect(await exists(join(paths.segments, "0001.mp3"))).toBe(true);
+          expect(new Uint8Array(await readFile(join(paths.segments, "0001.mp3")))).toEqual(oldSeg1);
+
+          // Prior metadata restored
+          const meta = JSON.parse(await readFile(paths.chapterMeta, "utf8"));
+          expect(meta.stages.tts.status).toBe("complete");
+          expect(meta.stages.tts.outputFingerprint).toBe("fp-old");
+        } finally {
+          renameSpy.mockRestore();
+        }
+      });
     });
   });
 });
