@@ -8,7 +8,15 @@ describe("vocalization detection matrix", () => {
     ["Hahaha...", "laugh", "Hahaha..."],
     ["Hahahaha!", "laugh", "Hahaha!"],
     ["Ha ha ha!", "laugh", "Hahaha!"],
+    ["Haha, haha, haha...", "laugh", "Hahaha..."],
+    ["Hehe hehe hehe...", "laugh", "Hehehe..."],
+    ["Heh, heh, heh...", "laugh", "Hehehe..."],
     ["Hehe...", "laugh", "Hehehe..."],
+    ["Ahem, ahem, ahem, ahem...", "throat_clear", "Ahem..."],
+    ["Tsk, tsk, tsk, tsk.", "scoff", "Tsk."],
+    ["Sob sob sob...", "sob", "Sob..."],
+    ["Sigh, sigh, sigh...", "sigh", "Sigh..."],
+    ["Gasp, gasp, gasp...", "gasp", "Gasp..."],
     ["Heh.", "chuckle", "Heh."],
     ["Hmph!", "scoff", "Hmph!"],
     ["Hmm...", "thinking", "Hmm..."],
@@ -63,6 +71,11 @@ describe("vocalization repetition collapsing", () => {
     ["Ahhhhhhhhh!", "Ahhh!"],
   ])("collapses %s to canonical %s", (input, spokenForm) => {
     expect(scanVocalizations(input)[0]).toMatchObject({ sourceText: input, spokenForm });
+  });
+
+  it("keeps separately punctuated reactions as separate performances", () => {
+    expect(scanVocalizations("Hahaha! Hahaha!").map((item) => item.sourceText)).toEqual(["Hahaha!", "Hahaha!"]);
+    expect(scanVocalizations("Gasp. Gasp.").map((item) => item.sourceText)).toEqual(["Gasp.", "Gasp."]);
   });
 });
 

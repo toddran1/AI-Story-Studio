@@ -94,6 +94,28 @@ describe("vocalization speech normalization", () => {
     expect(normalizeSpeechText("He sighed. Sigh. Ahhh! Grrrrr!", "en-US", {}, fishS2Tags).text).toBe("He sighed. [sigh] [gasp] Grrr!");
   });
 
+  it("renders a repeated heh laugh as one cue instead of three separate reactions", () => {
+    const line = "“Heh heh heh... Don’t worry. I’ll send you off to join him right now!”";
+    const tagged = normalizeSpeechText(line, "en-US", {}, fishS2Tags);
+    expect(tagged.text).toBe("“[laugh] Don’t worry. I’ll send you off to join him right now!”");
+    expect(tagged.transformations).toEqual([expect.objectContaining({ kind: "vocalization", written: "Heh heh heh...", spoken: "[laugh]" })]);
+    expect(normalizeSpeechText(line, "en-US").text).toBe("“Hehehe... Don’t worry. I’ll send you off to join him right now!”");
+    expect(normalizeSpeechText("He typed 'heh heh heh' into the chat.", "en-US", {}, fishS2Tags).text).toBe("He typed 'heh heh heh' into the chat.");
+  });
+
+  it.each([
+    ["Haha haha haha... Stop.", "[laugh] Stop."],
+    ["Hehe hehe hehe... Stop.", "[laugh] Stop."],
+    ["Ahem, ahem, ahem, ahem... Stop.", "[cough] Stop."],
+    ["Sigh, sigh, sigh... Stop.", "[sigh] Stop."],
+    ["Gasp, gasp, gasp... Stop.", "[gasp] Stop."],
+  ])("sends one native cue for repeated %s", (written, spoken) => {
+    const strategy: VocalizationRenderStrategy = { kind: "native_tags", tags: { laugh: "[laugh]", throat_clear: "[cough]", sigh: "[sigh]", gasp: "[gasp]" } };
+    const result = normalizeSpeechText(written, "en-US", {}, strategy);
+    expect(result.text).toBe(spoken);
+    expect(result.transformations).toHaveLength(1);
+  });
+
   it("omits vocalizations cleanly under omit strategy or omit_unsupported fallback", () => {
     const omitted = normalizeSpeechText(fiendDragon, "en-US", {}, { kind: "omit" });
     expect(omitted.text).toBe("Brat, once my fiend dragon comes out, all your bullshit undead are nothing but ants!");

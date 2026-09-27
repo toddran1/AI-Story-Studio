@@ -60,6 +60,7 @@ describe("Fish vocalization strategy", () => {
   it("maps a performed laugh to the approved cue but leaves a literal mention intact", () => {
     expect(normalizeFishSpeechText("“Hehe, I guessed it, didn’t I?”", "s2-pro")).toContain("[laugh] I guessed it");
     expect(normalizeFishSpeechText("Haha, I knew it.", "s2-pro")).toBe("[laugh] I knew it.");
+    expect(normalizeFishSpeechText("“Heh heh heh... Don’t worry.”", "s2-pro")).toBe("“[laugh] Don’t worry.”");
     expect(normalizeFishSpeechText("She typed “hehe” into the chat.", "s2-pro")).toContain("“hehe”");
     const original = "“Ahem, ahem, ahem… You’re right.”";
     expect(normalizeFishSpeechText(original, "s2-pro")).toContain("[cough] You’re right");
