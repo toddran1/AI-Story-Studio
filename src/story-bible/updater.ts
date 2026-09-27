@@ -182,11 +182,16 @@ function mergeCanonicalHistory(existing: StoryBible, update: StoryBibleUpdate, c
   let minorReferences = structuredClone(existing.minorReferences ?? []);
 
   const ensure = (name: string, type: EntityType = "concept", originalName = "", description = "", aliases: string[] = [], status = "unknown", confidence?: number) => {
+    const rawEntityId = stableId("ent", { type, identity: normalizeName(originalName || name) });
     const resolution = identityIndex.resolve([name, originalName, ...aliases], { expectedType: type });
-    if (resolution.status === "ambiguous") return undefined;
-    let entity = resolution.status === "matched" ? entities.find((candidate) => candidate.id === resolution.entity.id) : undefined;
+    // A prior concept can have been promoted to a character without changing
+    // its stable ID. Resolve that exact ID before treating a shared name as
+    // ambiguous or adding a second row with the same ID.
+    let entity = entities.find((candidate) => candidate.id === rawEntityId);
+    if (!entity && resolution.status === "ambiguous") return undefined;
+    entity ??= resolution.status === "matched" ? entities.find((candidate) => candidate.id === resolution.entity.id) : undefined;
     if (!entity) {
-      entity = { id: stableId("ent", { type, identity: normalizeName(originalName || name) }), type, canonicalName: name, aliases: uniqueNames([name, ...aliases]).filter((value) => normalizeName(value) !== normalizeName(name)), originalName, description, aliasNarrationRules: [], firstAppearance: chapter, lastKnownAppearance: chapter, status, notes: "", canonicalNameLocked: false, origin: "automatic", provenance: [], mergedFromIds: [] };
+      entity = { id: rawEntityId, type, canonicalName: name, aliases: uniqueNames([name, ...aliases]).filter((value) => normalizeName(value) !== normalizeName(name)), originalName, description, aliasNarrationRules: [], firstAppearance: chapter, lastKnownAppearance: chapter, status, notes: "", canonicalNameLocked: false, origin: "automatic", provenance: [], mergedFromIds: [] };
       entities.push(entity);
       identityIndex.add(effectiveEntityIdentity(entity, overlay?.overrides?.[entity.id]));
     } else {
@@ -248,8 +253,8 @@ function mergeCanonicalHistory(existing: StoryBible, update: StoryBibleUpdate, c
       }
       const keys = new Set([raw.canonicalEnglishName, raw.originalName, ...(raw.aliases ?? [])].map(normalizeName).filter(Boolean));
       const resolution = identityIndex.resolve([raw.canonicalEnglishName, raw.originalName, ...(raw.aliases ?? [])], { expectedType: type });
-      if (resolution.status === "matched") {
-        logger.debug({ event: "story_bible.identity_resolved", chapter, extractedName: raw.canonicalEnglishName, entityId: resolution.entity.id, matchKind: resolution.matchKind });
+      if (resolution.status === "matched" || entities.some((candidate) => candidate.id === rawEntityId)) {
+        logger.debug({ event: "story_bible.identity_resolved", chapter, extractedName: raw.canonicalEnglishName, entityId: resolution.status === "matched" ? resolution.entity.id : rawEntityId, matchKind: resolution.status === "matched" ? resolution.matchKind : "stable_id" });
         const entity = ensure(raw.canonicalEnglishName, type, raw.originalName, raw.description, raw.aliases ?? [], raw.status ?? "unknown", raw.confidence);
         if (!entity) continue;
         entity.sourceBucket ??= category;

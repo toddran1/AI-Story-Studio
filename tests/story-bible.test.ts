@@ -18,6 +18,17 @@ describe("Story Bible extraction prompt", () => {
 });
 
 describe("Story Bible", () => {
+  it("keeps one stable ID when a concept is promoted and later extracted as a concept again", () => {
+    const entry = (chapter: number) => ({ canonicalEnglishName: "Half-Monster", originalName: "半怪人", description: `Seen in chapter ${chapter}`, firstSeenChapter: chapter, lastSeenChapter: chapter });
+    let bible = mergeStoryBible(emptyStoryBible(), storyBibleUpdateSchema.parse({ systemTerms: [entry(1)], chapterSummary: "One" }), 1);
+    bible = mergeStoryBible(bible, storyBibleUpdateSchema.parse({ characters: [entry(2)], chapterSummary: "Two" }), 2);
+    bible = mergeStoryBible(bible, storyBibleUpdateSchema.parse({ systemTerms: [entry(3)], chapterSummary: "Three" }), 3);
+    const matches = bible.canonicalEntities.filter((entity) => entity.canonicalName === "Half-Monster");
+    expect(matches).toHaveLength(1);
+    expect(matches[0]?.lastKnownAppearance).toBe(3);
+    expect(matches[0]?.provenance.map((item) => item.chapter)).toEqual([1, 2, 3]);
+  });
+
   it("validates structured responses", () => {
     expect(() => storyBibleUpdateSchema.parse({ chapterSummary: 42 })).toThrow();
   });
