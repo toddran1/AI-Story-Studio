@@ -4105,10 +4105,6 @@ export function SettingsPage({ slug, onJob, initialStory, initialEffectiveRoutin
           </div>;
         })}
         <Field label="QA mode"><select value={story.qaMode ?? "production"} onChange={(event) => setStory({ ...story, qaMode: event.target.value as StoryConfig["qaMode"] })}><option value="production">Production — material issues only</option><option value="thorough">Thorough — also style and polish</option></select></Field>
-        <div className="settings-group"><h3>QA checks for this book</h3><p>Choose which findings apply to this story. Recheck QA after saving to update existing chapter findings.</p>
-          {([ ["completeness", "Completeness and missing content"], ["names", "Names"], ["numbers", "Numbers and levels"], ["terminology", "Terminology"], ["dialogue", "Dialogue"], ["storyConsistency", "Story consistency"], ["narrationFidelity", "Narration fidelity"] ] as const).map(([category, label]) => <label className="narration-policy" key={category}><span>{label}</span><input type="checkbox" checked={!story.qaPolicy?.disabledCategories.includes(category)} onChange={(event) => setStory({ ...story, qaPolicy: { ...story.qaPolicy, disabledRules: story.qaPolicy?.disabledRules ?? [], disabledCategories: event.target.checked ? (story.qaPolicy?.disabledCategories ?? []).filter((value) => value !== category) : [...(story.qaPolicy?.disabledCategories ?? []), category] } })} /></label>)}
-          <label className="narration-policy"><span>Repeated paragraphs</span><input type="checkbox" checked={!story.qaPolicy?.disabledRules.includes("duplicateParagraph")} onChange={(event) => setStory({ ...story, qaPolicy: { ...story.qaPolicy, disabledCategories: story.qaPolicy?.disabledCategories ?? [], disabledRules: event.target.checked ? (story.qaPolicy?.disabledRules ?? []).filter((value) => value !== "duplicateParagraph") : [...(story.qaPolicy?.disabledRules ?? []), "duplicateParagraph"] } })} /></label>
-        </div>
         <label className={`narration-policy ${story.narrationSettings.profanityMode === "soften-strong" ? "active" : ""}`}>
           <div><span>NARRATION ONLY</span><b>Soften strong profanity</b><small>Uses milder wording for harsh terms while keeping the scene's meaning and intensity. Ass, hell, and damn remain allowed. Original and translation stay unchanged.</small></div>
           <input type="checkbox" checked={story.narrationSettings.profanityMode === "soften-strong"} onChange={(event) => setStory({ ...story, narrationSettings: { ...story.narrationSettings, profanityMode: event.target.checked ? "soften-strong" : "preserve" } })} />
@@ -4206,6 +4202,24 @@ export function SettingsPage({ slug, onJob, initialStory, initialEffectiveRoutin
             <small className="field-note">Runs locally on preserved originals — no paid image requests.</small>
           </Field>
         </section>
+      </div>
+      <div className="settings-group qa-settings"><h3>QA checks for this book</h3><p>Choose which findings apply to this story. Recheck QA after saving to update existing chapter findings.</p>
+        {([ ["completeness", "Completeness and missing content"], ["names", "Names"], ["numbers", "Numbers and levels"], ["terminology", "Terminology"], ["dialogue", "Dialogue"], ["storyConsistency", "Story consistency"], ["narrationFidelity", "Narration fidelity"] ] as const).map(([category, label]) => {
+          const enabled = !story.qaPolicy?.disabledCategories.includes(category);
+          return <label className={`qa-check-toggle ${enabled ? "active" : ""}`} key={category}>
+            <span className="qa-check-name">{label}</span><span className="qa-check-state">{enabled ? "On" : "Off"}</span>
+            <input type="checkbox" checked={enabled} onChange={(event) => setStory({ ...story, qaPolicy: { ...story.qaPolicy, disabledRules: story.qaPolicy?.disabledRules ?? [], disabledCategories: event.target.checked ? (story.qaPolicy?.disabledCategories ?? []).filter((value) => value !== category) : [...(story.qaPolicy?.disabledCategories ?? []), category] } })} />
+            <i aria-hidden="true" />
+          </label>;
+        })}
+        {(() => {
+          const enabled = !story.qaPolicy?.disabledRules.includes("duplicateParagraph");
+          return <label className={`qa-check-toggle ${enabled ? "active" : ""}`}>
+            <span className="qa-check-name">Repeated paragraphs</span><span className="qa-check-state">{enabled ? "On" : "Off"}</span>
+            <input type="checkbox" checked={enabled} onChange={(event) => setStory({ ...story, qaPolicy: { ...story.qaPolicy, disabledCategories: story.qaPolicy?.disabledCategories ?? [], disabledRules: event.target.checked ? (story.qaPolicy?.disabledRules ?? []).filter((value) => value !== "duplicateParagraph") : [...(story.qaPolicy?.disabledRules ?? []), "duplicateParagraph"] } })} />
+            <i aria-hidden="true" />
+          </label>;
+        })()}
       </div>
       <div className="settings-group video-settings"><h3>Video</h3>
         <Field label="Resolution">

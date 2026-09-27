@@ -197,3 +197,16 @@
 
 .output-group > button:first-child { display: flex; align-items: center; gap: 10px; width: 100%; padding: 0; color: inherit; background: none; border: 0; border-bottom: 1px solid var(--line); text-align: left; cursor: pointer; }
 .output-group > button:first-child span { color: var(--muted); font: 9px var(--mono); }
+
+.qa-settings > p { color: var(--muted); font-size: 11px; line-height: 1.5; margin: 0 0 4px; }
+.qa-check-toggle { display: flex; align-items: center; gap: 10px; min-height: 42px; padding: 9px 11px; border: 1px solid var(--line); border-radius: 7px; background: #17171c; cursor: pointer; }
+.qa-check-toggle.active { border-color: rgba(170,166,255,.4); background: rgba(119,114,232,.09); }
+.qa-check-name { flex: 1; font-size: 11px; line-height: 1.3; }
+.qa-check-state { font: 10px var(--mono); color: var(--muted); }
+.qa-check-toggle.active .qa-check-state { color: var(--violet-soft); }
+.qa-check-toggle input { position: absolute; opacity: 0; width: 1px; height: 1px; }
+.qa-check-toggle i { flex: none; width: 34px; height: 20px; border-radius: 12px; background: #34343c; position: relative; transition: background .15s; }
+.qa-check-toggle i::after { content: ""; position: absolute; width: 14px; height: 14px; left: 3px; top: 3px; border-radius: 50%; background: #aaa9b3; transition: left .15s, background .15s; }
+.qa-check-toggle input:checked + i { background: var(--violet); }
+.qa-check-toggle input:checked + i::after { left: 17px; background: white; }
+.qa-check-toggle:has(input:focus-visible) { outline: 2px solid var(--violet-soft); outline-offset: 2px; }
