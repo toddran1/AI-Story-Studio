@@ -1,14 +1,15 @@
 import { FfmpegTools } from "./ffmpeg.js";
 import { FfmpegVideoTools } from "../video/ffmpeg-video.js";
 import { type ResolvedExportMusic } from "../music/types.js";
+import { renderMusicBed } from "../music/render-bed.js";
 
 export const BACKGROUND_MUSIC_PROCESSOR_VERSION = "background-music-v1";
 export function backgroundMusicFingerprint(music: ResolvedExportMusic) {
-  return { version: BACKGROUND_MUSIC_PROCESSOR_VERSION, mode: music.mode, trackId: music.track.id, trackFingerprint: music.track.fingerprint,
+  return { version: BACKGROUND_MUSIC_PROCESSOR_VERSION, mode: music.mode, trackId: music.track.id, trackFingerprint: music.track.fingerprint, bed: music.bed ? { id: music.bed.id, revision: music.bed.fingerprint, tracks: music.bed.tracks.map((item) => [item.track.id, item.track.fingerprint]), playbackMode: music.bed.playbackMode, crossfadeSeconds: music.bed.crossfadeSeconds } : undefined,
     gainDb: music.gainDb, ducking: music.ducking, fadeInSeconds: music.fadeInSeconds, fadeOutSeconds: music.fadeOutSeconds, loopMode: music.loopMode };
 }
 export function backgroundMusicManifest(music: ResolvedExportMusic) {
-  return { mode: music.mode, trackId: music.track.id, trackFingerprint: music.track.fingerprint, title: music.track.title, gainDb: music.gainDb,
+  return { mode: music.mode, trackId: music.track.id, trackFingerprint: music.track.fingerprint, title: music.bed?.name ?? music.track.title, gainDb: music.gainDb,
     ducking: music.ducking.enabled, duckingStrength: music.ducking.strength, fadeInSeconds: music.fadeInSeconds, fadeOutSeconds: music.fadeOutSeconds, loopMode: music.loopMode };
 }
 export function buildBackgroundMusicFilter(duration: number, music: ResolvedExportMusic) {
@@ -31,12 +32,14 @@ export function buildBackgroundMusicVideoArgs(input: string, output: string, dur
   return ["-i", input, "-stream_loop", "-1", "-i", music.path, "-filter_complex", buildBackgroundMusicFilter(duration, music), "-map", "0:v:0", "-map", "[out]", "-map", "0:s?", "-map_metadata", "0", "-map_chapters", "0", "-c:v", "copy", "-c:s", "copy", "-c:a", "aac", "-b:a", "192k", "-t", String(duration), "-movflags", "+faststart", output];
 }
 export async function mixBackgroundMusicAudio(input: string, output: string, format: "mp3" | "m4b", music: ResolvedExportMusic, tools = new FfmpegTools()) {
-  const before = await tools.probe(input); await tools.ffmpeg(buildBackgroundMusicAudioArgs(input, output, format, before.durationSeconds, music)); const after = await tools.probe(output);
+  const before = await tools.probe(input); const bed = music.bed ? await renderMusicBed(music.bed, before.durationSeconds, input, tools) : undefined;
+  try { await tools.ffmpeg(buildBackgroundMusicAudioArgs(input, output, format, before.durationSeconds, bed ? { ...music, path: bed } : music)); } finally { if (bed) { const { rm } = await import("node:fs/promises"); await rm(bed, { force: true }); } } const after = await tools.probe(output);
   if (Math.abs(after.durationSeconds - before.durationSeconds) > Math.max(1, before.durationSeconds * .002)) throw new Error("Music export duration differs from clean audio");
   return after;
 }
 export async function mixBackgroundMusicVideo(input: string, output: string, music: ResolvedExportMusic, tools = new FfmpegVideoTools()) {
-  const before = await tools.probe(input); await tools.ffmpeg(buildBackgroundMusicVideoArgs(input, output, before.durationSeconds, music)); const after = await tools.probe(output);
+  const before = await tools.probe(input); const bed = music.bed ? await renderMusicBed(music.bed, before.durationSeconds, input) : undefined;
+  try { await tools.ffmpeg(buildBackgroundMusicVideoArgs(input, output, before.durationSeconds, bed ? { ...music, path: bed } : music)); } finally { if (bed) { const { rm } = await import("node:fs/promises"); await rm(bed, { force: true }); } } const after = await tools.probe(output);
   if (after.videoCodec !== before.videoCodec || after.width !== before.width || after.height !== before.height || after.audioCodec !== "aac" || Math.abs(after.durationSeconds - before.durationSeconds) > Math.max(1, before.durationSeconds * .002)) throw new Error("Music video export changed the source streams or duration");
   return after;
 }

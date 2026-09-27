@@ -34,6 +34,12 @@ import { createErrorDiagnostic } from "../../src/errors/diagnostic.js";
 import { QaFindingLifecycleConflictError } from "../../src/qa/review.js";
 import { findVisualReferenceFile, mimeForVisualReferenceExtension } from "../../src/visual-canon/assets.js";
 import { artDirectionPresetEditSchema, createArtDirectionPresetSchema } from "../../src/domain/art-direction.js";
+import { musicProviderCatalog, musicProviderRegistry } from "../../src/music/providers/registry.js";
+import { discardMusicCandidate, listMusicGenerations, musicCandidatePath, readMusicGeneration, saveMusicCandidate, startMusicGeneration } from "../../src/music/generation.js";
+import { deleteMusicBed, listMusicBeds, saveMusicBed } from "../../src/music/music-bed.js";
+import { buildStoryMusicContext, rankMusicTracks, suggestMusicConcepts } from "../../src/music/recommendations.js";
+import { buildMusicMixPreview } from "../../src/music/preview.js";
+import { exportMusicSelectionSchema, musicOverridesSchema } from "../../src/music/types.js";
 
 const MAX_BODY_BYTES = 50_000_000;
 const MAX_JSON_BYTES = 1_000_000;
@@ -52,6 +58,31 @@ export function createApiHandler(operations: StudioOperations) {
     try {
       validateLocalRequest(request);
       if (request.method === "GET" && url.pathname === "/api/health") return send(response, 200, { status: "ready", binding: "localhost", credentials: { openai: "server-only", gemini: "server-only", kimi: "server-only", fish: "server-only" } });
+      if (url.pathname === "/api/music/providers" && request.method === "GET") return send(response, 200, { providers: musicProviderCatalog() });
+      const conceptsMatch = /^\/api\/stories\/([a-z0-9-]+)\/music-concepts$/.exec(url.pathname);
+      if (conceptsMatch && request.method === "GET") { const story = await loadStory(storyPaths(operations.root, conceptsMatch[1]!, 1).storyConfig); return send(response, 200, { context: buildStoryMusicContext(story), concepts: suggestMusicConcepts(story), recommendedTracks: rankMusicTracks(story, await listMusicTracks(operations.root)).slice(0, 5) }); }
+      const mixPreviewMatch = /^\/api\/stories\/([a-z0-9-]+)\/music-preview$/.exec(url.pathname);
+      if (mixPreviewMatch && request.method === "POST") { const input = z.object({ chapter: z.number().int().positive(), music: exportMusicSelectionSchema, overrides: musicOverridesSchema.optional(), position: z.enum(["beginning", "middle"]).default("middle") }).strict().parse(await jsonBody(request)); const story = await loadStory(storyPaths(operations.root, mixPreviewMatch[1]!, 1).storyConfig); const path = await buildMusicMixPreview(operations.root, story, input.chapter, input.music, input.overrides, input.position); return sendFile(request, response, path, "audio/mpeg"); }
+      if (url.pathname === "/api/music/beds" && request.method === "GET") return send(response, 200, { beds: await listMusicBeds(operations.root) });
+      if (url.pathname === "/api/music/beds" && request.method === "POST") return send(response, 201, await saveMusicBed(operations.root, await jsonBody(request)));
+      const bedMatch = /^\/api\/music\/beds\/(bed_[a-f0-9]{24})$/.exec(url.pathname);
+      if (bedMatch && request.method === "PUT") return send(response, 200, await saveMusicBed(operations.root, await jsonBody(request), bedMatch[1]));
+      if (bedMatch && request.method === "DELETE") { await deleteMusicBed(operations.root, bedMatch[1]!); return send(response, 200, { deleted: bedMatch[1] }); }
+      if (url.pathname === "/api/music/generations" && request.method === "GET") { const jobs = await listMusicGenerations(operations.root); return send(response, 200, { jobs, usage: { category: "music_generation", completedCount: jobs.filter((job) => job.status === "complete").length, requestedDurationSeconds: jobs.filter((job) => job.status === "complete").reduce((sum, job) => sum + (job.request.durationSeconds ?? 0), 0), estimatedCostUsd: null } }); }
+      if (url.pathname === "/api/music/generations" && request.method === "POST") {
+        const input = z.object({ provider: z.string(), request: z.unknown() }).strict().parse(await jsonBody(request));
+        const provider = musicProviderRegistry().find((item) => item.id === input.provider);
+        if (!provider) throw new HttpError("Music provider is unavailable or not configured", 400);
+        const job = startMusicGeneration(operations.root, input.request, provider); await job.ready; void job.run;
+        return send(response, 202, { id: job.id });
+      }
+      const generationMatch = /^\/api\/music\/generations\/([a-f0-9-]{36})$/.exec(url.pathname);
+      if (generationMatch && request.method === "GET") { const job = await readMusicGeneration(operations.root, generationMatch[1]!); return job ? send(response, 200, job) : send(response, 404, { error: "Music generation not found" }); }
+      if (generationMatch && request.method === "DELETE") { await discardMusicCandidate(operations.root, generationMatch[1]!); return send(response, 200, { discarded: generationMatch[1] }); }
+      const generationAudioMatch = /^\/api\/music\/generations\/([a-f0-9-]{36})\/audio$/.exec(url.pathname);
+      if (generationAudioMatch && request.method === "GET") { const path = await musicCandidatePath(operations.root, generationAudioMatch[1]!); return path ? sendFile(request, response, path, "audio/mpeg") : send(response, 404, { error: "Music candidate not found" }); }
+      const generationSaveMatch = /^\/api\/music\/generations\/([a-f0-9-]{36})\/save$/.exec(url.pathname);
+      if (generationSaveMatch && request.method === "POST") { const input = z.object({ title: z.string().trim().min(1).max(200).optional() }).strict().parse(await jsonBody(request)); return send(response, 201, await saveMusicCandidate(operations.root, generationSaveMatch[1]!, input.title)); }
       if (request.method === "GET" && url.pathname === "/api/stories") { const warnings: string[] = []; const stories = await listStories(operations.root, warnings); return send(response, 200, { stories, warnings }); }
       if (request.method === "GET" && url.pathname === "/api/novel/providers") return send(response, 200, { providers: operations.novelProviders() });
       if (request.method === "POST" && url.pathname === "/api/novel/search") return send(response, 200, await operations.searchNovelSources(await jsonBody(request)));

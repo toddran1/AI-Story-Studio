@@ -15,7 +15,7 @@ import { exportMusicSelectionSchema, musicOverridesSchema, type ExportMusicSelec
 export const chapterMusicExportManifestSchema = z.object({
   version: z.literal(1), story: z.string(), chapter: z.number().int().positive(), kind: z.enum(["audio", "video"]),
   edition: z.string().regex(/^bg-[a-f0-9]{12}$/), fingerprint: z.string(), sourceFingerprint: z.string(), outputFingerprint: z.string(),
-  output: z.string(), durationSeconds: z.number().positive(), createdAt: z.string(), music: z.object({ mode: z.enum(["story_default", "track"]), trackId: z.string(), trackFingerprint: z.string(), title: z.string(), gainDb: z.number(), ducking: z.boolean(), duckingStrength: z.string(), fadeInSeconds: z.number(), fadeOutSeconds: z.number(), loopMode: z.string() }),
+  output: z.string(), durationSeconds: z.number().positive(), createdAt: z.string(), music: z.object({ mode: z.enum(["story_default", "track", "bed"]), trackId: z.string(), trackFingerprint: z.string(), title: z.string(), gainDb: z.number(), ducking: z.boolean(), duckingStrength: z.string(), fadeInSeconds: z.number(), fadeOutSeconds: z.number(), loopMode: z.string() }),
 });
 
 export function chapterMusicExportPath(root: string, slug: string, chapter: number, kind: "audio" | "video", edition: string) {

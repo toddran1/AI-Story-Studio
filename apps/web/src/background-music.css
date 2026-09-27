@@ -10,3 +10,6 @@
 .music-library article small { color: #aaa7ba; }
 .music-library audio { height: 2rem; max-width: 16rem; }
 .music-library button { border: 1px solid #474154; border-radius: 6px; background: #25212f; color: #eee; padding: .4rem .7rem; cursor: pointer; }
+.music-controls textarea { width: min(100%, 45rem); min-height: 7rem; color: #eee; background: #22212d; border: 1px solid #474154; border-radius: 6px; padding: .6rem; }
+.music-generator, .music-controls > details { margin: 1rem 0; padding: .85rem; border: 1px solid #3b3647; border-radius: 8px; }
+.music-generator article, .music-controls > details article { padding: .65rem 0; border-top: 1px solid #34303f; }

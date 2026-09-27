@@ -26,7 +26,7 @@ export const exportManifestSchema = z.object({
   version: z.literal(1), fingerprint: z.string(), story: z.string(), from: z.number().int().positive(), to: z.number().int().positive(), format: z.enum(["mp3", "m4b"]),
   createdAt: z.string(), output: z.string(), outputFingerprint: z.string(), durationSeconds: z.number().positive(), codec: z.string(), container: z.string(),
   chapters: z.array(z.object({ chapter: z.number().int().positive(), title: z.string(), durationSeconds: z.number().positive(), fingerprint: z.string() })),
-  edition: z.string().regex(/^bg-[a-f0-9]{12}$/).optional(), music: z.object({ mode: z.enum(["story_default", "track"]), trackId: z.string(), trackFingerprint: z.string(), title: z.string(), gainDb: z.number(), ducking: z.boolean(), duckingStrength: z.string(), fadeInSeconds: z.number(), fadeOutSeconds: z.number(), loopMode: z.string() }).optional(),
+  edition: z.string().regex(/^bg-[a-f0-9]{12}$/).optional(), music: z.object({ mode: z.enum(["story_default", "track", "bed"]), trackId: z.string(), trackFingerprint: z.string(), title: z.string(), gainDb: z.number(), ducking: z.boolean(), duckingStrength: z.string(), fadeInSeconds: z.number(), fadeOutSeconds: z.number(), loopMode: z.string() }).optional(),
 });
 export type AudiobookManifest = z.infer<typeof exportManifestSchema>;
 

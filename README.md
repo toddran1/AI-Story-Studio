@@ -118,6 +118,8 @@ OPENAI_DEFAULT_MODEL=gpt-5.6-terra
 GEMINI_API_KEY=
 GEMINI_DEFAULT_MODEL=gemini-3.8-flash
 FISH_AUDIO_API_KEY=
+ELEVENLABS_API_KEY=
+
 FISH_AUDIO_MODEL=s2-pro
 FISH_AUDIO_REFERENCE_ID=
 PROVIDER_TIMEOUT_MS=120000
@@ -136,6 +138,8 @@ WEB_MAX_RESPONSE_BYTES=5000000
 WEB_MAX_RETRIES=2
 WEB_CACHE_DIR=cache/web
 ```
+
+Background music generation uses the official ElevenLabs Music API when this server-side key is configured and the account has Music API access. Generated audio remains a temporary candidate until you preview and save it to the local Music Library. Suno generation and provider catalog search remain unavailable until their official endpoint and licensing contracts are accessible for verification. Music exports use local files and do not call generation providers.
 
 OpenAI model routing supports `gpt-6-sol` and `gpt-6-luna` for translation, narration, QA, Story Bible, and scene planning through the Responses API. Choose either model in a story's settings or set `OPENAI_DEFAULT_MODEL` for new stories. Existing story settings are unchanged. The settings fields also accept custom OpenAI model IDs; the suggested choices are not an allowlist.
 
