@@ -9,7 +9,7 @@ import { storyPaths } from "../src/storage/paths.js";
 import { mergeStoryBible } from "../src/story-bible/updater.js";
 import { updateCanonicalEntity, applyCanonicalOverlay } from "../src/story-bible/canonical.js";
 import { rebuildStoryBibleBeforeChapter } from "../src/story-bible/rebuild.js";
-import { enrichStoryPronunciations, invalidatePronunciationChange, loadPronunciationEntities, loadPronunciationSuggestions } from "../src/story-bible/pronunciation.js";
+import { dismissPronunciationSuggestion, enrichStoryPronunciations, invalidatePronunciationChange, loadPronunciationEnrichment, loadPronunciationEntities, loadPronunciationSuggestions } from "../src/story-bible/pronunciation.js";
 import { adaptPronunciationText, pronunciationProvider, resolvePronunciations } from "../src/tts/pronunciation.js";
 import { FishAudioProvider } from "../src/tts/fish/fish-audio.provider.js";
 import { retrieveRelevantContext } from "../src/story-bible/retrieval.js";
@@ -100,6 +100,8 @@ describe("pronunciation persistence and production boundary", () => {
     // Enrichment stores a suggestion; the canonical entity keeps default TTS.
     expect((await loadPronunciationEntities(root, story.slug))[0]?.pronunciation).toBeUndefined();
     expect((await loadPronunciationSuggestions(root, story.slug))[entity.id]).toMatchObject({ sourceLanguage: "zh-CN", source: "ai" });
+    await dismissPronunciationSuggestion(root, story.slug, entity.id);
+    expect((await loadPronunciationEnrichment(root, story.slug))[entity.id]?.cacheKeyVersion).toBe(2);
     await updateCanonicalEntity(root, story.slug, bible, entity.id, { pronunciation: { mode: "custom", customPronunciation: "Manual", source: "manual" } });
     await enrichStoryPronunciations(root, story.slug, bible, llm, story.pipeline.storyBible, story.sourceLanguage, [entity.id]);
     expect(generate).toHaveBeenCalledTimes(1);
@@ -108,6 +110,35 @@ describe("pronunciation persistence and production boundary", () => {
     await enrichStoryPronunciations(root, story.slug, english, llm, story.pipeline.storyBible, story.sourceLanguage);
     await enrichStoryPronunciations(root, story.slug, english, llm, story.pipeline.storyBible, story.sourceLanguage);
     expect(generate).toHaveBeenCalledTimes(2);
+  });
+  it("keeps completed enrichment after a later failure and ignores accumulating aliases", async () => {
+    const { root, story, bible, entity } = await fixture();
+    const llm = new MockLLM();
+    const generate = vi.spyOn(llm, "generateStructured").mockImplementation(async request => ({ value: request.schema.parse({ pronunciation: null }) }));
+    await enrichStoryPronunciations(root, story.slug, bible, llm, story.pipeline.storyBible, story.sourceLanguage);
+    // A later pipeline stage can fail after the enrichment result is saved.
+    const laterFailure = () => { throw new Error("Audio mastering failed"); };
+    expect(laterFailure).toThrow("Audio mastering failed");
+    const nextBible = structuredClone(bible);
+    nextBible.canonicalEntities[0]!.aliases.push("New chapter alias");
+    const retry = await enrichStoryPronunciations(root, story.slug, nextBible, llm, story.pipeline.storyBible, story.sourceLanguage);
+    expect(retry.summary.alreadyEnriched).toBe(1);
+    expect(generate).toHaveBeenCalledTimes(1);
+    expect((await loadPronunciationEnrichment(root, story.slug))[entity.id]?.cacheKeyVersion).toBe(2);
+  });
+  it("migrates completed alias-sensitive cache entries without provider calls", async () => {
+    const { root, story, paths, bible, entity } = await fixture();
+    await atomicWriteJson(join(paths.story, "pronunciation-enrichment.json"), { [entity.id]: { attempt: "prior-alias-sensitive-key" } });
+    const llm = new MockLLM();
+    const generate = vi.spyOn(llm, "generateStructured");
+    const result = await enrichStoryPronunciations(root, story.slug, bible, llm, story.pipeline.storyBible, story.sourceLanguage);
+    expect(result.summary.alreadyEnriched).toBe(1);
+    expect(generate).not.toHaveBeenCalled();
+    expect((await loadPronunciationEnrichment(root, story.slug))[entity.id]).toMatchObject({ cacheKeyVersion: 2 });
+    const renamed = structuredClone(bible);
+    renamed.canonicalEntities[0]!.originalName = "江亮";
+    await enrichStoryPronunciations(root, story.slug, renamed, llm, story.pipeline.storyBible, story.sourceLanguage);
+    expect(generate).toHaveBeenCalledTimes(1);
   });
   it("uses original chapter evidence for AI enrichment and records an uncertain outcome as a suggestion, not an obligation", async () => {
     const { root, story, bible, entity, paths } = await fixture(); const llm = new MockLLM();

@@ -17,7 +17,7 @@ export async function loadPronunciationEntities(root: string, slug: string, base
   return (await applyCanonicalOverlay(root, slug, raw ? storyBibleSchema.parse(raw) : emptyStoryBible())).bible.canonicalEntities;
 }
 
-const enrichmentEntrySchema = z.object({ attempt: z.string(), suggestion: pronunciationSchema.optional() });
+const enrichmentEntrySchema = z.object({ attempt: z.string(), cacheKeyVersion: z.literal(2).optional(), suggestion: pronunciationSchema.optional() });
 const enrichmentCacheSchema = z.record(z.string(), z.union([z.string(), enrichmentEntrySchema]).transform(value => typeof value === "string" ? { attempt: value } : value));
 const pendingSchema = z.array(z.object({ before: canonicalEntitySchema, after: canonicalEntitySchema }));
 
@@ -49,7 +49,10 @@ function unresolvedPronunciation(language: string, evidence: PronunciationSource
 
 /** Canonical-identity cache key recorded for every completed enrichment attempt. */
 export function pronunciationAttemptInput(entity: CanonicalEntity, language: string) {
-  return fingerprint({ version: PRONUNCIATION_VERSION, id: entity.id, name: entity.canonicalName, original: entity.originalName, aliases: entity.aliases, language, type: entity.type });
+  // Aliases accumulate as chapters are processed. They do not change the
+  // pronunciation of this entity's primary name and must not invalidate a
+  // completed provider analysis for every new chapter.
+  return fingerprint({ version: PRONUNCIATION_VERSION, id: entity.id, name: entity.canonicalName, original: entity.originalName, language, type: entity.type });
 }
 
 /** Completed enrichment attempts plus any AI suggestion per entity; suggestions are inert until accepted. */
@@ -66,7 +69,7 @@ export async function loadPronunciationSuggestions(root: string, slug: string): 
 export async function dismissPronunciationSuggestion(root: string, slug: string, id: string) {
   const path = enrichmentCachePath(root, slug);
   const cache = await loadPronunciationEnrichment(root, slug);
-  if (cache[id]?.suggestion) { cache[id] = { attempt: cache[id]!.attempt }; await atomicWriteJson(path, cache); }
+  if (cache[id]?.suggestion) { cache[id] = { attempt: cache[id]!.attempt, cacheKeyVersion: cache[id]!.cacheKeyVersion }; await atomicWriteJson(path, cache); }
 }
 
 /**
@@ -83,13 +86,25 @@ export async function enrichStoryPronunciations(root: string, slug: string, base
   const entities = await loadPronunciationEntities(root, slug, base), suggested: string[] = [], uncertain: string[] = [];
   const summary = { total: entities.length, alreadyEnriched: 0, protected: 0, notNeeded: 0, eligible: 0, batches: 0, provider: provider.name, model: config.model };
   const candidates: Array<{ entity: CanonicalEntity; evidence: PronunciationSourceEvidence[]; input: string }> = [];
+  let migrated = false;
   for (const entity of entities) {
     if (ids && !ids.includes(entity.id)) continue;
     const pronunciation = entity.pronunciation;
     if (pronunciation?.locked || pronunciation?.source === "manual") { summary.protected++; continue; }
     if (!force && hasActivePronunciation(pronunciation)) { summary.alreadyEnriched++; continue; }
     const input = pronunciationAttemptInput(entity, language);
-    if (!force && cache[entity.id]?.attempt === input) { summary.alreadyEnriched++; continue; }
+    const cached = cache[entity.id];
+    if (!force && cached) {
+      if (cached.cacheKeyVersion === 2 && cached.attempt === input) { summary.alreadyEnriched++; continue; }
+      if (!cached.cacheKeyVersion) {
+        // Legacy entries were written after each successful provider result,
+        // but their key included mutable aliases. Stable entity IDs let us
+        // retain that completed work instead of repeating paid calls.
+        if (!dryRun) { cache[entity.id] = { ...cached, attempt: input, cacheKeyVersion: 2 }; migrated = true; }
+        summary.alreadyEnriched++;
+        continue;
+      }
+    }
     if (!entity.originalName && /^en(?:-|$)|^english$/i.test(language)) { summary.notNeeded++; continue; }
     const evidence = await collectSourceEvidence(root, slug, entity);
     if (!entity.originalName && !evidence.length) {
@@ -101,9 +116,10 @@ export async function enrichStoryPronunciations(root: string, slug: string, base
   summary.batches = Math.ceil(candidates.length / 8);
   onProgress?.({ processed: 0, total: candidates.length });
   if (dryRun) return { enriched: suggested, unresolved: uncertain, entities, suggestions: {} as Record<string, EntityPronunciation>, summary: { ...summary, successful: 0, needsReview: 0, durationMs: Date.now() - startedAt }, dryRun: true };
+  if (migrated) await atomicWriteJson(path, cache);
   const persist = async (entity: CanonicalEntity, input: string, value: CanonicalEntity["pronunciation"] | undefined) => {
     const suggestion = value ? { ...value, sourceLanguage: value.sourceLanguage ?? language, needsReview: value.needsReview ?? (value.confidence ?? 1) < .7, source: "ai" as const, locked: false, updatedAt: new Date().toISOString() } : undefined;
-    cache[entity.id] = suggestion ? { attempt: input, suggestion } : { attempt: input };
+    cache[entity.id] = suggestion ? { attempt: input, cacheKeyVersion: 2, suggestion } : { attempt: input, cacheKeyVersion: 2 };
     await atomicWriteJson(path, cache);
     if (suggestion) {
       suggested.push(entity.id);
