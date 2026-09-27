@@ -271,7 +271,10 @@ export class StudioOperations {
     slugSchema.parse(slug); const input = stageExecutionInputSchema.parse(raw);
     if (input.executionPolicy === "chapter-stage" && (input.chapters.length !== 1 || input.stages.length !== 1)) throw new ConfigurationError("Chapter-stage execution requires one chapter and one stage.");
     if (input.dryRun) return this.planStageExecution(slug, input);
-    return this.jobs.create("stageExecution", slug, async (control) => withStoryLock(this.root, slug, "manual stage processing", async () => {
+    return this.jobs.create("stageExecution", slug, async (control) => {
+      const shutdown = new ShutdownController();
+      control.setPause(() => shutdown.request());
+      return withStoryLock(this.root, slug, "manual stage processing", async () => {
       const story = await loadStory(storyPaths(this.root, slug, 1).storyConfig); const imported = await loadImportedChapters(this.root, slug);
       const selected = selectChapterNumbers(imported.chapters, input.chapters); const batchPlan = await planStageExecutionBatch({ root: this.root, story: slug, chapters: selected.map((chapter) => chapter.chapter), selectedStages: input.stages, mode: input.mode, force: input.force, executionPolicy: input.executionPolicy, storyConfig: story });
       if (input.expectedPlanFingerprint && input.expectedPlanFingerprint !== batchPlan.fingerprint) throw new ConfigurationError("The execution plan changed after preview. Preview the current plan before running it.");
@@ -289,6 +292,7 @@ export class StudioOperations {
       }
       const sources = new Map(selected.map((item) => [item.chapter, item])); const results: Array<{ chapter: number; status: "completed" | "reused" | "blocked" | "failed"; plan: (typeof batchPlan.chapters)[number]; error?: string; diagnostic?: ErrorDiagnostic }> = [];
       for (const plan of batchPlan.chapters) {
+        if (shutdown.isRequested) break;
         const chapter = plan.chapter; const source = sources.get(chapter)!;
         control.update({ type: "stage-execution.chapter.planned", chapter, plan });
         if (plan.blockedStages.length) { results.push({ chapter, status: "blocked", plan }); continue; }
@@ -307,8 +311,10 @@ export class StudioOperations {
       }
       invalidateCatalogCache(this.root, slug); await invalidateChapterStatusDerivedReads(this.root, slug); await invalidateStoryBibleDerivedReads(this.root, slug);
       const failedChapters = results.filter((item) => item.status === "failed").length;
-      return { status: failedChapters ? "completed_with_errors" : "completed", stopReason: failedChapters ? `${failedChapters} of ${results.length} chapters failed. See the chapter errors below.` : undefined, fingerprint: batchPlan.fingerprint, results, summary: { ...batchPlan.summary, completedOperations: results.filter((item) => item.status === "completed").reduce((count, item) => count + item.plan.runStages.length, 0), completedChapters: results.filter((item) => item.status === "completed").length, reusedChapters: results.filter((item) => item.status === "reused").length, blockedChapters: results.filter((item) => item.status === "blocked").length, failedChapters } };
-    }), input);
+      const paused = shutdown.isRequested && results.length < batchPlan.chapters.length;
+      return { status: paused ? "paused" : failedChapters ? "completed_with_errors" : "completed", stopReason: failedChapters ? `${failedChapters} of ${results.length} chapters failed. See the chapter errors below.` : undefined, fingerprint: batchPlan.fingerprint, results, summary: { ...batchPlan.summary, completedOperations: results.filter((item) => item.status === "completed").reduce((count, item) => count + item.plan.runStages.length, 0), completedChapters: results.filter((item) => item.status === "completed").length, reusedChapters: results.filter((item) => item.status === "reused").length, blockedChapters: results.filter((item) => item.status === "blocked").length, failedChapters } };
+      });
+    }, input);
   }
 
   novelProviders() { return this.registry.listNovelProviders(); }
@@ -1777,6 +1783,14 @@ export class StudioOperations {
       case "stageExecution": {
         const input = stageExecutionInputSchema.parse(job.payload);
         const { expectedPlanFingerprint: _previousFingerprint, ...retryInput } = input;
+        if (job.status === "paused" && job.result && typeof job.result === "object") {
+          const completed = new Set(
+            (Array.isArray((job.result as { results?: unknown }).results) ? (job.result as { results: unknown[] }).results : [])
+              .flatMap((item) => item && typeof item === "object" && typeof (item as { chapter?: unknown }).chapter === "number"
+                ? [(item as { chapter: number }).chapter] : []),
+          );
+          return this.startStageExecution(job.story, { ...retryInput, chapters: retryInput.chapters.filter((chapter) => !completed.has(chapter)) });
+        }
         return this.startStageExecution(job.story, retryInput);
       }
       case "scenes": return this.startScenes(job.story, job.payload ?? {});

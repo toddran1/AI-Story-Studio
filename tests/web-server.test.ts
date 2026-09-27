@@ -300,6 +300,37 @@ describe("web service layer", () => {
     await operations.close();
   });
 
+  it("pauses stage execution after the current chapter", async () => {
+    const root = await mkdtemp(join(tmpdir(), "story-stage-pause-")); const jobs = new JobManager();
+    let releaseFirst!: () => void;
+    let signalFirst!: () => void;
+    const firstStarted = new Promise<void>((resolve) => { signalFirst = resolve; });
+    const firstMayFinish = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    const calls: number[] = [];
+    const operations = new StudioOperations(root, env, jobs, { pipeline: { run: async (options) => {
+      calls.push(options.chapter);
+      if (options.chapter === 1) { signalFirst(); await firstMayFinish; }
+      return undefined;
+    } } });
+    try {
+      const inspection = await operations.inspectSource({ files: [{ name: "chapter-001.txt", text: "One" }, { name: "chapter-002.txt", text: "Two" }] });
+      const imported = await operations.importInspection("stage-pause-story", inspection.id);
+      const started = operations.startStageExecution(imported.story.slug, { chapters: [1, 2], stages: ["translation"], mode: "prerequisites", force: true }) as Job;
+      const finished = waitForJob(jobs, started.id);
+      await firstStarted;
+      expect(jobs.pause(started.id)).toBe(true);
+      releaseFirst();
+      const result = await finished;
+      expect(result.status).toBe("paused");
+      expect(result.result).toMatchObject({ status: "paused", results: [{ chapter: 1, status: "completed" }] });
+      expect(calls).toEqual([1]);
+      const resumed = await waitForJob(jobs, (await operations.retryJob(started.id) as Job).id);
+      expect(resumed.status).toBe("completed");
+      expect(resumed.payload).toMatchObject({ chapters: [2] });
+      expect(calls).toEqual([1, 2]);
+    } finally { releaseFirst?.(); await operations.close(); await rm(root, { recursive: true, force: true }); }
+  });
+
   it("retries stageExecution with its Chapter policy and target, without the old plan fingerprint", async () => {
     const root = await mkdtemp(join(tmpdir(), "story-stage-retry-")); const jobs = new JobManager();
     const calls: Array<{ executionStages?: readonly string[] }> = [];

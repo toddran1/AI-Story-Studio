@@ -4495,7 +4495,7 @@ export function JobConsole({ job, onUpdate, onClose, navigate, initialQaComparis
         {jobWarnings.length > 0 && <ul className="job-warnings">{jobWarnings.map((warning, index) => <li key={index}>{warning}</li>)}</ul>}
         <div className="job-actions">
           {diagnostic && <button type="button" onClick={() => void copyDiagnostic()}>{copied ? "Copied" : "Copy details"}</button>}
-          {job.status === "failed" && <button type="button" className="button-retry" disabled={retrying} onClick={() => void retry()}>{retrying ? "Retrying…" : "Retry"}</button>}
+          {(job.status === "failed" || (job.status === "paused" && job.type === "stageExecution")) && <button type="button" className="button-retry" disabled={retrying} onClick={() => void retry()}>{retrying ? "Starting…" : job.status === "paused" ? "Resume remaining chapters" : "Retry"}</button>}
           {job.story && (
             <button type="button" onClick={() => navigate?.(`/stories/${job.story}/settings`) ?? (location.href = `/stories/${job.story}/settings`)}>Open model settings</button>
           )}
