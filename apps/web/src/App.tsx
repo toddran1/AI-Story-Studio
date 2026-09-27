@@ -4555,12 +4555,45 @@ function guessExceptionValue(messageText: string) {
   return (match?.[1] ?? match?.[2] ?? match?.[3] ?? "").trim();
 }
 
+const severityRank: Record<string, number> = {
+  fail: 0,
+  warn: 1,
+};
+
+export type QaSeverityFilter = "all" | "critical" | "warning";
+
+export function sortQaFindingsBySeverity(findings: QaFinding[]): QaFinding[] {
+  return findings
+    .map((finding, index) => ({ finding, index }))
+    .sort((a, b) => {
+      const severityDiff =
+        (severityRank[a.finding.severity] ?? 99) -
+        (severityRank[b.finding.severity] ?? 99);
+      return severityDiff || a.index - b.index;
+    })
+    .map(({ finding }) => finding);
+}
+
+export function filterQaFindingsBySeverity(
+  findings: QaFinding[],
+  filter: QaSeverityFilter,
+): QaFinding[] {
+  if (filter === "critical") {
+    return findings.filter((finding) => finding.severity === "fail");
+  }
+  if (filter === "warning") {
+    return findings.filter((finding) => finding.severity === "warn");
+  }
+  return findings;
+}
+
 export function QaDetail({ slug, chapter, onJob, onEditManually, onChanged, initialData, initialError }: { slug: string; chapter: number; onJob: (job: Job) => void; onEditManually: () => void; onChanged: () => void; initialData?: ChapterQaDetail; initialError?: string }) {
   const [data, setData] = useState<ChapterQaDetail | undefined>(initialData); const [error, setError] = useState(initialError ?? ""); const [note, setNote] = useState(""); const [busy, setBusy] = useState("");
   const [dismissTarget, setDismissTarget] = useState<QaFinding>(); const [resetOpen, setResetOpen] = useState(false);
   const [repairChoice, setRepairChoice] = useState<QaFinding>();
   const [safeFixRecheckFailed, setSafeFixRecheckFailed] = useState(false);
   const [retryRecheck, setRetryRecheck] = useState(false);
+  const [severityFilter, setSeverityFilter] = useState<QaSeverityFilter>("all");
   const [expanded, setExpanded] = useState<string[]>([]); const [recheckSummary, setRecheckSummary] = useState<QaRecheckSummary>();
   const watcher = useRef<(() => void) | undefined>(undefined); const mutationInFlight = useRef(false); const qaRevision = useRef(0);
   const load = async () => { const revision = qaRevision.current; const next = await api<ChapterQaDetail>(`/stories/${slug}/chapters/${chapter}/qa`); if (revision === qaRevision.current) setData(next); return next; };
@@ -4593,7 +4626,21 @@ export function QaDetail({ slug, chapter, onJob, onEditManually, onChanged, init
     return true;
   };
   const reconcileMutation = async (result: unknown) => { applyAuthoritativeQa(result); await load(); onChanged(); };
-  useEffect(() => { qaRevision.current++; if (!initialData && !initialError) { setData(undefined); setError(""); setRecheckSummary(undefined); void load().catch((value) => setError(message(value))); } return () => watcher.current?.(); }, [slug, chapter]);
+  useEffect(() => { setSeverityFilter("all"); }, [slug, chapter]);
+  useEffect(() => {
+    qaRevision.current++;
+    if (initialData) {
+      setData(initialData);
+      setError(initialError ?? "");
+      setRecheckSummary(undefined);
+    } else if (!initialError) {
+      setData(undefined);
+      setError("");
+      setRecheckSummary(undefined);
+      void load().catch((value) => setError(message(value)));
+    }
+    return () => watcher.current?.();
+  }, [slug, chapter]);
   const toggleExpanded = (key: string) => setExpanded((current) => current.includes(key) ? current.filter((item) => item !== key) : [...current, key]);
   const runJob = (kind: string, job: Job, onComplete?: (job: Job) => void) => { setError(""); setNote(""); setBusy(kind); onJob(job); watcher.current?.(); watcher.current = watchJob(job.id, async (next) => { onJob(next); if (next.status === "completed") { setBusy(""); mutationInFlight.current = false; if (kind === "recheck") setRetryRecheck(false); applyAuthoritativeQa(next.result); onComplete?.(next); await load(); onChanged(); } else if (next.status === "failed") { setBusy(""); mutationInFlight.current = false; if (kind === "recheck") setRetryRecheck(true); if (next.diagnostic?.code === "QA_FINDING_STALE_SELECTION") await reconcileStaleSelection(next.error ?? "QA_FINDING_STALE_SELECTION"); else if (!await reconcileLifecycleConflict(next.error ?? "QA job failed")) setError(next.error ?? "QA job failed"); } }, (value) => { setBusy(""); mutationInFlight.current = false; if (kind === "recheck") setRetryRecheck(true); setError(message(value)); }); };
   const recheck = async (mode: "changed" | "full") => { setRetryRecheck(false); try { const job = await post<Job>(`/stories/${slug}/chapters/${chapter}/qa/recheck`, { mode }); runJob("recheck", job, (done) => { const summary = done.result?.summary as QaRecheckSummary | undefined; if (summary) setRecheckSummary(summary); }); } catch (value) { setRetryRecheck(true); setError(message(value)); } };
@@ -4629,6 +4676,9 @@ export function QaDetail({ slug, chapter, onJob, onEditManually, onChanged, init
   const resolvedFindings = data.state.findings.filter((finding) => finding.status !== "open");
   const critical = openFindingsList.filter((finding) => finding.severity === "fail").length;
   const warnings = openFindingsList.filter((finding) => finding.severity === "warn").length;
+  const totalOpen = openFindingsList.length;
+  const sortedOpenFindings = sortQaFindingsBySeverity(openFindingsList);
+  const visibleOpenFindings = filterQaFindingsBySeverity(sortedOpenFindings, severityFilter);
   const needsVerification = data.stats?.needsVerification ?? (stale ? data.state.findings.filter((finding) => finding.status !== "obsolete").length : 0);
   const unverified = (finding: QaFinding) => stale && finding.verifiedAgainstFingerprint !== data.currentFingerprint;
   const summaryParts = recheckSummary ? [recheckSummary.verified ? `✓ ${recheckSummary.verified} fix${recheckSummary.verified === 1 ? "" : "es"} verified` : "", recheckSummary.respected ? `✓ ${recheckSummary.respected} dismissal${recheckSummary.respected === 1 ? "" : "s"} respected` : "", recheckSummary.reopened ? `⚠ ${recheckSummary.reopened} returned` : "", recheckSummary.newFindings ? `${recheckSummary.newFindings} new issue${recheckSummary.newFindings === 1 ? "" : "s"}` : ""].filter(Boolean) : [];
@@ -4642,9 +4692,52 @@ export function QaDetail({ slug, chapter, onJob, onEditManually, onChanged, init
             {stale && <span className="qa-score-badge">· Previous score</span>}
           </div>
         )}
-        <div className="qa-attention-counts">{stale
-          ? <Status status="warn" label={needsVerification ? `${needsVerification} previous finding${needsVerification === 1 ? "" : "s"} need${needsVerification === 1 ? "s" : ""} verification` : "Previous result is out of date"} />
-          : <>{critical > 0 && <Status status="fail" label={`${critical} critical`} />}{warnings > 0 && <Status status="warn" label={`${warnings} warning${warnings === 1 ? "" : "s"}`} />}{!openFindingsList.length && <Status status="pass" label="Chapter is clear" />}</>}</div>
+        <div className="qa-attention-counts">
+          {openFindingsList.length > 0 ? (
+            <div className="qa-severity-filters" role="group" aria-label="Filter findings by severity">
+              <button
+                type="button"
+                className={`qa-severity-filter-btn${severityFilter === "all" ? " active" : ""}`}
+                aria-pressed={severityFilter === "all"}
+                aria-label={totalOpen === 1 ? "Show 1 open QA finding" : `Show all ${totalOpen} open QA findings`}
+                onClick={() => setSeverityFilter("all")}
+              >
+                All {totalOpen}
+              </button>
+              <button
+                type="button"
+                className={`qa-severity-filter-btn fail${severityFilter === "critical" ? " active" : ""}`}
+                aria-pressed={severityFilter === "critical"}
+                aria-label={`Show ${critical} critical QA finding${critical === 1 ? "" : "s"}`}
+                onClick={() => setSeverityFilter("critical")}
+              >
+                <i />
+                Critical {critical}
+              </button>
+              <button
+                type="button"
+                className={`qa-severity-filter-btn warn${severityFilter === "warning" ? " active" : ""}`}
+                aria-pressed={severityFilter === "warning"}
+                aria-label={`Show ${warnings} warning QA finding${warnings === 1 ? "" : "s"}`}
+                onClick={() => setSeverityFilter("warning")}
+              >
+                <i />
+                {warnings === 1 ? "Warning 1" : `Warnings ${warnings}`}
+              </button>
+            </div>
+          ) : stale ? (
+            <Status
+              status="warn"
+              label={
+                needsVerification
+                  ? `${needsVerification} previous finding${needsVerification === 1 ? "" : "s"} need${needsVerification === 1 ? "s" : ""} verification`
+                  : "Previous result is out of date"
+              }
+            />
+          ) : (
+            <Status status="pass" label="Chapter is clear" />
+          )}
+        </div>
       </div>
       <div className="qa-attention-actions">
         {data.counts.safeFixesAvailable > 0 && !stale && <button className="button primary" disabled={Boolean(busy)} onClick={() => void safeFixes()}>{busy === "safeFixes" ? "Fixing…" : `Fix ${data.counts.safeFixesAvailable} safe issue${data.counts.safeFixesAvailable === 1 ? "" : "s"}`}</button>}
@@ -4665,8 +4758,37 @@ export function QaDetail({ slug, chapter, onJob, onEditManually, onChanged, init
     {recheckSummary && <div className="naming-notice qa-recheck-summary"><b>Recheck complete{recheckSummary.fellBackToFull ? " (full recheck — changed content could not be isolated)" : ""}</b><span>{summaryParts.length ? summaryParts.join(" · ") : "No changes to findings"}{` — Needs attention: ${recheckSummary.open}`}</span></div>}
     {stale && openFindingsList.length > 0 && <p className="qa-unverified-label">{openFindingsList.length} previous open finding{openFindingsList.length === 1 ? "" : "s"} — awaiting QA verification, not yet confirmed against the current chapter.</p>}
     <div className="issues">
-      {openFindingsList.map((finding) => <QaFindingCard key={finding.id} finding={finding} busy={busy} expanded={expanded} pendingVerification={unverified(finding)} slug={slug} onToggle={toggleExpanded} onFixAi={() => void fixWithAi(finding)} onEdit={onEditManually} onResolve={() => void resolveManual(finding)} onDismiss={() => setDismissTarget(finding)} />)}
-      {!openFindingsList.length && !stale && <Empty title="Nothing needs attention" text="Every finding for this chapter is resolved. Recheck QA after editing the manuscript to verify it stays clear." />}
+      {visibleOpenFindings.map((finding) => (
+        <QaFindingCard
+          key={finding.id}
+          finding={finding}
+          busy={busy}
+          expanded={expanded}
+          pendingVerification={unverified(finding)}
+          slug={slug}
+          onToggle={toggleExpanded}
+          onFixAi={() => void fixWithAi(finding)}
+          onEdit={onEditManually}
+          onResolve={() => void resolveManual(finding)}
+          onDismiss={() => setDismissTarget(finding)}
+        />
+      ))}
+      {openFindingsList.length > 0 && visibleOpenFindings.length === 0 && (
+        <Empty
+          title={severityFilter === "critical" ? "No critical findings" : "No warning findings"}
+          text={
+            severityFilter === "critical"
+              ? "This chapter currently has no open critical QA findings."
+              : "This chapter currently has no open warning QA findings."
+          }
+        />
+      )}
+      {!openFindingsList.length && !stale && (
+        <Empty
+          title="Nothing needs attention"
+          text="Every finding for this chapter is resolved. Recheck QA after editing the manuscript to verify it stays clear."
+        />
+      )}
     </div>
     {resolvedFindings.length > 0 && <QaResolvedFindings findings={resolvedFindings} busy={busy} expanded={expanded} currentFingerprint={data.currentFingerprint} onToggle={toggleExpanded} onReopen={(finding) => void reopen(finding)} />}
     {dismissTarget && <DismissFindingDialog slug={slug} chapter={chapter} finding={dismissTarget} busy={Boolean(busy)} onClose={() => setDismissTarget(undefined)} onDone={async (result, remembered) => { setDismissTarget(undefined); setError(""); setNote(remembered ? "Finding dismissed and remembered as a story-level exception." : "Finding dismissed. A future recheck will respect this decision."); await reconcileMutation(result); }} onError={(value) => { setDismissTarget(undefined); void reconcileLifecycleConflict(value).then((recovered) => { if (!recovered) setError(message(value)); }); }} />}
