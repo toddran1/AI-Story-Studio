@@ -1,0 +1,12 @@
+.music-controls { margin: 1.25rem 0; padding: 1.25rem; border: 1px solid rgba(155, 146, 230, .3); border-radius: 12px; background: #14131c; }
+.music-controls h3, .music-controls h4 { margin: 0 0 .5rem; }
+.music-controls p { color: #aaa7ba; }
+.music-controls label { display: flex; flex-direction: column; gap: .35rem; margin: .55rem 0; color: #d5d2e6; }
+.music-controls label:has(input[type="checkbox"]) { flex-direction: row; align-items: center; }
+.music-controls select, .music-controls input:not([type="checkbox"]):not([type="file"]) { max-width: 25rem; min-height: 2.3rem; color: #eee; background: #22212d; border: 1px solid #474154; border-radius: 6px; padding: .35rem .5rem; }
+.music-preferences, .music-import-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: .25rem 1rem; margin-top: .75rem; }
+.music-library { border-top: 1px solid #3b3647; margin-top: 1rem; padding-top: 1rem; }
+.music-library article { display: flex; align-items: center; gap: .75rem; flex-wrap: wrap; padding: .65rem 0; border-bottom: 1px solid #34303f; }
+.music-library article small { color: #aaa7ba; }
+.music-library audio { height: 2rem; max-width: 16rem; }
+.music-library button { border: 1px solid #474154; border-radius: 6px; background: #25212f; color: #eee; padding: .4rem .7rem; cursor: pointer; }

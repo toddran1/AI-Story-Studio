@@ -12,6 +12,10 @@ import { fingerprint } from "../utils/hash.js";
 import { fileFingerprint } from "../utils/file-fingerprint.js";
 import { AudioSettings } from "./config.js";
 import { AUDIO_PROCESSOR_VERSION, AudioProbe, FfmpegTools } from "./ffmpeg.js";
+import { backgroundMusicFingerprint, backgroundMusicManifest, mixBackgroundMusicAudio } from "./background-music.js";
+import { resolveExportMusic } from "../music/resolver.js";
+import { commitMusicExport } from "../music/commit.js";
+import { exportMusicSelectionSchema, musicOverridesSchema, type ExportMusicSelection } from "../music/types.js";
 
 export type AudiobookFormat = "mp3" | "m4b";
 export type AudiobookChapter = { chapter: number; title: string; path: string; durationSeconds: number; fingerprint: string };
@@ -22,6 +26,7 @@ export const exportManifestSchema = z.object({
   version: z.literal(1), fingerprint: z.string(), story: z.string(), from: z.number().int().positive(), to: z.number().int().positive(), format: z.enum(["mp3", "m4b"]),
   createdAt: z.string(), output: z.string(), outputFingerprint: z.string(), durationSeconds: z.number().positive(), codec: z.string(), container: z.string(),
   chapters: z.array(z.object({ chapter: z.number().int().positive(), title: z.string(), durationSeconds: z.number().positive(), fingerprint: z.string() })),
+  edition: z.string().regex(/^bg-[a-f0-9]{12}$/).optional(), music: z.object({ mode: z.enum(["story_default", "track"]), trackId: z.string(), trackFingerprint: z.string(), title: z.string(), gainDb: z.number(), ducking: z.boolean(), duckingStrength: z.string(), fadeInSeconds: z.number(), fadeOutSeconds: z.number(), loopMode: z.string() }).optional(),
 });
 export type AudiobookManifest = z.infer<typeof exportManifestSchema>;
 
@@ -41,7 +46,25 @@ export class FfmpegAudiobookProcessor implements AudiobookProcessor {
   }
 }
 
-export async function assembleAudiobook(options: { root: string; story: Story; from: number; to: number; format: AudiobookFormat; processor: AudiobookProcessor; force?: boolean; onProgress?: (event: { type: string; chapter?: number; index?: number; total?: number }) => void }) {
+export async function assembleAudiobook(options: { root: string; story: Story; from: number; to: number; format: AudiobookFormat; processor: AudiobookProcessor; force?: boolean; music?: ExportMusicSelection; musicOverrides?: unknown; onProgress?: (event: { type: string; chapter?: number; index?: number; total?: number }) => void }): Promise<{ manifest: AudiobookManifest; reused: boolean }> {
+  const selection = exportMusicSelectionSchema.parse(options.music ?? { mode: "none" });
+  if (selection.mode !== "none") {
+    const music = await resolveExportMusic(options.root, options.story, selection, musicOverridesSchema.parse(options.musicOverrides ?? {}));
+    if (!music) throw new AudioError("Background music could not be resolved");
+    if (music.loopMode === "restart_chapter" && options.from !== options.to) throw new AudioError("Restarting background music at each chapter is not available yet. Choose continuous playback for this export.");
+    const clean = await assembleAudiobook({ ...options, force: false, music: { mode: "none" }, musicOverrides: undefined });
+    const mixKey = fingerprint({ clean: clean.manifest.outputFingerprint, music: backgroundMusicFingerprint(music), format: options.format });
+    const edition = `bg-${mixKey.slice(0, 12)}`; const paths = exportPaths(options.root, options.story.slug, options.from, options.to, options.format, edition);
+    const cachedRaw = await readJsonIfExists(paths.manifest).catch(() => undefined); const cached = cachedRaw ? exportManifestSchema.safeParse(cachedRaw) : undefined;
+    if (!options.force && cached?.success && cached.data.fingerprint === mixKey && await fileFingerprint(paths.output) === cached.data.outputFingerprint) return { manifest: cached.data, reused: true };
+    await mkdir(paths.directory, { recursive: true }); const staged = `${paths.output}.stage-${randomUUID()}.${options.format}`;
+    try {
+      const probe = await mixBackgroundMusicAudio(clean.manifest.output, staged, options.format, music);
+      const outputFingerprint = await fileFingerprint(staged); if (!outputFingerprint) throw new AudioError("Music export is empty");
+      const manifest = exportManifestSchema.parse({ ...clean.manifest, edition, music: backgroundMusicManifest(music), fingerprint: mixKey, output: paths.output, outputFingerprint, durationSeconds: probe.durationSeconds, codec: probe.codec, container: probe.container, createdAt: new Date().toISOString() });
+      await commitMusicExport(staged, paths.output, paths.manifest, manifest); return { manifest, reused: false };
+    } catch (error) { await rm(staged, { force: true }); throw new AudioError(`Background music export failed: ${error instanceof Error ? error.message : String(error)}`, { cause: error }); }
+  }
   const chapters = await selectExportChapters(options.root, options.story, options.from, options.to); const paths = exportPaths(options.root, options.story.slug, options.from, options.to, options.format);
   const cover = await findCover(options.root, options.story.slug); const coverFingerprint = cover ? await fileFingerprint(cover) : undefined;
   const fp = fingerprint({ story: options.story.slug, title: options.story.title, author: options.story.author, format: options.format, settings: options.story.audio,

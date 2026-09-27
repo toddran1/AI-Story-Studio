@@ -7,6 +7,7 @@ import { artworkSettingsSchema, sceneSettingsSchema } from "../scenes/types.js";
 import { productionProfilesSchema } from "../production/types.js";
 import { storyNovelSourceSchema } from "../source/novel-provider.js";
 import { qaCategorySchema } from "./qa.js";
+import { backgroundMusicSettingsSchema } from "../music/types.js";
 
 export const qaPolicySchema = z.object({
   disabledCategories: z.array(qaCategorySchema).max(7).refine((items) => new Set(items).size === items.length).default([]),
@@ -61,6 +62,7 @@ const rawStorySchema = z.object({
   qaMode: z.enum(["production", "thorough"]).default("production"),
   qaPolicy: qaPolicySchema,
   audio: audioSettingsSchema,
+  backgroundMusic: backgroundMusicSettingsSchema.default({ level: "subtle", ducking: { enabled: true, strength: "normal" }, fadeInSeconds: 1.5, fadeOutSeconds: 2, loopMode: "continuous" }),
   subtitles: subtitleSettingsSchema,
   video: videoSettingsSchema,
   scenes: sceneSettingsSchema,

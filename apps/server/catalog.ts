@@ -19,6 +19,7 @@ import { rebuildStoryBibleBeforeChapter, computeStaleExtractionChapters } from "
 import { resolveEntityVisualEvidence } from "../../src/story-bible/visual-evidence.js";
 import { exportManifestSchema } from "../../src/audio/audiobook.js";
 import { videoExportManifestSchema } from "../../src/video/video-export.js";
+import { chapterMusicExportManifestSchema, chapterMusicExportPath } from "../../src/music/chapter-export.js";
 import { SceneManifest, artworkSettingsSchema, sceneManifestSchema, sceneSettingsSchema } from "../../src/scenes/types.js";
 import { sceneContentFingerprint } from "../../src/scenes/manifest.js";
 import { getArtworkOutputReadRevision } from "../../src/artwork/output-index-revision.js";
@@ -52,6 +53,7 @@ import { normalizeEntitySearch } from "../../src/story-bible/search.js";
 import { cachedStoryRead, fileStamp, filesStampFingerprint, invalidateStoryReadCache } from "../../src/story-bible/read-cache.js";
 import { bumpStoryBibleReadRevision, getStoryBibleReadRevision } from "../../src/story-bible/read-revision.js";
 import { bumpChapterStatusReadRevision, getChapterStatusReadRevision } from "../../src/studio/chapter-status-revision.js";
+import { backgroundMusicSettingsSchema } from "../../src/music/types.js";
 
 const slugSchema = z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/);
 export const chapterFilterSchema = z.enum(["all", "unprocessed", "warn", "fail", "complete"]);
@@ -933,11 +935,24 @@ async function getArtworkOutputIndex(root: string, slug: string) {
   return result.value;
 }
 
+async function listChapterMusicExports(root: string, slug: string) {
+  const directory = join(storyPaths(root, slug, 1).story, "exports");
+  const names = await readdir(directory).catch((error: NodeJS.ErrnoException) => { if (error.code === "ENOENT") return [] as string[]; throw error; });
+  return (await mapLimit(names.filter((name) => name.endsWith(".json") && name.includes("-bg-") && /-(audio|video)-bg-[a-f0-9]{12}\.(mp3|mp4)\.json$/.test(name)), 8, async (name) => {
+    const raw = await readJsonIfExists(join(directory, name)).catch(() => undefined);
+    const parsed = raw ? chapterMusicExportManifestSchema.safeParse(raw) : undefined;
+    if (!parsed?.success || parsed.data.story !== slug) return undefined;
+    const item = parsed.data; const path = chapterMusicExportPath(root, slug, item.chapter, item.kind, item.edition);
+    return await fileFingerprint(path.output) === item.outputFingerprint ? item : undefined;
+  })).filter((item): item is NonNullable<typeof item> => Boolean(item));
+}
+
 export async function getOutputsSummary(root: string, slug: string) {
   const startedAt = Date.now();
   const [chapters, audio, video, artwork] = await Promise.all([getChapterStatusReadModel(root, slug), getAudioSummary(root, slug), getVideoSummary(root, slug), getArtworkOutputIndex(root, slug)]);
-  const counts = { chapterAudio: chapters.filter((item) => item.audioAvailable).length, audiobooks: audio.exports.length,
-    chapterVideos: chapters.filter((item) => item.videoAvailable).length, combinedVideos: video.exports.length,
+  const chapterMusic = await listChapterMusicExports(root, slug);
+  const counts = { chapterAudio: chapters.filter((item) => item.audioAvailable).length + chapterMusic.filter((item) => item.kind === "audio").length, audiobooks: audio.exports.length,
+    chapterVideos: chapters.filter((item) => item.videoAvailable).length + chapterMusic.filter((item) => item.kind === "video").length, combinedVideos: video.exports.length,
     subtitles: chapters.filter((item) => item.subtitles === "complete").length * 2, artwork: artwork.length };
   logger.debug({ event: "outputs.summary", story: slug, totalArtwork: artwork.length, durationMs: Date.now() - startedAt });
   return { counts };
@@ -959,9 +974,14 @@ export async function getOutputsPage(root: string, slug: string, group: OutputGr
     entries.push({ path: paths.audio, fallbackPath: paths.audioRaw, value: { id: `chapter-audio-${item.chapter}`, group, chapter: item.chapter, format: "mp3", url: `/api/stories/${slug}/chapters/${item.chapter}/audio`, downloadUrl: `/api/stories/${slug}/chapters/${item.chapter}/audio?download=1` } });
   }
   if (group === "chapterVideos") for (const item of chapters) if (item.videoAvailable) entries.push({ path: storyPaths(root, slug, item.chapter).video, value: { id: `chapter-video-${item.chapter}`, group, chapter: item.chapter, format: "mp4", url: `/api/stories/${slug}/chapters/${item.chapter}/video`, downloadUrl: `/api/stories/${slug}/chapters/${item.chapter}/video?download=1` } });
+  if (group === "chapterAudio" || group === "chapterVideos") for (const item of await listChapterMusicExports(root, slug)) if ((group === "chapterAudio" ? "audio" : "video") === item.kind) {
+    const format = item.kind === "audio" ? "mp3" : "mp4";
+    const url = `/api/stories/${slug}/chapters/${item.chapter}/${item.kind}-exports/${item.edition}.${format}`;
+    entries.push({ path: chapterMusicExportPath(root, slug, item.chapter, item.kind, item.edition).output, value: { id: `chapter-${item.kind}-${item.fingerprint}`, group, chapter: item.chapter, format, createdAt: item.createdAt, durationSeconds: item.durationSeconds, musicTitle: item.music.title, url, downloadUrl: url } });
+  }
   if (group === "subtitles") for (const item of chapters) if (item.subtitles === "complete") for (const format of ["srt", "vtt"] as const) entries.push({ path: format === "srt" ? storyPaths(root, slug, item.chapter).subtitlesSrt : storyPaths(root, slug, item.chapter).subtitlesVtt, value: { id: `subtitle-${format}-${item.chapter}`, group, chapter: item.chapter, format, url: `/api/stories/${slug}/chapters/${item.chapter}/subtitles.${format}`, downloadUrl: `/api/stories/${slug}/chapters/${item.chapter}/subtitles.${format}?download=1` } });
-  if (group === "audiobooks") for (const item of (await getAudioSummary(root, slug)).exports) entries.push({ path: exportPaths(root, slug, item.from, item.to, item.format).output, value: { id: `audiobook-${item.fingerprint}`, group, from: item.from, to: item.to, format: item.format, createdAt: item.createdAt, durationSeconds: item.durationSeconds, url: item.downloadUrl, downloadUrl: item.downloadUrl } });
-  if (group === "combinedVideos") for (const item of (await getVideoSummary(root, slug)).exports) entries.push({ path: videoExportPaths(root, slug, item.from, item.to).output, value: { id: `video-${item.fingerprint}`, group, from: item.from, to: item.to, format: "mp4", createdAt: item.createdAt, durationSeconds: item.durationSeconds, url: item.downloadUrl, downloadUrl: item.downloadUrl } });
+  if (group === "audiobooks") for (const item of (await getAudioSummary(root, slug)).exports) entries.push({ path: exportPaths(root, slug, item.from, item.to, item.format, item.edition).output, value: { id: `audiobook-${item.fingerprint}`, group, from: item.from, to: item.to, format: item.format, createdAt: item.createdAt, durationSeconds: item.durationSeconds, musicTitle: item.music?.title, url: item.downloadUrl, downloadUrl: item.downloadUrl } });
+  if (group === "combinedVideos") for (const item of (await getVideoSummary(root, slug)).exports) entries.push({ path: videoExportPaths(root, slug, item.from, item.to, item.edition).output, value: { id: `video-${item.fingerprint}`, group, from: item.from, to: item.to, format: "mp4", createdAt: item.createdAt, durationSeconds: item.durationSeconds, musicTitle: item.music?.title, url: item.downloadUrl, downloadUrl: item.downloadUrl } });
   const slice = mediaPage(entries, page, pageSize);
   const items = (await mapLimit(slice.items, 8, async (entry) => { const item = await outputItem(entry.path, entry.value); return item.missing && entry.fallbackPath ? outputItem(entry.fallbackPath, entry.value) : item; })).filter((item) => !item.missing);
   logger.debug({ event: "outputs.page", story: slug, group, page: slice.page, pageSize: slice.pageSize, total: slice.total, durationMs: Date.now() - startedAt });
@@ -979,7 +999,7 @@ export async function getOutputsLibrary(root: string, slug: string) {
   return { items: pages.flat() };
 }
 
-type OutputValue = { id: string; group: OutputGroup; format: string; url: string; downloadUrl?: string; chapter?: number; from?: number; to?: number; createdAt?: string; durationSeconds?: number };
+type OutputValue = { id: string; group: OutputGroup; format: string; url: string; downloadUrl?: string; chapter?: number; from?: number; to?: number; createdAt?: string; durationSeconds?: number; musicTitle?: string };
 async function outputItem(path: string, value: OutputValue) { try { const info = await stat(path); return { ...value, bytes: info.size, createdAt: value.createdAt ?? info.mtime.toISOString(), missing: false }; } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return { ...value, bytes: 0, missing: true }; throw error; } }
 
 export const settingsUpdateSchema = z.object({
@@ -999,6 +1019,7 @@ export const settingsUpdateSchema = z.object({
     maxCharsPerRequest: z.number().int().min(500).max(20_000).optional(), maxQualityRetries: z.number().int().min(0).max(5).optional(), normalize: z.boolean().optional() }),
   audio: z.object({ loudnessTarget: z.number().min(-24).max(-12), truePeak: z.number().min(-6).max(-0.1), segmentGapSeconds: z.number().min(0).max(5),
     chapterGapSeconds: z.number().min(0).max(10), bitrate: z.enum(["64k", "96k", "128k", "160k", "192k", "256k", "320k"]), sampleRate: z.union([z.literal(32000), z.literal(44100), z.literal(48000)]) }).optional(),
+  backgroundMusic: backgroundMusicSettingsSchema.optional(),
   subtitles: z.object({ maxCharactersPerLine: z.number().int().min(20).max(80), maxLines: z.number().int().min(1).max(3), minimumDurationSeconds: z.number().min(.4).max(5), maximumDurationSeconds: z.number().min(2).max(12) }).optional(),
   video: z.object({ width: z.number().int().min(640).max(3840), height: z.number().int().min(360).max(2160), fps: z.union([z.literal(24), z.literal(25), z.literal(30), z.literal(60)]), codec: z.literal("libx264"), quality: z.number().int().min(0).max(40), subtitleMode: z.enum(["none", "burn", "soft", "both"]), subtitleStyle: z.enum(["default", "large", "minimal"]), backgroundMode: z.enum(["cover", "gradient", "kenBurns"]), introDurationSeconds: z.number().min(0).max(10), resolution: videoResolutionSchema.optional() }).optional(),
   scenes: sceneSettingsSchema.optional(), artwork: artworkSettingsSchema.optional(),
@@ -1015,7 +1036,7 @@ export async function updateStorySettings(root: string, slug: string, input: unk
       qaMode: update.qaMode ?? current.qaMode,
       qaPolicy: update.qaPolicy ?? current.qaPolicy,
       narrationSettings: update.narrationSettings ?? current.narrationSettings,
-      audio: { ...current.audio, ...update.audio }, subtitles: { ...current.subtitles, ...update.subtitles }, video: { ...current.video, ...update.video }, scenes: { ...current.scenes, ...update.scenes }, artwork,
+      audio: { ...current.audio, ...update.audio }, backgroundMusic: update.backgroundMusic ?? current.backgroundMusic, subtitles: { ...current.subtitles, ...update.subtitles }, video: { ...current.video, ...update.video }, scenes: { ...current.scenes, ...update.scenes }, artwork,
       pipeline: {
         ...current.pipeline,
         translation: update.translation,
@@ -1160,12 +1181,12 @@ export async function getAudioSummary(root: string, slug: string) {
     const parsed = raw ? exportManifestSchema.safeParse(raw) : undefined;
     if (!parsed?.success || parsed.data.story !== slug || !(await intactAudioExport(root, slug, parsed.data))) return undefined;
     const { output: _output, ...manifest } = parsed.data;
-    return { ...manifest, downloadUrl: `/api/stories/${slug}/exports/${parsed.data.from}-${parsed.data.to}.${parsed.data.format}` };
+    return { ...manifest, downloadUrl: `/api/stories/${slug}/exports/${parsed.data.from}-${parsed.data.to}${parsed.data.edition ? `-${parsed.data.edition}` : ""}.${parsed.data.format}` };
   }))
     .filter((item): item is NonNullable<typeof item> => Boolean(item)).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   const available = chapters.filter((item) => item.audioAvailable);
   const current = available.filter((item) => !item.audioStale);
-  const summary = { settings: story.audio, minChapter: chapters[0]?.chapter, maxChapter: chapters.at(-1)?.chapter, counts: { total: chapters.length, mastered: available.length, current: current.length, stale: available.length - current.length },
+  const summary = { settings: story.audio, backgroundMusic: story.backgroundMusic, minChapter: chapters[0]?.chapter, maxChapter: chapters.at(-1)?.chapter, counts: { total: chapters.length, mastered: available.length, current: current.length, stale: available.length - current.length },
     totalDurationSeconds: available.reduce((sum, item) => sum + (item.durationSeconds ?? 0), 0) + story.audio.chapterGapSeconds * Math.max(0, available.filter((item) => (item.durationSeconds ?? 0) > 0).length - 1), exports };
   logger.debug({ event: "audio.summary", story: slug, durationMs: Date.now() - startedAt, total: chapters.length });
   return summary;
@@ -1177,7 +1198,7 @@ export async function getVideoSummary(root: string, slug: string) {
   const cover = (await Promise.all(["cover.jpg", "cover.jpeg", "cover.png"].map(async (name) => await exists(join(storyRoot, name)) ? name : undefined))).find(Boolean); let names: string[] = [];
   try { names = (await readdir(join(storyRoot, "exports"))).filter((name) => isVisibleManifest(name, ".mp4.json")); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
   const exports = (await mapLimit(names, 8, async (name) => { const raw = await readJsonIfExists(join(storyRoot, "exports", name)).catch((error) => { logger.warn({ event: "video.export_manifest_ignored", story: slug, manifest: name, error: error instanceof Error ? error.message : String(error) }, "Ignoring unreadable video export manifest"); return undefined; }); const parsed = raw ? videoExportManifestSchema.safeParse(raw) : undefined; if (!parsed?.success || parsed.data.story !== slug || !(await currentVideoExport(root, slug, parsed.data))) return undefined; const { output: _output, ...manifest } = parsed.data; return { ...manifest, downloadUrl: `/api/stories/${slug}/video-exports/${parsed.data.from}-${parsed.data.to}.mp4` }; })).filter((item): item is NonNullable<typeof item> => Boolean(item)).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-  const summary = { minChapter: chapters[0]?.chapter, maxChapter: chapters.at(-1)?.chapter, settings: story.video, subtitleSettings: story.subtitles, background: { coverAvailable: Boolean(cover), coverName: cover, effectiveMode: story.video.backgroundMode === "gradient" || !cover ? "fallback" : story.video.backgroundMode }, counts: { total: chapters.length, mastered: chapters.filter((item) => item.audioAvailable || item.audioMastering === "complete").length, subtitles: chapters.filter((item) => item.subtitles === "complete").length, videos: chapters.filter((item) => item.video === "complete").length }, exports };
+  const summary = { minChapter: chapters[0]?.chapter, maxChapter: chapters.at(-1)?.chapter, settings: story.video, backgroundMusic: story.backgroundMusic, subtitleSettings: story.subtitles, background: { coverAvailable: Boolean(cover), coverName: cover, effectiveMode: story.video.backgroundMode === "gradient" || !cover ? "fallback" : story.video.backgroundMode }, counts: { total: chapters.length, mastered: chapters.filter((item) => item.audioAvailable || item.audioMastering === "complete").length, subtitles: chapters.filter((item) => item.subtitles === "complete").length, videos: chapters.filter((item) => item.video === "complete").length }, exports };
   logger.debug({ event: "video.summary", story: slug, durationMs: Date.now() - startedAt, total: chapters.length });
   return summary;
 }
@@ -1471,11 +1492,11 @@ export function publicProductionManifest(manifest: ProductionManifest, slug: str
 async function intactAudioExport(root: string, slug: string, manifest: z.infer<typeof exportManifestSchema>) {
   // An audiobook is a standalone retained artifact. Source chapters becoming
   // stale should invite a rebuild, but must not hide an intact existing export.
-  return await fileFingerprint(exportPaths(root, slug, manifest.from, manifest.to, manifest.format).output) === manifest.outputFingerprint;
+  return await fileFingerprint(exportPaths(root, slug, manifest.from, manifest.to, manifest.format, manifest.edition).output) === manifest.outputFingerprint;
 }
 
 async function currentVideoExport(root: string, slug: string, manifest: z.infer<typeof videoExportManifestSchema>) {
-  if (await fileFingerprint(videoExportPaths(root, slug, manifest.from, manifest.to).output) !== manifest.outputFingerprint) return false;
+  if (await fileFingerprint(videoExportPaths(root, slug, manifest.from, manifest.to, manifest.edition).output) !== manifest.outputFingerprint) return false;
   for (const chapter of manifest.chapters) { const paths = storyPaths(root, slug, chapter.chapter); const raw = await readJsonIfExists<Chapter>(paths.chapterMeta); const parsed = raw ? chapterSchema.safeParse(raw) : undefined; if (!parsed?.success || parsed.data.stages.video.status !== "complete" || await fileFingerprint(paths.video) !== chapter.fingerprint) return false; }
   return true;
 }

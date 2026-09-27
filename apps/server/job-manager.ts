@@ -10,7 +10,7 @@ import { readJsonIfExists } from "../../src/storage/story-files.js";
 import { failedResultDiagnostics, saveJobError } from "./job-error-history.js";
 
 export type JobStatus = "queued" | "running" | "completed" | "failed" | "paused";
-export type Job = { id: string; type: "batch" | "stageExecution" | "preview" | "voicePreview" | "metadataTranslation" | "entityLocalizationSuggestions" | "pronunciation" | "qaRepair" | "qaRecheck" | "summary" | "audio" | "audiobook" | "alignment" | "subtitles" | "video" | "videoExport" | "scenes" | "artwork" | "production" | "ttsQualityVerify" | "ttsSegmentRegenerate"; story: string; status: JobStatus; createdAt: string; updatedAt: string; payload?: unknown; progress?: unknown; result?: unknown; error?: string; diagnostic?: ErrorDiagnostic };
+export type Job = { id: string; type: "batch" | "stageExecution" | "preview" | "voicePreview" | "metadataTranslation" | "entityLocalizationSuggestions" | "pronunciation" | "qaRepair" | "qaRecheck" | "summary" | "audio" | "audiobook" | "chapterMusicExport" | "alignment" | "subtitles" | "video" | "videoExport" | "scenes" | "artwork" | "production" | "ttsQualityVerify" | "ttsSegmentRegenerate"; story: string; status: JobStatus; createdAt: string; updatedAt: string; payload?: unknown; progress?: unknown; result?: unknown; error?: string; diagnostic?: ErrorDiagnostic };
 type JobControl = { update(progress: unknown): void; setPause(handler: () => void): void };
 
 export class JobConflictError extends Error {}

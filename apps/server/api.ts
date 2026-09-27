@@ -2,10 +2,15 @@ import { randomUUID } from "node:crypto";
 import { getStoryBible } from "./catalog.js";
 import { loadStory } from "../../src/config/load-config.js";
 import { createReadStream } from "node:fs";
-import { mkdir, open, rm, stat } from "node:fs/promises";
+import { mkdir, open, rm, stat, writeFile } from "node:fs/promises";
 import { isAbsolute, join } from "node:path";
 import { IncomingMessage, ServerResponse } from "node:http";
 import { z } from "zod";
+import { deleteMusicTrack, getMusicTrack, importMusicTrack, listMusicTracks, musicTrackPath, updateMusicTrack } from "../../src/music/library.js";
+import { backgroundMusicSettingsSchema } from "../../src/music/types.js";
+import { chapterMusicExportPath, chapterMusicExportManifestSchema } from "../../src/music/chapter-export.js";
+import { atomicWriteJson } from "../../src/storage/atomic-write.js";
+import { withStoryLock } from "../../src/storage/story-lock.js";
 import { getAudioDashboard, getAudioSummary, getAudioChapterPage, getCanonicalEntitiesPage, getCanonicalEntityAudit, getCanonicalEntityDetail, getCanonicalEntityHistory, getCanonicalEntityUsage, getChapter, getChapterPage, getContinuityReview, getContinuityPage, getContinuitySummary, getMinorReferencesPage, getOutputsLibrary, getOutputsSummary, getOutputsPage, outputGroupSchema, getQaDashboard, getQaPage, getQaSummary, qaStatusFilterSchema, getScenesDashboard, getScenesIndex, getScenesIndexRow, getScenesChapter, getStoryBibleView, getStoryDashboard, getProductionStatus, getStoryOverview, getSummariesContext, getStoryBibleHealth, getStoryBibleReview, getStoryBibleReviewSummary, getSuppressedCanonicalEntities, getVideoDashboard, getVideoSummary, getVideoChapterPage, listStories, updateStorySettings, chapterFilterSchema, entityReadinessFilterSchema, bibleReviewKindSchema, bibleReviewStatusSchema } from "./catalog.js";
 import { JobConflictError } from "./job-manager.js";
 import { listJobErrors } from "./job-error-history.js";
@@ -102,6 +107,25 @@ export function createApiHandler(operations: StudioOperations) {
       }
 
       const storyMatch = /^\/api\/stories\/([a-z0-9-]+)$/.exec(url.pathname);
+      if (url.pathname === "/api/music/tracks" && request.method === "GET") return send(response, 200, { tracks: await listMusicTracks(operations.root) });
+      if (url.pathname === "/api/music/tracks" && request.method === "POST") {
+        const filename = request.headers["x-file-name"];
+        if (typeof filename !== "string" || filename.length > 500) throw new HttpError("Music upload requires X-File-Name", 400);
+        const metadataHeader = request.headers["x-music-metadata"];
+        const metadata = typeof metadataHeader === "string" ? JSON.parse(decodeURIComponent(metadataHeader)) : {};
+        const temporary = join(operations.root, "music-library", `.incoming-${randomUUID()}`);
+        await mkdir(join(operations.root, "music-library"), { recursive: true });
+        try { await writeFile(temporary, await body(request, 100 * 1024 * 1024)); return send(response, 201, await importMusicTrack(operations.root, temporary, decodeURIComponent(filename), metadata)); }
+        finally { await rm(temporary, { force: true }); }
+      }
+      const musicTrackMatch = /^\/api\/music\/tracks\/(mus_[a-f0-9]{24})$/.exec(url.pathname);
+      if (musicTrackMatch && request.method === "PATCH") return send(response, 200, await updateMusicTrack(operations.root, musicTrackMatch[1]!, await jsonBody(request)));
+      if (musicTrackMatch && request.method === "DELETE") return send(response, 200, await deleteMusicTrack(operations.root, musicTrackMatch[1]!));
+      const musicPreviewMatch = /^\/api\/music\/tracks\/(mus_[a-f0-9]{24})\/audio$/.exec(url.pathname);
+      if (musicPreviewMatch && request.method === "GET") { const track = await getMusicTrack(operations.root, musicPreviewMatch[1]!); if (!track) return send(response, 404, { error: "Music track not found" }); return sendFile(request, response, musicTrackPath(operations.root, track), track.filename.endsWith(".mp3") ? "audio/mpeg" : track.filename.endsWith(".wav") ? "audio/wav" : track.filename.endsWith(".m4a") ? "audio/mp4" : track.filename.endsWith(".flac") ? "audio/flac" : "audio/ogg"); }
+      const musicSettingsMatch = /^\/api\/stories\/([a-z0-9-]+)\/background-music$/.exec(url.pathname);
+      if (musicSettingsMatch && request.method === "GET") { const story = await loadStory(storyPaths(operations.root, musicSettingsMatch[1]!, 1).storyConfig); return send(response, 200, story.backgroundMusic); }
+      if (musicSettingsMatch && request.method === "PUT") { const slug = musicSettingsMatch[1]!; const settings = backgroundMusicSettingsSchema.parse(await jsonBody(request)); return send(response, 200, await withStoryLock(operations.root, slug, "background music settings update", async () => { const path = storyPaths(operations.root, slug, 1).storyConfig; const story = await loadStory(path); await atomicWriteJson(path, { ...story, backgroundMusic: settings }); return settings; })); }
       if (storyMatch && request.method === "GET") return send(response, 200, await getStoryOverview(operations.root, storyMatch[1]!));
       if (storyMatch && request.method === "DELETE") return send(response, 200, await operations.deleteProject(storyMatch[1]!, await jsonBody(request)));
       const metadataMatch = /^\/api\/stories\/([a-z0-9-]+)\/metadata$/.exec(url.pathname);
@@ -224,6 +248,15 @@ export function createApiHandler(operations: StudioOperations) {
         return send(response, 200, await operations.reopenQaFinding(slug, chapter, id));
       }
       const audioMatch = /^\/api\/stories\/([a-z0-9-]+)\/chapters\/(\d+)\/audio$/.exec(url.pathname);
+      const chapterMusicDownloadMatch = /^\/api\/stories\/([a-z0-9-]+)\/chapters\/(\d+)\/(audio|video)-exports\/(bg-[a-f0-9]{12})\.(mp3|mp4)$/.exec(url.pathname);
+      if (chapterMusicDownloadMatch && request.method === "GET") {
+        const [_, slug, rawChapter, kind, edition, format] = chapterMusicDownloadMatch;
+        if ((kind === "audio" ? "mp3" : "mp4") !== format) throw new HttpError("Invalid music export format", 400);
+        const chapter = chapterParam(rawChapter!); const paths = chapterMusicExportPath(operations.root, slug!, chapter, kind as "audio" | "video", edition!);
+        const raw = await readJsonIfExists(paths.manifest); const manifest = raw ? chapterMusicExportManifestSchema.safeParse(raw) : undefined;
+        if (!manifest?.success || manifest.data.story !== slug || manifest.data.chapter !== chapter || manifest.data.kind !== kind) return send(response, 404, { error: "Chapter music export was not found" });
+        return sendFile(request, response, paths.output, kind === "audio" ? "audio/mpeg" : "video/mp4", { downloadName: `${slug}-${chapter}-${kind}-${edition}.${format}` });
+      }
       if (audioMatch && request.method === "GET") {
         const chapterNumber = chapterParam(audioMatch[2]!); const chapter = await getChapter(operations.root, audioMatch[1]!, chapterNumber);
         if (!chapter.audioAvailable) return send(response, 404, { error: "Chapter audio was not found" });
@@ -493,19 +526,19 @@ export function createApiHandler(operations: StudioOperations) {
         const body = await jsonBody(request).catch(() => ({}));
         return send(response, 200, await operations.reupscaleArtwork(artworkReupscaleMatch[1]!, chapterParam(artworkReupscaleMatch[2]!), body));
       }
-      const exportMatch = /^\/api\/stories\/([a-z0-9-]+)\/exports\/(\d+)-(\d+)\.(mp3|m4b)$/.exec(url.pathname);
+      const exportMatch = /^\/api\/stories\/([a-z0-9-]+)\/exports\/(\d+)-(\d+)(?:-(bg-[a-f0-9]{12}))?\.(mp3|m4b)$/.exec(url.pathname);
       if (exportMatch && request.method === "GET") {
-        const from = chapterParam(exportMatch[2]!); const to = chapterParam(exportMatch[3]!); const format = exportMatch[4] as "mp3" | "m4b";
+        const from = chapterParam(exportMatch[2]!); const to = chapterParam(exportMatch[3]!); const edition = exportMatch[4]; const format = exportMatch[5] as "mp3" | "m4b";
         if (to < from) throw new HttpError("Invalid export range", 400);
         const downloadName = rangeMediaDownloadName(exportMatch[1]!, from, to, format);
-        return sendFile(request, response, exportPaths(operations.root, exportMatch[1]!, from, to, format).output, format === "m4b" ? "audio/mp4" : "audio/mpeg", { downloadName });
+        return sendFile(request, response, exportPaths(operations.root, exportMatch[1]!, from, to, format, edition).output, format === "m4b" ? "audio/mp4" : "audio/mpeg", { downloadName: edition ? downloadName.replace(`.${format}`, `-${edition}.${format}`) : downloadName });
       }
-      const videoExportMatch = /^\/api\/stories\/([a-z0-9-]+)\/video-exports\/(\d+)-(\d+)\.mp4$/.exec(url.pathname);
+      const videoExportMatch = /^\/api\/stories\/([a-z0-9-]+)\/video-exports\/(\d+)-(\d+)(?:-(bg-[a-f0-9]{12}))?\.mp4$/.exec(url.pathname);
       if (videoExportMatch && request.method === "GET") {
         const from = chapterParam(videoExportMatch[2]!); const to = chapterParam(videoExportMatch[3]!);
         if (to < from) throw new HttpError("Invalid video export range", 400);
         const downloadName = rangeMediaDownloadName(videoExportMatch[1]!, from, to, "mp4");
-        return sendFile(request, response, videoExportPaths(operations.root, videoExportMatch[1]!, from, to).output, "video/mp4", { downloadName });
+        const edition = videoExportMatch[4]; return sendFile(request, response, videoExportPaths(operations.root, videoExportMatch[1]!, from, to, edition).output, "video/mp4", { downloadName: edition ? downloadName.replace(".mp4", `-${edition}.mp4`) : downloadName });
       }
       const bibleMatch = /^\/api\/stories\/([a-z0-9-]+)\/story-bible$/.exec(url.pathname);
       if (bibleMatch && request.method === "GET") return send(response, 200, await getStoryBibleView(operations.root, bibleMatch[1]!));
@@ -624,6 +657,8 @@ export function createApiHandler(operations: StudioOperations) {
       if (audioJobMatch && request.method === "POST") return send(response, 202, operations.startAudio(audioJobMatch[1]!, await jsonBody(request)));
       const audiobookJobMatch = /^\/api\/stories\/([a-z0-9-]+)\/jobs\/audiobook$/.exec(url.pathname);
       if (audiobookJobMatch && request.method === "POST") return send(response, 202, operations.startAudiobook(audiobookJobMatch[1]!, await jsonBody(request)));
+      const chapterMusicJobMatch = /^\/api\/stories\/([a-z0-9-]+)\/jobs\/chapter-music-export$/.exec(url.pathname);
+      if (chapterMusicJobMatch && request.method === "POST") return send(response, 202, operations.startChapterMusicExport(chapterMusicJobMatch[1]!, await jsonBody(request)));
       const subtitleJobMatch = /^\/api\/stories\/([a-z0-9-]+)\/jobs\/subtitles$/.exec(url.pathname);
       if (subtitleJobMatch && request.method === "POST") return send(response, 202, operations.startSubtitles(subtitleJobMatch[1]!, await jsonBody(request)));
       const alignmentJobMatch = /^\/api\/stories\/([a-z0-9-]+)\/jobs\/alignment$/.exec(url.pathname);

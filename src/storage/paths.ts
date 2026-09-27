@@ -53,13 +53,13 @@ export function visualProfileRefPath(root: string, slug: string, entityId: strin
   return join(storyPaths(root, slug, 1).visualProfilesDirectory, entityId, `${refId}.${parsedExt.data}`);
 }
 
-export function videoExportPaths(root: string, slug: string, from: number, to: number) {
-  const directory = join(root, "stories", slug, "exports"); const stem = `${slug}-${String(from).padStart(3, "0")}-${String(to).padStart(3, "0")}`;
+export function videoExportPaths(root: string, slug: string, from: number, to: number, edition?: string) {
+  const directory = join(root, "stories", slug, "exports"); const stem = `${slug}-${String(from).padStart(3, "0")}-${String(to).padStart(3, "0")}${edition ? `-${edition}` : ""}`;
   return { directory, output: join(directory, `${stem}.mp4`), manifest: join(directory, `${stem}.mp4.json`) };
 }
 
-export function exportPaths(root: string, slug: string, from: number, to: number, format: "mp3" | "m4b") {
-  const directory = join(root, "stories", slug, "exports"); const stem = `${slug}-${String(from).padStart(3, "0")}-${String(to).padStart(3, "0")}`;
+export function exportPaths(root: string, slug: string, from: number, to: number, format: "mp3" | "m4b", edition?: string) {
+  const directory = join(root, "stories", slug, "exports"); const stem = `${slug}-${String(from).padStart(3, "0")}-${String(to).padStart(3, "0")}${edition ? `-${edition}` : ""}`;
   return { directory, output: join(directory, `${stem}.${format}`), manifest: join(directory, `${stem}.${format}.json`) };
 }
 
