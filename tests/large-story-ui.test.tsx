@@ -122,7 +122,7 @@ describe("large story pages", () => {
     const calls: string[] = [];
     vi.stubGlobal("fetch", vi.fn(async (url: string) => { calls.push(url);
       if (url.endsWith("/audio/summary")) return json({ settings: { loudnessTarget: -17, truePeak: -1.5 }, counts: { total: 30, mastered: 0, current: 0, stale: 0 }, minChapter: 1, maxChapter: 30, totalDurationSeconds: 0, exports: [] });
-      if (url.includes("/audio/chapters")) return json({ items: [], page: Number(new URL(url, location.href).searchParams.get("page")), pages: 2, total: 30 });
+      if (url.includes("/audio/chapters")) return json({ items: [{ chapter: 1, title: "Opening chapter", status: "complete", audioAvailable: true, audioStale: false, durationSeconds: 42 }], page: Number(new URL(url, location.href).searchParams.get("page")), pages: 2, total: 30 });
       if (url.endsWith("/video/summary")) return json({ settings: { width: 1920, height: 1080, fps: 30, introDurationSeconds: 3, quality: 20, backgroundMode: "gradient", subtitleMode: "burn" }, subtitleSettings: {}, background: { coverAvailable: false, effectiveMode: "fallback" }, counts: { total: 30, mastered: 0, subtitles: 0, videos: 0 }, minChapter: 1, maxChapter: 30, exports: [] });
       if (url.includes("/video/chapters")) return json({ items: [], page: Number(new URL(url, location.href).searchParams.get("page")), pages: 2, total: 30 });
       return json({});
@@ -130,6 +130,16 @@ describe("large story pages", () => {
     await mount(<AudioPage slug="test-story" onJob={() => undefined} />);
     const formatSelect = [...container!.querySelectorAll("select")].find((select) => [...select.options].some((option) => option.textContent?.includes("universal playback")));
     expect(formatSelect?.value).toBe("mp3");
+    const musicToggle = [...container!.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.includes("Background music"));
+    expect(musicToggle?.getAttribute("aria-expanded")).toBe("false");
+    expect(container!.textContent).not.toContain("Music for this export");
+    await act(async () => musicToggle?.click());
+    expect(musicToggle?.getAttribute("aria-expanded")).toBe("true");
+    expect(container!.textContent).toContain("Music for this export");
+    const masterRow = container!.querySelector(".master-list article");
+    expect(masterRow?.querySelector(".master-copy-heading b")?.textContent).toBe("Opening chapter");
+    expect(masterRow?.querySelector(".master-audio audio")).not.toBeNull();
+    expect(masterRow?.querySelector(".master-actions .button")?.textContent).toBe("Export chapter");
     expect(calls.some((url) => url.endsWith("/audio/summary"))).toBe(true);
     await act(async () => [...container!.querySelectorAll("button")].find((button) => button.getAttribute("aria-label")?.includes("Next"))?.click());
     expect(calls.filter((url) => url.endsWith("/audio/summary"))).toHaveLength(1);
