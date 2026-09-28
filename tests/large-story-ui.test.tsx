@@ -128,6 +128,8 @@ describe("large story pages", () => {
       return json({});
     }));
     await mount(<AudioPage slug="test-story" onJob={() => undefined} />);
+    const formatSelect = [...container!.querySelectorAll("select")].find((select) => [...select.options].some((option) => option.textContent?.includes("universal playback")));
+    expect(formatSelect?.value).toBe("mp3");
     expect(calls.some((url) => url.endsWith("/audio/summary"))).toBe(true);
     await act(async () => [...container!.querySelectorAll("button")].find((button) => button.getAttribute("aria-label")?.includes("Next"))?.click());
     expect(calls.filter((url) => url.endsWith("/audio/summary"))).toHaveLength(1);
