@@ -68,12 +68,12 @@ export function createApiHandler(operations: StudioOperations) {
       const bedMatch = /^\/api\/music\/beds\/(bed_[a-f0-9]{24})$/.exec(url.pathname);
       if (bedMatch && request.method === "PUT") return send(response, 200, await saveMusicBed(operations.root, await jsonBody(request), bedMatch[1]));
       if (bedMatch && request.method === "DELETE") { await deleteMusicBed(operations.root, bedMatch[1]!); return send(response, 200, { deleted: bedMatch[1] }); }
-      if (url.pathname === "/api/music/generations" && request.method === "GET") { const jobs = await listMusicGenerations(operations.root); return send(response, 200, { jobs, usage: { category: "music_generation", completedCount: jobs.filter((job) => job.status === "complete").length, requestedDurationSeconds: jobs.filter((job) => job.status === "complete").reduce((sum, job) => sum + (job.request.durationSeconds ?? 0), 0), estimatedCostUsd: null } }); }
+      if (url.pathname === "/api/music/generations" && request.method === "GET") { const jobs = await listMusicGenerations(operations.root); return send(response, 200, { jobs, usage: { category: "music_generation", completedCount: jobs.filter((job) => ["complete", "saved"].includes(job.status)).length, requestedDurationSeconds: jobs.filter((job) => ["complete", "saved"].includes(job.status)).reduce((sum, job) => sum + (job.request.durationSeconds ?? 0), 0), estimatedCostUsd: null } }); }
       if (url.pathname === "/api/music/generations" && request.method === "POST") {
         const input = z.object({ provider: z.string(), request: z.unknown() }).strict().parse(await jsonBody(request));
         const provider = musicProviderRegistry().find((item) => item.id === input.provider);
         if (!provider) throw new HttpError("Music provider is unavailable or not configured", 400);
-        const job = startMusicGeneration(operations.root, input.request, provider); await job.ready; void job.run;
+        const job = startMusicGeneration(operations.root, input.request, provider); await job.ready; void job.run.catch((error) => logger.error({ err: error, generationId: job.id }, "Music generation persistence failed"));
         return send(response, 202, { id: job.id });
       }
       const generationMatch = /^\/api\/music\/generations\/([a-f0-9-]{36})$/.exec(url.pathname);

@@ -6,7 +6,7 @@ export const musicTrackSchema = z.object({
   durationSeconds: z.number().positive(), fingerprint: z.string().min(1), source: z.string().max(500).optional(), sourceUrl: z.string().url().optional(),
   license: z.string().max(500).optional(), attribution: z.string().max(1000).optional(), commercialUse: z.boolean().optional(),
   tags: z.array(z.string().trim().min(1).max(60)).max(20).default([]), createdAt: z.string().datetime(), updatedAt: z.string().datetime(),
-  generation: z.object({ provider: z.string(), providerGenerationId: z.string().optional(), model: z.string().optional(), prompt: z.string(), requestedDurationSeconds: z.number().positive().optional(), generatedAt: z.string().datetime() }).optional(),
+  generation: z.object({ generationJobId: z.string().uuid().optional(), provider: z.string(), providerGenerationId: z.string().optional(), model: z.string().optional(), prompt: z.string(), requestedDurationSeconds: z.number().positive().optional(), generatedAt: z.string().datetime() }).optional(),
   licenseInfo: z.object({ source: z.string(), licenseName: z.string().optional(), commercialUse: z.boolean().optional(), attributionRequired: z.boolean().optional(), termsUrl: z.string().url().optional(), capturedAt: z.string().datetime(), notes: z.string().optional() }).optional(),
 });
 export type MusicTrack = z.infer<typeof musicTrackSchema>;

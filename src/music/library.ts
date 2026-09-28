@@ -9,7 +9,7 @@ import { fileFingerprint } from "../utils/file-fingerprint.js";
 import { musicLibrarySchema, musicTrackSchema, musicTrackIdSchema, type MusicTrack } from "./types.js";
 
 let libraryMutation = Promise.resolve();
-function withLibraryMutation<T>(action: () => Promise<T>): Promise<T> {
+export function withLibraryMutation<T>(action: () => Promise<T>): Promise<T> {
   const current = libraryMutation.then(action);
   libraryMutation = current.then(() => undefined, () => undefined);
   return current;
