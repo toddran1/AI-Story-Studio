@@ -1,3 +1,4 @@
+import { getOutputsPage } from "../apps/server/catalog.js";
 import { mkdtemp, mkdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -11,6 +12,11 @@ import { importMusicTrack, listMusicTracks, musicTrackPath, updateMusicTrack, de
 import { invalidateStoryForConfigChange } from "../src/studio/projects.js";
 import { commitMusicExport } from "../src/music/commit.js";
 import { resolveExportMusic } from "../src/music/resolver.js";
+import { exportSummaryWithMusic, listSummaryMusicExports, summaryMusicExportPath } from "../src/music/summary-export.js";
+import { summaryMediaPaths } from "../src/summaries/media.js";
+import { summaryPath } from "../src/summaries/service.js";
+import { saveMusicBed } from "../src/music/music-bed.js";
+import { buildMusicMixPreviewFromSource } from "../src/music/preview.js";
 import { exportChapterWithMusic } from "../src/music/chapter-export.js";
 import { storyPaths } from "../src/storage/paths.js";
 import { atomicWrite } from "../src/storage/atomic-write.js";
@@ -86,6 +92,45 @@ describe("background music library and exports", () => {
     const changed = await exportChapterWithMusic({ root, story, chapter: 1, kind: "audio", music, musicOverrides: { level: "present" } });
     expect(changed.edition).not.toBe(audio.edition);
     expect(await fileFingerprint(audio.output)).toBeTruthy();
+  });
+
+  it("exports summary audio and video with reusable music beds without changing clean media", async () => {
+    const { root, source, story } = await fixture();
+    const id = "sum_12345678-1234-1234-1234-123456789abc";
+    const paths = summaryMediaPaths(root, story.slug, id);
+    await mkdir(paths.directory, { recursive: true });
+    const videoPath = join(paths.directory, "video.mp4");
+    await runCommand("ffmpeg", ["-v", "error", "-f", "lavfi", "-i", "sine=frequency=440:duration=2", "-c:a", "libmp3lame", "-y", paths.audio]);
+    await runCommand("ffmpeg", ["-v", "error", "-f", "lavfi", "-i", "color=c=black:s=320x180:d=2:r=24", "-f", "lavfi", "-i", "sine=frequency=440:duration=2", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest", "-y", videoPath]);
+    await runCommand("ffmpeg", ["-v", "error", "-f", "lavfi", "-i", "sine=frequency=220:duration=1", "-c:a", "libmp3lame", "-y", source]);
+    const track = await importMusicTrack(root, source, "summary-bed.mp3");
+    const bed = await saveMusicBed(root, { name: "Summary bed", tracks: [{ trackId: track.id }], playbackMode: "sequential", crossfadeSeconds: 0 });
+    const music = { mode: "bed" as const, bedId: bed.id };
+    const audioFp = await fileFingerprint(paths.audio), videoFp = await fileFingerprint(videoPath);
+    const record = { id, storyId: story.slug, title: "Recap", chapters: [1], summaryType: "brief", sourceMode: "translated", targetLength: { words: 100 }, text: "Recap text", status: "complete", origin: "manual", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), provenance: { model: { provider: "openai", model: "fake" }, promptVersion: "test", chapterSources: [], levels: [] }, audio: { status: "current", inputFingerprint: "test", outputFingerprint: audioFp }, video: { status: "current", inputFingerprint: "test", outputFingerprint: videoFp } };
+    await atomicWriteJson(summaryPath(root, story.slug, id), record);
+    const recordBefore = await readFile(summaryPath(root, story.slug, id), "utf8");
+    const options = { root, story, summaryId: id, music };
+    const audio = await exportSummaryWithMusic({ ...options, kind: "audio" });
+    const video = await exportSummaryWithMusic({ ...options, kind: "video" });
+    expect(audio.output).not.toBe(paths.audio); expect(video.output).not.toBe(videoPath);
+    expect((await exportSummaryWithMusic({ ...options, kind: "audio" })).reused).toBe(true);
+    expect((await exportSummaryWithMusic({ ...options, kind: "audio", musicOverrides: { level: "present" } })).edition).not.toBe(audio.edition);
+    expect(await listSummaryMusicExports(root, story.slug, id)).toHaveLength(3);
+    const outputs = await getOutputsPage(root, story.slug, "summaryMedia", 1, 10);
+    expect(outputs.items).toHaveLength(5);
+    expect(outputs.items.every((item) => item.title === "Recap" && item.downloadUrl?.includes(`/summaries/${id}/`))).toBe(true);
+    expect(await fileFingerprint(paths.audio)).toBe(audioFp); expect(await fileFingerprint(videoPath)).toBe(videoFp);
+    expect(await readFile(summaryPath(root, story.slug, id), "utf8")).toBe(recordBefore);
+    expect((await exportSummaryWithMusic({ ...options, kind: "audio", music: { mode: "none" } })).output).toBe(paths.audio);
+    const preview = await buildMusicMixPreviewFromSource(root, story, paths.audio, music, {});
+    expect(await fileFingerprint(preview)).toBeTruthy();
+    await writeFile(audio.output, "damaged");
+    expect(await listSummaryMusicExports(root, story.slug, id)).toHaveLength(2);
+    expect((await exportSummaryWithMusic({ ...options, kind: "audio" })).reused).toBe(false);
+    await writeFile(paths.audio, "damaged master");
+    await expect(exportSummaryWithMusic({ ...options, kind: "audio" })).rejects.toThrow("missing or damaged");
+    expect(() => summaryMusicExportPath(root, story.slug, "../bad", "audio", "bg-123456789abc")).toThrow();
   });
 
   it("keeps a clean audiobook cached while distinct music settings create separate editions", async () => {

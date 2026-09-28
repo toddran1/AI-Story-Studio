@@ -1,3 +1,6 @@
+import { summarySchema } from "../../src/summaries/types.js";
+import { summaryMediaPaths } from "../../src/summaries/media.js";
+import { listSummaryMusicExports, summaryMusicExportPath } from "../../src/music/summary-export.js";
 import { readFile, readdir, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { z } from "zod";
@@ -913,7 +916,7 @@ export async function getContinuityReview(root: string, slug: string, status?: s
   return { ...context.parsed, findings, names, needsReanalysis: context.needsReanalysis, counts: { open: context.counts.open, resolved: context.counts.resolved } };
 }
 
-export const outputGroupSchema = z.enum(["chapterAudio", "audiobooks", "chapterVideos", "combinedVideos", "subtitles", "artwork"]);
+export const outputGroupSchema = z.enum(["chapterAudio", "audiobooks", "chapterVideos", "combinedVideos", "subtitles", "artwork", "summaryMedia"]);
 export type OutputGroup = z.infer<typeof outputGroupSchema>;
 
 async function getArtworkOutputIndex(root: string, slug: string) {
@@ -947,19 +950,42 @@ async function listChapterMusicExports(root: string, slug: string) {
   })).filter((item): item is NonNullable<typeof item> => Boolean(item));
 }
 
+async function summaryOutputEntries(root: string, slug: string) {
+  slugSchema.parse(slug);
+  const directory = join(root, "stories", slug, "summaries");
+  const files = await readdir(directory).catch((error: NodeJS.ErrnoException) => { if (error.code === "ENOENT") return [] as string[]; throw error; });
+  const entries: Array<{ path: string; value: OutputValue }> = [];
+  for (const name of files.filter((name) => /^sum_[a-f0-9-]{36}\.json$/.test(name))) {
+    const parsed = summarySchema.safeParse(await readJsonIfExists(join(directory, name)).catch(() => undefined));
+    if (!parsed.success || parsed.data.storyId !== slug || `${parsed.data.id}.json` !== name) continue;
+    const summary = parsed.data, paths = summaryMediaPaths(root, slug, summary.id);
+    const base = `/api/stories/${slug}/summaries/${summary.id}`;
+    for (const kind of ["audio", "video"] as const) {
+      const path = kind === "audio" ? paths.audio : join(paths.directory, "video.mp4");
+      if (summary[kind]?.outputFingerprint && await fileFingerprint(path) === summary[kind]?.outputFingerprint) entries.push({ path, value: { id: `${summary.id}-${kind}`, group: "summaryMedia", title: summary.title, format: kind === "audio" ? "mp3" : "mp4", url: `${base}/export/${kind}`, downloadUrl: `${base}/export/${kind}?download=1` } });
+    }
+    for (const edition of await listSummaryMusicExports(root, slug, summary.id)) entries.push({ path: summaryMusicExportPath(root, slug, summary.id, edition.kind, edition.edition).output, value: { id: `${summary.id}-${edition.kind}-${edition.edition}`, group: "summaryMedia", title: summary.title, format: edition.kind === "audio" ? "mp3" : "mp4", createdAt: edition.createdAt, musicTitle: edition.musicTitle, url: edition.url, downloadUrl: edition.url } });
+  }
+  return entries;
+}
+
 export async function getOutputsSummary(root: string, slug: string) {
   const startedAt = Date.now();
   const [chapters, audio, video, artwork] = await Promise.all([getChapterStatusReadModel(root, slug), getAudioSummary(root, slug), getVideoSummary(root, slug), getArtworkOutputIndex(root, slug)]);
   const chapterMusic = await listChapterMusicExports(root, slug);
   const counts = { chapterAudio: chapters.filter((item) => item.audioAvailable).length + chapterMusic.filter((item) => item.kind === "audio").length, audiobooks: audio.exports.length,
     chapterVideos: chapters.filter((item) => item.videoAvailable).length + chapterMusic.filter((item) => item.kind === "video").length, combinedVideos: video.exports.length,
-    subtitles: chapters.filter((item) => item.subtitles === "complete").length * 2, artwork: artwork.length };
+    subtitles: chapters.filter((item) => item.subtitles === "complete").length * 2, artwork: artwork.length, summaryMedia: (await summaryOutputEntries(root, slug)).length };
   logger.debug({ event: "outputs.summary", story: slug, totalArtwork: artwork.length, durationMs: Date.now() - startedAt });
   return { counts };
 }
 
 export async function getOutputsPage(root: string, slug: string, group: OutputGroup, page: number, pageSize: number) {
   const startedAt = Date.now(); slugSchema.parse(slug);
+  if (group === "summaryMedia") {
+    const slice = mediaPage(await summaryOutputEntries(root, slug), page, pageSize);
+    return { ...slice, items: await mapLimit(slice.items, 8, (entry) => outputItem(entry.path, entry.value)) };
+  }
   if (group === "artwork") {
     const index = await getArtworkOutputIndex(root, slug);
     const slice = mediaPage(index, page, pageSize);
@@ -999,7 +1025,7 @@ export async function getOutputsLibrary(root: string, slug: string) {
   return { items: pages.flat() };
 }
 
-type OutputValue = { id: string; group: OutputGroup; format: string; url: string; downloadUrl?: string; chapter?: number; from?: number; to?: number; createdAt?: string; durationSeconds?: number; musicTitle?: string };
+type OutputValue = { title?: string; id: string; group: OutputGroup; format: string; url: string; downloadUrl?: string; chapter?: number; from?: number; to?: number; createdAt?: string; durationSeconds?: number; musicTitle?: string };
 async function outputItem(path: string, value: OutputValue) { try { const info = await stat(path); return { ...value, bytes: info.size, createdAt: value.createdAt ?? info.mtime.toISOString(), missing: false }; } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return { ...value, bytes: 0, missing: true }; throw error; } }
 
 export const settingsUpdateSchema = z.object({

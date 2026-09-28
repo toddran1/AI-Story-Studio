@@ -539,10 +539,9 @@ describe("Story Bible entity deep-link integration", () => {
     act(() => [...page.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === "Edit entity")!.click());
     await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
     expect(page.querySelector(".editor-sheet.naming-editor")).not.toBeNull();
-    expect(page.querySelector(".editor-sheet.naming-editor")?.getAttribute("aria-modal")).toBe("true");
+    expect(page.querySelector(".editor-sheet.naming-editor")?.getAttribute("aria-modal")).toBe("false");
     expect(document.activeElement).toBe(page.querySelector(".editor-sheet[aria-label='Edit canonical record'] input:not([type='checkbox'])"));
-    expect(page.querySelector(".entity-sheet")?.hasAttribute("inert")).toBe(true);
-    expect(page.querySelector(".entity-sheet")?.getAttribute("aria-hidden")).toBe("true");
+    expect(page.querySelector(".entity-sheet")).toBeNull();
     act(() => window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })));
     expect(page.querySelector(".editor-sheet.naming-editor")).toBeNull();
     expect(page.querySelector(".entity-sheet")?.hasAttribute("inert")).toBe(false);

@@ -38,7 +38,9 @@ import { musicProviderCatalog, musicProviderRegistry } from "../../src/music/pro
 import { discardMusicCandidate, listMusicGenerations, musicCandidatePath, readMusicGeneration, saveMusicCandidate, startMusicGeneration } from "../../src/music/generation.js";
 import { deleteMusicBed, listMusicBeds, saveMusicBed } from "../../src/music/music-bed.js";
 import { buildStoryMusicContext, rankMusicTracks, suggestMusicConcepts } from "../../src/music/recommendations.js";
-import { buildMusicMixPreview } from "../../src/music/preview.js";
+import { fileFingerprint } from "../../src/utils/file-fingerprint.js";
+import { listSummaryMusicExports, summaryMusicExportPath, summaryMusicExportManifestSchema } from "../../src/music/summary-export.js";
+import { buildMusicMixPreview, buildMusicMixPreviewFromSource } from "../../src/music/preview.js";
 import { exportMusicSelectionSchema, musicOverridesSchema } from "../../src/music/types.js";
 
 const MAX_BODY_BYTES = 50_000_000;
@@ -220,6 +222,26 @@ export function createApiHandler(operations: StudioOperations) {
         return sendFile(request, response, artifact.path, artifact.contentType, { downloadName: url.searchParams.get("download") === "1" ? artifact.name : undefined });
       }
       if (summaryArtworkVersionMatch && request.method === "PUT") return send(response, 200, { summary: await operations.reviewSummaryArtworkVersion(summaryArtworkVersionMatch[1]!, summaryArtworkVersionMatch[2]!, summaryArtworkVersionMatch[3]!, summaryArtworkVersionMatch[4]!) });
+      const summaryMusicList = /^\/api\/stories\/([a-z0-9-]+)\/summaries\/(sum_[a-f0-9-]{36})\/music-exports$/.exec(url.pathname);
+      if (summaryMusicList && request.method === "GET") return send(response, 200, { editions: await listSummaryMusicExports(operations.root, summaryMusicList[1]!, summaryMusicList[2]!) });
+      const summaryMusicMatch = /^\/api\/stories\/([a-z0-9-]+)\/summaries\/(sum_[a-f0-9-]{36})\/(music-export|music-preview)$/.exec(url.pathname);
+      if (summaryMusicMatch && request.method === "POST") {
+        const [, slug, id, action] = summaryMusicMatch;
+        if (action === "music-export") return send(response, 202, operations.startSummaryMusicExport(slug!, id!, await jsonBody(request)));
+        const input = z.object({ music: exportMusicSelectionSchema, overrides: musicOverridesSchema.optional(), position: z.enum(["beginning", "middle"]).default("middle") }).strict().parse(await jsonBody(request));
+        const story = await loadStory(storyPaths(operations.root, slug!, 1).storyConfig);
+        const artifact = await operations.summaryMedia().export(slug!, id!, "audio");
+        return sendFile(request, response, await buildMusicMixPreviewFromSource(operations.root, story, artifact.path, input.music, input.overrides, input.position), "audio/mpeg");
+      }
+      const summaryMusicDownload = /^\/api\/stories\/([a-z0-9-]+)\/summaries\/(sum_[a-f0-9-]{36})\/(audio|video)-exports\/(bg-[a-f0-9]{12})\.(mp3|mp4)$/.exec(url.pathname);
+      if (summaryMusicDownload && request.method === "GET") {
+        const [, slug, id, kind, edition, extension] = summaryMusicDownload;
+        if (extension !== (kind === "audio" ? "mp3" : "mp4")) throw new HttpError("Invalid summary export format", 400);
+        const paths = summaryMusicExportPath(operations.root, slug!, id!, kind as "audio" | "video", edition!);
+        const parsed = summaryMusicExportManifestSchema.safeParse(await readJsonIfExists(paths.manifest));
+        if (!parsed.success || parsed.data.story !== slug || parsed.data.summaryId !== id || parsed.data.kind !== kind || parsed.data.edition !== edition || await fileFingerprint(paths.output) !== parsed.data.outputFingerprint) return send(response, 404, { error: "Summary music export is missing or damaged" });
+        return sendFile(request, response, paths.output, kind === "audio" ? "audio/mpeg" : "video/mp4", { downloadName: `${id}-${kind}-${edition}.${extension}` });
+      }
       const summaryExportMatch = /^\/api\/stories\/([a-z0-9-]+)\/summaries\/(sum_[a-f0-9-]{36})\/export\/(summary|narration|audio|video)$/.exec(url.pathname);
       if (summaryExportMatch && request.method === "GET") {
         const artifact = summaryExportMatch[3] === "video" ? await operations.summaryVisuals().export(summaryExportMatch[1]!, summaryExportMatch[2]!, "video") : await operations.summaryMedia().export(summaryExportMatch[1]!, summaryExportMatch[2]!, summaryExportMatch[3]!);

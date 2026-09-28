@@ -72,6 +72,29 @@ describe("Story Bible page loading", () => {
     vi.unstubAllGlobals();
   });
 
+  it("uses one entity drawer and dismisses editing on outside clicks and Escape", async () => {
+    installFetch((url) => {
+      if (url.includes("/story-bible/entities?")) return json(entitiesPayload([entityRow("e1", "Qain Yi")]));
+      if (url.endsWith("/story-bible/entities/e1")) return json({ entity: { ...entityRow("e1", "Qain Yi"), notes: "", description: "", provenance: [] }, timeline: [], relationships: [], relatedNames: {}, relatedReferences: [], duplicateSuggestions: [], issues: [], readiness: [], namingCollisions: [], merges: [] });
+      if (url.includes("/story-bible/health")) return json(healthPayload());
+      if (url.includes("/story-bible/suppressions")) return json([]);
+      if (url.includes("/pronunciation")) return json({ entities: [], suggestions: {} });
+      return json({});
+    });
+    await renderBible("/stories/story/bible?entity=e1");
+    const edit = () => [...host!.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === "Edit entity")!;
+    await act(async () => { edit().click(); });
+    expect(host!.querySelectorAll(".editor-sheet")).toHaveLength(1);
+    expect(host!.querySelector(".canonical-editor")).not.toBeNull();
+    await act(async () => { document.body.dispatchEvent(new Event("pointerdown", { bubbles: true })); });
+    expect(host!.querySelector(".canonical-editor")).toBeNull();
+    expect(host!.querySelector(".entity-sheet")).not.toBeNull();
+    await act(async () => { edit().click(); });
+    await act(async () => { window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })); });
+    expect(host!.querySelector(".canonical-editor")).toBeNull();
+    expect(host!.querySelector(".entity-sheet")).not.toBeNull();
+  });
+
   it("renders the entity list independently of health, review summary, and suppressions failures", async () => {
     let healthAttempts = 0;
     installFetch((url) => {

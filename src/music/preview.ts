@@ -13,7 +13,11 @@ import { resolveExportMusic } from "./resolver.js";
 import type { ExportMusicSelection } from "./types.js";
 
 export async function buildMusicMixPreview(root: string, story: Story, chapter: number, selection: ExportMusicSelection, overrides: unknown, position: "beginning" | "middle" = "middle", tools = new FfmpegTools()) {
-  const source = storyPaths(root, story.slug, chapter).audio; const sourceFp = await fileFingerprint(source); if (!sourceFp) throw new Error("Clean chapter narration is missing"); const music = await resolveExportMusic(root, story, selection, overrides, tools); if (!music) throw new Error("Choose music for preview");
+  return buildMusicMixPreviewFromSource(root, story, storyPaths(root, story.slug, chapter).audio, selection, overrides, position, tools);
+}
+
+export async function buildMusicMixPreviewFromSource(root: string, story: Story, source: string, selection: ExportMusicSelection, overrides: unknown, position: "beginning" | "middle" = "middle", tools = new FfmpegTools()) {
+  const sourceFp = await fileFingerprint(source); if (!sourceFp) throw new Error("Clean narration is missing"); const music = await resolveExportMusic(root, story, selection, overrides, tools); if (!music) throw new Error("Choose music for preview");
   const probe = await tools.probe(source); const duration = Math.min(30, probe.durationSeconds); const start = position === "middle" ? Math.max(0, (probe.durationSeconds - duration) / 2) : 0;
   const key = fingerprint({ sourceFp, music: backgroundMusicFingerprint(music), start, duration, version: 1 }); const dir = join(root, "music-previews"); const output = join(dir, `${key}.mp3`);
   const cached = await readJsonIfExists(`${output}.json`).catch(() => undefined) as { outputFingerprint?: string } | undefined;
