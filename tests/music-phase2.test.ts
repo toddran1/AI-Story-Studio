@@ -1,12 +1,12 @@
 import { mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { FfmpegTools, runCommand } from "../src/audio/ffmpeg.js";
 import { importMusicTrack, listMusicTracks, deleteMusicTrack } from "../src/music/library.js";
 import { bedPlaybackOrder, listMusicBeds, saveMusicBed } from "../src/music/music-bed.js";
 import { musicProviderCatalog } from "../src/music/providers/registry.js";
-import { ElevenLabsMusicProvider } from "../src/music/providers/elevenlabs.js";
+import { ElevenLabsMusicProvider, musicGenerationTimeoutMs } from "../src/music/providers/elevenlabs.js";
 import { startMusicGeneration, readMusicGeneration, listMusicGenerations, saveMusicCandidate, discardMusicCandidate } from "../src/music/generation.js";
 import { resolveExportMusic } from "../src/music/resolver.js";
 import { renderMusicBed } from "../src/music/render-bed.js";
@@ -22,6 +22,37 @@ async function root() { return mkdtemp(join(tmpdir(), "music-phase2-")); }
 const request = { prompt: "Soft dark ambient instrumental music beneath a narrator", instrumental: true, tags: ["ambient"], energy: "low" as const, purpose: "background_narration" as const, loopFriendly: true };
 
 describe("music phase 2", () => {
+  it("reports only implemented adapter capabilities", () => {
+    expect(new ElevenLabsMusicProvider("test").capabilities()).toEqual({
+      generation: true, asyncGeneration: false, instrumentalControl: true,
+      durationControl: true, loopingControl: false, structuredComposition: false,
+      searchCatalog: false, commercialUseMetadata: false, maxDurationSeconds: 600,
+    });
+  });
+  it("scales generation timeouts monotonically within safe bounds", () => {
+    expect([undefined, 60, 120, 300, 600].map(musicGenerationTimeoutMs)).toEqual([300_000, 180_000, 300_000, 750_000, 900_000]);
+    const durations = [-1, 0, 60, 120, 300, 600, 1000];
+    const timeouts = durations.map(musicGenerationTimeoutMs);
+    expect(timeouts.every((value, index) => value >= 180_000 && value <= 900_000 && (!index || value >= timeouts[index - 1]!))).toBe(true);
+    expect(musicGenerationTimeoutMs(NaN)).toBe(300_000);
+  });
+  it("uses the duration timeout and never retries a timed-out paid request", async () => {
+    vi.useFakeTimers();
+    try {
+      const fetcher = vi.fn<typeof fetch>((_url, init) => new Promise((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+      }));
+      const pending = new ElevenLabsMusicProvider("test", fetcher).generate({ ...request, durationSeconds: 600 });
+      const rejected = expect(pending).rejects.toThrow("not retried automatically because provider charges may already have occurred");
+      await vi.advanceTimersByTimeAsync(899_999);
+      expect(fetcher.mock.calls[0]?.[1]?.signal?.aborted).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      await rejected;
+      expect(fetcher).toHaveBeenCalledTimes(1);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally { vi.useRealTimers(); }
+  });
+
   it("lists official provider availability without exposing keys", () => { const catalog = musicProviderCatalog({ ELEVENLABS_API_KEY: "secret", SUNO_API_KEY: "secret" }); expect(catalog[0]?.configured).toBe(true); expect(catalog[1]?.available).toBe(false); expect(JSON.stringify(catalog)).not.toContain("secret"); });
   it("uses ElevenLabs official compose request and classifies rate limit", async () => { let body: Record<string, unknown> = {}; const provider = new ElevenLabsMusicProvider("secret", async (_url, init) => { body = JSON.parse(String(init?.body)); return new Response(new Uint8Array([1, 2, 3]), { status: 200, headers: { "song-id": "song-1" } }); }); const result = await provider.generate(request); expect(body.force_instrumental).toBe(true); expect(result.providerGenerationId).toBe("song-1"); const limited = new ElevenLabsMusicProvider("secret", async () => new Response("", { status: 429 })); await expect(limited.generate(request)).rejects.toThrow("rate limit"); });
   it("keeps candidates temporary until approved and saves provenance", async () => { const dir = await root(); const provider = { id: "fake", displayName: "Fake", capabilities: () => ({ generation: true, asyncGeneration: false, instrumentalControl: true, durationControl: true, loopingControl: false, structuredComposition: false, searchCatalog: false, commercialUseMetadata: false }), generate: async () => ({ audio: new Uint8Array([1, 2, 3]), providerGenerationId: "remote-1", model: "fake-v1" }) }; const job = startMusicGeneration(dir, request, provider, fakeTools); await job.run; expect(await listMusicTracks(dir)).toHaveLength(0); expect((await readMusicGeneration(dir, job.id))?.status).toBe("complete"); const track = await saveMusicCandidate(dir, job.id, "Approved", fakeTools); expect(track.title).toBe("Approved"); expect(track.generation?.providerGenerationId).toBe("remote-1"); expect(track.generation?.prompt).toBe(request.prompt); expect(JSON.stringify(track)).not.toContain("secret"); expect(await listMusicTracks(dir)).toHaveLength(1); expect((await readMusicGeneration(dir, job.id))?.status).toBe("saved"); expect((await saveMusicCandidate(dir, job.id, "Retry", fakeTools)).id).toBe(track.id); });

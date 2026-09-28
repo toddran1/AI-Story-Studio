@@ -8,6 +8,7 @@ import type { ArtworkVersion, ChapterDetail, Job, QaFinding, Scene, TtsQualityAr
 import { pretty } from "../apps/web/src/format.js";
 import { ChapterImportPage, savedStorySourceUrl } from "../apps/web/src/ChapterImportPage.js";
 import { SummariesPage } from "../apps/web/src/SummariesPage.js";
+import { MusicGenerator } from "../apps/web/src/MusicGenerator.js";
 import { NamesLocalizationPage } from "../apps/web/src/NamesLocalizationPage.js";
 import { defaultLocale, LanguageSelect } from "../apps/web/src/languages.js";
 import { SelectedArtworkProvenance } from "../apps/web/src/SummaryVisualPanels.js";
@@ -17,6 +18,14 @@ import { formatChapterSelection, parseChapterSelection } from "../src/batch/rang
 import type { StageExecutionBatchPlan } from "../src/studio/stage-execution.js";
 
 describe("web UI", () => {
+  it("distinguishes free local music concepts from paid generation", () => {
+    const html = renderToStaticMarkup(<MusicGenerator slug="demo-story" onSaved={() => undefined} />);
+    expect(html).toContain("Suggested music concepts");
+    expect(html).toContain("Suggest concepts");
+    expect(html).toContain("No music provider call is made");
+    expect(html).toContain("Generation may incur provider charges");
+    expect(html).not.toContain("AI analyzed");
+  });
   it("shows chapter errors when a continuing stage batch fails", () => {
     const html = renderToStaticMarkup(<CompletionSummary result={{ summary: { completedChapters: 0, completedOperations: 0, failedChapters: 1 }, results: [{ chapter: 541, status: "failed", error: "QA did not pass" }] }} />);
     expect(html).toContain("Batch finished with errors");

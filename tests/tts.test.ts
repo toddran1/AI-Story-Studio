@@ -64,7 +64,7 @@ describe("Fish TTS", () => {
     await provider.synthesize({ text: "**Important:** *whisper this.* [sad] 2 * 2", model: "s2.1-pro", speed: 1, format: "mp3", sampleRate: 44100, bitrate: 128, normalize: true, maxCharsPerRequest: 500 });
     const body = JSON.parse(String((fetcher.mock.calls[0]?.[1] as RequestInit).body));
     expect(body.text).toBe("Important: whisper this. [sad] 2 * 2");
-    expect(provider.inputNormalizationVersion).toBe("fish-speech-normalization-v11-multispeaker-safe-chunks");
+    expect(provider.inputNormalizationVersion).toBe("fish-speech-normalization-v12-multispeaker-safe-chunks");
   });
 
   it("does not turn profanity into the literal word bleep inside Fish", async () => {
@@ -199,6 +199,18 @@ describe("Fish TTS", () => {
     expect(normalizeFishSpeechText(narration, "s2-pro")).toBe("Before.\n\nAfter... still speaking.\n\n[laugh] Hello.");
     expect(narration).toContain("......");
     expect(normalizeFishSpeechText("......", "s2-pro")).toBe("");
+  });
+
+  it("posts one laugh cue for Chapter 552's repeated reaction", async () => {
+    const posted: string[] = [];
+    const fetcher = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => { posted.push(JSON.parse(String(init?.body)).text); return new Response(new Uint8Array([1]), { headers: { "content-type": "audio/mpeg" } }); });
+    const provider = new FishAudioProvider("test-key", fetcher as typeof fetch);
+    const phrase = "This move again? If I remember correctly, you can’t maintain it for very long, can you?";
+    for (const text of [`“Heh heh... ${phrase}”`, `[soft] “ [laugh] [laugh] ${phrase}”[calm]`]) {
+      await provider.synthesize({ text, model: "s2.1-pro-free", speed: 1, format: "mp3", sampleRate: 44100, bitrate: 128, normalize: true, maxCharsPerRequest: 500 });
+    }
+    for (const text of posted) { expect(text.match(/\[laugh\]/g)).toHaveLength(1); expect(text).toContain(phrase); expect(text).not.toMatch(/heh|cough/iu); }
+    expect(normalizeFishSpeechText("[laugh] Hello. [laugh] Goodbye.", "s2-pro")).toBe("[laugh] Hello. [laugh] Goodbye.");
   });
 
   it("normalizes fiction abbreviations, titles, values, and units for speech", () => {

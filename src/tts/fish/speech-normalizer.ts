@@ -89,6 +89,9 @@ export function normalizeFishSpeechText(text: string, model?: string, options: {
   const structured = normalizeFishLeadingHesitations(stripStandaloneEllipsisLines(text), model).replace(/【[^【】\n]{1,500}】/gu, normalizeStructuredSpeechBlock)
     .replace(/(?<![\p{L}\p{N}])([A-Z][\p{L}\p{N} -]{1,80})\s+\((Passive|Active)\)\s+\((Level [^()\n]{1,30}|Rank [^()\n]{1,30})\)/gu, normalizeSystemMetadataText);
   const withoutMarkup = renderFishVocalizations(disambiguateFishS2Brackets(stripFishMarkdownEmphasis(stripEmojiForSpeech(stripMarkdownForSpeech(structured))), model), model, options)
+    // A performed reaction can be tagged more than once by earlier preparation.
+    // Repeated adjacent laugh tags describe one reaction, not separate sounds.
+    .replace(/\[laugh\](?:[ \t]*\[laugh\])+/giu, "[laugh]")
     .replace(/(?<![\p{L}\p{N}])(EXP|XP|HP|MP)\s*\/\s*(\d{1,6})?(?![\p{L}\p{N}])/giu, (_match, label: string, number?: string) =>
       number ? `${label.toUpperCase()}: ${speakInteger(Number(number))}` : label.toUpperCase());
   const normalizedValues = withoutMarkup

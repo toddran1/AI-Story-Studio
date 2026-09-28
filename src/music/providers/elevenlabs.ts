@@ -1,13 +1,20 @@
 import type { MusicGenerationProvider, MusicGenerationRequest, MusicGenerationResult } from "./types.js";
 
+/** Bound synchronous generation time without automatically repeating paid requests. */
+export function musicGenerationTimeoutMs(durationSeconds?: number): number {
+  const seconds = durationSeconds !== undefined && Number.isFinite(durationSeconds)
+    ? durationSeconds : 120;
+  return Math.min(900_000, Math.max(180_000, seconds * 2_500));
+}
+
 export class ElevenLabsMusicProvider implements MusicGenerationProvider {
   readonly id = "elevenlabs"; readonly displayName = "ElevenLabs Music";
   constructor(private readonly apiKey: string, private readonly fetcher: typeof fetch = fetch) {}
-  capabilities() { return { generation: true, asyncGeneration: false, instrumentalControl: true, durationControl: true, loopingControl: false, structuredComposition: true, searchCatalog: false, commercialUseMetadata: false, maxDurationSeconds: 600 }; }
+  capabilities() { return { generation: true, asyncGeneration: false, instrumentalControl: true, durationControl: true, loopingControl: false, structuredComposition: false, searchCatalog: false, commercialUseMetadata: false, maxDurationSeconds: 600 }; }
   async generate(request: MusicGenerationRequest): Promise<MusicGenerationResult> {
     const model = request.model ?? "music_v2_5";
     if (!["music_v1", "music_v2", "music_v2_5"].includes(model)) throw new Error("Unsupported ElevenLabs music model");
-    const controller = new AbortController(); const timeout = setTimeout(() => controller.abort(), 180_000);
+    const controller = new AbortController(); const timeout = setTimeout(() => controller.abort(), musicGenerationTimeoutMs(request.durationSeconds));
     try {
       const response = await this.fetcher("https://api.elevenlabs.io/v1/music?output_format=auto", { method: "POST", headers: { "xi-api-key": this.apiKey, "Content-Type": "application/json" }, body: JSON.stringify({ prompt: request.prompt, music_length_ms: request.durationSeconds ? request.durationSeconds * 1000 : undefined, model_id: model, force_instrumental: request.instrumental }), signal: controller.signal });
       if (!response.ok) throw new Error(response.status === 429 ? "ElevenLabs Music rate limit reached. Try again later." : response.status === 402 ? "ElevenLabs Music requires available paid credits." : response.status === 401 || response.status === 403 ? "ElevenLabs Music credentials or plan do not permit generation." : response.status === 422 ? "ElevenLabs Music rejected this prompt or request. Edit the prompt and retry." : `ElevenLabs Music request failed (${response.status}).`);
@@ -16,7 +23,7 @@ export class ElevenLabsMusicProvider implements MusicGenerationProvider {
       try { for (;;) { const { done, value } = await reader.read(); if (done) break; length += value.length; if (length > 100_000_000) throw new Error("Generated music exceeds the 100 MB limit"); chunks.push(value); } } finally { await reader.cancel().catch(() => undefined); }
       const audio = new Uint8Array(length); let offset = 0; for (const chunk of chunks) { audio.set(chunk, offset); offset += chunk.length; } if (!audio.length) throw new Error("Generated music is empty");
       return { audio, providerGenerationId: response.headers.get("song-id") ?? undefined, model };
-    } catch (error) { if (controller.signal.aborted) throw new Error("ElevenLabs Music generation timed out."); throw error; }
+    } catch (error) { if (controller.signal.aborted) throw new Error("ElevenLabs Music generation timed out before the result was received. The request was not retried automatically because provider charges may already have occurred. Review the provider account and retry manually."); throw error; }
     finally { clearTimeout(timeout); }
   }
 }
