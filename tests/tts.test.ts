@@ -201,6 +201,26 @@ describe("Fish TTS", () => {
     expect(normalizeFishSpeechText("......", "s2-pro")).toBe("");
   });
 
+  it("omits Chapter 555's quoted silent response from the Fish request", async () => {
+    const posted: string[] = [];
+    const fetcher = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      posted.push(JSON.parse(String(init?.body)).text);
+      return new Response(new Uint8Array([1]), { headers: { "content-type": "audio/mpeg" } });
+    });
+    const provider = new FishAudioProvider("test-key", fetcher as typeof fetch);
+    for (const silent of ["“...”", "“……”", '"......"']) {
+      const narration = `Passive skill triggered: [Damage Transfer]!\n\n${silent}\n\nAsher was beaten until he was dizzy and dazed.`;
+      await provider.synthesize({ text: narration, model: "s2.1-pro-free", speed: 1, format: "mp3", sampleRate: 44100, bitrate: 128, normalize: true, maxCharsPerRequest: 500 });
+      expect(narration).toContain(silent);
+    }
+    expect(posted).toHaveLength(3);
+    for (const text of posted) {
+      expect(text).toContain("Passive skill triggered");
+      expect(text).toContain("Asher was beaten until he was dizzy and dazed.");
+      expect(text).not.toMatch(/[…“”"]|\.{3}/u);
+    }
+  });
+
   it("posts one laugh cue for Chapter 552's repeated reaction", async () => {
     const posted: string[] = [];
     const fetcher = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => { posted.push(JSON.parse(String(init?.body)).text); return new Response(new Uint8Array([1]), { headers: { "content-type": "audio/mpeg" } }); });
