@@ -64,7 +64,7 @@ describe("Fish TTS", () => {
     await provider.synthesize({ text: "**Important:** *whisper this.* [sad] 2 * 2", model: "s2.1-pro", speed: 1, format: "mp3", sampleRate: 44100, bitrate: 128, normalize: true, maxCharsPerRequest: 500 });
     const body = JSON.parse(String((fetcher.mock.calls[0]?.[1] as RequestInit).body));
     expect(body.text).toBe("Important: whisper this. [sad] 2 * 2");
-    expect(provider.inputNormalizationVersion).toBe("fish-speech-normalization-v10-multispeaker-safe-chunks");
+    expect(provider.inputNormalizationVersion).toBe("fish-speech-normalization-v11-multispeaker-safe-chunks");
   });
 
   it("does not turn profanity into the literal word bleep inside Fish", async () => {
@@ -192,6 +192,13 @@ describe("Fish TTS", () => {
     expect(posted.join(" ")).toContain("[laugh] I guessed it");
     expect(posted.join(" ")).toContain("[cough] You’re right");
     expect(narration).toContain("Ahem, ahem, ahem…");
+  });
+
+  it("omits standalone ellipsis lines while preserving sentence pauses and cues", () => {
+    const narration = "Before.\n\n......\n\nAfter... still speaking.\n…\n“……”\n. . .\n[laugh] Hello.";
+    expect(normalizeFishSpeechText(narration, "s2-pro")).toBe("Before.\n\nAfter... still speaking.\n\n[laugh] Hello.");
+    expect(narration).toContain("......");
+    expect(normalizeFishSpeechText("......", "s2-pro")).toBe("");
   });
 
   it("normalizes fiction abbreviations, titles, values, and units for speech", () => {

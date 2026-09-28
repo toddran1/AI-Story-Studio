@@ -153,9 +153,17 @@ export function speechNormalizationSettingsFromNarration(narrationSettings: {
 }
 
 /** The one shared speech-normalization entry point for every TTS consumer. */
+export function stripStandaloneEllipsisLines(text: string): string {
+  // Scene-break/silent-response lines have no words to synthesize. Preserve
+  // paragraph separation and ellipses inside actual sentences.
+  return text.replace(/^[\t ]*(?:["“”‘’']?[\t ]*)(?:\.[\t ]*){3,}["“”‘’']?[\t ]*\r?$/gm, "")
+    .replace(/^[\t ]*["“”‘’']?[\t ]*(?:…[\t ]*)+["“”‘’']?[\t ]*\r?$/gm, "");
+}
+
 export function normalizeSpeechForProvider(text: string, language: string, narrationSettings: Parameters<typeof speechNormalizationSettingsFromNarration>[0], provider?: TTSProvider, model?: string) {
   const strategy = provider?.vocalizationStrategy?.(model) ?? { kind: "safe_normalize" as const };
-  return speechNormalizationFingerprint(text, language, speechNormalizationSettingsFromNarration(narrationSettings), provider ? { ...strategy, provider: provider.name } : strategy);
+  const input = provider?.name === "fish" ? stripStandaloneEllipsisLines(text) : text;
+  return speechNormalizationFingerprint(input, language, speechNormalizationSettingsFromNarration(narrationSettings), provider ? { ...strategy, provider: provider.name } : strategy);
 }
 
 function isEnglish(language: string) { return /^en(?:[-_]|$)/i.test(language.trim()); }
