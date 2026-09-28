@@ -99,6 +99,26 @@ describe("Story Bible page loading", () => {
     expect(host!.textContent).toContain("Qain Yi");
   });
 
+  it("keeps the suppression audit collapsed until the user opens it", async () => {
+    installFetch((url) => {
+      if (url.includes("/story-bible/entities?")) return json(entitiesPayload([entityRow("e1", "Qain Yi")]));
+      if (url.includes("/story-bible/health")) return json(healthPayload());
+      if (url.includes("/story-bible/review")) return json({ openTotal: 0 });
+      if (url.includes("/story-bible/suppressions")) return json([{ entityId: "e2", name: "Old Name", type: "character", reason: "duplicate", suppressedAt: "2026-09-28" }]);
+      if (url.includes("/pronunciation")) return json({ entities: [], suggestions: {} });
+      return json({});
+    });
+    await renderBible();
+
+    const audit = host!.querySelector<HTMLDetailsElement>("details.duplicate-strip")!;
+    const toggle = audit.querySelector("summary.suppression-audit-toggle")!;
+    expect(audit.open).toBe(false);
+    expect(audit.textContent).toContain("1 removed canonical records");
+    await act(async () => { toggle.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+    expect(audit.open).toBe(true);
+    expect(audit.querySelector("button")?.textContent).toBe("Restore entity");
+  });
+
   it("shows a list-specific retry when the initial entity request fails", async () => {
     let attempts = 0;
     installFetch((url) => {
