@@ -224,6 +224,26 @@ describe("Story Bible entity detail accordion", () => {
     expect(requests).toBe(1);
   });
 
+  it("keeps entity usage pagination controls on one horizontal row", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({
+      summary: { sourceChapters: [1, 41], translationChapters: 41, narrationChapters: 0, qaFindings: 0, continuityFindings: 0, scenes: 0, visualProfile: false },
+      uses: [], total: 41, page: 1, pageSize: 25,
+    }), { status: 200, headers: { "content-type": "application/json" } })));
+    host = document.createElement("div");
+    document.body.append(host);
+    root = createRoot(host);
+    await act(async () => {
+      root!.render(<EntityUsageSection slug="story" entityId="entity-a" navigate={() => undefined} expandedByDefault />);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    const pagination = host.querySelector<HTMLElement>('nav[aria-label="Entity usage pages"]')!;
+    expect([...pagination.children].map((element) => element.tagName)).toEqual(["BUTTON", "SMALL", "BUTTON"]);
+    expect(pagination.querySelectorAll("button")[0].disabled).toBe(true);
+    expect(pagination.querySelectorAll("button")[1].disabled).toBe(false);
+    expect(readFileSync("apps/web/src/continuity.css", "utf8")).toContain(".entity-usage-pagination{display:grid;grid-template-columns:minmax(72px,auto) minmax(0,1fr) minmax(72px,auto)");
+  });
+
   it("discards merge-search results when the query changes during an outstanding request", async () => {
     let resolveA!: (response: Response) => void;
     const candidate = (id: string, canonicalName: string) => ({ id, canonicalName, type: "character", firstAppearance: 1, lastKnownAppearance: 2 });

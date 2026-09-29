@@ -2284,11 +2284,11 @@ export function EntityUsageSection({ slug, entityId, navigate, expandedByDefault
             {!data.uses.length && <p className="empty-text">No recorded uses beyond the canonical record.</p>}
           </div>
           {data.total > data.pageSize && (
-            <div className="field-row">
+            <nav className="entity-usage-pagination" aria-label="Entity usage pages">
               <button type="button" className="button" disabled={data.page <= 1} onClick={() => void load(data.page - 1)}>Previous</button>
               <small>Page {data.page} · {data.total} uses</small>
               <button type="button" className="button" disabled={data.page * data.pageSize >= data.total} onClick={() => void load(data.page + 1)}>Next</button>
-            </div>
+            </nav>
           )}
         </>
       )}

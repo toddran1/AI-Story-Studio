@@ -66,6 +66,8 @@ export function VisualProfileModal({
   const [generatingSheet, setGeneratingSheet] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [completeness, setCompleteness] = useState<Awaited<ReturnType<typeof inspectVisualProfile>> | null>(null);
+  const [regenerationExpanded, setRegenerationExpanded] = useState(false);
+  const [proposalExpanded, setProposalExpanded] = useState(true);
   const [proposal, setProposal] = useState<VisualProfileProposal | null>(null);
   const [selectedProposalFields, setSelectedProposalFields] = useState<string[]>([]);
   const [proposing, setProposing] = useState(false);
@@ -295,7 +297,7 @@ export function VisualProfileModal({
     try {
       const fields = regenerate ? selectedRegenerationFields : undefined;
       const next = await proposeVisualProfile(slug, entityId, { fields, regenerate });
-      setProposal(next);
+      setProposal(next); setProposalExpanded(true);
       setSelectedProposalFields(Object.keys(next.values));
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -323,6 +325,7 @@ export function VisualProfileModal({
       const updated = await applyVisualProfileProposal(slug, entityId, proposal, selectedProposalFields);
       setProfile(updated);
       setProposal(null);
+      setRegenerationExpanded(false); setSelectedRegenerationFields([]);
       setSelectedProposalFields([]);
       onUpdated?.(updated);
       await refreshInspection();
@@ -353,7 +356,7 @@ export function VisualProfileModal({
         <div className="modal-content visual-profile-modal" role="dialog" aria-modal={!viewingReference} aria-label={`Visual Profile: ${entityName || entityId}`} onClick={(e) => e.stopPropagation()}>
           <div className="modal-header">
             <h3>Visual Profile: {entityName || entityId}</h3>
-            <button className="btn-close" onClick={onClose}>✕</button>
+            <button className="btn-close" aria-label="Close Visual Profile" onClick={onClose}>✕</button>
           </div>
           <div className="modal-body loading-indicator">Loading visual profile...</div>
         </div>
@@ -367,7 +370,7 @@ export function VisualProfileModal({
         <div className="modal-content visual-profile-modal" role="dialog" aria-modal={!viewingReference} aria-label={`Visual Profile: ${entityName || entityId}`} onClick={(e) => e.stopPropagation()}>
           <div className="modal-header">
             <h3>Visual Profile</h3>
-            <button className="btn-close" onClick={onClose}>✕</button>
+            <button className="btn-close" aria-label="Close Visual Profile" onClick={onClose}>✕</button>
           </div>
           <div className="modal-body error-box">{error || "Could not load profile"}</div>
         </div>
@@ -383,13 +386,7 @@ export function VisualProfileModal({
             <h3>Visual Profile: {entityName || profile.entityId}</h3>
             <span
               className={`badge status-${profile.status}`}
-              style={{
-                padding: "4px 10px",
-                borderRadius: "4px",
-                fontWeight: "bold",
-                backgroundColor: profile.status === "approved" ? "#2e7d32" : "#ed6c02",
-                color: "#fff",
-              }}
+
             >
               {profile.status === "approved" ? "✓ Approved Canon" : "Draft (Not Enforced)"}
             </span>
@@ -397,7 +394,7 @@ export function VisualProfileModal({
             {Boolean(Object.keys(completeness?.context?.storyBibleVisualEvidence?.values ?? {}).length) && <small>Story Bible visual evidence available</small>}
             {Boolean(Object.keys(completeness?.context?.storyBibleVisualEvidence?.conflicts ?? {}).length) && <small>Story Bible visual facts conflict; review source chapters</small>}
           </div>
-          <button className="btn-close" onClick={onClose}>✕</button>
+          <button className="btn-close" aria-label="Close Visual Profile" onClick={onClose}>✕</button>
         </div>
 
         {error && <div className="error-banner">{error}</div>}
@@ -509,29 +506,29 @@ export function VisualProfileModal({
               )}
               {completeness?.conflicts.filter((conflict) => conflict.status === "needs_review").map((conflict) => (
                 <section className="visual-conflict-panel" key={conflict.id}>
-                  <strong>Source conflict · {conflict.field.replace(/^character\.|^location\./, "")}</strong>
+                  <strong>Source conflict · {conflict.field.replace(/^(character|location|creature|item)\./, "").replace(/([a-z])([A-Z])/g, "$1 $2")}</strong>
                   <p className="hint-text">Source-backed value: <b>{conflict.canonicalValue}</b><br />Earlier AI suggestion: <b>{conflict.visualValue}</b></p>
                   <div className="proposal-actions"><button type="button" className="btn btn-primary" disabled={saving} onClick={() => handleResolveConflict(conflict.id, "accept_canonical")}>Use source-backed value</button><button type="button" className="btn btn-outline" disabled={saving} onClick={() => handleResolveConflict(conflict.id, "retain_manual_override")}>Keep as manual override</button></div>
                 </section>
               ))}
               {completeness?.fields.some((field) => field.regenerable) && (
-                <section className="visual-regeneration-panel">
-                  <strong>Regenerate selected AI details</strong>
+                <details className="visual-regeneration-panel" open={regenerationExpanded} onToggle={(event) => setRegenerationExpanded(event.currentTarget.open)}>
+                  <summary>Regenerate selected AI details</summary>
                   <p className="hint-text">Only unlocked AI suggestions are eligible. Source-backed and manual fields stay protected.</p>
-                  {completeness.fields.filter((field) => field.regenerable).map((field) => <label className="proposal-field" key={field.path}><input type="checkbox" checked={selectedRegenerationFields.includes(field.path)} onChange={(event) => setSelectedRegenerationFields((items) => event.target.checked ? [...items, field.path] : items.filter((item) => item !== field.path))} /><span>{field.path.replace(/^character\.|^location\./, "")} <small>AI suggestion</small></span></label>)}
+                  {completeness.fields.filter((field) => field.regenerable).map((field) => <label className="proposal-field" key={field.path}><input type="checkbox" checked={selectedRegenerationFields.includes(field.path)} onChange={(event) => setSelectedRegenerationFields((items) => event.target.checked ? [...items, field.path] : items.filter((item) => item !== field.path))} /><span>{field.path.replace(/^(character|location|creature|item)\./, "").replace(/([a-z])([A-Z])/g, "$1 $2")} <small>AI suggestion</small></span></label>)}
                   <button type="button" className="btn btn-secondary" disabled={proposing || !selectedRegenerationFields.length} onClick={() => handlePropose(true)}>{proposing ? "Preparing proposal…" : "Regenerate selected details"}</button>
-                </section>
+                </details>
               )}
               {proposal && (
-                <section className="visual-proposal-panel">
-                  <strong>AI visual proposal</strong>
+                <details className="visual-proposal-panel" open={proposalExpanded} onToggle={(event) => setProposalExpanded(event.currentTarget.open)}>
+                  <summary>AI visual proposal · {selectedProposalFields.length} selected</summary>
                   {proposal.rationale && <p className="hint-text">{proposal.rationale}</p>}
                   {Object.entries(proposal.values).map(([field, value]) => (
-                    <label key={field} className="proposal-field"><input type="checkbox" checked={selectedProposalFields.includes(field)} onChange={(event) => setSelectedProposalFields((items) => event.target.checked ? [...items, field] : items.filter((item) => item !== field))} /><span><b>{field.replace(/^character\.|^location\./, "")}</b><br />{value}</span></label>
+                    <label key={field} className="proposal-field"><input type="checkbox" checked={selectedProposalFields.includes(field)} onChange={(event) => setSelectedProposalFields((items) => event.target.checked ? [...items, field] : items.filter((item) => item !== field))} /><span><b>{field.replace(/^(character|location|creature|item)\./, "").replace(/([a-z])([A-Z])/g, "$1 $2")}</b><br />{value}</span></label>
                   ))}
                   {!Object.keys(proposal.values).length && <p className="hint-text">No safe missing details were proposed.</p>}
                   <div className="proposal-actions"><button type="button" className="btn btn-primary" onClick={handleApplyProposal} disabled={saving || !selectedProposalFields.length}>Apply selected</button><button type="button" className="btn btn-outline" onClick={() => setProposal(null)}>Cancel</button></div>
-                </section>
+                </details>
               )}
               {profile.visualType === "character" && (
                 <>

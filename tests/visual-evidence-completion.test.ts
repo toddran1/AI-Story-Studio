@@ -38,7 +38,7 @@ describe("visual evidence completion", () => {
     const inspection = await inspectVisualProfile(root, slug, bible, id);
     expect(inspection.profile.visualType).toBe(type);
     expect(inspection.protectedFields).toEqual(paths);
-    expect(inspection.eligibleFields).toEqual([]);
+    expect(inspection.eligibleFields).toEqual(["appearance", "visualPrompt", "negativePrompt"]);
     expect(inspection.profile[section]).toEqual({});
   });
 

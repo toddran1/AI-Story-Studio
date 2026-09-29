@@ -31,6 +31,7 @@
   width:min(520px,calc(100vw - 32px));
   background:var(--panel);
 }
+.entity-usage-pagination{display:grid;grid-template-columns:minmax(72px,auto) minmax(0,1fr) minmax(72px,auto);align-items:center;gap:8px;margin-top:12px}.entity-usage-pagination .button{padding:7px 9px;font-size:9px;white-space:nowrap}.entity-usage-pagination small{text-align:center;color:var(--muted);font:8px var(--mono);white-space:nowrap}
 .editor-sheet.canonical-editor {
   display:grid; grid-template-rows:auto minmax(0,1fr) auto;
   padding:0; overflow:hidden;

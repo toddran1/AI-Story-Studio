@@ -13,14 +13,16 @@ export function profileSection(type: VisualEntityType): Section | undefined {
   return type in fields ? type as Section : undefined;
 }
 export function visualFieldsForType(type: VisualEntityType): readonly string[] { const section = profileSection(type); return section ? fields[section] : []; }
-export function validVisualField(type: VisualEntityType, path: string): boolean { return visualFieldsForType(type).includes(path); }
+export function validVisualField(type: VisualEntityType, path: string): boolean { return ["appearance", "visualPrompt", "negativePrompt"].includes(path) || visualFieldsForType(type).includes(path); }
 export function readVisualField(profile: VisualEntityProfile, path: string): string | undefined {
   if (!validVisualField(profile.visualType, path)) return undefined;
+  if (path === "appearance" || path === "visualPrompt" || path === "negativePrompt") return profile[path]?.trim() || undefined;
   const [section, key] = path.split(".") as [Section, string];
   return (profile[section] as Record<string, string | undefined> | undefined)?.[key]?.trim() || undefined;
 }
 export function writeVisualField(profile: VisualEntityProfile, path: string, value: string): boolean {
   if (!validVisualField(profile.visualType, path)) return false;
+  if (path === "appearance" || path === "visualPrompt" || path === "negativePrompt") { profile[path] = value; return true; }
   const [section, key] = path.split(".") as [Section, string];
   (profile as unknown as Record<string, unknown>)[section] = { ...(profile[section] ?? {}), [key]: value };
   return true;

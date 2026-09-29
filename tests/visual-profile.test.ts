@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { access, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -77,6 +77,25 @@ describe("Visual Entity Profiles", () => {
 
   afterEach(async () => {
     await rm(root, { recursive: true, force: true });
+  });
+
+  it("applies an unsaved draft proposal after time passes but rejects actual edits", async () => {
+    const bible = emptyStoryBible();
+    const entity = canonicalEntitySchema.parse({ id: entityId, firstAppearance: 1, lastKnownAppearance: 1, canonicalName: "Draft character", type: "character", description: "A student", aliases: [], provenance: [] });
+    bible.canonicalEntities.push(entity);
+    await atomicWriteJson(storyPaths(root, slug, 1).bible, bible);
+    const provider = { name: "fake", generateStructured: async () => ({ value: { values: [{ field: "character.build", value: "lean" }, { field: "appearance", value: "A lean student" }, { field: "visualPrompt", value: "Portrait of a lean student" }], rationale: "Suggestion" } }) };
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date("2026-01-01T00:00:00Z"));
+      const proposal = await proposeMissingVisualDetails(root, slug, bible, entity.id, provider as any, { provider: "openai", model: "fake" });
+      vi.setSystemTime(new Date("2026-01-01T00:05:00Z"));
+      const updated = await applyVisualProfileProposal(root, slug, bible, proposal, ["character.build", "appearance", "visualPrompt"]);
+      expect(updated.character?.build).toBe("lean");
+      expect(updated.appearance).toBe("A lean student");
+      expect(updated.visualPrompt).toBe("Portrait of a lean student");
+      await expect(applyVisualProfileProposal(root, slug, bible, proposal, ["character.build"])).rejects.toThrow("changed");
+    } finally { vi.useRealTimers(); }
   });
 
   it("loads empty profiles if visual-profiles.json does not exist", async () => {
