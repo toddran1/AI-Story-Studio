@@ -74,6 +74,9 @@ export function normalizeSceneOverridesForFingerprint(raw: SceneOverrides | unde
 export const SCENE_STATE_PRIORITY_INSTRUCTION =
   "SCENE-STATE PRIORITY: Preserve Story Bible identity and approved Visual Profile traits such as face, age, build, hair, eyes, and permanent distinguishing features. Treat profile attire, footwear, accessories, weapons, and equipment as defaults only. Current visual continuity, the current scene, scene direction, and explicit scene overrides take precedence for temporary clothing, injuries, blood, dirt, damage, equipment, pose, expression, and environmental effects. Do not infer a change from an omitted detail.";
 
+export const MATURE_ARTWORK_STYLING =
+  "MATURE CHARACTER STYLING: Female characters have a seductive, alluring look with curvaceous figures, full busts and shapely hips. Keep it tasteful — alluring and elegant, never explicit or nude. Depict blood, injuries, and battle violence when the scene calls for it.";
+
 /** The one authoritative definition of entities visibly represented by a scene.
  * It intentionally uses scene identity fields only—not broad narration matching—
  * so preflight and prompt resolution cannot disagree about who is on screen. */
@@ -199,11 +202,18 @@ export function resolveVisualCanonPrompt(options: {
 
       if (profile.character) {
         const c = profile.character;
+        const isFemale = c.gender?.trim().toLowerCase() === "female";
+        const figureTrait = story.artwork.adultContent && isFemale
+          ? c.figure === "larger" ? "Figure: very curvaceous with an especially full bust and hips"
+          : c.figure === "normal" ? "Figure: curvaceous with a full bust and hips"
+          : undefined
+          : undefined;
         const details = [
           c.apparentAge && `Age: ${c.apparentAge}`,
           c.gender && `Gender: ${c.gender}`,
           c.height && `Height: ${c.height}`,
           c.build && `Build: ${c.build}`,
+          figureTrait,
           c.skinTone && `Skin tone: ${c.skinTone}`,
           c.faceShape && `Face shape: ${c.faceShape}`,
           c.hairColor && c.hairstyle ? `Hair: ${c.hairColor}, ${c.hairstyle}` : c.hairColor ? `Hair: ${c.hairColor}` : c.hairstyle ? `Hair: ${c.hairstyle}` : undefined,
@@ -337,6 +347,7 @@ export function resolveVisualCanonPrompt(options: {
   ].filter(Boolean).join(" | ");
 
   if (styleHeader) promptParts.push(`STORY ART DIRECTION: ${styleHeader}`);
+  if (story.artwork.adultContent) promptParts.push(MATURE_ARTWORK_STYLING);
 
   // Layer 2: Entity Visual Canon
   if (entityCanonLines.length > 0) {

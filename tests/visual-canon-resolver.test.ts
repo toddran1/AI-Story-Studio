@@ -419,4 +419,38 @@ describe("Visual Canon Prompt Resolver", () => {
     expect(res2.sceneDirectionFingerprint).not.toBe(res1.sceneDirectionFingerprint);
     expect(res2.resolvedPromptFingerprint).not.toBe(res1.resolvedPromptFingerprint);
   });
+
+  describe("mature artwork styling and figure traits", () => {
+    const femaleProfile = (figure?: "smaller" | "normal" | "larger", gender = "female"): VisualEntityProfile => ({
+      id: "vp-figure", entityId: entityId1, visualType: "character", status: "approved", revision: 1,
+      createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), appearance: "", visualPrompt: "", notes: "", negativePrompt: "", variants: [], references: [],
+      character: { gender, build: "lean", ...(figure ? { figure } : {}) },
+    });
+    const matureStory = { ...story, artwork: { ...story.artwork, adultContent: true } };
+    const resolve = (profile: VisualEntityProfile, targetStory = story) => resolveVisualCanonPrompt({
+      scene: { ...baseScene, entityIds: [entityId1] },
+      story: targetStory,
+      bible,
+      artDirection,
+      visualProfiles: { [entityId1]: profile },
+    });
+
+    it("adds the mature styling block only when adultContent is enabled", () => {
+      expect(resolve(femaleProfile("normal")).prompt).not.toContain("MATURE CHARACTER STYLING");
+      expect(resolve(femaleProfile("normal"), matureStory).prompt).toContain("MATURE CHARACTER STYLING");
+    });
+
+    it("serializes figure traits for female characters only when adultContent is enabled", () => {
+      expect(resolve(femaleProfile("larger"), matureStory).prompt).toContain("Figure: very curvaceous with an especially full bust and hips");
+      expect(resolve(femaleProfile("normal"), matureStory).prompt).toContain("Figure: curvaceous with a full bust and hips");
+      expect(resolve(femaleProfile("smaller"), matureStory).prompt).not.toContain("Figure:");
+      expect(resolve(femaleProfile(), matureStory).prompt).not.toContain("Figure:");
+      expect(resolve(femaleProfile("larger")).prompt).not.toContain("Figure:");
+    });
+
+    it("never serializes figure traits for non-female characters", () => {
+      expect(resolve(femaleProfile("larger", "male"), matureStory).prompt).not.toContain("Figure:");
+      expect(resolve(femaleProfile("larger", ""), matureStory).prompt).not.toContain("Figure:");
+    });
+  });
 });

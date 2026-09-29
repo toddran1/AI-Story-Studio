@@ -80,6 +80,7 @@ export type VisualProfileStatus = z.infer<typeof visualProfileStatusSchema>;
 export const characterVisualDetailsSchema = z.object({
   apparentAge: z.string().trim().max(200).optional(),
   gender: z.string().trim().max(100).optional(),
+  figure: z.enum(["smaller", "normal", "larger"]).optional(),
   height: z.string().trim().max(100).optional(),
   build: z.string().trim().max(200).optional(),
   skinTone: z.string().trim().max(200).optional(),

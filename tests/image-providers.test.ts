@@ -173,6 +173,12 @@ describe("OpenAI image adapter", () => {
     expect(result.mimeType).toBe("image/png");
     expect(result.revisedPrompt).toBe("revised");
   });
+  it("requests the least restrictive moderation level on generation", async () => {
+    const captured: any = {};
+    const provider = new OpenAIImageProvider("key", 1000, okClient(captured) as any);
+    await provider.generate(request);
+    expect(captured.generate.moderation).toBe("low");
+  });
   it("routes reference images through images.edit only for the 2.5 family", async () => {
     const referenceImages = [{ data: PNG_ALT, mimeType: "image/png", role: "face_portrait" }];
     const withRefs: any = {};
@@ -220,6 +226,17 @@ describe("Gemini image adapter", () => {
     expect(parts[1].inlineData.mimeType).toBe("image/png");
     expect(Buffer.from(parts[1].inlineData.data, "base64").equals(PNG_ALT)).toBe(true);
     expect(result).toMatchObject({ mimeType: "image/png", requestId: "resp-1" });
+  });
+  it("requests BLOCK_NONE safety settings on every generation", async () => {
+    const captured: any = {};
+    const provider = new GeminiImageProvider("key", 1000, geminiClient(captured, okResponse) as any);
+    await provider.generate(request);
+    expect(captured.request.config.safetySettings).toEqual([
+      { category: "HARM_CATEGORY_HARASSMENT", threshold: "BLOCK_NONE" },
+      { category: "HARM_CATEGORY_HATE_SPEECH", threshold: "BLOCK_NONE" },
+      { category: "HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold: "BLOCK_NONE" },
+      { category: "HARM_CATEGORY_DANGEROUS_CONTENT", threshold: "BLOCK_NONE" },
+    ]);
   });
   it("maps quality intent to image size", async () => {
     for (const [quality, imageSize] of [["low", "1K"], ["high", "4K"]] as const) {

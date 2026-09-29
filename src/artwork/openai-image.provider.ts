@@ -47,6 +47,7 @@ export class OpenAIImageProvider implements ImageProvider {
         size: request.size,
         quality: request.quality,
         output_format: request.outputFormat,
+        moderation: "low",
       });
       return decode(response.data?.[0]);
     } catch (error) {

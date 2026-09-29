@@ -68,6 +68,20 @@ export function GenderSelect({ id, value, onChange }: { id?: string; value?: str
   </select>;
 }
 
+export function FigureSettings({ gender, figure, onChange }: { gender?: string; figure?: "smaller" | "normal" | "larger"; onChange: (value: "smaller" | "normal" | "larger") => void }) {
+  if (genderSelectionValue(gender) !== "female") return null;
+  return <details className="figure-settings">
+    <summary>Figure (mature styling)</summary>
+    <p className="hint-text">Only applies when the story's Mature (21+) artwork style is enabled.</p>
+    {([["smaller", "Smaller · default proportions"], ["normal", "Normal · curvy"], ["larger", "Larger · very curvy"]] as const).map(([value, label]) => (
+      <label className="proposal-field" key={value}>
+        <input type="radio" name="visual-profile-figure" checked={(figure ?? "smaller") === value} onChange={() => onChange(value)} />
+        <span>{label}</span>
+      </label>
+    ))}
+  </details>;
+}
+
 export function VisualProfileModal({
   slug,
   entityId,
@@ -578,6 +592,11 @@ export function VisualProfileModal({
                       />
                       {profile.character?.gender && !genderSelectionValue(profile.character.gender) && <small className="hint-text">Saved value “{profile.character.gender}” is kept until you choose Male or Female.</small>}
                     </div>
+                    <FigureSettings
+                      gender={profile.character?.gender}
+                      figure={profile.character?.figure}
+                      onChange={(figure) => setProfile({ ...profile, character: { ...profile.character, figure } })}
+                    />
                     <div>
                       <label>Height</label>
                       <input

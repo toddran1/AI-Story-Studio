@@ -13,7 +13,7 @@ import { NamesLocalizationPage } from "../apps/web/src/NamesLocalizationPage.js"
 import { defaultLocale, LanguageSelect } from "../apps/web/src/languages.js";
 import { SelectedArtworkProvenance } from "../apps/web/src/SummaryVisualPanels.js";
 import { PronunciationFields, PronunciationPanel } from "../apps/web/src/PronunciationPanel.js";
-import { GenderSelect, genderSelectionValue } from "../apps/web/src/VisualProfileModal.js";
+import { GenderSelect, genderSelectionValue, FigureSettings } from "../apps/web/src/VisualProfileModal.js";
 import { applyStagePreset, BatchProcessingPanel, CompletionSummary, ExecutionPreview, toggleStageSelection } from "../apps/web/src/BatchProcessingPanel.js";
 import { formatChapterSelection, parseChapterSelection } from "../src/batch/range.js";
 import type { StageExecutionBatchPlan } from "../src/studio/stage-execution.js";
@@ -39,6 +39,14 @@ describe("web UI", () => {
     expect(legacyValue).toContain("Select gender");
     expect(genderSelectionValue("androgynous")).toBe("");
     expect(female.match(/<option /g)).toHaveLength(3); // disabled placeholder + exactly two selectable choices
+  });
+  it("shows the figure radio section only for female Visual Profiles", () => {
+    const female = renderToStaticMarkup(<FigureSettings gender="female" figure="normal" onChange={() => undefined} />);
+    expect(female).toContain("Figure (mature styling)");
+    expect(female.match(/type="radio"/g)).toHaveLength(3);
+    expect(female).toContain("Normal · curvy");
+    expect(renderToStaticMarkup(<FigureSettings gender="male" figure="larger" onChange={() => undefined} />)).toBe("");
+    expect(renderToStaticMarkup(<FigureSettings gender={undefined} figure="larger" onChange={() => undefined} />)).toBe("");
   });
   it("shows chapter errors when a continuing stage batch fails", () => {
     const html = renderToStaticMarkup(<CompletionSummary result={{ summary: { completedChapters: 0, completedOperations: 0, failedChapters: 1 }, results: [{ chapter: 541, status: "failed", error: "QA did not pass" }] }} />);
@@ -606,7 +614,7 @@ describe("web UI", () => {
     expect(deleteChapterSceneDraft(weightedScenes, "scene-003", true, 40, sceneSettings).map((scene) => scene.endSeconds - scene.startSeconds)).toEqual([13.333, 26.667]);
     expect(() => deleteChapterSceneDraft(weightedScenes, "scene-003", true, 60, { ...sceneSettings, maximumDurationSeconds: 20 })).toThrow("Scene count cannot satisfy the configured duration bounds");
     const markupScenes = [scenes[0]!, { ...scenes[1]!, disabled: true }];
-    const markup = renderToStaticMarkup(<ScenesPage slug="demo-story" onJob={() => undefined} initialData={{ settings: { targetDurationSeconds: 20, minimumDurationSeconds: 10, maximumDurationSeconds: 30, maximumScenesPerChapter: 50 }, artwork: { provider: "openai", model: "fake", stylePrompt: "style", aspectRatio: "16:9", quality: "medium", size: "1536x1024", outputFormat: "png", outputResolution: "native", upscaling: "off", upscaler: "local-realesrgan" }, planner: { provider: "openai", model: "fake" }, videoSubtitleMode: "burn", selectedChapter: 1, chapters: [], counts: { chapters: 1, planned: 1, artworkReady: 1 }, manifest: { version: 1, chapter: 1, durationSeconds: 30, planningFingerprint: "x", manualRevision: 0, manuallyEdited: false, updatedAt: new Date().toISOString(), scenes: markupScenes } } as any} />);
+    const markup = renderToStaticMarkup(<ScenesPage slug="demo-story" onJob={() => undefined} initialData={{ settings: { targetDurationSeconds: 20, minimumDurationSeconds: 10, maximumDurationSeconds: 30, maximumScenesPerChapter: 50 }, artwork: { provider: "openai", model: "fake", stylePrompt: "style", aspectRatio: "16:9", quality: "medium", size: "1536x1024", outputFormat: "png", outputResolution: "native", upscaling: "off", upscaler: "local-realesrgan", adultContent: false }, planner: { provider: "openai", model: "fake" }, videoSubtitleMode: "burn", selectedChapter: 1, chapters: [], counts: { chapters: 1, planned: 1, artworkReady: 1 }, manifest: { version: 1, chapter: 1, durationSeconds: 30, planningFingerprint: "x", manualRevision: 0, manuallyEdited: false, updatedAt: new Date().toISOString(), scenes: markupScenes } } as any} />);
     expect(markup).toContain("Move up"); expect(markup).toContain("Move down"); expect(markup).toContain("Enable"); expect(markup).toContain("Delete scene"); expect(markup).toContain("Save all scene edits"); expect(markup).toContain("Produce this chapter");
     expect(markup).toMatch(/title="A chapter must keep at least one scene and at least one enabled scene\." disabled=""[^>]*>Delete scene/);
   });
@@ -2229,7 +2237,7 @@ describe("Milestone 23 — image output quality UI", () => {
         navigate={() => undefined}
         initialData={{
           settings: { targetDurationSeconds: 20, minimumDurationSeconds: 10, maximumDurationSeconds: 30, maximumScenesPerChapter: 50 },
-          artwork: { provider: "gemini", model: "gemini-3.1-flash-image", stylePrompt: "s", aspectRatio: "16:9", quality: "high", size: "1536x1024", outputFormat: "png", outputResolution: "native", upscaling: "automatic", upscaler: "local-realesrgan" },
+          artwork: { provider: "gemini", model: "gemini-3.1-flash-image", stylePrompt: "s", aspectRatio: "16:9", quality: "high", size: "1536x1024", outputFormat: "png", outputResolution: "native", upscaling: "automatic", upscaler: "local-realesrgan", adultContent: false },
           resolvedBehavior: { nativeEstimate: "2752x1536 (high)", upscaling: "off" },
           planner: { provider: "mock", model: "mock" },
           selectedChapter: 1,
@@ -2252,7 +2260,7 @@ describe("Milestone 23 — image output quality UI", () => {
         navigate={() => undefined}
         initialData={{
           settings: { targetDurationSeconds: 20, minimumDurationSeconds: 10, maximumDurationSeconds: 30, maximumScenesPerChapter: 50 },
-          artwork: { provider: "gemini", model: "gemini-3.1-flash-image", stylePrompt: "s", aspectRatio: "16:9", quality: "high", size: "1536x1024", outputFormat: "png", outputResolution: "2160p", upscaling: "automatic", upscaler: "local-realesrgan" },
+          artwork: { provider: "gemini", model: "gemini-3.1-flash-image", stylePrompt: "s", aspectRatio: "16:9", quality: "high", size: "1536x1024", outputFormat: "png", outputResolution: "2160p", upscaling: "automatic", upscaler: "local-realesrgan", adultContent: false },
           resolvedBehavior: { nativeEstimate: "2752x1536 (high)", target: { width: 3840, height: 2160 }, upscaling: "required" },
           planner: { provider: "mock", model: "mock" },
           selectedChapter: 1,

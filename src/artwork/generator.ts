@@ -17,7 +17,7 @@ import { withRetry } from "../batch/retry.js";
 import { retryConfigSchema } from "../batch/types.js";
 import { loadVisualProfiles } from "../visual-canon/profiles.js";
 import { loadStoryArtDirection, resolveActiveArtDirection } from "../visual-canon/art-direction.js";
-import { resolveVisualCanonPrompt, ResolvedSceneVisualPrompt } from "../visual-canon/resolver.js";
+import { resolveVisualCanonPrompt, ResolvedSceneVisualPrompt, MATURE_ARTWORK_STYLING } from "../visual-canon/resolver.js";
 import { renderSceneContinuity, resolveChapterVisualContinuity, VisualContinuityReferenceDecision } from "../visual-canon/continuity.js";
 import { emptyStoryBible, storyBibleSchema, StoryBible } from "../domain/story-bible.js";
 import { assertImageModelCompatible, imageNativeTiers, MAX_REFERENCE_IMAGES, MAX_REFERENCE_IMAGE_BYTES, MAX_REFERENCE_TOTAL_BYTES, providerSupportsReferenceImages } from "./providers.js";
@@ -673,6 +673,7 @@ export function artworkFingerprint(
     scene: sceneArtworkContentState(scene),
     visualReferenceFingerprints,
     style: story.artwork.stylePrompt,
+    adultContent: story.artwork.adultContent,
     aspectRatio: story.artwork.aspectRatio,
     quality: story.artwork.quality,
     size: story.artwork.size,
@@ -695,13 +696,15 @@ export function artworkPrompt(
   refs: Array<{ name: string; description: string }>,
   style: string,
   size: string,
-  aspectRatio?: ImageAspectRatio
+  aspectRatio?: ImageAspectRatio,
+  adultContent = false
 ) {
   const resolvedRatio = resolveArtworkAspectRatio({
     artwork: { aspectRatio, size },
   });
   return [
     `STORY-WIDE ART DIRECTION: ${style}`,
+    adultContent ? MATURE_ARTWORK_STYLING : "",
     `SCENE: ${scene.visualPrompt}`,
     `SUMMARY: ${scene.summary}`,
     scene.location ? `LOCATION: ${scene.location}` : "",

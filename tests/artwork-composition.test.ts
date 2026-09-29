@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { artworkCompositionGuidance, resolveArtworkAspectRatio } from "../src/artwork/composition.js";
-import { artworkFingerprint, generateStoredArtwork } from "../src/artwork/generator.js";
+import { artworkFingerprint, artworkPrompt, generateStoredArtwork } from "../src/artwork/generator.js";
 import { ImageGenerationRequest, ImageProvider } from "../src/artwork/provider.js";
 import { createDefaultArtDirection } from "../src/domain/art-direction.js";
 import { chapterSchema } from "../src/domain/chapter.js";
@@ -253,5 +253,48 @@ describe("fingerprint staleness and resolution separation", () => {
 
     expect(fp1080).toBe(fp1440);
     expect(fp1080).toBe(fp4K);
+  });
+
+  it("changes generation fingerprint when mature artwork styling is toggled", () => {
+    const baseStory = testStory();
+    const fpStandard = artworkFingerprint(scene, [], { ...baseStory, artwork: { ...baseStory.artwork, adultContent: false } }, "v1");
+    const fpMature = artworkFingerprint(scene, [], { ...baseStory, artwork: { ...baseStory.artwork, adultContent: true } }, "v1");
+    expect(fpStandard).not.toBe(fpMature);
+  });
+});
+
+describe("mature artwork styling in prompts", () => {
+  const scene = {
+    id: "scene-001",
+    summary: "Li Chen stands on the summit.",
+    startSeconds: 0,
+    endSeconds: 10,
+    characters: ["Li Chen"],
+    entityIds: [],
+    location: "Summit",
+    visualPrompt: "Swordsman atop a misty mountain summit",
+    importance: "major" as const,
+    artwork: { status: "pending" as const, review: "unreviewed" as const, versions: [] },
+  };
+
+  it("includes the mature styling block in artworkPrompt only when enabled", () => {
+    expect(artworkPrompt(scene, [], "cinematic", "1536x1024", "16:9")).not.toContain("MATURE CHARACTER STYLING");
+    expect(artworkPrompt(scene, [], "cinematic", "1536x1024", "16:9", true)).toContain("MATURE CHARACTER STYLING");
+  });
+
+  it("delivers the mature styling block through the resolved visual canon prompt", async () => {
+    const { root, story } = await fixture({ adultContent: true });
+    const provider = fakeImages("openai");
+    await generateStoredArtwork({ root, story, chapter: 1, provider, sceneId: "scene-001" });
+    expect(provider.calls).toHaveLength(1);
+    expect(provider.calls[0]!.prompt).toContain("MATURE CHARACTER STYLING");
+    expect(provider.calls[0]!.prompt).toContain("never explicit or nude");
+  });
+
+  it("omits the mature styling block by default", async () => {
+    const { root, story } = await fixture();
+    const provider = fakeImages("openai");
+    await generateStoredArtwork({ root, story, chapter: 1, provider, sceneId: "scene-001" });
+    expect(provider.calls[0]!.prompt).not.toContain("MATURE CHARACTER STYLING");
   });
 });

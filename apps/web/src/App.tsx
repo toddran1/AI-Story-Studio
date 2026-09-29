@@ -4189,6 +4189,11 @@ export function SettingsPage({ slug, onJob, initialStory, initialEffectiveRoutin
               <option value="9:16">9:16 · portrait</option>
             </select>
           </Field>
+          <label className={`narration-policy ${story.artwork.adultContent ? "active" : ""}`}>
+            <div><span>IMAGE PROMPTS</span><b>Mature (21+) artwork style</b><small>Tasteful, more seductive styling for female characters. No explicit content.</small></div>
+            <input type="checkbox" checked={story.artwork.adultContent} onChange={(event) => setStory({ ...story, artwork: { ...story.artwork, adultContent: event.target.checked } })} />
+            <i aria-hidden="true" />
+          </label>
         </section>
         <section className="settings-subsection"><h4>Output Quality</h4>
           <Field label="Final resolution">

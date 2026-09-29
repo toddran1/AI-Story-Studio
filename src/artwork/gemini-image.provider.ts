@@ -1,9 +1,16 @@
-import { GoogleGenAI } from "@google/genai";
+import { GoogleGenAI, HarmBlockThreshold, HarmCategory } from "@google/genai";
 import { ConfigurationError, ArtworkError, ProviderError } from "../pipeline/errors.js";
 import { ImageGenerationRequest, ImageGenerationResult, ImageProvider, ImageProviderCapabilities, ImageQualityIntent } from "./provider.js";
 import { geminiSupportedImageSizes, IMAGE_PROVIDER_CATALOG, MAX_REFERENCE_IMAGES } from "./providers.js";
 
 const IMAGE_SIZE_BY_QUALITY: Record<ImageQualityIntent, string> = { low: "1K", medium: "2K", high: "4K" };
+
+const SAFETY_SETTINGS = [
+  HarmCategory.HARM_CATEGORY_HARASSMENT,
+  HarmCategory.HARM_CATEGORY_HATE_SPEECH,
+  HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
+  HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
+].map((category) => ({ category, threshold: HarmBlockThreshold.BLOCK_NONE }));
 
 export class GeminiImageProvider implements ImageProvider {
   readonly name = "gemini"; readonly version = "gemini-images-v1";
@@ -36,6 +43,7 @@ export class GeminiImageProvider implements ImageProvider {
         config: {
           responseModalities: ["IMAGE"],
           imageConfig: { aspectRatio: request.aspectRatio, imageSize },
+          safetySettings: SAFETY_SETTINGS,
         },
       });
       return decodeGeminiImageResponse(response);

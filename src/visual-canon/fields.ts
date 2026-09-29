@@ -2,7 +2,9 @@ import type { CanonicalEntity } from "../domain/story-bible.js";
 import { characterVisualDetailsSchema, creatureVisualDetailsSchema, itemVisualDetailsSchema, locationVisualDetailsSchema, type VisualEntityProfile, type VisualEntityType } from "../domain/visual-profile.js";
 
 const fields = {
-  character: Object.keys(characterVisualDetailsSchema.removeDefault().shape).map((key) => `character.${key}`),
+  // character.figure is a user-controlled setting, not an AI-generated or
+  // source-evidence detail, so it is excluded from the completion field list.
+  character: Object.keys(characterVisualDetailsSchema.removeDefault().shape).map((key) => `character.${key}`).filter((key) => key !== "character.figure"),
   location: Object.keys(locationVisualDetailsSchema.removeDefault().shape).map((key) => `location.${key}`),
   creature: Object.keys(creatureVisualDetailsSchema.removeDefault().shape).map((key) => `creature.${key}`),
   item: Object.keys(itemVisualDetailsSchema.removeDefault().shape).map((key) => `item.${key}`),
@@ -13,7 +15,7 @@ export function profileSection(type: VisualEntityType): Section | undefined {
   return type in fields ? type as Section : undefined;
 }
 export function visualFieldsForType(type: VisualEntityType): readonly string[] { const section = profileSection(type); return section ? fields[section] : []; }
-export function validVisualField(type: VisualEntityType, path: string): boolean { return ["appearance", "visualPrompt", "negativePrompt"].includes(path) || visualFieldsForType(type).includes(path); }
+export function validVisualField(type: VisualEntityType, path: string): boolean { return ["appearance", "visualPrompt", "negativePrompt"].includes(path) || (path === "character.figure" && profileSection(type) === "character") || visualFieldsForType(type).includes(path); }
 export function readVisualField(profile: VisualEntityProfile, path: string): string | undefined {
   if (!validVisualField(profile.visualType, path)) return undefined;
   if (path === "appearance" || path === "visualPrompt" || path === "negativePrompt") return profile[path]?.trim() || undefined;
