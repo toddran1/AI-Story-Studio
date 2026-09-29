@@ -58,6 +58,23 @@ async function storyFixture() {
 }
 
 describe("web service layer", () => {
+  it("returns the updated profile and new reference from a visual reference upload", async () => {
+    const { root, story, paths } = await storyFixture();
+    const entityId = "ent_0123456789abcdef01234567";
+    await atomicWriteJson(paths.bible, { ...emptyStoryBible(), canonicalEntities: [canonicalEntitySchema.parse({ id: entityId, type: "character", canonicalName: "Su Ming", aliases: [], description: "", firstAppearance: 1, lastKnownAppearance: 1 })] });
+    const handler = createApiHandler(new StudioOperations(root, env));
+    const payload = JSON.stringify({ filename: "reference.png", dataBase64: Buffer.from("second-reference-image").toString("base64"), role: "general_reference" });
+    const req = Object.assign(Readable.from([payload]), { method: "POST", url: `/api/stories/${story.slug}/visual-profiles/${entityId}/references`, headers: { host: "localhost:3000", "content-type": "application/json" } });
+    const chunks: Buffer[] = []; let status = 0; const res = Object.assign(new PassThrough(), { writeHead: (code: number) => { status = code; } });
+    res.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+    const done = new Promise<void>((resolve) => res.on("finish", resolve));
+    await handler(req as unknown as IncomingMessage, res as unknown as ServerResponse); await done;
+    const result = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+    expect(status).toBe(201);
+    expect(result.profile.references).toHaveLength(1);
+    expect(result.profile.references[0]).toMatchObject({ id: result.reference.id, role: "general_reference" });
+  });
+
   it("serves controlled visual references for viewing and original-resolution download", async () => {
     const { root, story, paths } = await storyFixture();
     const entityId = "ent_0123456789abcdef01234567";

@@ -74,8 +74,11 @@ export function normalizeSceneOverridesForFingerprint(raw: SceneOverrides | unde
 export const SCENE_STATE_PRIORITY_INSTRUCTION =
   "SCENE-STATE PRIORITY: Preserve Story Bible identity and approved Visual Profile traits such as face, age, build, hair, eyes, and permanent distinguishing features. Treat profile attire, footwear, accessories, weapons, and equipment as defaults only. Current visual continuity, the current scene, scene direction, and explicit scene overrides take precedence for temporary clothing, injuries, blood, dirt, damage, equipment, pose, expression, and environmental effects. Do not infer a change from an omitted detail.";
 
+// export const MATURE_ARTWORK_STYLING =
+//   "MATURE CHARACTER STYLING: Female characters have a seductive, alluring look with curvaceous figures, full busts and shapely hips. Keep it tasteful — alluring and elegant, never explicit or nude. Depict blood, injuries, and battle violence when the scene calls for it.";
 export const MATURE_ARTWORK_STYLING =
-  "MATURE CHARACTER STYLING: Female characters have a seductive, alluring look with curvaceous figures, full busts and shapely hips. Keep it tasteful — alluring and elegant, never explicit or nude. Depict blood, injuries, and battle violence when the scene calls for it.";
+  "MATURE CHARACTER STYLING: Female characters have a seductive, alluring look with curvaceous figures, full busts and shapely hips. Keep it tasteful — alluring and elegant. Depict blood, injuries, and battle violence when the scene calls for it.";
+
 
 /** The one authoritative definition of entities visibly represented by a scene.
  * It intentionally uses scene identity fields only—not broad narration matching—

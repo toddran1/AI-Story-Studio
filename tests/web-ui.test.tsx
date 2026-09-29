@@ -45,6 +45,9 @@ describe("web UI", () => {
     expect(female).toContain("Figure (mature styling)");
     expect(female.match(/type="radio"/g)).toHaveLength(3);
     expect(female).toContain("Normal · curvy");
+    const defaultFigure = renderToStaticMarkup(<FigureSettings gender="female" onChange={() => undefined} />);
+    expect(defaultFigure).toContain('name="visual-profile-figure" checked="" value="normal"');
+    expect(defaultFigure).not.toContain('name="visual-profile-figure" checked="" value="smaller"');
     expect(renderToStaticMarkup(<FigureSettings gender="male" figure="larger" onChange={() => undefined} />)).toBe("");
     expect(renderToStaticMarkup(<FigureSettings gender={undefined} figure="larger" onChange={() => undefined} />)).toBe("");
   });

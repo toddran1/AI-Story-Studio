@@ -104,7 +104,7 @@ describe("Milestone 21: Visual Canon Backend Consistency & Asset Safety Hardenin
     const operations = new StudioOperations(tempDir, loadEnvironment({}));
     const inspection = await operations.inspectVisualProfile(slug, idTarget);
     expect(inspection.eligibleFields).toHaveLength(22);
-    const values = Object.fromEntries(inspection.eligibleFields.map((field) => [field, `Suggested ${field}`]));
+    const values = Object.fromEntries(inspection.eligibleFields.map((field) => [field, field === "character.apparentAge" ? "28" : field === "character.gender" ? "female" : `Suggested ${field}`]));
 
     const updated = await operations.applyVisualProfileProposal(slug, idTarget, {
       proposal: {
@@ -121,7 +121,7 @@ describe("Milestone 21: Visual Canon Backend Consistency & Asset Safety Hardenin
       selectedFields: inspection.eligibleFields,
     });
 
-    expect(updated.character?.apparentAge).toBe("Suggested character.apparentAge");
+    expect(updated.character?.apparentAge).toBe("28");
     expect(updated.character?.additionalAppearanceNotes).toBe("Suggested character.additionalAppearanceNotes");
     expect(updated.appearance).toBe("Suggested appearance");
     expect(updated.visualPrompt).toBe("Suggested visualPrompt");

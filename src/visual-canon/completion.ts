@@ -8,7 +8,7 @@ import { storyPaths } from "../storage/paths.js";
 import { fingerprint } from "../utils/hash.js";
 import { getVisualProfile, updateVisualProfile } from "./profiles.js";
 import { resolveEntityVisualEvidence } from "../story-bible/visual-evidence.js";
-import { readVisualField, resolveVisualEntityType, validVisualField, visualFieldsForType, writeVisualField } from "./fields.js";
+import { normalizeVisualProposalValue, readVisualField, resolveVisualEntityType, validVisualField, visualFieldsForType, writeVisualField } from "./fields.js";
 
 
 export const visualProfileProposalItemSchema = z.object({ field: z.string().trim().min(1), value: z.string().trim().min(1).max(5_000) }).strict();
@@ -121,7 +121,7 @@ export async function proposeMissingVisualDetails(root: string, slug: string, bi
     model: config.model,
     schemaName: "visual_profile_completion",
     schema: visualProfileProposalResponseSchema,
-    instructions: "Design only the requested persistent visual details for this one entity. When requested, also propose appearance (a cohesive readable appearance description), visualPrompt (an image-generation prompt consistent with the persistent traits and approved references), and negativePrompt (concise visual exclusions). Keep these consistent with the specific traits proposed in the same response. Source evidence, Story Bible facts, manual/locked fields, and approved primary references are authoritative. Never overwrite or contradict them. Do not use temporary injuries, scene action, current weather, one-off emotions, or short-lived clothing as persistent identity. Use role, relationships, culture, powers, occupation, equipment, faction, history, and entity-relevant summaries only when they support a durable visual suggestion. AI output is a proposal, not story canon. Return only the requested visual fields. Never propose character.figure — it is a user-controlled setting, not an AI-generated detail. For each proposed field, return an item in values where 'field' is exactly one of the requested field paths and 'value' is the proposed persistent visual description. Do not return unrequested fields, do not rename field paths, and do not return nested profile objects.",
+    instructions: "Design only the requested persistent visual details for this one entity. When requested, also propose appearance (a cohesive readable appearance description), visualPrompt (an image-generation prompt consistent with the persistent traits and approved references), and negativePrompt (concise visual exclusions). Keep these consistent with the specific traits proposed in the same response. Source evidence, Story Bible facts, manual/locked fields, and approved primary references are authoritative. Never overwrite or contradict them. Do not use temporary injuries, scene action, current weather, one-off emotions, or short-lived clothing as persistent identity. Use role, relationships, culture, powers, occupation, equipment, faction, history, and entity-relevant summaries only when they support a durable visual suggestion. AI output is a proposal, not story canon. Return only the requested visual fields. For character.apparentAge return only a nonnegative whole number of years as digits, without units, ranges, or descriptions. For character.gender return exactly male or female. If uncertain, omit the field. Never propose character.figure — it is a user-controlled setting, not an AI-generated detail. For each proposed field, return an item in values where 'field' is exactly one of the requested field paths and 'value' is the proposed persistent visual description. Do not return unrequested fields, do not rename field paths, and do not return nested profile objects.",
     input: JSON.stringify({ ...inspection.context, requestedFields: eligibleFields, mode: options.regenerate ? "explicit_selected_regeneration" : "fill_missing_only" }, null, 2)
   });
   const values: Record<string, string> = {};
@@ -133,7 +133,8 @@ export async function proposeMissingVisualDetails(root: string, slug: string, bi
     if (!field || !value) continue;
     if (!eligibleFields.includes(field)) continue;
     if (field in values) continue;
-    values[field] = value;
+    const normalized = normalizeVisualProposalValue(field, value);
+    if (normalized !== undefined) values[field] = normalized;
   }
   return {
     entityId,
@@ -149,6 +150,6 @@ export async function proposeMissingVisualDetails(root: string, slug: string, bi
 }
 export async function applyVisualProfileProposal(root: string, slug: string, bible: StoryBible, proposal: VisualProfileProposal, selectedFields: string[]): Promise<VisualEntityProfile> {
   const inspection = await synchronizeVisualProfileConflicts(root, slug, bible, proposal.entityId); if (proposal.contextFingerprint !== inspection.contextFingerprint) throw new Error("The visual profile changed after this proposal was generated. Generate a fresh proposal before applying it."); const next = structuredClone(inspection.profile);
-  for (const path of selectedFields) { const value = proposal.values[path]; if (!value || !proposal.eligibleFields.includes(path)) continue; const state = inspection.fields.find((item) => item.path === path); if (!state || state.canonical || state.locked || (!state.missing && !state.regenerable)) continue; if (!writeVisualField(next, path, value)) continue; next.fieldProvenance ??= {}; next.fieldProvenance[path] = { source: "ai_generated", locked: false, provider: proposal.provider, model: proposal.model, generatedAt: new Date().toISOString(), contextFingerprint: proposal.contextFingerprint }; }
+  for (const path of selectedFields) { const value = normalizeVisualProposalValue(path, proposal.values[path] ?? ""); if (!value || !proposal.eligibleFields.includes(path)) continue; const state = inspection.fields.find((item) => item.path === path); if (!state || state.canonical || state.locked || (!state.missing && !state.regenerable)) continue; if (!writeVisualField(next, path, value)) continue; next.fieldProvenance ??= {}; next.fieldProvenance[path] = { source: "ai_generated", locked: false, provider: proposal.provider, model: proposal.model, generatedAt: new Date().toISOString(), contextFingerprint: proposal.contextFingerprint }; }
   return updateVisualProfile(root, slug, proposal.entityId, next);
 }

@@ -73,12 +73,14 @@ export function FigureSettings({ gender, figure, onChange }: { gender?: string; 
   return <details className="figure-settings">
     <summary>Figure (mature styling)</summary>
     <p className="hint-text">Only applies when the story's Mature (21+) artwork style is enabled.</p>
-    {([["smaller", "Smaller · default proportions"], ["normal", "Normal · curvy"], ["larger", "Larger · very curvy"]] as const).map(([value, label]) => (
-      <label className="proposal-field" key={value}>
-        <input type="radio" name="visual-profile-figure" checked={(figure ?? "smaller") === value} onChange={() => onChange(value)} />
-        <span>{label}</span>
-      </label>
-    ))}
+    <div className="figure-options">
+      {([["smaller", "Smaller · default proportions"], ["normal", "Normal · curvy"], ["larger", "Larger · very curvy"]] as const).map(([value, label]) => (
+        <label className="proposal-field" key={value}>
+          <input type="radio" name="visual-profile-figure" value={value} checked={(figure ?? "normal") === value} onChange={() => onChange(value)} />
+          <span>{label}</span>
+        </label>
+      ))}
+    </div>
   </details>;
 }
 
@@ -244,24 +246,19 @@ export function VisualProfileModal({
       reader.readAsDataURL(file);
       const dataBase64 = await base64Promise;
 
-      const ref = await uploadVisualReference(slug, entityId, {
+      const uploaded = await uploadVisualReference(slug, entityId, {
         filename: file.name,
         dataBase64,
+        ext: file.name.split(".").pop()?.toLowerCase(),
         role: uploadRole,
       });
 
-      if (profile) {
-        const nextProfile = {
-          ...profile,
-          references: [...profile.references, ref],
-        };
-        setProfile(nextProfile);
-        onUpdated?.(nextProfile);
-      }
-      if (fileInputRef.current) fileInputRef.current.value = "";
+      setProfile(uploaded.profile);
+      onUpdated?.(uploaded.profile);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
+      if (fileInputRef.current) fileInputRef.current.value = "";
       setUploading(false);
     }
   };
@@ -568,16 +565,21 @@ export function VisualProfileModal({
                 <>
                   <div className="form-grid-2col">
                     <div>
-                      <label>Apparent Age</label>
+                      <label>Apparent Age (years)</label>
+                      {profile.character?.apparentAge && !/^\d+$/.test(profile.character.apparentAge) && <small className="hint-text">Saved age “{profile.character.apparentAge}” is kept until you enter a whole number.</small>}
                       <input
-                        type="text"
-                        value={profile.character?.apparentAge || ""}
+                        type="number"
+                        min={0}
+                        step={1}
+                        inputMode="numeric"
+                        aria-label="Apparent age"
+                        value={/^\d+$/.test(profile.character?.apparentAge ?? "") ? profile.character!.apparentAge : ""}
                         onChange={(e) =>
                           setProfile({
                             ...profile,
                             character: {
                               ...profile.character,
-                              apparentAge: e.target.value,
+                              apparentAge: /^\d*$/.test(e.target.value) ? e.target.value : profile.character?.apparentAge,
                             },
                           })
                         }
@@ -1087,7 +1089,7 @@ export function VisualProfileModal({
             {profile.status === "approved" ? "Return to draft" : "Approve Visual Profile"}
           </button>
           <button type="button" className="btn btn-secondary" onClick={onClose}>
-            Cancel
+            Close
           </button>
           <button
             type="button"

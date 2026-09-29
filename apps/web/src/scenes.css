@@ -222,7 +222,7 @@
 .visual-profile-modal .form-grid-2col { grid-template-columns: repeat(2,minmax(0,1fr)); gap: 16px; margin: 16px 0; }
 .visual-profile-modal .form-grid-2col > div { gap: 8px; min-width: 0; }
 .visual-profile-modal :is(.form-row,.form-grid-2col) label { color: #b7b4c7; font: 10px/1.5 var(--mono); letter-spacing: .04em; }
-.visual-profile-modal :is(input:not([type=checkbox]):not([type=file]),textarea,select) { width: 100%; min-width: 0; min-height: 40px; padding: 10px 12px; background: #101015; color: var(--ink); border: 1px solid var(--line-strong); border-radius: 6px; font: 13px/1.6 var(--sans, sans-serif); color-scheme: dark; }
+.visual-profile-modal :is(input:not([type=checkbox]):not([type=radio]):not([type=file]),textarea,select) { width: 100%; min-width: 0; min-height: 40px; padding: 10px 12px; background: #101015; color: var(--ink); border: 1px solid var(--line-strong); border-radius: 6px; font: 13px/1.6 var(--sans, sans-serif); color-scheme: dark; }
 .visual-profile-modal textarea { resize: vertical; min-height: 100px; }
 .visual-profile-modal input[type=checkbox] { accent-color: var(--violet); flex: 0 0 auto; width: 15px; height: 15px; margin: 2px 0 0; }
 .visual-profile-modal .hint-text { color: var(--muted); font-size: 12px; line-height: 1.6; margin: 8px 0; }
@@ -241,3 +241,11 @@
 .visual-profile-modal .reference-card { min-width: 0; }
 .visual-profile-modal :is(button,input,textarea,select,summary):focus-visible { outline: 2px solid var(--violet-soft); outline-offset: 3px; }
 @media(max-width:600px) { .visual-profile-modal .form-grid-2col { grid-template-columns: minmax(0,1fr); } .visual-profile-modal :is(.modal-header,.modal-body,.modal-tabs,.modal-footer) { padding: 16px; } .visual-profile-modal .modal-title-row h3 { font-size: 25px; } .visual-profile-modal .modal-footer .btn { flex: 1 1 auto; } }
+
+.visual-profile-modal .figure-settings { grid-column: 1 / -1; min-width: 0; }
+.visual-profile-modal .figure-settings .figure-options { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.visual-profile-modal .figure-settings .proposal-field { display: flex; align-items: center; min-width: 0; gap: 10px; padding: 10px 12px; margin: 6px 0; }
+.visual-profile-modal .figure-settings input[type=radio] { appearance: auto; width: 16px; height: 16px; min-height: 0; padding: 0; margin: 0; flex: 0 0 16px; accent-color: var(--violet); }
+.visual-profile-modal .figure-settings .proposal-field span { font: 13px/1.5 var(--sans, sans-serif); color: var(--ink); text-transform: none; letter-spacing: normal; }
+.visual-profile-modal .figure-settings .proposal-field:has(input:checked) { border-color: var(--violet); background: rgba(124, 111, 234, .1); }
+@media(max-width:600px) { .visual-profile-modal .figure-settings .figure-options { grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); } }

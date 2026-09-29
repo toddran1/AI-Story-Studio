@@ -564,8 +564,8 @@ export async function deleteVisualProfile(slug: string, entityId: string): Promi
   return del<{ ok: boolean }>(`/stories/${encodeURIComponent(slug)}/visual-profiles/${encodeURIComponent(entityId)}`);
 }
 
-export async function uploadVisualReference(slug: string, entityId: string, payload: { filename: string; dataBase64: string; role?: string; label?: string; notes?: string }): Promise<VisualReferenceImage> {
-  return post<VisualReferenceImage>(`/stories/${encodeURIComponent(slug)}/visual-profiles/${encodeURIComponent(entityId)}/references`, payload);
+export async function uploadVisualReference(slug: string, entityId: string, payload: { filename: string; dataBase64: string; ext?: string; role?: string; label?: string; notes?: string }): Promise<{ profile: VisualEntityProfile; reference: VisualReferenceImage }> {
+  return post<{ profile: VisualEntityProfile; reference: VisualReferenceImage }>(`/stories/${encodeURIComponent(slug)}/visual-profiles/${encodeURIComponent(entityId)}/references`, payload);
 }
 
 export async function generateStyleSheet(slug: string, entityId: string): Promise<{ styleSheetUrl: string; profile: VisualEntityProfile }> {

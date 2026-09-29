@@ -38,3 +38,12 @@ export function resolveVisualEntityType(entity: CanonicalEntity, existing?: Visu
   if (entity.type === "organization") return "faction";
   return "other";
 }
+
+/** Restricted AI values must match the controls, rather than descriptive prose. */
+export function normalizeVisualProposalValue(path: string, value: string): string | undefined {
+  const trimmed = value.trim();
+  if (path === "character.apparentAge") return /^\d+$/.test(trimmed) && Number.isSafeInteger(Number(trimmed)) ? String(Number(trimmed)) : undefined;
+  if (path === "character.gender") return ["male", "female"].includes(trimmed.toLowerCase()) ? trimmed.toLowerCase() : undefined;
+  if (path === "character.figure") return undefined;
+  return trimmed || undefined;
+}
