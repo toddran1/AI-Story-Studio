@@ -290,12 +290,12 @@ export function VisualProfileModal({
     }
   };
 
-  const handlePropose = async (regenerate = false) => {
+  const handlePropose = async (regenerate = false, requestedFields?: string[]) => {
     if (!profile) return;
     setProposing(true);
     setError(null);
     try {
-      const fields = regenerate ? selectedRegenerationFields : undefined;
+      const fields = requestedFields ?? (regenerate ? selectedRegenerationFields : undefined);
       const next = await proposeVisualProfile(slug, entityId, { fields, regenerate });
       setProposal(next); setProposalExpanded(true);
       setSelectedProposalFields(Object.keys(next.values));
@@ -422,8 +422,24 @@ export function VisualProfileModal({
         </div>
 
         <div className="modal-body">
+              {proposal && activeTab !== "references" && (
+                <details className="visual-proposal-panel" open={proposalExpanded} onToggle={(event) => setProposalExpanded(event.currentTarget.open)}>
+                  <summary>AI visual proposal · {selectedProposalFields.length} selected</summary>
+                  {proposal.rationale && <p className="hint-text">{proposal.rationale}</p>}
+                  {Object.entries(proposal.values).map(([field, value]) => (
+                    <label key={field} className="proposal-field"><input type="checkbox" checked={selectedProposalFields.includes(field)} onChange={(event) => setSelectedProposalFields((items) => event.target.checked ? [...items, field] : items.filter((item) => item !== field))} /><span><b>{field.replace(/^(character|location|creature|item)\./, "").replace(/([a-z])([A-Z])/g, "$1 $2")}</b><br />{value}</span></label>
+                  ))}
+                  {!Object.keys(proposal.values).length && <p className="hint-text">No safe missing details were proposed.</p>}
+                  <div className="proposal-actions"><button type="button" className="btn btn-primary" onClick={handleApplyProposal} disabled={saving || !selectedProposalFields.length}>Apply selected</button><button type="button" className="btn btn-outline" onClick={() => setProposal(null)}>Cancel</button></div>
+                </details>
+              )}
+
           {activeTab === "appearance" && (
             <div className="form-group-stack">
+              <section className="visual-completion-panel">
+                <div><strong>Generate appearance &amp; prompts</strong><p className="hint-text">Propose missing appearance, visual prompt, and negative prompt fields. Review suggestions before applying. Internal studio notes are manual.</p></div>
+                <button type="button" className="btn btn-primary" disabled={proposing || saving} onClick={() => handlePropose(false, ["appearance", "visualPrompt", "negativePrompt"])}>{proposing ? "Preparing proposal…" : "Generate appearance & prompts with AI"}</button>
+              </section>
               <div className="form-row">
                 <label>Visual Entity Type</label>
                 <select
@@ -517,17 +533,6 @@ export function VisualProfileModal({
                   <p className="hint-text">Only unlocked AI suggestions are eligible. Source-backed and manual fields stay protected.</p>
                   {completeness.fields.filter((field) => field.regenerable).map((field) => <label className="proposal-field" key={field.path}><input type="checkbox" checked={selectedRegenerationFields.includes(field.path)} onChange={(event) => setSelectedRegenerationFields((items) => event.target.checked ? [...items, field.path] : items.filter((item) => item !== field.path))} /><span>{field.path.replace(/^(character|location|creature|item)\./, "").replace(/([a-z])([A-Z])/g, "$1 $2")} <small>AI suggestion</small></span></label>)}
                   <button type="button" className="btn btn-secondary" disabled={proposing || !selectedRegenerationFields.length} onClick={() => handlePropose(true)}>{proposing ? "Preparing proposal…" : "Regenerate selected details"}</button>
-                </details>
-              )}
-              {proposal && (
-                <details className="visual-proposal-panel" open={proposalExpanded} onToggle={(event) => setProposalExpanded(event.currentTarget.open)}>
-                  <summary>AI visual proposal · {selectedProposalFields.length} selected</summary>
-                  {proposal.rationale && <p className="hint-text">{proposal.rationale}</p>}
-                  {Object.entries(proposal.values).map(([field, value]) => (
-                    <label key={field} className="proposal-field"><input type="checkbox" checked={selectedProposalFields.includes(field)} onChange={(event) => setSelectedProposalFields((items) => event.target.checked ? [...items, field] : items.filter((item) => item !== field))} /><span><b>{field.replace(/^(character|location|creature|item)\./, "").replace(/([a-z])([A-Z])/g, "$1 $2")}</b><br />{value}</span></label>
-                  ))}
-                  {!Object.keys(proposal.values).length && <p className="hint-text">No safe missing details were proposed.</p>}
-                  <div className="proposal-actions"><button type="button" className="btn btn-primary" onClick={handleApplyProposal} disabled={saving || !selectedProposalFields.length}>Apply selected</button><button type="button" className="btn btn-outline" onClick={() => setProposal(null)}>Cancel</button></div>
                 </details>
               )}
               {profile.visualType === "character" && (

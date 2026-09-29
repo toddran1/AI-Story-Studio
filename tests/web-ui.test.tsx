@@ -1208,6 +1208,22 @@ describe("web UI", () => {
       expect(mastering).toContain("Mastering audio…");
     });
 
+    it("shows summary artwork scene, item count, and completed-item progress", () => {
+      const started = renderToStaticMarkup(<JobConsole job={{ ...runningJob, type: "summary", progress: { type: "summary.artwork.started", scene: "scene-014", index: 2, total: 5 } }} onUpdate={() => undefined} onClose={() => undefined} />);
+      expect(started).toContain("Generating summary artwork");
+      expect(started).toContain("Scene 014 · Artwork 2 of 5 · in progress");
+      expect(started).toContain('aria-valuemax="5"');
+      expect(started).toContain('aria-valuenow="1"');
+      expect(started).toContain('style="width:20%"');
+
+      const completed = renderToStaticMarkup(<JobConsole job={{ ...runningJob, type: "summary", progress: { type: "summary.artwork.completed", scene: "scene-014", index: 2, total: 5 } }} onUpdate={() => undefined} onClose={() => undefined} />);
+      expect(completed).toContain("Scene 014 · Artwork 2 of 5 · complete");
+      expect(completed).toContain('aria-valuenow="2"');
+
+      const minimized = renderToStaticMarkup(<JobConsole job={{ ...runningJob, type: "summary", progress: { type: "summary.artwork.started", scene: "scene-014", index: 2, total: 5 } }} initialMinimized onUpdate={() => undefined} onClose={() => undefined} />);
+      expect(minimized).toContain("Scene 014 · Artwork 2 of 5 · in progress");
+    });
+
     it("renders compact strip when minimized with live dot, title, chapter/stage, and expand control", () => {
       const html = renderToStaticMarkup(
         <JobConsole

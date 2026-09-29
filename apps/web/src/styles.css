@@ -343,3 +343,6 @@
 }
 .settings-subsection{display:grid;gap:12px;border-top:1px solid var(--line);padding-top:12px}
 .settings-subsection h4{font:500 13px var(--serif);margin:0;color:var(--muted);letter-spacing:.04em;text-transform:uppercase}
+.job-progress-detailed{height:4px;background:#35343d;border-radius:4px;overflow:hidden}
+.job-progress-detailed span{display:block;height:100%;background:var(--violet);border-radius:inherit;transition:width .25s ease}
+.job-console .job-artwork-detail{line-height:1.5}

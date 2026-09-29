@@ -4369,6 +4369,23 @@ export function JobConsole({ job, onUpdate, onClose, navigate, initialQaComparis
   const stage = diagnostic?.stage ?? job.progress?.stage ?? job.progress?.event?.stage ?? job.progress?.type?.replace("chapter.", "");
   const chapter = diagnostic?.chapter ?? job.progress?.chapter;
   const detail = job.progress?.event?.detail ?? job.progress?.detail;
+  const summaryArtworkProgress = job.type === "summary" && typeof job.progress?.type === "string" && job.progress.type.startsWith("summary.artwork.")
+    ? job.progress as { type: string; scene?: string; index?: number; total?: number }
+    : undefined;
+  const artworkSceneNumber = summaryArtworkProgress?.scene?.match(/^scene-(\d+)$/i)?.[1];
+  const artworkSceneLabel = artworkSceneNumber
+    ? `Scene ${artworkSceneNumber}`
+    : summaryArtworkProgress?.scene;
+  const artworkCountLabel = Number.isFinite(summaryArtworkProgress?.index) && Number.isFinite(summaryArtworkProgress?.total)
+    ? `Artwork ${summaryArtworkProgress!.index} of ${summaryArtworkProgress!.total}`
+    : undefined;
+  const artworkIndex = Number.isInteger(summaryArtworkProgress?.index) ? summaryArtworkProgress!.index! : undefined;
+  const artworkTotal = Number.isInteger(summaryArtworkProgress?.total) && summaryArtworkProgress!.total! > 0 ? summaryArtworkProgress!.total : undefined;
+  const artworkCompleted = artworkIndex === undefined ? undefined : Math.max(0, artworkIndex - (summaryArtworkProgress?.type.endsWith("completed") ? 0 : 1));
+  const artworkPercent = artworkCompleted !== undefined && artworkTotal ? Math.round(artworkCompleted / artworkTotal * 100) : undefined;
+  const summaryArtworkDetail = summaryArtworkProgress
+    ? [artworkSceneLabel, artworkCountLabel, summaryArtworkProgress.type.endsWith("completed") ? "complete" : "in progress"].filter(Boolean).join(" · ")
+    : undefined;
   // QA-related failures carry the failure-time dependency fingerprint; compare
   // it against the chapter's current QA state so stale failures read as history.
   const qaRelated = Boolean(diagnostic && diagnostic.chapter && (diagnostic.category === "content_qa" || diagnostic.issues?.length));
@@ -4426,7 +4443,7 @@ export function JobConsole({ job, onUpdate, onClose, navigate, initialQaComparis
     }
   };
   const isSceneJob = job.type === "scenes" || stage === "scenePlanning" || stage === "scenes";
-  const label = ({ batch: "Processing chapters", preview: "Rendering comparison", metadataTranslation: "Translating reader metadata", qaRepair: "Repairing selected QA findings", qaRecheck: "Rechecking chapter QA", stageExecution: "Processing stage", summary: "Building story recap", audio: "Mastering chapter audio", audiobook: "Building audiobook", alignment: "Aligning narration to audio", subtitles: "Timing subtitles", video: "Rendering chapter video", videoExport: "Building combined video", scenes: "Planning chapter scenes", artwork: "Generating scene artwork", production: "Producing finished story", ttsQualityVerify: "Verifying TTS quality", ttsSegmentRegenerate: "Regenerating TTS segment" } as Record<string, string>)[job.type] ?? "Working";
+  const label = summaryArtworkProgress ? "Generating summary artwork" : ({ batch: "Processing chapters", preview: "Rendering comparison", metadataTranslation: "Translating reader metadata", qaRepair: "Repairing selected QA findings", qaRecheck: "Rechecking chapter QA", stageExecution: "Processing stage", summary: "Building story recap", audio: "Mastering chapter audio", audiobook: "Building audiobook", alignment: "Aligning narration to audio", subtitles: "Timing subtitles", video: "Rendering chapter video", videoExport: "Building combined video", scenes: "Planning chapter scenes", artwork: "Generating scene artwork", production: "Producing finished story", ttsQualityVerify: "Verifying TTS quality", ttsSegmentRegenerate: "Regenerating TTS segment" } as Record<string, string>)[job.type] ?? "Working";
   const modelBadge = [diagnostic?.provider, diagnostic?.model].filter(Boolean).join(" · ");
   const terminal = isTerminalJob(job);
   const title = terminal ? (job.status === "completed" ? `${label} — completed` : `${label} — ${job.status}`) : label;
@@ -4447,7 +4464,9 @@ export function JobConsole({ job, onUpdate, onClose, navigate, initialQaComparis
         <div className="job-minimized-info">
           {!terminal && <span className="live-dot" />}
           <b className="job-minimized-title">{label}</b>
-          {chapter != null ? (
+          {summaryArtworkDetail ? (
+            <span className="job-minimized-detail">{summaryArtworkDetail}</span>
+          ) : chapter != null ? (
             <span className="job-minimized-detail">
               Chapter {chapter}{stage ? ` · ${pretty(stage)}` : ""}
             </span>
@@ -4486,7 +4505,11 @@ export function JobConsole({ job, onUpdate, onClose, navigate, initialQaComparis
             </button>
           </div>
         </div>
-        <div className="job-progress"><i /><i /><i /><i /><i /></div>
+        {artworkPercent !== undefined && artworkIndex !== undefined && artworkTotal !== undefined && artworkCompleted !== undefined ? (
+          <div className="job-progress job-progress-detailed" role="progressbar" aria-label="Summary artwork progress" aria-valuemin={0} aria-valuemax={artworkTotal} aria-valuenow={artworkCompleted} aria-valuetext={`${artworkCompleted} of ${artworkTotal} artwork items complete; ${summaryArtworkProgress?.type.endsWith("completed") ? "scene finished" : `working on item ${artworkIndex}`}`}>
+            <span style={{ width: `${artworkPercent}%` }} />
+          </div>
+        ) : <div className="job-progress"><i /><i /><i /><i /><i /></div>}
         {diagnostic ? <div className="incident">
           <h3>{isSceneJob ? "Scene planning failed" : diagnostic.summary}</h3>
           <div className="incident-meta">
@@ -4510,7 +4533,7 @@ export function JobConsole({ job, onUpdate, onClose, navigate, initialQaComparis
             ? <details><summary>Issues reported by this attempt</summary><ul>{diagnostic.issues.slice(0, 3).map((issue, index) => <li key={`${issue.category}-${index}`}><b>{pretty(issue.category)}</b>{issue.message}</li>)}</ul></details>
             : <ul>{diagnostic.issues.slice(0, 3).map((issue, index) => <li key={`${issue.category}-${index}`}><b>{pretty(issue.category)}</b>{issue.message}</li>)}</ul>) : null}          <div className="incident-next"><small>Recommended next step</small><p>{diagnostic.recommendedAction}</p></div>
           <details><summary>Technical details</summary><p>{diagnostic.technicalDetails ?? "No additional provider details were supplied."}</p><small>{new Date(diagnostic.timestamp).toLocaleString()} · {diagnostic.id} · Job {job.id.slice(0, 8)}</small></details>
-        </div> : <p>{actionError || job.error || (chapter ? `Chapter ${chapter} · ${pretty(stage ?? "working")}${detail ? ` — ${detail}` : ""}` : pretty(job.status))}</p>}
+        </div> : <p className={summaryArtworkDetail ? "job-artwork-detail" : undefined} aria-live={summaryArtworkDetail ? "polite" : undefined}>{actionError || job.error || (summaryArtworkDetail ? summaryArtworkDetail : chapter ? `Chapter ${chapter} · ${pretty(stage ?? "working")}${detail ? ` — ${detail}` : ""}` : pretty(job.status))}</p>}
         {jobWarnings.length > 0 && <ul className="job-warnings">{jobWarnings.map((warning, index) => <li key={index}>{warning}</li>)}</ul>}
         <div className="job-actions">
           {diagnostic && <button type="button" onClick={() => void copyDiagnostic()}>{copied ? "Copied" : "Copy details"}</button>}
