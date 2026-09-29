@@ -234,6 +234,7 @@ export function VisualProfileModal({
     setUploading(true);
     setError(null);
     try {
+      if (file.size > 26 * 1024 * 1024) throw new Error("Reference image exceeds 15 MB. Choose a smaller image.");
       const reader = new FileReader();
       const base64Promise = new Promise<string>((resolve, reject) => {
         reader.onload = () => {

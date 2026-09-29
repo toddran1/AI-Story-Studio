@@ -460,8 +460,12 @@ export function createApiHandler(operations: StudioOperations) {
       if (visualProfileRefsMatch && request.method === "POST") {
         const contentType = request.headers["content-type"] ?? "";
         if (contentType.includes("application/json")) {
-          const bodyData = (await jsonBody(request)) as any;
-          const buffer = Buffer.from(bodyData.base64 ?? bodyData.dataBase64, "base64");
+          // Base64 adds roughly one third to the binary upload size.
+          const bodyData = z.object({ base64: z.string().optional(), dataBase64: z.string().optional(), ext: z.string().optional(), viewType: z.string().optional(), role: z.string().optional(), notes: z.string().optional() }).passthrough().parse(await jsonBody(request, 21 * 1024 * 1024));
+          const encoded = bodyData.base64 ?? bodyData.dataBase64;
+          if (!encoded) throw new HttpError("Reference image data is required", 400);
+          const buffer = Buffer.from(encoded, "base64");
+          if (buffer.length > 26 * 1024 * 1024) throw new HttpError("Reference image exceeds 15 MB. Choose a smaller image.", 413);
           const ext = bodyData.ext || "png";
           return send(response, 201, await operations.addVisualReferenceImage(visualProfileRefsMatch[1]!, visualProfileRefsMatch[2]!, buffer, ext, bodyData.viewType ?? bodyData.role ?? "general_reference", bodyData.notes));
         } else {
