@@ -201,8 +201,8 @@ export class SummaryVisualService {
     const resolved = resolveVisualContinuity({ scenes: continuityScenes, manualOverrides });
     return new Map(resolved.perScene.map((entry) => [entry.sceneId, { text: renderSceneContinuity(entry), decision: entry.referenceDecision, resolved: entry }]));
   }
-  private async imageInput(slug: string, id: string, scene: Scene, visualContinuity?: string, continuityDecision?: VisualContinuityReferenceDecision, summaryDirection?: StorySummary["artDirectionOverride"], chapter?: number) {
-    const context = await this.context(slug);
+  private async imageInput(slug: string, id: string, scene: Scene, visualContinuity?: string, continuityDecision?: VisualContinuityReferenceDecision, summaryDirection?: StorySummary["artDirectionOverride"], chapter?: number, loadedContext?: Awaited<ReturnType<SummaryVisualService["context"]>>) {
+    const context = loadedContext ?? await this.context(slug);
     const effectiveDirection = resolveSummarySceneArtDirection(context.artDirection, summaryDirection, scene);
     const effectiveScene = effectiveDirection.source === "disabled" ? { ...scene, direction: { ...sceneDirectionSchema.parse(scene.direction ?? {}), useStoryArtDirection: false } } : scene;
     const artDirection = effectiveDirection.preset;
@@ -289,10 +289,10 @@ export class SummaryVisualService {
   private videoFingerprint(summary: StorySummary, settings: unknown) { return fingerprint({ version: "summary-video-v1", audio: summary.audio?.outputFingerprint, scenes: summary.scenePlan?.scenes.filter((scene) => !scene.disabled).map((scene) => ({ id: scene.id, start: scene.startSeconds, end: scene.endSeconds, image: scene.artwork.imageFingerprint, review: scene.artwork.review })), settings, alignment: summary.alignment?.inputFingerprint, renderer: this.renderer.version }); }
   private async sceneArtworkFreshness(slug: string, summary: StorySummary) {
     const paths = this.paths(slug, summary.id);
-    const continuity = await this.sceneContinuity(slug, summary.id, summary.scenePlan?.scenes ?? []);
+    const [continuity, context] = await Promise.all([this.sceneContinuity(slug, summary.id, summary.scenePlan?.scenes ?? []), this.context(slug)]);
     return new Map(await Promise.all((summary.scenePlan?.scenes ?? []).map(async (scene) => {
       const visual = continuity.get(scene.id);
-      const input = await this.imageInput(slug, summary.id, scene, visual?.text, visual?.decision, summary.artDirectionOverride, Math.max(...summary.chapters));
+      const input = await this.imageInput(slug, summary.id, scene, visual?.text, visual?.decision, summary.artDirectionOverride, Math.max(...summary.chapters), context);
       const actual = await validPngFingerprint(paths.image(scene.id));
       const hasImage = Boolean(actual && scene.artwork.imageFingerprint === actual);
       const current = hasImage && scene.artwork.status === "complete" && scene.artwork.fingerprint === input.inputFingerprint && !["rejected", "needs-regeneration"].includes(scene.artwork.review);
@@ -435,13 +435,16 @@ export class SummaryVisualService {
   }
   async artwork(slug: string, id: string, raw: unknown = {}, progress?: SummaryVisualProgress, paused?: () => boolean, upscalerOverride?: ImageUpscaler) {
     const options = summaryVisualInputSchema.parse(raw);
-    let summary = await this.get(slug, id);
+    // Candidate planning below verifies the exact inputs and artwork files; avoid
+    // doing a second full visual freshness pass before that same work.
+    let summary = await this.media.get(slug, id);
     // Availability, not freshness: a valid-but-stale scene plan is consumable for artwork.
     if (!summary.scenePlan || !summaryScenePlanAvailable(summary)) throw new Error("Generate scenes before artwork production");
     const selected = summary.scenePlan.scenes.filter((scene) => !scene.disabled && (!options.scenes || options.scenes.includes(scene.id)));
     if (options.scenes?.some((sceneId) => !selected.some((scene) => scene.id === sceneId))) throw new Error("Selected scene was not found or is disabled");
 
-    const { story } = await this.context(slug);
+    const context = await this.context(slug);
+    const { story } = context;
     const paths = this.paths(slug, id);
     const continuity = await this.sceneContinuity(slug, id, summary.scenePlan.scenes);
     const upscaler = needsProductionDerivative(story) ? resolveUpscaler(upscalerOverride ?? this.upscaler) : undefined;
@@ -459,7 +462,7 @@ export class SummaryVisualService {
     const planItems: PlanItem[] = [];
 
     for (const scene of selected) {
-      const visual = continuity.get(scene.id); const input = await this.imageInput(slug, id, scene, visual?.text, visual?.decision, summary.artDirectionOverride, Math.max(...summary.chapters));
+      const visual = continuity.get(scene.id); const input = await this.imageInput(slug, id, scene, visual?.text, visual?.decision, summary.artDirectionOverride, Math.max(...summary.chapters), context);
       const backing = backingArtworkVersion(scene);
       let intactOriginal = false;
       if (backing) {
@@ -502,6 +505,7 @@ export class SummaryVisualService {
     const preflight = await inspectArtworkVisualPreflightForScenes({
       root: this.root,
       slug,
+      context,
       candidates: planItems.filter((item) => item.needsGeneration).map((item) => ({ id: item.scene.id, scene: item.scene })),
       allowUnprofiledEntityIds: options.allowUnprofiledEntityIds,
     });

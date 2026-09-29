@@ -13,6 +13,7 @@ import { NamesLocalizationPage } from "../apps/web/src/NamesLocalizationPage.js"
 import { defaultLocale, LanguageSelect } from "../apps/web/src/languages.js";
 import { SelectedArtworkProvenance } from "../apps/web/src/SummaryVisualPanels.js";
 import { PronunciationFields, PronunciationPanel } from "../apps/web/src/PronunciationPanel.js";
+import { GenderSelect, genderSelectionValue } from "../apps/web/src/VisualProfileModal.js";
 import { applyStagePreset, BatchProcessingPanel, CompletionSummary, ExecutionPreview, toggleStageSelection } from "../apps/web/src/BatchProcessingPanel.js";
 import { formatChapterSelection, parseChapterSelection } from "../src/batch/range.js";
 import type { StageExecutionBatchPlan } from "../src/studio/stage-execution.js";
@@ -25,6 +26,19 @@ describe("web UI", () => {
     expect(html).toContain("No music provider call is made");
     expect(html).toContain("Generation may incur provider charges");
     expect(html).not.toContain("AI analyzed");
+  });
+  it("offers only Male and Female as selectable Visual Profile gender values", () => {
+    const female = renderToStaticMarkup(<GenderSelect id="visual-profile-gender" value="Female" onChange={() => undefined} />);
+    expect(female).toContain('id="visual-profile-gender"');
+    expect(female).toContain('<option value="male">Male</option>');
+    expect(female).toContain('<option value="female" selected="">Female</option>');
+    expect(genderSelectionValue("Man")).toBe("male");
+    expect(genderSelectionValue("Woman")).toBe("female");
+
+    const legacyValue = renderToStaticMarkup(<GenderSelect value="androgynous" onChange={() => undefined} />);
+    expect(legacyValue).toContain("Select gender");
+    expect(genderSelectionValue("androgynous")).toBe("");
+    expect(female.match(/<option /g)).toHaveLength(3); // disabled placeholder + exactly two selectable choices
   });
   it("shows chapter errors when a continuing stage batch fails", () => {
     const html = renderToStaticMarkup(<CompletionSummary result={{ summary: { completedChapters: 0, completedOperations: 0, failedChapters: 1 }, results: [{ chapter: 541, status: "failed", error: "QA did not pass" }] }} />);

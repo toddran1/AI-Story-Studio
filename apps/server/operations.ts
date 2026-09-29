@@ -76,7 +76,7 @@ import {
   commitVisualCanonDemote,
   rollbackPreparedVisualCanonDemote,
 } from "../../src/visual-canon/profiles.js";
-import { applyVisualProfileProposal, proposeMissingVisualDetails, resolveVisualProfileConflict, synchronizeVisualProfileConflicts, visualProfileProposalSchema } from "../../src/visual-canon/completion.js";
+import { applyVisualProfileProposal, MAX_VISUAL_PROFILE_FIELD_COUNT, proposeMissingVisualDetails, resolveVisualProfileConflict, synchronizeVisualProfileConflicts, visualProfileProposalSchema } from "../../src/visual-canon/completion.js";
 import { loadStoryArtDirection, saveStoryArtDirection, createPreset, updatePreset, deletePreset, duplicatePreset, setDefaultPreset } from "../../src/visual-canon/art-direction.js";
 import { visualProfileSchema } from "../../src/domain/visual-profile.js";
 import { storyArtDirectionSchema, artDirectionPresetEditSchema, createArtDirectionPresetSchema } from "../../src/domain/art-direction.js";
@@ -2007,7 +2007,7 @@ export class StudioOperations {
   async proposeVisualProfile(slug: string, entityId: string, input: unknown) {
     slugSchema.parse(slug);
     canonicalEntitySchema.shape.id.parse(entityId);
-    const parsed = z.object({ fields: z.array(z.string().min(1)).max(20).optional(), regenerate: z.boolean().optional() }).strict().parse(input ?? {});
+    const parsed = z.object({ fields: z.array(z.string().min(1)).max(MAX_VISUAL_PROFILE_FIELD_COUNT).optional(), regenerate: z.boolean().optional() }).strict().parse(input ?? {});
     return withStoryLock(this.root, slug, "propose visual profile details", async () => {
       const story = await loadStory(storyPaths(this.root, slug, 1).storyConfig);
       return withUsageScope({ story: slug, stage: "visual-profile" }, async () => proposeMissingVisualDetails(this.root, slug, await getStoryBible(this.root, slug), entityId, this.llm.forStage(story.pipeline.storyBible), story.pipeline.storyBible, parsed));
@@ -2017,7 +2017,7 @@ export class StudioOperations {
   async applyVisualProfileProposal(slug: string, entityId: string, input: unknown) {
     slugSchema.parse(slug);
     canonicalEntitySchema.shape.id.parse(entityId);
-    const parsed = z.object({ proposal: visualProfileProposalSchema.extend({ entityId: z.string(), visualType: visualProfileSchema.shape.visualType, eligibleFields: z.array(z.string()), protectedFields: z.array(z.string()), contextFingerprint: z.string(), provider: z.string(), model: z.string() }), selectedFields: z.array(z.string()).max(20) }).strict().parse(input);
+    const parsed = z.object({ proposal: visualProfileProposalSchema.extend({ entityId: z.string(), visualType: visualProfileSchema.shape.visualType, eligibleFields: z.array(z.string()), protectedFields: z.array(z.string()), contextFingerprint: z.string(), provider: z.string(), model: z.string() }), selectedFields: z.array(z.string()).max(MAX_VISUAL_PROFILE_FIELD_COUNT) }).strict().parse(input);
     if (parsed.proposal.entityId !== entityId) throw new Error("Visual profile proposal belongs to a different entity");
     return withStoryLock(this.root, slug, "apply visual profile proposal", async () => {
       const result = await applyVisualProfileProposal(this.root, slug, await getStoryBible(this.root, slug), parsed.proposal, parsed.selectedFields);

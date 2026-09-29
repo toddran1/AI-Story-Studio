@@ -26,6 +26,11 @@ function blankProfile(entity: CanonicalEntity): VisualEntityProfile {
   return visualProfileSchema.parse({ id: `vprof_draft_${entity.id}`, entityId: entity.id, visualType, status: "draft", appearance: "", visualPrompt: "", negativePrompt: "", notes: "", variants: [], references: [], fieldProvenance: {}, conflicts: [], revision: 0, createdAt: now, updatedAt: now });
 }
 const fieldValue = readVisualField;
+/** The largest supported selection is all character details plus the three
+ * shared appearance/prompt fields. Keep API selection bounds in sync with it. */
+export const MAX_VISUAL_PROFILE_FIELD_COUNT = Math.max(
+  ...(["character", "location", "creature", "item"] as const).map((type) => visualFieldsForType(type).length + 3),
+);
 const colour = "white|black|silver|gold(?:en)?|blue|green|red|brown|violet|purple|gray|grey|amber|hazel|emerald|crimson";
 const visualMatchers: Array<[string, RegExp]> = [
   ["character.apparentAge", /\b(?:appears?|looks?)\s+(?:to be\s+)?([^.,;]{1,80}\b(?:years? old|young|middle-aged|elderly|child|teen(?:ager)?))\b/i], ["character.gender", /\b(?:gender|sex|presentation)\s*[:=-]\s*([^.,;]{1,80})/i], ["character.height", /\b((?:very |quite )?(?:tall|short|average[- ]height)|\d(?:\.\d+)?\s*(?:feet|foot|ft|cm|centimeters?))\b/i], ["character.build", /\b((?:slender|lean|muscular|athletic|stocky|broad[- ]shouldered|lithe|frail|burly|well-built)[^.,;]{0,90})\b/i],

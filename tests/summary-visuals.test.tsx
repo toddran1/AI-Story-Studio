@@ -24,6 +24,7 @@ import { runCommand } from "../src/audio/ffmpeg.js";
 import { JobManager } from "../apps/server/job-manager.js";
 import { StudioOperations } from "../apps/server/operations.js";
 import { loadEnvironment } from "../src/config/env.js";
+import * as visualProfileStorage from "../src/visual-canon/profiles.js";
 import { saveVisualProfiles } from "../src/visual-canon/profiles.js";
 import { loadStoryBibleWithCanonicalOverlay } from "../src/story-bible/canonical.js";
 import { createDefaultArtDirection } from "../src/domain/art-direction.js";
@@ -246,7 +247,10 @@ describe("summary visual production", () => {
   it("preflights missing and draft profiles against only scenes that need generation before calling the image provider", async () => {
     const planned = await produce(); const entityId = planned.scenePlan!.scenes[0]!.entityIds![0]!; images.generate.mockClear();
     await saveVisualProfiles(root, "demo-story", {});
+    const profileReads = vi.spyOn(visualProfileStorage, "loadVisualProfiles");
     const reusableOnly = await visuals.artwork("demo-story", id, { missingOnly: true, dryRun: true });
+    expect(profileReads).toHaveBeenCalledTimes(1);
+    profileReads.mockRestore();
     expect(reusableOnly).toMatchObject({ imagesToGenerate: 0, sceneIds: [], preflight: { ready: true, requiresDecision: [] } });
     const missing = await visuals.artwork("demo-story", id, { force: true, dryRun: true });
     expect(missing).toMatchObject({ dryRun: true, imagesToGenerate: 2, preflight: { ready: false, requiresDecision: [{ entityId, state: "missing_profile" }] } });

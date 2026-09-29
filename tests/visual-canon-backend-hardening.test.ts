@@ -100,6 +100,34 @@ describe("Milestone 21: Visual Canon Backend Consistency & Asset Safety Hardenin
     expect((await getStoryBible(tempDir, slug)).canonicalEntities.find((item) => item.id === idTarget)?.type).toBe("location");
   });
 
+  it("applies a complete character Visual Profile proposal with all 22 supported fields", async () => {
+    const operations = new StudioOperations(tempDir, loadEnvironment({}));
+    const inspection = await operations.inspectVisualProfile(slug, idTarget);
+    expect(inspection.eligibleFields).toHaveLength(22);
+    const values = Object.fromEntries(inspection.eligibleFields.map((field) => [field, `Suggested ${field}`]));
+
+    const updated = await operations.applyVisualProfileProposal(slug, idTarget, {
+      proposal: {
+        entityId: idTarget,
+        visualType: inspection.profile.visualType,
+        values,
+        rationale: "Test proposal",
+        eligibleFields: inspection.eligibleFields,
+        protectedFields: inspection.protectedFields,
+        contextFingerprint: inspection.contextFingerprint,
+        provider: "fake",
+        model: "deterministic-test",
+      },
+      selectedFields: inspection.eligibleFields,
+    });
+
+    expect(updated.character?.apparentAge).toBe("Suggested character.apparentAge");
+    expect(updated.character?.additionalAppearanceNotes).toBe("Suggested character.additionalAppearanceNotes");
+    expect(updated.appearance).toBe("Suggested appearance");
+    expect(updated.visualPrompt).toBe("Suggested visualPrompt");
+    expect(updated.negativePrompt).toBe("Suggested negativePrompt");
+  });
+
   it("suppresses and restores a canonical identity through the shared operations layer", async () => {
     const operations = new StudioOperations(tempDir, loadEnvironment({}));
     await updateVisualProfile(tempDir, slug, idSource, { appearance: "Historical design", status: "approved" });

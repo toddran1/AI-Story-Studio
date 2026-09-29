@@ -36,8 +36,9 @@ export async function inspectArtworkVisualPreflightForScenes(options: {
   slug: string;
   candidates: readonly { id: string; scene: Scene }[];
   allowUnprofiledEntityIds?: readonly string[];
+  context?: { bible: Awaited<ReturnType<typeof loadStoryBibleWithCanonicalOverlay>>; visualProfiles: Awaited<ReturnType<typeof loadVisualProfiles>> };
 }): Promise<ArtworkVisualPreflight> {
-  const [bible, profiles] = await Promise.all([
+  const [bible, profiles] = options.context ? [options.context.bible, options.context.visualProfiles] : await Promise.all([
     loadStoryBibleWithCanonicalOverlay(options.root, options.slug),
     loadVisualProfiles(options.root, options.slug),
   ]);

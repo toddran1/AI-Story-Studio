@@ -53,6 +53,21 @@ const VISUAL_ENTITY_TYPES: { value: VisualEntityType; label: string }[] = [
   { value: "other", label: "Other" },
 ];
 
+export function genderSelectionValue(value?: string): "male" | "female" | "" {
+  const normalized = value?.trim().toLowerCase();
+  if (normalized === "male" || normalized === "man") return "male";
+  if (normalized === "female" || normalized === "woman") return "female";
+  return "";
+}
+
+export function GenderSelect({ id, value, onChange }: { id?: string; value?: string; onChange: (value: "male" | "female") => void }) {
+  return <select id={id} aria-label="Gender" value={genderSelectionValue(value)} onChange={(event) => onChange(event.target.value as "male" | "female")}>
+    <option value="" disabled hidden>Select gender</option>
+    <option value="male">Male</option>
+    <option value="female">Female</option>
+  </select>;
+}
+
 export function VisualProfileModal({
   slug,
   entityId,
@@ -555,20 +570,13 @@ export function VisualProfileModal({
                       />
                     </div>
                     <div>
-                      <label>Gender / Presentation</label>
-                      <input
-                        type="text"
+                      <label htmlFor="visual-profile-gender">Gender</label>
+                      <GenderSelect
+                        id="visual-profile-gender"
                         value={profile.character?.gender || ""}
-                        onChange={(e) =>
-                          setProfile({
-                            ...profile,
-                            character: {
-                              ...profile.character,
-                              gender: e.target.value,
-                            },
-                          })
-                        }
+                        onChange={(gender) => setProfile({ ...profile, character: { ...profile.character, gender } })}
                       />
+                      {profile.character?.gender && !genderSelectionValue(profile.character.gender) && <small className="hint-text">Saved value “{profile.character.gender}” is kept until you choose Male or Female.</small>}
                     </div>
                     <div>
                       <label>Height</label>
