@@ -8,7 +8,13 @@ describe("configuration", () => {
   it("loads valid values and defaults", () => {
     const env = loadEnvironment({ OPENAI_API_KEY: "test", GEMINI_API_KEY: "test", FISH_AUDIO_API_KEY: "test" });
     expect(env.FISH_AUDIO_MODEL).toBe("s2.1-pro");
+    expect(env.PROVIDER_TIMEOUT_MS).toBe(120_000);
+    expect(env.IMAGE_PROVIDER_TIMEOUT_MS).toBe(300_000);
     expect(env.FISH_AUDIO_MP3_BITRATE).toBe(128);
+  });
+
+  it("allows a separate image generation deadline", () => {
+    expect(loadEnvironment({ IMAGE_PROVIDER_TIMEOUT_MS: "450000" }).IMAGE_PROVIDER_TIMEOUT_MS).toBe(450_000);
   });
 
   it("uses an explicit FISH_AUDIO_MODEL for new stories", () => {

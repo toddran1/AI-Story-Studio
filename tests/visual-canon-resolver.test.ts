@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import { resolveVisualCanonPrompt } from "../src/visual-canon/resolver.js";
+import { resolveVisualCanonPrompt, resolveVisuallyRelevantCanonicalEntities } from "../src/visual-canon/resolver.js";
 import { createDefaultArtDirection } from "../src/domain/art-direction.js";
 import { StoryBible, emptyStoryBible } from "../src/domain/story-bible.js";
 import { Scene } from "../src/scenes/types.js";
@@ -13,6 +13,12 @@ describe("Visual Canon Prompt Resolver", () => {
 
   let bible: StoryBible;
   const artDirection = createDefaultArtDirection("cinematic manhwa digital art").presets[0];
+
+  it("resolves retained scene IDs through merged canonical identities", () => {
+    const target = { id: entityId1, canonicalName: "Ye Lingfei", type: "character", mergedFromIds: [entityId2] } as StoryBible["canonicalEntities"][number];
+    const scene = { id: "scene-001", entityIds: [entityId2], characters: [] } as unknown as Scene;
+    expect(resolveVisuallyRelevantCanonicalEntities(scene, { ...emptyStoryBible(), canonicalEntities: [target] }).map((entity) => entity.id)).toEqual([entityId1]);
+  });
 
   beforeEach(() => {
     bible = {

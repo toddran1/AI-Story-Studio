@@ -24,6 +24,7 @@ const envSchema = z.object({
   FISH_AUDIO_NORMALIZE: z.stringbool().default(true),
   FISH_AUDIO_MAX_CHARS: z.coerce.number().int().min(500).max(20_000).default(1750),
   PROVIDER_TIMEOUT_MS: z.coerce.number().int().min(1000).max(900_000).default(120_000),
+  IMAGE_PROVIDER_TIMEOUT_MS: z.coerce.number().int().min(1000).max(900_000).default(300_000),
   MEDIA_PROCESS_TIMEOUT_MS: z.coerce.number().int().min(1000).max(86_400_000).default(1_800_000),
   ALIGNMENT_ENGINE: z.enum(["whisper-cpp", "disabled"]).default("whisper-cpp"),
   ALIGNMENT_EXECUTABLE: z.string().trim().min(1).default("whisper-cli"),

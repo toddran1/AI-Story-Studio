@@ -37,8 +37,8 @@ export function createPipelineRuntime(env: Environment, usage?: UsageSink) {
   const censor = new FfmpegCensorAudioService();
   const trackImage = (provider: ImageProvider) => usage ? new TrackedImageProvider(provider, usage) : provider;
   const images = new ImageProviderRouter(new Map<string, ImageProvider>([
-    ["openai", trackImage(new OpenAIImageProvider(env.OPENAI_API_KEY, env.PROVIDER_TIMEOUT_MS))],
-    ["gemini", trackImage(new GeminiImageProvider(env.GEMINI_API_KEY, env.PROVIDER_TIMEOUT_MS))],
+    ["openai", trackImage(new OpenAIImageProvider(env.OPENAI_API_KEY, env.IMAGE_PROVIDER_TIMEOUT_MS))],
+    ["gemini", trackImage(new GeminiImageProvider(env.GEMINI_API_KEY, env.IMAGE_PROVIDER_TIMEOUT_MS))],
   ]));
   const align = alignmentConfig(env, resolveStudioRoot(env));
   const transcriber = align.engine === "disabled" ? undefined : new WhisperCppSpeechTranscriber(align.executable, align.model, align.timeoutMs, undefined, align.device);

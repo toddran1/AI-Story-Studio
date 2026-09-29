@@ -283,7 +283,10 @@ export function VisualProfileModal({
       setProfile(res.profile);
       onUpdated?.(res.profile);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      const message = err instanceof Error ? err.message : String(err);
+      setError(/timed? out|timeout/i.test(message)
+        ? "Style sheet generation timed out. No reference was added. Your Visual Profile is saved; try Create Style Sheet again."
+        : message);
     } finally {
       setGeneratingSheet(false);
     }

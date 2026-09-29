@@ -86,7 +86,7 @@ export const MATURE_ARTWORK_STYLING =
 export function resolveVisuallyRelevantCanonicalEntities(scene: Scene, bible: StoryBible): CanonicalEntity[] {
   const matchedEntities = new Map<string, CanonicalEntity>();
   for (const id of scene.entityIds ?? []) {
-    const found = bible.canonicalEntities.find((entity) => entity.id === id);
+    const found = bible.canonicalEntities.find((entity) => entity.id === id || entity.mergedFromIds?.includes(id));
     // An attached ID is explicit visual evidence only for things an image can
     // depict directly. Context-only concepts, abilities, and organizations do
     // not become on-screen just because planning linked them to the scene.

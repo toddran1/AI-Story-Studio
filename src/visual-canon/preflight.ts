@@ -13,6 +13,7 @@ export type ArtworkVisualProfileState = "approved_profile" | "draft_profile" | "
 export type ArtworkVisualPreflightEntity = {
   entityId: string;
   name: string;
+  originalName?: string;
   type: string;
   state: ArtworkVisualProfileState;
   affectedSceneIds: string[];
@@ -58,7 +59,7 @@ export async function inspectArtworkVisualPreflightForScenes(options: {
             : "missing_profile";
       const previous = byEntity.get(entity.id);
       if (previous) previous.affectedSceneIds.push(id);
-      else byEntity.set(entity.id, { entityId: entity.id, name: entity.canonicalName, type: entity.type, state, affectedSceneIds: [id], profileId: profile?.id, profileRevision: profile?.revision, policy });
+      else byEntity.set(entity.id, { entityId: entity.id, name: entity.canonicalName, originalName: entity.originalName, type: entity.type, state, affectedSceneIds: [id], profileId: profile?.id, profileRevision: profile?.revision, policy });
     }
   }
   const entities = [...byEntity.values()];
