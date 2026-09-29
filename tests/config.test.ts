@@ -17,6 +17,13 @@ describe("configuration", () => {
     expect(defaultStory("new-story", env).pipeline.tts).toMatchObject({ model: "s2.1-pro-free", voiceMode: "same-voice-dialogue", deliveryIntensity: "restrained", qualityMode: "off", qualityGuard: false, maxCharsPerRequest: 1750 });
   });
 
+  it("enables mature artwork by default while preserving explicit per-story overrides", () => {
+    const story = defaultStory("new-story", loadEnvironment({}));
+    expect(story.artwork.adultContent).toBe(true);
+    expect(storySchema.parse({ ...story, artwork: { ...story.artwork, adultContent: undefined } }).artwork.adultContent).toBe(true);
+    expect(storySchema.parse({ ...story, artwork: { ...story.artwork, adultContent: false } }).artwork.adultContent).toBe(false);
+  });
+
   it("defaults legacy stories without explicit qualityMode to off regardless of qualityGuard", () => {
     const story = defaultStory("legacy-story", loadEnvironment({}));
     // Case A: qualityMode unset, qualityGuard: true -> "off"
