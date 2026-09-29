@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { put } from "./api.js";
 import { VisualProfileModal } from "./VisualProfileModal.js";
 
@@ -12,11 +12,24 @@ export function VisualProfileCheckDialog(props: {
   onOneTimeEntityIds: (ids: string[] | ((current: string[]) => string[])) => void;
   onCancel: () => void;
   onContinue: () => void;
-  onRefresh: () => void;
+  onRefresh: () => Promise<void>;
   onError: (error: unknown) => void;
 }) {
   const [activeProfile, setActiveProfile] = useState<VisualPreflightEntity>();
   const [savingPolicy, setSavingPolicy] = useState<string>();
+  const [refreshing, setRefreshing] = useState(false);
+  useEffect(() => {
+    if (activeProfile) return;
+    let active = true;
+    const refresh = () => {
+      if (document.visibilityState !== "visible") return;
+      setRefreshing(true);
+      void props.onRefresh().finally(() => { if (active) setRefreshing(false); });
+    };
+    window.addEventListener("focus", refresh);
+    document.addEventListener("visibilitychange", refresh);
+    return () => { active = false; window.removeEventListener("focus", refresh); document.removeEventListener("visibilitychange", refresh); };
+  }, [activeProfile, props.onRefresh]);
   const toggleOneTime = (id: string) => props.onOneTimeEntityIds((current) => current.includes(id) ? current.filter((item) => item !== id) : [...current, id]);
   const persistSkip = async (id: string) => {
     try { setSavingPolicy(id); await put(`/stories/${props.slug}/visual-profiles/${id}/policy`, { mode: "skip" }); props.onRefresh(); }
@@ -34,9 +47,9 @@ export function VisualProfileCheckDialog(props: {
             return <article key={entity.entityId} className="visual-preflight-entity"><div><span className="visual-preflight-type">{entity.type}</span><h4>{entity.name}</h4><small>{entity.state === "draft_profile" ? "Draft Visual Profile" : "No Visual Profile"} · {entity.affectedSceneIds.length} candidate scene{entity.affectedSceneIds.length === 1 ? "" : "s"}</small></div><div className="visual-preflight-actions"><button type="button" className="button" onClick={() => setActiveProfile(entity)}>{entity.state === "draft_profile" ? "Review / approve profile" : "Create Visual Profile"}</button><button type="button" className={oneTime ? "button active" : "button"} onClick={() => toggleOneTime(entity.entityId)}>{oneTime ? "Will use fallback" : "Generate without profile"}</button><button type="button" className="button subtle-warning" disabled={savingPolicy === entity.entityId} onClick={() => void persistSkip(entity.entityId)}>{savingPolicy === entity.entityId ? "Saving…" : "Always use fallback"}</button></div></article>;
           })}
         </div> : <p className="visual-preflight-ready">Every candidate scene has an approved profile or a saved fallback policy. Continue when you are ready to generate.</p>}
-        <footer><small>“Generate without profile” applies only to this request. “Always use fallback” can be reset in the entity’s Visual Profile. Profile edits return here; generation will not start automatically.</small><button type="button" className="button primary" disabled={props.report.requiresDecision.some((entity) => !props.oneTimeEntityIds.includes(entity.entityId))} onClick={props.onContinue}>Continue generation</button></footer>
+        <footer><small>“Generate without profile” applies only to this request. “Always use fallback” can be reset in the entity’s Visual Profile. Profile edits return here; generation will not start automatically.</small><button type="button" className="button primary" disabled={refreshing || props.report.requiresDecision.some((entity) => !props.oneTimeEntityIds.includes(entity.entityId))} onClick={props.onContinue}>Continue generation</button></footer>
       </section>
     </div>}
-    {activeProfile && <VisualProfileModal slug={props.slug} entityId={activeProfile.entityId} entityName={activeProfile.name} onClose={() => { setActiveProfile(undefined); props.onRefresh(); }} onUpdated={props.onRefresh} />}
+    {activeProfile && <VisualProfileModal slug={props.slug} entityId={activeProfile.entityId} entityName={activeProfile.name} onClose={() => { setActiveProfile(undefined); void props.onRefresh(); }} onUpdated={props.onRefresh} />}
   </>;
 }

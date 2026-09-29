@@ -92,6 +92,7 @@ export function VisualProfileModal({
   onUpdated,
 }: VisualProfileModalProps) {
   const [profile, setProfile] = useState<VisualEntityProfile | null>(null);
+  const loadedProfile = useRef<VisualEntityProfile | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [generatingSheet, setGeneratingSheet] = useState(false);
@@ -120,6 +121,7 @@ export function VisualProfileModal({
     getVisualProfile(slug, entityId)
       .then((res) => {
         if (active) {
+          loadedProfile.current = res;
           setProfile(res);
           inspectVisualProfile(slug, entityId).then(setCompleteness).catch(() => undefined);
           setLoading(false);
@@ -176,6 +178,14 @@ export function VisualProfileModal({
     return () => window.removeEventListener("keydown", onKeyDown, true);
   }, [viewingReference]);
 
+  const reloadSavedProfile = async () => {
+    if (profile && loadedProfile.current && JSON.stringify(profile) !== JSON.stringify(loadedProfile.current) && !window.confirm("Discard unsaved Visual Profile changes and load the latest saved version?")) return;
+    setLoading(true); setError(null);
+    try { const latest = await getVisualProfile(slug, entityId); loadedProfile.current = latest; setProfile(latest); setCompleteness(await inspectVisualProfile(slug, entityId)); }
+    catch (err) { setError(err instanceof Error ? err.message : String(err)); }
+    finally { setLoading(false); }
+  };
+
   const handleSave = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
     if (!profile) return;
@@ -183,6 +193,7 @@ export function VisualProfileModal({
     setError(null);
     try {
       const updated = await updateVisualProfile(slug, entityId, profile);
+      loadedProfile.current = updated;
       setProfile(updated);
       onUpdated?.(updated);
       await inspectVisualProfile(slug, entityId).then(setCompleteness);
@@ -421,7 +432,7 @@ export function VisualProfileModal({
             {Boolean(Object.keys(completeness?.context?.storyBibleVisualEvidence?.values ?? {}).length) && <small>Story Bible visual evidence available</small>}
             {Boolean(Object.keys(completeness?.context?.storyBibleVisualEvidence?.conflicts ?? {}).length) && <small>Story Bible visual facts conflict; review source chapters</small>}
           </div>
-          <button className="btn-close" aria-label="Close Visual Profile" onClick={onClose}>✕</button>
+          <div className="visual-profile-header-actions"><button type="button" className="btn btn-outline" onClick={() => void reloadSavedProfile()}>Reload saved profile</button><button className="btn-close" aria-label="Close Visual Profile" onClick={onClose}>✕</button></div>
         </div>
 
         {error && <div className="error-banner">{error}</div>}

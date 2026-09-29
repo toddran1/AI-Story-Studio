@@ -249,3 +249,6 @@
 .visual-profile-modal .figure-settings .proposal-field span { font: 13px/1.5 var(--sans, sans-serif); color: var(--ink); text-transform: none; letter-spacing: normal; }
 .visual-profile-modal .figure-settings .proposal-field:has(input:checked) { border-color: var(--violet); background: rgba(124, 111, 234, .1); }
 @media(max-width:600px) { .visual-profile-modal .figure-settings .figure-options { grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); } }
+
+.visual-profile-modal .visual-profile-header-actions { display: flex; align-items: center; gap: 8px; }
+.visual-profile-modal .visual-profile-header-actions .btn { white-space: nowrap; }
