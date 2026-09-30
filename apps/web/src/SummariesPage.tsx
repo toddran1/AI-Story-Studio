@@ -115,8 +115,12 @@ export function SummariesPage({ slug, onJob, activeJob }: Props) {
     }
   }, [currentJob?.status, currentJob?.result]);
 
-  const lastCompletedJobId = useRef<string>();
-  const lastHandledJobStatus = useRef<string>();
+  const lastCompletedJobId = useRef<string | undefined>(
+    currentJob?.status === "completed" ? currentJob.id : undefined,
+  );
+  const lastHandledJobStatus = useRef<string | undefined>(
+    currentJob && isTerminalJob(currentJob) ? `${currentJob.id}:${currentJob.status}` : undefined,
+  );
   useEffect(() => {
     if (!currentJob) return;
     if (isTerminalJob(currentJob)) {
@@ -124,14 +128,15 @@ export function SummariesPage({ slug, onJob, activeJob }: Props) {
       if (lastHandledJobStatus.current === statusKey) return;
       lastHandledJobStatus.current = statusKey;
 
+      if (currentJob.status === "completed" && lastCompletedJobId.current !== currentJob.id) {
+        lastCompletedJobId.current = currentJob.id;
+        void loadList();
+      }
+
       const intent = completionIntents.current.get(currentJob.id);
       if (intent) {
         completionIntents.current.delete(currentJob.id);
         void intent.handleTerminal(currentJob);
-      }
-      if (currentJob.status === "completed" && lastCompletedJobId.current !== currentJob.id) {
-        lastCompletedJobId.current = currentJob.id;
-        void loadList();
       }
     }
   }, [currentJob?.id, currentJob?.status]);
@@ -159,7 +164,6 @@ export function SummariesPage({ slug, onJob, activeJob }: Props) {
         handleTerminal: async (finished) => {
           if (finished.status === "completed") {
             setCreating(false);
-            await loadList();
             if (selectionGeneration.current === selectionAtStart && finished.result?.id) {
               await open(finished.result.id);
             }
@@ -222,7 +226,6 @@ export function SummariesPage({ slug, onJob, activeJob }: Props) {
         summaryId,
         handleTerminal: async (finished) => {
           if (finished.status === "completed") {
-            await loadList();
             if (selectionGeneration.current === selectionAtStart && selectedId.current === summaryId) {
               await open(summaryId);
             }
@@ -546,7 +549,6 @@ export function SummariesPage({ slug, onJob, activeJob }: Props) {
                   summaryId: id,
                   handleTerminal: async (finished) => {
                     if (finished.status === "completed") {
-                      await loadList();
                       if (selectionGeneration.current === selectionAtStart && selectedId.current === id) {
                         await open(id);
                       }

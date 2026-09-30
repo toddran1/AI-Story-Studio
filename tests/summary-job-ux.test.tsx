@@ -1,4 +1,5 @@
 /** @vitest-environment jsdom */
+globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -464,6 +465,20 @@ describe("Summary Job UX — App Persistence & Route Hydration", () => {
       if (urlStr.includes("/summaries")) {
         return new Response(JSON.stringify({ items: [], page: 1, pages: 1, total: 0 }), { headers: { "content-type": "application/json" } });
       }
+      if (urlStr.includes("/audio/summary")) {
+        return new Response(
+          JSON.stringify({
+            counts: { mastered: 0, total: 10, current: 0, stale: 0 },
+            totalDurationSeconds: 0,
+            settings: { loudnessTarget: -16, truePeak: -1 },
+            exports: [],
+          }),
+          { headers: { "content-type": "application/json" } },
+        );
+      }
+      if (urlStr.includes("/audio/chapters")) {
+        return new Response(JSON.stringify({ items: [], page: 1, pages: 1, total: 0 }), { headers: { "content-type": "application/json" } });
+      }
       return new Response(JSON.stringify({}), { headers: { "content-type": "application/json" } });
     }));
 
@@ -532,20 +547,14 @@ describe("Summary Job UX — App Persistence & Route Hydration", () => {
     }
   });
 
-  it("SummariesPage unmount and completion refreshes summary list when returning", async () => {
-    const summaryListRequests: number[] = [];
-    const id = "sum_test_unmount";
+  it("refreshes summary list exactly once when activeJob transitions to completed and ignores duplicate re-renders", async () => {
+    const summaryListRequests: string[] = [];
+    const id = "sum_test_single_refresh";
     const summariesData: StorySummary[] = [
       makeSummary({
         id,
         storyId: "undead-disaster",
         title: "Arc 1 Recap",
-        summaryType: "detailed",
-        sourceMode: "translated",
-        chapters: [1, 2, 3],
-        chapterRange: { from: 1, to: 3 },
-        targetLength: { words: 800 },
-        text: "Recap text",
       }),
     ];
 
@@ -554,8 +563,8 @@ describe("Summary Job UX — App Persistence & Route Hydration", () => {
       if (urlStr.includes("/summaries/context")) {
         return new Response(JSON.stringify({ minChapter: 1, maxChapter: 5 }), { headers: { "content-type": "application/json" } });
       }
-      if (urlStr.includes("/summaries")) {
-        summaryListRequests.push(Date.now());
+      if (urlStr.includes("/summaries?") || urlStr.endsWith("/summaries")) {
+        summaryListRequests.push(urlStr);
         return new Response(
           JSON.stringify({
             items: summariesData.map((s) => ({
@@ -586,25 +595,21 @@ describe("Summary Job UX — App Persistence & Route Hydration", () => {
 
     try {
       const onJob = vi.fn();
-      // Mount SummariesPage with activeJob undefined
-      await act(async () => {
-        root.render(<SummariesPage slug="undead-disaster" onJob={onJob} />);
-      });
-      expect(summaryListRequests.length).toBeGreaterThanOrEqual(1);
-      const initialFetchCount = summaryListRequests.length;
-
-      // Pass active running job
       const runningJob: Job = {
-        id: "job-123",
+        id: "job-refresh-test",
         type: "summary",
         story: "undead-disaster",
         status: "running",
       };
+
+      // 1. Initial mount with running active job
       await act(async () => {
         root.render(<SummariesPage slug="undead-disaster" onJob={onJob} activeJob={runningJob} />);
       });
+      const initialFetchCount = summaryListRequests.length;
+      expect(initialFetchCount).toBe(1);
 
-      // Pass completed active job -> triggers refresh
+      // 2. Active job transitions from running to completed
       const completedJob: Job = {
         ...runningJob,
         status: "completed",
@@ -613,10 +618,276 @@ describe("Summary Job UX — App Persistence & Route Hydration", () => {
         root.render(<SummariesPage slug="undead-disaster" onJob={onJob} activeJob={completedJob} />);
       });
 
-      expect(summaryListRequests.length).toBeGreaterThan(initialFetchCount);
+      // Must be called exactly once beyond initial mount
+      expect(summaryListRequests.length).toBe(initialFetchCount + 1);
+
+      // 3. Re-render with the exact same completed job -> must NOT trigger any additional loadList calls
+      await act(async () => {
+        root.render(<SummariesPage slug="undead-disaster" onJob={onJob} activeJob={completedJob} />);
+      });
+      expect(summaryListRequests.length).toBe(initialFetchCount + 1);
+
+      // 4. Re-render with a new object reference with identical completed status
+      await act(async () => {
+        root.render(<SummariesPage slug="undead-disaster" onJob={onJob} activeJob={{ ...completedJob }} />);
+      });
+      expect(summaryListRequests.length).toBe(initialFetchCount + 1);
     } finally {
       act(() => root.unmount());
       host.remove();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("refreshes summary list exactly once when a created summary job completes", async () => {
+    const summaryListRequests: string[] = [];
+    const id = "sum_created_flow";
+    let summariesData: StorySummary[] = [
+      makeSummary({
+        id: "sum_initial",
+        storyId: "undead-disaster",
+        title: "Initial Recap",
+      }),
+    ];
+
+    let createdJob: Job | undefined;
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
+      const urlStr = String(url);
+      if (urlStr.includes("/summaries/context")) {
+        return new Response(JSON.stringify({ minChapter: 1, maxChapter: 5 }), { headers: { "content-type": "application/json" } });
+      }
+      if (init?.method === "POST" && urlStr.endsWith("/summaries")) {
+        createdJob = {
+          id: "job-create-flow",
+          type: "summary",
+          story: "undead-disaster",
+          status: "running",
+        };
+        return new Response(JSON.stringify(createdJob), { headers: { "content-type": "application/json" } });
+      }
+      if (urlStr.includes(`/summaries/${id}`)) {
+        return new Response(
+          JSON.stringify({
+            summary: makeSummary({
+              id,
+              storyId: "undead-disaster",
+              title: "Newly Created Summary",
+            }),
+          }),
+          { headers: { "content-type": "application/json" } },
+        );
+      }
+      if (urlStr.includes("/summaries?") || urlStr.endsWith("/summaries")) {
+        summaryListRequests.push(urlStr);
+        return new Response(
+          JSON.stringify({
+            items: summariesData.map((s) => ({
+              id: s.id,
+              title: s.title,
+              summaryType: s.summaryType,
+              sourceMode: s.sourceMode,
+              status: s.status ?? "complete",
+              chapters: s.chapters,
+              updatedAt: s.updatedAt,
+              createdAt: s.createdAt,
+              manuallyEdited: false,
+              wordCount: 10,
+            })),
+            page: 1,
+            pages: 1,
+            total: summariesData.length,
+          }),
+          { headers: { "content-type": "application/json" } },
+        );
+      }
+      if (urlStr.includes("/art-direction")) {
+        return new Response(JSON.stringify({ presets: [] }), { headers: { "content-type": "application/json" } });
+      }
+      if (urlStr.includes("/scenes/identities") || urlStr.includes("/scenes/continuity")) {
+        return new Response(JSON.stringify({ scenes: [] }), { headers: { "content-type": "application/json" } });
+      }
+      return new Response(JSON.stringify({}), { headers: { "content-type": "application/json" } });
+    }));
+
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+
+    try {
+      let activeJobState: Job | undefined;
+      const onJob = vi.fn((job: Job) => {
+        activeJobState = job;
+      });
+
+      // 1. Mount SummariesPage
+      await act(async () => {
+        root.render(<SummariesPage slug="undead-disaster" onJob={onJob} activeJob={activeJobState} />);
+      });
+      const initialFetchCount = summaryListRequests.length;
+      expect(initialFetchCount).toBe(1);
+
+      // 2. Open create form by clicking "Create summary" button
+      const createButton = host.querySelector<HTMLButtonElement>("button.button.primary");
+      expect(createButton).not.toBeNull();
+      await act(async () => {
+        createButton!.click();
+      });
+
+      // 3. Submit generate form
+      const form = host.querySelector<HTMLFormElement>("form.summary-create");
+      expect(form).not.toBeNull();
+      await act(async () => {
+        form!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+      });
+
+      expect(onJob).toHaveBeenCalled();
+      expect(createdJob).toBeDefined();
+      expect(summaryListRequests.length).toBe(initialFetchCount);
+
+      // 4. Update parent activeJob to running
+      await act(async () => {
+        root.render(<SummariesPage slug="undead-disaster" onJob={onJob} activeJob={activeJobState} />);
+      });
+      expect(summaryListRequests.length).toBe(initialFetchCount);
+
+      // Update server summaries to include the new one
+      summariesData = [
+        ...summariesData,
+        makeSummary({
+          id,
+          storyId: "undead-disaster",
+          title: "Newly Created Summary",
+        }),
+      ];
+
+      // 5. Job completes
+      const completedJob: Job = {
+        ...createdJob!,
+        status: "completed",
+        result: { id },
+      };
+      await act(async () => {
+        root.render(<SummariesPage slug="undead-disaster" onJob={onJob} activeJob={completedJob} />);
+      });
+
+      // Single refresh on completion
+      expect(summaryListRequests.length).toBe(initialFetchCount + 1);
+
+      // Re-render with same completed job must not trigger duplicate refresh
+      await act(async () => {
+        root.render(<SummariesPage slug="undead-disaster" onJob={onJob} activeJob={completedJob} />);
+      });
+      expect(summaryListRequests.length).toBe(initialFetchCount + 1);
+    } finally {
+      act(() => root.unmount());
+      host.remove();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("remounts SummariesPage after global job completion and loads fresh server state without local callback replay", async () => {
+    const summaryListRequests: string[] = [];
+    let serverSummaries: StorySummary[] = [
+      makeSummary({
+        id: "sum_initial",
+        storyId: "undead-disaster",
+        title: "Initial Existing Summary",
+      }),
+    ];
+
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+      const urlStr = String(url);
+      if (urlStr.includes("/summaries/context")) {
+        return new Response(JSON.stringify({ minChapter: 1, maxChapter: 5 }), { headers: { "content-type": "application/json" } });
+      }
+      if (urlStr.includes("/summaries?") || urlStr.endsWith("/summaries")) {
+        summaryListRequests.push(urlStr);
+        return new Response(
+          JSON.stringify({
+            items: serverSummaries.map((s) => ({
+              id: s.id,
+              title: s.title,
+              summaryType: s.summaryType,
+              sourceMode: s.sourceMode,
+              status: s.status ?? "complete",
+              chapters: s.chapters,
+              updatedAt: s.updatedAt,
+              createdAt: s.createdAt,
+              manuallyEdited: false,
+              wordCount: 10,
+            })),
+            page: 1,
+            pages: 1,
+            total: serverSummaries.length,
+          }),
+          { headers: { "content-type": "application/json" } },
+        );
+      }
+      return new Response(JSON.stringify({}), { headers: { "content-type": "application/json" } });
+    }));
+
+    const runningJob: Job = {
+      id: "job-unmount-remount",
+      type: "summary",
+      story: "undead-disaster",
+      status: "running",
+    };
+
+    // 1. Mount initial SummariesPage instance while a job is running
+    const firstHost = document.createElement("div");
+    document.body.append(firstHost);
+    const firstRoot = createRoot(firstHost);
+
+    await act(async () => {
+      firstRoot.render(<SummariesPage slug="undead-disaster" onJob={vi.fn()} activeJob={runningJob} />);
+    });
+
+    expect(firstHost.textContent).toContain("Initial Existing Summary");
+    expect(firstHost.textContent).not.toContain("Global Finished Summary");
+    expect(summaryListRequests.length).toBe(1);
+
+    // 2. Fully unmount SummariesPage (simulates navigating away to another route)
+    await act(async () => {
+      firstRoot.unmount();
+    });
+    firstHost.remove();
+
+    // 3. While SummariesPage is unmounted:
+    // - Server state updates with the newly completed summary
+    // - Global JobConsole / App receives job completion
+    const newSummary = makeSummary({
+      id: "sum_completed_during_unmount",
+      storyId: "undead-disaster",
+      title: "Global Finished Summary",
+    });
+    serverSummaries = [newSummary, ...serverSummaries];
+
+    const completedJob: Job = {
+      ...runningJob,
+      status: "completed",
+      result: { id: newSummary.id },
+    };
+
+    // 4. Remount a fresh SummariesPage instance (user navigates back to Summaries)
+    const secondHost = document.createElement("div");
+    document.body.append(secondHost);
+    const secondRoot = createRoot(secondHost);
+
+    try {
+      await act(async () => {
+        secondRoot.render(<SummariesPage slug="undead-disaster" onJob={vi.fn()} activeJob={completedJob} />);
+      });
+
+      // 5. Verifies:
+      // - Fresh GET /stories/:slug/summaries was made upon remount
+      // - The newly generated summary from the server is rendered in the list
+      // - No local callback replay or global callback storage was required
+      expect(summaryListRequests.length).toBe(2);
+      expect(secondHost.textContent).toContain("Global Finished Summary");
+      expect(secondHost.textContent).toContain("Initial Existing Summary");
+    } finally {
+      act(() => secondRoot.unmount());
+      secondHost.remove();
       vi.unstubAllGlobals();
     }
   });
