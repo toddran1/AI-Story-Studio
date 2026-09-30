@@ -215,7 +215,7 @@ export function SummaryScenePanel(props: SummaryVisualProps) {
     {planError && <div className="error-box">{planError}</div>}
     {draft.length > 0 && <SceneFilmstrip scenes={draft} imageFor={(scene) => scene.artwork.imageFingerprint ? `/api${props.base}/artwork/${scene.id}?v=${scene.artwork.imageFingerprint}` : undefined} statusFor={(scene) => scene.disabled ? "Disabled" : `${scene.artwork.review} artwork`} onSelect={(scene) => document.getElementById(`summary-scene-${summary.id}-${scene.id}`)?.scrollIntoView({ block: "center", behavior: "smooth" })} />}
     <div className="summary-visual-actions"><button className="button primary" disabled={working || anyDirty || !summaryNarrationTextAvailable(summary)} onClick={() => { if (!summary.scenePlan || confirm("Regenerate all scenes? Manual visual directions may be replaced; approved artwork is preserved for review.")) void run("scenes", { ...input, force: Boolean(summary.scenePlan) }); }}>{summary.scenePlan ? "Regenerate all scenes" : "Generate scenes"}</button>
-      <button className="button" disabled={working || anyDirty || !summary.scenePlan || summary.audio?.status !== "current"} onClick={() => void run("scenes", { ...summary.scenePacing, force: false })}>Update timing</button>
+      <button className="button" disabled={working || anyDirty || !summary.scenePlan || !summaryAudioAvailable(summary)} onClick={() => void run("scenes", { ...summary.scenePacing, force: false })}>Update timing</button>
       {summary.scenes?.status === "stale" && <button className="button" disabled={working || anyDirty || summary.narration?.status !== "current"} onClick={() => { if (confirm("Accept the existing scene visuals against the current narration and settings? Timing will be refreshed locally.")) void run("scenes", { acceptCurrent: true }, true); }}>Review / mark current</button>}
       <button className="button" disabled={working || !anyDirty} onClick={() => void saveAll()}>{savingAll ? "Saving…" : "Save all scene edits"}</button>{savedScene === "all" && <span role="status">Saved</span>}</div>
     {draft.map((scene, index) => <article id={`summary-scene-${summary.id}-${scene.id}`} tabIndex={-1} className="summary-scene-card" key={scene.id}><header><span className="eyebrow">Scene {String(index + 1).padStart(2, "0")}</span><span>{clock(scene.startSeconds)}–{clock(scene.endSeconds)} · {scene.disabled ? "disabled" : summary.scenePlan?.timingMethod ?? "estimated"}</span><span className="summary-scene-save-state" role="status">{savingScene === scene.id ? "Saving…" : dirtyIds.has(scene.id) ? "Unsaved changes" : savedScene === scene.id ? "Saved" : ""}</span></header>
@@ -375,7 +375,7 @@ export function SummaryArtworkPanel(props: SummaryVisualProps) {
 export function SummaryVideoPanel(props: SummaryVisualProps) {
   const { summary } = props; const { run, disabled } = useActions(props);
   const [videoSettings, setVideoSettings] = useState<StoryConfig["video"]>();
-  const [subtitlesEnabled, setSubtitlesEnabled] = useState(true);
+  const [subtitlesEnabled, setSubtitlesEnabled] = useState(false);
   const [preflight, setPreflight] = useState<VisualPreflightReport>();
   const [pendingProduceRequest, setPendingProduceRequest] = useState<Record<string, unknown>>();
   const [oneTimeFallbackIds, setOneTimeFallbackIds] = useState<string[]>([]);
@@ -383,9 +383,10 @@ export function SummaryVideoPanel(props: SummaryVisualProps) {
   useEffect(() => {
     if (!props.slug) return;
     let active = true;
-    void api<{ story: StoryConfig }>(`/stories/${props.slug}`).then((result) => { if (active) { setVideoSettings(result.story.video); setSubtitlesEnabled((summary.video?.subtitleMode ?? result.story.video.subtitleMode) !== "none"); } }).catch((error) => { if (active) props.onError(error); });
+    void api<{ story: StoryConfig }>(`/stories/${props.slug}`).then((result) => { if (active) setVideoSettings(result.story.video); }).catch((error) => { if (active) props.onError(error); });
     return () => { active = false; };
   }, [props.slug]);
+  useEffect(() => { setSubtitlesEnabled(false); }, [summary.id]);
   useEffect(() => {
     if (props.produceBlocked?.id !== summary.id) return;
     setPendingProduceRequest({}); setPreflight(props.produceBlocked.preflight); setOneTimeFallbackIds([]);

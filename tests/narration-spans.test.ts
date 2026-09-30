@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { bindNarrationSpans } from "../src/scenes/narration-spans.js";
+import { bindNarrationSpans, timeNarrationScenes } from "../src/scenes/narration-spans.js";
 import type { Scene } from "../src/scenes/types.js";
 
 const narration = "one two three four five six seven eight nine ten";
@@ -54,5 +54,12 @@ describe("bindNarrationSpans", () => {
 
   it("still rejects when scenes outnumber narration words", () => {
     expect(() => bindNarrationSpans([scene(0, 1), scene(1, 2), scene(2, 3)], "one two")).toThrow(/word count/);
+  });
+
+  it("keeps a short final estimated beat visible and ends at the audio duration", () => {
+    const bound = bindNarrationSpans([scene(0, 9), scene(9, 10, { id: "scene-002" })], narration);
+    const timed = timeNarrationScenes(bound, 20);
+    expect(timed.scenes[1]!.endSeconds - timed.scenes[1]!.startSeconds).toBeGreaterThanOrEqual(2);
+    expect(timed.scenes.at(-1)!.endSeconds).toBe(20);
   });
 });

@@ -660,7 +660,10 @@ describe("summary visual production", () => {
     expect(scenePanel).toContain("Image prompt only"); expect(scenePanel).toContain("Full visual direction");
     const artworkPanel = renderToStaticMarkup(<SummaryArtworkPanel {...props} />);
     expect(artworkPanel).toContain("Approve displayed image"); expect(artworkPanel).toContain("Approve selected (0)"); expect(artworkPanel).toContain("Select visible"); expect(artworkPanel).toContain("Regenerate artwork from current saved scene"); expect(artworkPanel).toContain("Edit scene");
-    expect(renderToStaticMarkup(<SummaryVideoPanel {...props} />)).toContain("Download MP4");
+    const videoPanel = renderToStaticMarkup(<SummaryVideoPanel {...props} />);
+    expect(videoPanel).toContain("Download MP4");
+    expect(videoPanel).toContain("Include subtitles in the video");
+    expect(videoPanel.match(/<input[^>]*type="checkbox"[^>]*>/)?.[0]).not.toContain("checked");
     const layers = renderToStaticMarkup(<SummaryLayers {...props} slug="demo-story" busy={false}>Canonical</SummaryLayers>);
     expect(layers).toContain("Artwork"); expect(layers).toContain('hidden=""'); expect(layers).toContain("Save this scene");
   });
@@ -717,6 +720,23 @@ describe("summary visual production", () => {
     expect(images.generate.mock.calls.length).toBe(imageCalls); expect(llm.calls.length).toBe(llmCalls);
     await atomicWrite(summaryMediaPaths(root, "demo-story", id).audio, "corrupt-audio");
     await expect(visuals.video("demo-story", id, { force: true })).rejects.toThrow("Usable mastered audio");
+  });
+  it("retimes a saved estimated scene plan to retained stale audio before rendering", async () => {
+    const produced = await produce();
+    const stored = await summaries.get("demo-story", id);
+    stored.scenePlan!.scenes = stored.scenePlan!.scenes.map((scene) => ({ ...scene, startSeconds: scene.startSeconds * 2, endSeconds: scene.endSeconds * 2 }));
+    stored.scenePlan!.durationSeconds *= 2;
+    stored.audio!.status = "stale";
+    stored.scenes!.status = "stale";
+    await atomicWriteJson(summaryPath(root, "demo-story", id), stored);
+    const inspected = await visuals.get("demo-story", id);
+    expect(inspected.scenePlan?.durationSeconds).toBeCloseTo(produced.audio!.durationSeconds!, 3);
+    expect((await summaries.get("demo-story", id)).scenePlan?.durationSeconds).toBeCloseTo(produced.audio!.durationSeconds!, 3);
+    const rendered = await visuals.video("demo-story", id, { force: true });
+    expect(rendered.scenePlan?.durationSeconds).toBeCloseTo(produced.audio!.durationSeconds!, 3);
+    expect(rendered.scenePlan?.scenes.at(-1)?.endSeconds).toBeCloseTo(produced.audio!.durationSeconds!, 3);
+    const renderedScenes = render.mock.lastCall?.[0].sceneArtwork ?? [];
+    expect(renderedScenes.reduce((total, scene) => total + scene.durationSeconds, 0)).toBeCloseTo(produced.audio!.durationSeconds!, 3);
   });
   it("renders from retained manually edited narration when it is stale", async () => {
     await produce();

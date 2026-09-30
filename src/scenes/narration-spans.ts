@@ -1,7 +1,7 @@
 import type { Scene } from "./types.js";
 import type { AlignedWord } from "../alignment/types.js";
 import { tokenizeNarration } from "../alignment/quality.js";
-import { validateSceneCoverage } from "./timing.js";
+import { boundedDurations, validateSceneCoverage } from "./timing.js";
 
 export function bindNarrationSpans(scenes: Scene[], narration: string) {
   const words = tokenizeNarration(narration);
@@ -34,10 +34,16 @@ export function timeNarrationScenes(scenes: Scene[], duration: number, words?: A
   const usable = words?.length === lastWord && words.every((word, index) => word.end > word.start && word.end <= duration && (!index || word.start >= words[index - 1]!.end));
   const active = scenes.filter((scene) => !scene.disabled);
   if (!active.length) throw new Error("Keep at least one scene enabled");
+  // Estimated word timing can leave the final visual beat on screen for a
+  // fraction of a second. Keep every scene visible for a useful minimum while
+  // still ending exactly with the mastered audio.
+  const estimatedDurations = usable ? undefined : boundedDurations(
+    active.map((scene, index) => Math.max(1, (active[index + 1]?.narrationStartWord ?? lastWord) - scene.narrationStartWord!)),
+    duration, Math.min(2, duration / active.length), duration);
   let cursor = 0;
   const timed = active.map((scene, index) => {
     const next = active[index + 1];
-    const end = next ? usable ? words![next.narrationStartWord!]!.start : duration * next.narrationStartWord! / lastWord : duration;
+    const end = next ? usable ? words![next.narrationStartWord!]!.start : cursor + estimatedDurations![index]! : duration;
     if (end <= cursor) throw new Error("Scene alignment produced an empty time range; recheck the narration spans");
     const result = { ...scene, startSeconds: cursor, endSeconds: end }; cursor = end; return result;
   });

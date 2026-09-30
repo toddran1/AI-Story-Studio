@@ -10,6 +10,7 @@ import { exists, readJsonIfExists } from "../storage/story-files.js";
 import { fileFingerprint } from "../utils/file-fingerprint.js";
 import { fingerprint } from "../utils/hash.js";
 import { productionSceneFingerprint, sceneContentFingerprint } from "../scenes/manifest.js";
+import { retimeScenesToDuration } from "../scenes/production.js";
 import { resolveSceneVisualEntity } from "../scenes/identity.js";
 import { sceneSchema, sceneDirectionSchema, sceneOverridesSchema, artworkReviewSchema, type Scene, type ArtworkVersion } from "../scenes/types.js";
 import { bindNarrationSpans, timeNarrationScenes } from "../scenes/narration-spans.js";
@@ -142,7 +143,7 @@ export class SummaryVisualService {
    * scene planner and retain that plan (retiming it locally if needed). */
   private willReuseScenePlan(summary: StorySummary, story: Awaited<ReturnType<typeof loadStory>>, options: z.infer<typeof summaryScenesInputSchema>) {
     const { force, ...pacing } = options;
-    return Boolean(summary.scenePlan && summary.narration?.status === "current" &&
+    return Boolean(summary.scenePlan && summary.narration?.text?.trim() &&
       summary.scenes?.sourceFingerprint === fingerprint(summary.narration.text) &&
       summary.scenes.configurationFingerprint === fingerprint({ config: story.pipeline.scenePlanner, settings: story.scenes }) &&
       summary.scenes.outputFingerprint === productionSceneFingerprint(summary.scenePlan) &&
@@ -321,7 +322,24 @@ export class SummaryVisualService {
   }
   async get(slug: string, id: string) {
     const summary = await this.media.get(slug, id);
+    await this.retimePlanToRetainedAudio(slug, summary);
     return this.reconcileSummaryVisualFreshness(slug, summary);
+  }
+  private async retimePlanToRetainedAudio(slug: string, summary: StorySummary) {
+    if (!summary.scenePlan || !summary.audio?.outputFingerprint || !summary.audio.durationSeconds ||
+      Math.abs(summary.scenePlan.durationSeconds - summary.audio.durationSeconds) <= .02 ||
+      await fileFingerprint(this.paths(slug, summary.id).audio) !== summary.audio.outputFingerprint) return;
+    const timed = summary.scenePlan.manuallyEdited
+      ? retimeScenesToDuration(summary.scenePlan.scenes.filter((scene) => !scene.disabled), summary.audio.durationSeconds)
+      : timeNarrationScenes(summary.scenePlan.scenes, summary.audio.durationSeconds,
+        summary.alignment?.mode === "aligned" && summary.alignment.audioFingerprint === summary.audio.outputFingerprint ? summary.alignment.words : undefined).scenes;
+    const byId = new Map(timed.map((scene) => [scene.id, scene]));
+    summary.scenePlan.scenes = summary.scenePlan.scenes.map((scene) => byId.get(scene.id) ?? scene);
+    summary.scenePlan.durationSeconds = summary.audio.durationSeconds;
+    summary.scenePlan.timingMethod = "estimated";
+    if (summary.scenes) summary.scenes.outputFingerprint = productionSceneFingerprint(summary.scenePlan);
+    if (summary.video) summary.video.status = "stale";
+    await this.save(slug, summary);
   }
   async align(slug: string, id: string, progress?: SummaryVisualProgress) {
     const summary = await this.media.get(slug, id); if (summary.audio?.status !== "current" || !summary.audio.durationSeconds || !summary.narration?.text) throw new Error("Current mastered summary audio is required for alignment");
@@ -340,7 +358,9 @@ export class SummaryVisualService {
     const { story } = await this.context(slug);
     const onlyTiming = this.willReuseScenePlan(before, story, options);
     // A reviewed manual timeline is authoritative while its narration and audio remain current.
-    if (onlyTiming && before.scenes?.status === "current" && before.scenePlan?.manuallyEdited && before.audio?.status === "current" && before.scenePlan.durationSeconds === before.audio.durationSeconds) return before;
+    const audioDuration = before.audio?.outputFingerprint && (before.audio.durationSeconds ?? 0) > 0 &&
+      await fileFingerprint(this.paths(slug, id).audio) === before.audio.outputFingerprint ? before.audio.durationSeconds : undefined;
+    if (onlyTiming && before.scenes?.status === "current" && before.scenePlan?.manuallyEdited && audioDuration && before.scenePlan.durationSeconds === audioDuration) return before;
     let summary = onlyTiming ? before : await this.media.scenes(slug, id, options);
     if (before.scenePlan && summary.scenePlan && !onlyTiming) {
       const [oldContinuity, nextContinuity] = await Promise.all([this.sceneContinuity(slug, id, before.scenePlan.scenes), this.sceneContinuity(slug, id, summary.scenePlan.scenes)]);
@@ -349,7 +369,7 @@ export class SummaryVisualService {
     if (summary.audio?.status === "current") summary = await this.alignWithPlan(slug, summary, progress);
     if (!summary.scenePlan || !summary.narration?.text) throw new Error("Summary scene plan is missing");
     summary.scenePlan.scenes = bindNarrationSpans(summary.scenePlan.scenes, summary.narration.text);
-    const timed = timeNarrationScenes(summary.scenePlan.scenes, summary.audio?.status === "current" ? summary.audio.durationSeconds! : summary.scenePlan.durationSeconds, summary.alignment?.mode === "aligned" ? summary.alignment.words : undefined);
+    const timed = timeNarrationScenes(summary.scenePlan.scenes, audioDuration ?? summary.scenePlan.durationSeconds, summary.alignment?.mode === "aligned" && summary.alignment.audioFingerprint === summary.audio?.outputFingerprint ? summary.alignment.words : undefined);
     const byId = new Map(timed.scenes.map((scene) => [scene.id, scene])); summary.scenePlan.scenes = summary.scenePlan.scenes.map((scene) => byId.get(scene.id) ?? scene);
     summary.scenePlan.durationSeconds = timed.scenes.at(-1)!.endSeconds; summary.scenePlan.timingMethod = timed.timingMethod;
     summary.scenes = { ...summary.scenes!, status: "current", outputFingerprint: productionSceneFingerprint(summary.scenePlan) };

@@ -155,7 +155,10 @@ export class SummaryMediaService {
     const input = await this.inputs(slug, summary);
     const { force, ...pacing } = options;
     summary.scenePacing = pacing;
-    const estimate = estimateScenePacing(summary.narration.text, pacing, summary.audio?.status === "current" ? summary.audio.durationSeconds : undefined);
+    const paths = summaryMediaPaths(this.root, slug, id);
+    const measuredDuration = summary.audio?.durationSeconds && summary.audio.outputFingerprint &&
+      await fileFingerprint(paths.audio) === summary.audio.outputFingerprint ? summary.audio.durationSeconds : undefined;
+    const estimate = estimateScenePacing(summary.narration.text, pacing, measuredDuration);
     const identities = input.context.canonicalEntities.map((entity) => ({ entityId: entity.id, canonicalName: entity.canonicalName,
       originalName: entity.originalName, narrationNames: [entity.localizedNaming?.fullName, entity.localizedNaming?.shortName, entity.preferredNarrationName].filter((value): value is string => Boolean(value)) }));
     const inputFingerprint = fingerprint({ version: "summary-scenes-v1", narration: summary.narration.text, context: input.context,
