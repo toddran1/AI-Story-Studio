@@ -34,6 +34,7 @@ export const summaryDerivativeSchema = z.object({
   segmentFingerprints: z.array(z.string()).optional(),
   quality: ttsQualityReportSchema.optional(),
   width: z.number().int().positive().optional(), height: z.number().int().positive().optional(), sceneCount: z.number().int().positive().optional(),
+  subtitleMode: z.enum(["none", "burn", "soft", "both"]).optional(),
 });
 export type SummaryDerivative = z.infer<typeof summaryDerivativeSchema>;
 

@@ -5,7 +5,7 @@ export const artworkOutputResolutionSchema = z.enum(["native", "720p", "1080p", 
 export type ArtworkOutputResolution = z.infer<typeof artworkOutputResolutionSchema>;
 export const artworkUpscalingModeSchema = z.enum(["off", "automatic", "always"]);
 export type ArtworkUpscalingMode = z.infer<typeof artworkUpscalingModeSchema>;
-export const upscalerEngineSchema = z.enum(["local-realesrgan"]);
+export const upscalerEngineSchema = z.enum(["ffmpeg-lanczos", "local-realesrgan"]);
 export type UpscalerEngine = z.infer<typeof upscalerEngineSchema>;
 
 export type ImageDimensions = { width: number; height: number };

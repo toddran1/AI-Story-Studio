@@ -518,9 +518,10 @@ describe("summary visual production", () => {
   it("protects approved artwork and supports explicit regeneration and damaged cache detection", async () => {
     const result = await produce(); await visuals.reviewArtwork("demo-story", id, "scene-001", "approved"); const scenes = structuredClone(result.scenePlan!.scenes); scenes[0]!.visualPrompt = "A new visual direction";
     await visuals.editScenes("demo-story", id, { scenes }); await visuals.artwork("demo-story", id); expect(images.generate).toHaveBeenCalledTimes(2); expect((await visuals.get("demo-story", id)).artwork?.status).toBe("stale");
-    await expect(visuals.video("demo-story", id)).rejects.toThrow("review protected artwork");
+    await visuals.video("demo-story", id);
+    expect(render).toHaveBeenCalledTimes(2);
     await visuals.artwork("demo-story", id, { force: true, scenes: ["scene-001"] }); expect(images.generate).toHaveBeenCalledTimes(3);
-    await atomicWrite(visuals.paths("demo-story", id).image("scene-001"), "damaged"); expect((await visuals.get("demo-story", id)).artwork?.status).toBe("stale"); await expect(visuals.reviewArtwork("demo-story", id, "scene-001", "approved")).rejects.toThrow("intact");
+    await atomicWrite(visuals.paths("demo-story", id).image("scene-001"), "damaged"); expect((await visuals.get("demo-story", id)).artwork?.status).toBe("stale"); await expect(visuals.video("demo-story", id)).rejects.toThrow("missing, damaged, or rejected artwork"); await expect(visuals.reviewArtwork("demo-story", id, "scene-001", "approved")).rejects.toThrow("intact");
   });
   it("recovers from an interrupted image operation without repeating completed provider calls", async () => {
     await media.audio("demo-story", id); await visuals.scenes("demo-story", id, { sceneCount: 2 }); let pause = false;
@@ -658,7 +659,7 @@ describe("summary visual production", () => {
     expect(scenePanel).toContain("Summary Art Direction"); expect(scenePanel).toContain("Story Default · Main Style"); expect(scenePanel).toContain("No Story Art Direction"); expect(scenePanel).toContain("Advanced visual direction"); expect(scenePanel).toContain("Custom negative prompt");
     expect(scenePanel).toContain("Image prompt only"); expect(scenePanel).toContain("Full visual direction");
     const artworkPanel = renderToStaticMarkup(<SummaryArtworkPanel {...props} />);
-    expect(artworkPanel).toContain("Approve displayed image"); expect(artworkPanel).toContain("Regenerate artwork from current saved scene"); expect(artworkPanel).toContain("Edit scene");
+    expect(artworkPanel).toContain("Approve displayed image"); expect(artworkPanel).toContain("Approve selected (0)"); expect(artworkPanel).toContain("Select visible"); expect(artworkPanel).toContain("Regenerate artwork from current saved scene"); expect(artworkPanel).toContain("Edit scene");
     expect(renderToStaticMarkup(<SummaryVideoPanel {...props} />)).toContain("Download MP4");
     const layers = renderToStaticMarkup(<SummaryLayers {...props} slug="demo-story" busy={false}>Canonical</SummaryLayers>);
     expect(layers).toContain("Artwork"); expect(layers).toContain('hidden=""'); expect(layers).toContain("Save this scene");
@@ -717,6 +718,27 @@ describe("summary visual production", () => {
     await atomicWrite(summaryMediaPaths(root, "demo-story", id).audio, "corrupt-audio");
     await expect(visuals.video("demo-story", id, { force: true })).rejects.toThrow("Usable mastered audio");
   });
+  it("renders from retained manually edited narration when it is stale", async () => {
+    await produce();
+    const stored = await summaries.get("demo-story", id);
+    stored.narration!.status = "stale";
+    stored.narration!.manuallyEdited = true;
+    await atomicWriteJson(summaryPath(root, "demo-story", id), stored);
+    const refreshed = await visuals.produce("demo-story", id);
+    expect(refreshed.narration?.text).toBe(stored.narration?.text);
+    expect(refreshed.narration?.manuallyEdited).toBe(true);
+    expect(refreshed.video?.status).toBe("current");
+    const rendered = await visuals.video("demo-story", id, { force: true });
+    expect(rendered.video?.sourceFingerprint).toBe(stored.audio?.outputFingerprint);
+  });
+  it("renders summary video without subtitles when selected", async () => {
+    await produce();
+    const result = await visuals.video("demo-story", id, { force: true, subtitleMode: "none" });
+    expect(result.video?.subtitleMode).toBe("none");
+    expect(render.mock.lastCall?.[0].subtitles).toBeUndefined();
+    expect(render.mock.lastCall?.[2].subtitleMode).toBe("none");
+    expect((await visuals.get("demo-story", id)).video?.status).toBe("current");
+  });
   it("keeps editorial scene editing gated on reviewed current narration", async () => {
     const result = await produce(); await markStale("narration");
     await expect(visuals.editScenes("demo-story", id, { scenes: structuredClone(result.scenePlan!.scenes) })).rejects.toThrow("Review narration");
@@ -738,9 +760,9 @@ describe("summary visual production", () => {
     expect(button(artworkPanel, "Generate missing artwork")).not.toContain("disabled");
     expect(artworkPanel).toContain("The scene plan is stale");
     const videoPanel = renderToStaticMarkup(<SummaryVideoPanel {...props} summary={staleMedia} />);
-    expect(button(videoPanel, "Generate / update video")).not.toContain("disabled");
-    expect(videoPanel).toContain("stale audio/scene inputs");
+    expect(button(videoPanel, "Produce summary video")).not.toContain("disabled");
+    expect(videoPanel).toContain("even when they are stale");
     const currentPanel = renderToStaticMarkup(<SummaryVideoPanel {...props} summary={await visuals.get("demo-story", id)} />);
-    expect(button(currentPanel, "Generate / update video")).not.toContain("disabled");
+    expect(button(currentPanel, "Produce summary video")).not.toContain("disabled");
   });
 });

@@ -22,9 +22,9 @@ export const artworkSettingsSchema = z.object({
   outputFormat: z.literal("png").default("png"),
   outputResolution: artworkOutputResolutionSchema.default("native"),
   upscaling: artworkUpscalingModeSchema.default("automatic"),
-  upscaler: upscalerEngineSchema.default("local-realesrgan"),
+  upscaler: upscalerEngineSchema.default("ffmpeg-lanczos"),
   adultContent: z.boolean().default(true),
-}).default({ provider: "openai", model: "gpt-image-2.5-flare", stylePrompt: "cinematic illustrated fiction, dramatic natural lighting, consistent character design, widescreen composition", aspectRatio: "16:9", quality: "medium", size: "1536x1024", outputFormat: "png", outputResolution: "native", upscaling: "automatic", upscaler: "local-realesrgan", adultContent: true });
+}).default({ provider: "openai", model: "gpt-image-2.5-flare", stylePrompt: "cinematic illustrated fiction, dramatic natural lighting, consistent character design, widescreen composition", aspectRatio: "16:9", quality: "medium", size: "1536x1024", outputFormat: "png", outputResolution: "native", upscaling: "automatic", upscaler: "ffmpeg-lanczos", adultContent: true });
 
 export const artworkReviewSchema = z.enum(["unreviewed", "approved", "rejected", "needs-regeneration"]);
 export const sceneImportanceSchema = z.enum(["transition", "standard", "major"]);

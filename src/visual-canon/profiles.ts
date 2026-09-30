@@ -393,9 +393,12 @@ export async function generateStyleSheet(
         `Avoid text, labels, watermarks, cinematic backgrounds, temporary damage, current emotion, weather, or chapter-specific state.`,
       ];
 
+  const paletteGuidance = "COLOR AND CHARACTER: Where appearance details are unspecified, use a distinctive, story-appropriate mix of colors, materials, and small identifying accents. Avoid automatically making clothing all black or giving every person black hair and dark brown eyes. Preserve every established profile trait, approved reference detail, source fact, and story art-direction choice; do not recolor known features for variety.";
+
   const sheetPrompt = options.promptOverride ?? [
     artDirectionParts.join("\n"),
     entityDetails.join("\n"),
+    paletteGuidance,
     referenceRequirements.join("\n"),
   ].filter(Boolean).join("\n\n");
 

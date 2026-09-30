@@ -2559,7 +2559,7 @@ export function artworkVersionMetadata(version: ArtworkVersion): { original?: st
   let production: string | undefined;
   if (version.production) {
     production = version.production.upscaled
-      ? `Production ${version.production.width}×${version.production.height} · AI upscaled${version.production.engine ? ` (${version.production.engine})` : ""}`
+      ? `Production ${version.production.width}×${version.production.height} · ${version.production.engine === "ffmpeg-lanczos" ? "Clean resized (Lanczos)" : `AI upscaled${version.production.engine ? ` (${version.production.engine})` : ""}`}`
       : `Production ${version.production.width}×${version.production.height} · original (upscaling off or not required)`;
   }
   const warning = version.upscale?.status === "unavailable"
@@ -2920,11 +2920,13 @@ export function chapterVideoReadinessChecks(chapter: ScenesDashboard["chapters"]
     : unresolved
       ? { label: "Visual Profiles", state: "warning", detail: `${unresolved} scene identity/profile${unresolved === 1 ? " needs" : "s need"} review before artwork generation.` }
       : { label: "Visual Profiles", state: "ready", detail: "Enabled scene identities resolve to approved profiles." });
-  const fullyApproved = active.length > 0 && active.every((scene) => scene.artwork.status === "complete" && Boolean(scene.imageUrl) && scene.artwork.review === "approved");
+  const allArtworkPresent = active.length > 0 && active.every((scene) => Boolean(scene.artwork.imageFingerprint) && Boolean(scene.imageUrl));
   const rejected = active.some((scene) => scene.artwork.review === "rejected" || scene.artwork.review === "needs-regeneration");
-  checks.push(fullyApproved
-    ? { label: "Artwork", state: chapter.artworkStatus === "complete" && !manifestStale ? "ready" : "warning", detail: chapter.artworkStatus === "complete" && !manifestStale ? "Every enabled scene has intact approved artwork." : "Approved artwork is retained, but the chapter artwork stage is stale." }
-    : { label: "Artwork", state: "warning", detail: rejected ? "Some artwork is rejected or marked for regeneration; the chapter renderer uses its configured background fallback until all scene artwork is approved." : "Artwork is missing or unreviewed; the chapter renderer can use its configured background fallback." });
+  checks.push(rejected
+    ? { label: "Artwork", state: "blocker", detail: "Some artwork is rejected or marked for regeneration; select usable artwork before rendering." }
+    : allArtworkPresent
+      ? { label: "Artwork", state: chapter.artworkStatus === "complete" && !manifestStale ? "ready" : "warning", detail: chapter.artworkStatus === "complete" && !manifestStale ? "Every enabled scene has artwork." : "Retained scene artwork will be used despite stale generation inputs." }
+      : { label: "Artwork", state: "warning", detail: "Artwork is missing; the chapter renderer can use its configured background fallback." });
   checks.push(chapter.videoAvailable
     ? { label: "Video", state: chapter.videoStale ? "warning" : "ready", detail: chapter.videoStale ? "A retained video exists and needs a render to match current inputs." : "A current video render is available." }
     : { label: "Video", state: "warning", detail: "No video render is available yet." });
@@ -3581,7 +3583,7 @@ export function ScenesPage({ slug, onJob, navigate, initialData }: { slug: strin
                                 type="button"
                                 className={`version-tab ${isSelected ? "active" : ""} ${isApproved ? "is-approved" : ""}`}
                                 onClick={() => setSelectedVersionByScene({ ...selectedVersionByScene, [scene.id]: ver.id })}
-                                title={`Version ${ver.versionNumber}: ${new Date(ver.createdAt).toLocaleTimeString()} (${ver.provider}/${ver.model})${ver.original ? ` · Original ${ver.original.width}×${ver.original.height}` : ""}${ver.production ? ` · Production ${ver.production.width}×${ver.production.height}${ver.production.upscaled ? " (AI upscaled)" : ""}` : ""}${ver.upscale?.status === "unavailable" ? " · Upscaler unavailable — using original" : ""}${ver.provenance?.referencesUsed ? ` · references: ${ver.provenance.referencesUsed}${ver.provenance.referenceImageCount ? ` (${ver.provenance.referenceImageCount} image${ver.provenance.referenceImageCount === 1 ? "" : "s"})` : ""}` : ""}${isApproved ? " · approved" : ""}`}
+                                title={`Version ${ver.versionNumber}: ${new Date(ver.createdAt).toLocaleTimeString()} (${ver.provider}/${ver.model})${ver.original ? ` · Original ${ver.original.width}×${ver.original.height}` : ""}${ver.production ? ` · Production ${ver.production.width}×${ver.production.height}${ver.production.upscaled ? ver.production.engine === "ffmpeg-lanczos" ? " (clean resized)" : " (AI upscaled)" : ""}` : ""}${ver.upscale?.status === "unavailable" ? " · Upscaler unavailable — using original" : ""}${ver.provenance?.referencesUsed ? ` · references: ${ver.provenance.referencesUsed}${ver.provenance.referenceImageCount ? ` (${ver.provenance.referenceImageCount} image${ver.provenance.referenceImageCount === 1 ? "" : "s"})` : ""}` : ""}${isApproved ? " · approved" : ""}`}
                               >
                                 v{ver.versionNumber}{isApproved ? " ✓" : ""}
                               </button>
@@ -3833,7 +3835,7 @@ export function VideoPage({ slug, onJob }: { slug: string; onJob: (job: Job) => 
   useEffect(() => { const request = ++summaryRequest.current; api<Omit<VideoDashboard, "chapters"> & { minChapter?: number; maxChapter?: number }>(`/stories/${slug}/video/summary`).then((next) => { if (request !== summaryRequest.current) return; setData(next); setError(""); setRange((current) => ({ ...current, subtitleMode: next.settings.subtitleMode, ...(!current.from ? { from: String(next.minChapter ?? ""), to: String(next.maxChapter ?? "") } : {}) })); }).catch((value) => { if (request === summaryRequest.current) setError(message(value)); }); return () => { summaryRequest.current++; }; }, [slug, refreshVersion]);
   useEffect(() => { const request = ++pageRequest.current; api<{ items: VideoDashboard["chapters"]; page: number; pages: number; total: number }>(`/stories/${slug}/video/chapters?page=${page}&pageSize=${pageSize}`).then((next) => { if (request === pageRequest.current) { setChapterPage(next); setPageError(""); } }).catch((value) => { if (request === pageRequest.current) setPageError(message(value)); }); return () => { pageRequest.current++; }; }, [slug, page, pageSize, refreshVersion]);
   useEffect(() => () => watcher.current?.(), [slug]);
-  const run = async (kind: "subtitles" | "video" | "video-export") => { try { setError(""); const job = await post<Job>(`/stories/${slug}/jobs/${kind}`, { from: Number(range.from), to: Number(range.to), ...(kind === "video" ? { subtitleMode: range.subtitleMode } : {}), ...(kind === "video-export" ? { music, musicOverrides } : {}) }); onJob(job); watcher.current?.(); watcher.current = watchJob(job.id, (next) => { onJob(next); if (next.status === "completed") setRefreshVersion((value) => value + 1); else if (next.status === "failed") setError(next.error ?? "Video job failed"); }, (value) => setError(message(value))); } catch (value) { setError(message(value)); } };
+  const run = async (kind: "subtitles" | "video" | "video-export") => { try { setError(""); const job = await post<Job>(`/stories/${slug}/jobs/${kind}`, { from: Number(range.from), to: Number(range.to), ...(kind === "video" ? { subtitleMode: range.subtitleMode } : {}), ...(kind === "video-export" ? { music, musicOverrides, subtitleMode: range.subtitleMode } : {}) }); onJob(job); watcher.current?.(); watcher.current = watchJob(job.id, (next) => { onJob(next); if (next.status === "completed") setRefreshVersion((value) => value + 1); else if (next.status === "failed") setError(next.error ?? "Video job failed"); }, (value) => setError(message(value))); } catch (value) { setError(message(value)); } };
   const exportChapter = async (chapter: number) => { try { setError(""); if (music.mode === "none") { setChapterExport({ chapter, url: `/api/stories/${slug}/chapters/${chapter}/video?download=1` }); return; } const job = await post<Job>(`/stories/${slug}/jobs/chapter-music-export`, { chapter, kind: "video", music, musicOverrides }); onJob(job); watcher.current?.(); watcher.current = watchJob(job.id, (next) => { onJob(next); if (next.status === "completed") { const result = next.result as { edition?: string } | undefined; if (result?.edition) setChapterExport({ chapter, url: `/api/stories/${slug}/chapters/${chapter}/video-exports/${result.edition}.mp4` }); } else if (next.status === "failed") setError(next.error ?? "Video export failed"); }, (value) => setError(message(value))); } catch (value) { setError(message(value)); } };
   if (!data && !chapterPage) return error ? <LoadFailure error={error} /> : <Loading />;
   if (!data) return <section className="page video-page">{error && <ErrorBox text={error} />}{pageError && <ErrorBox text={pageError} />}{chapterPage?.items.map((item) => <p key={item.chapter}>Chapter {item.chapter} · {item.title}</p>)}</section>;
@@ -4220,10 +4222,11 @@ export function SettingsPage({ slug, onJob, initialStory, initialEffectiveRoutin
             </select>
           </Field>
           <Field label="Upscaler">
-            <select value={story.artwork.upscaler} disabled>
+            <select value={story.artwork.upscaler} onChange={(event) => setStory({ ...story, artwork: { ...story.artwork, upscaler: event.target.value as ArtworkSettings["upscaler"] } })}>
+              <option value="ffmpeg-lanczos">Clean resize · Lanczos</option>
               <option value="local-realesrgan">Local AI · Real-ESRGAN</option>
             </select>
-            <small className="field-note">Runs locally on preserved originals — no paid image requests.</small>
+            <small className="field-note">Lanczos preserves the original composition and runs locally without AI or paid image requests.</small>
           </Field>
         </section>
       </div>
@@ -4374,15 +4377,16 @@ export function JobConsole({ job, onUpdate, onClose, navigate, initialQaComparis
   const stage = diagnostic?.stage ?? job.progress?.stage ?? job.progress?.event?.stage ?? job.progress?.type?.replace("chapter.", "");
   const chapter = diagnostic?.chapter ?? job.progress?.chapter;
   const detail = job.progress?.event?.detail ?? job.progress?.detail;
-  const summaryArtworkProgress = job.type === "summary" && typeof job.progress?.type === "string" && job.progress.type.startsWith("summary.artwork.")
+  const summaryArtworkProgress = job.type === "summary" && typeof job.progress?.type === "string" && (job.progress.type.startsWith("summary.artwork.") || job.progress.type.startsWith("summary.reupscale."))
     ? job.progress as { type: string; scene?: string; index?: number; total?: number }
     : undefined;
+  const isSummaryReupscale = summaryArtworkProgress?.type.startsWith("summary.reupscale.") ?? false;
   const artworkSceneNumber = summaryArtworkProgress?.scene?.match(/^scene-(\d+)$/i)?.[1];
   const artworkSceneLabel = artworkSceneNumber
     ? `Scene ${artworkSceneNumber}`
     : summaryArtworkProgress?.scene;
   const artworkCountLabel = Number.isFinite(summaryArtworkProgress?.index) && Number.isFinite(summaryArtworkProgress?.total)
-    ? `Artwork ${summaryArtworkProgress!.index} of ${summaryArtworkProgress!.total}`
+    ? `${isSummaryReupscale ? "Upscaling" : "Artwork"} ${summaryArtworkProgress!.index} of ${summaryArtworkProgress!.total}`
     : undefined;
   const artworkIndex = Number.isInteger(summaryArtworkProgress?.index) ? summaryArtworkProgress!.index! : undefined;
   const artworkTotal = Number.isInteger(summaryArtworkProgress?.total) && summaryArtworkProgress!.total! > 0 ? summaryArtworkProgress!.total : undefined;
@@ -4448,7 +4452,7 @@ export function JobConsole({ job, onUpdate, onClose, navigate, initialQaComparis
     }
   };
   const isSceneJob = job.type === "scenes" || stage === "scenePlanning" || stage === "scenes";
-  const label = summaryArtworkProgress ? "Generating summary artwork" : ({ batch: "Processing chapters", preview: "Rendering comparison", metadataTranslation: "Translating reader metadata", qaRepair: "Repairing selected QA findings", qaRecheck: "Rechecking chapter QA", stageExecution: "Processing stage", summary: "Building story recap", audio: "Mastering chapter audio", audiobook: "Building audiobook", alignment: "Aligning narration to audio", subtitles: "Timing subtitles", video: "Rendering chapter video", videoExport: "Building combined video", scenes: "Planning chapter scenes", artwork: "Generating scene artwork", production: "Producing finished story", ttsQualityVerify: "Verifying TTS quality", ttsSegmentRegenerate: "Regenerating TTS segment" } as Record<string, string>)[job.type] ?? "Working";
+  const label = summaryArtworkProgress ? isSummaryReupscale ? "Re-upscaling summary artwork" : "Generating summary artwork" : ({ batch: "Processing chapters", preview: "Rendering comparison", metadataTranslation: "Translating reader metadata", qaRepair: "Repairing selected QA findings", qaRecheck: "Rechecking chapter QA", stageExecution: "Processing stage", summary: "Building story recap", audio: "Mastering chapter audio", audiobook: "Building audiobook", alignment: "Aligning narration to audio", subtitles: "Timing subtitles", video: "Rendering chapter video", videoExport: "Building combined video", scenes: "Planning chapter scenes", artwork: "Generating scene artwork", production: "Producing finished story", ttsQualityVerify: "Verifying TTS quality", ttsSegmentRegenerate: "Regenerating TTS segment" } as Record<string, string>)[job.type] ?? "Working";
   const modelBadge = [diagnostic?.provider, diagnostic?.model].filter(Boolean).join(" · ");
   const terminal = isTerminalJob(job);
   const title = terminal ? (job.status === "completed" ? `${label} — completed` : `${label} — ${job.status}`) : label;
@@ -4511,7 +4515,7 @@ export function JobConsole({ job, onUpdate, onClose, navigate, initialQaComparis
           </div>
         </div>
         {artworkPercent !== undefined && artworkIndex !== undefined && artworkTotal !== undefined && artworkCompleted !== undefined ? (
-          <div className="job-progress job-progress-detailed" role="progressbar" aria-label="Summary artwork progress" aria-valuemin={0} aria-valuemax={artworkTotal} aria-valuenow={artworkCompleted} aria-valuetext={`${artworkCompleted} of ${artworkTotal} artwork items complete; ${summaryArtworkProgress?.type.endsWith("completed") ? "scene finished" : `working on item ${artworkIndex}`}`}>
+          <div className="job-progress job-progress-detailed" role="progressbar" aria-label={isSummaryReupscale ? "Summary artwork re-upscale progress" : "Summary artwork progress"} aria-valuemin={0} aria-valuemax={artworkTotal} aria-valuenow={artworkCompleted} aria-valuetext={`${artworkCompleted} of ${artworkTotal} artwork items complete; ${summaryArtworkProgress?.type.endsWith("completed") ? "scene finished" : `working on item ${artworkIndex}`}`}>
             <span style={{ width: `${artworkPercent}%` }} />
           </div>
         ) : <div className="job-progress"><i /><i /><i /><i /><i /></div>}

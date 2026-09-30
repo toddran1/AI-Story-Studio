@@ -97,7 +97,7 @@ export type VideoSettings = { width: number; height: number; fps: 24 | 25 | 30 |
 export type SceneSettings = { targetDurationSeconds: number; minimumDurationSeconds: number; maximumDurationSeconds: number; maximumScenesPerChapter: number };
 export type ArtworkOutputResolution = "native" | "720p" | "1080p" | "1440p" | "2160p";
 export type ArtworkUpscalingMode = "off" | "automatic" | "always";
-export type UpscalerEngine = "local-realesrgan";
+export type UpscalerEngine = "ffmpeg-lanczos" | "local-realesrgan";
 export type ArtworkSettings = { provider: "openai" | "gemini"; model: string; stylePrompt: string; aspectRatio: "16:9" | "1:1" | "9:16"; quality: "low" | "medium" | "high"; size: "1536x1024" | "1024x1024" | "1024x1536"; outputFormat: "png"; outputResolution: ArtworkOutputResolution; upscaling: ArtworkUpscalingMode; upscaler: UpscalerEngine; adultContent: boolean };
 export type ArtworkRouting = { provider: string; model: string; availableProviders: Array<{ name: string; models: string[]; defaultModel: string }> };
 // Mirrors the server IMAGE_PROVIDER_CATALOG; used where artworkRouting is unavailable (e.g. the settings page).

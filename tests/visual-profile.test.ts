@@ -279,6 +279,8 @@ describe("Visual Entity Profiles", () => {
     expect(prompt).toContain("ACCESSORIES: gold spectacles and silver signet ring");
     expect(prompt).toContain("PERSISTENT EQUIPMENT: etched bone talisman");
     expect(prompt).toContain("DEFAULT COSTUME / WARDROBE: dark academy jacket and fitted trousers");
+    expect(prompt).toContain("distinctive, story-appropriate mix of colors");
+    expect(prompt).toContain("Preserve every established profile trait");
   });
 
   it("proposes only missing visual details and persists only selected acceptance", async () => {
@@ -289,12 +291,14 @@ describe("Visual Entity Profiles", () => {
     await atomicWriteJson(storyPaths(root, slug, 1).bible, bible);
     await updateVisualProfile(root, slug, entityId, { character: { hairColor: "silver", eyeColor: "blue" } });
     let calls = 0;
+    let instructions = "";
     const provider = {
       name: "fake",
       validateConfiguration: async () => {},
       generateText: async () => ({ text: "" }),
-      generateStructured: async () => {
+      generateStructured: async (input: { instructions: string }) => {
         calls++;
+        instructions = input.instructions;
         return {
           value: {
             values: [
@@ -309,6 +313,8 @@ describe("Visual Entity Profiles", () => {
     };
     const proposal = await proposeMissingVisualDetails(root, slug, bible, entityId, provider as any, { provider: "openai", model: "fake" });
     expect(calls).toBe(1);
+    expect(instructions).toContain("do not habitually default to all-black clothing");
+    expect(instructions).toContain("preserving any established colors");
     expect(proposal.values).toMatchObject({ "character.build": "lean athletic", "character.faceShape": "angular with a narrow jaw" });
     expect(proposal.values["character.hairColor"]).toBeUndefined();
     expect((await getVisualProfile(root, slug, entityId))?.character?.build).toBeUndefined();

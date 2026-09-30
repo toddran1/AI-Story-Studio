@@ -141,7 +141,9 @@ describe("summary narration and audio", () => {
     await media.editNarration("demo-story", canonical.id, { text: "My protected narration" });
     const changed = story(); changed.narrationSettings.profanityMode = "soften-strong"; await atomicWriteJson(storyPaths(root, "demo-story", 1).storyConfig, changed);
     expect(await media.get("demo-story", canonical.id)).toMatchObject({ narration: { text: "My protected narration", status: "stale", reviewRequired: true } });
-    await expect(media.audio("demo-story", canonical.id)).rejects.toThrow(/Manual narration requires review/);
+    const retained = await media.audio("demo-story", canonical.id);
+    expect(retained.narration).toMatchObject({ text: "My protected narration", status: "stale", manuallyEdited: true });
+    expect(tts.requests[0]?.text).toBe("My protected narration");
     await media.editNarration("demo-story", canonical.id, { acceptCurrent: true });
     await media.audio("demo-story", canonical.id); expect(tts.requests[0]?.text).toBe("My protected narration");
     const replaced = await media.narration("demo-story", canonical.id, { force: true }); expect(replaced.narration?.manuallyEdited).toBe(false);

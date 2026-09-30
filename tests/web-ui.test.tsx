@@ -624,13 +624,13 @@ describe("web UI", () => {
 
   it("shows Chapter video readiness from existing availability and freshness without providers", () => {
     const row = { chapter: 1, audioAvailable: true, audioStale: false, audioMastering: "complete", subtitlesAvailable: true, subtitlesStale: false, subtitleStatus: "complete", videoAvailable: true, videoStale: false, videoStatus: "complete", sceneStatus: "complete", artworkStatus: "complete" } as any;
-    const scene: Scene = { id: "scene-001", summary: "A", startSeconds: 0, endSeconds: 30, characters: ["Mara"], resolvedCharacters: [{ name: "Mara", entityId: "ent_mara", profileStatus: "approved", resolution: "canonical_name" }], visualPrompt: "A", importance: "standard", imageUrl: "/scene.png", artwork: { status: "complete", review: "approved", versions: [] } };
+    const scene: Scene = { id: "scene-001", summary: "A", startSeconds: 0, endSeconds: 30, characters: ["Mara"], resolvedCharacters: [{ name: "Mara", entityId: "ent_mara", profileStatus: "approved", resolution: "canonical_name" }], visualPrompt: "A", importance: "standard", imageUrl: "/scene.png", artwork: { status: "complete", review: "approved", imageFingerprint: "test-image", versions: [] } };
     const current = chapterVideoReadinessChecks(row, [scene], false, "burn");
     expect(current.every((check) => check.state === "ready")).toBe(true);
     expect(chapterVideoReadinessChecks({ ...row, audioAvailable: false }, [scene], false, "burn").find((check) => check.label === "Audio")?.state).toBe("blocker");
     expect(chapterVideoReadinessChecks(row, [scene], true, "burn").find((check) => check.label === "Scene plan")?.state).toBe("warning");
     expect(chapterVideoReadinessChecks({ ...row, audioStale: true, videoStale: true }, [scene], false, "burn").filter((check) => check.state === "warning")).toHaveLength(2);
-    expect(chapterVideoReadinessChecks(row, [{ ...scene, artwork: { status: "complete", review: "rejected", versions: [] } }], false, "burn").find((check) => check.label === "Artwork")?.state).toBe("warning");
+    expect(chapterVideoReadinessChecks(row, [{ ...scene, artwork: { status: "complete", review: "rejected", versions: [] } }], false, "burn").find((check) => check.label === "Artwork")?.state).toBe("blocker");
     expect(chapterVideoReadinessChecks(row, [{ ...scene, artwork: { status: "pending", review: "unreviewed", versions: [] }, imageUrl: undefined }], false, "burn").find((check) => check.label === "Artwork")?.state).toBe("warning");
     expect(chapterVideoReadinessChecks(row, [scene, { ...scene, id: "scene-disabled", disabled: true, artwork: { status: "failed", review: "rejected", versions: [] }, imageUrl: undefined }], false, "burn").find((check) => check.label === "Artwork")?.state).toBe("ready");
     expect(chapterVideoReadinessChecks(row, [scene], false, "none").find((check) => check.label === "Subtitle timing")?.detail).toBe("Subtitles are disabled for this video.");
@@ -1247,6 +1247,13 @@ describe("web UI", () => {
 
       const minimized = renderToStaticMarkup(<JobConsole job={{ ...runningJob, type: "summary", progress: { type: "summary.artwork.started", scene: "scene-014", index: 2, total: 5 } }} initialMinimized onUpdate={() => undefined} onClose={() => undefined} />);
       expect(minimized).toContain("Scene 014 · Artwork 2 of 5 · in progress");
+    });
+
+    it("shows selected summary re-upscale progress in the job console", () => {
+      const html = renderToStaticMarkup(<JobConsole job={{ ...runningJob, type: "summary", progress: { type: "summary.reupscale.scene.started", scene: "scene-002", index: 2, total: 3 } }} onUpdate={() => undefined} onClose={() => undefined} />);
+      expect(html).toContain("Re-upscaling summary artwork");
+      expect(html).toContain("Scene 002 · Upscaling 2 of 3 · in progress");
+      expect(html).toContain('aria-label="Summary artwork re-upscale progress"');
     });
 
     it("renders compact strip when minimized with live dot, title, chapter/stage, and expand control", () => {
@@ -2184,6 +2191,11 @@ describe("Milestone 23 — image output quality UI", () => {
       production: { width: 3840, height: 2160, upscaled: true, engine: "local-realesrgan" },
     }} />);
     expect(upscaled).toContain("Production 3840×2160 · AI upscaled (local-realesrgan)");
+    const resized = renderToStaticMarkup(<ArtworkVersionMetadata version={{
+      ...baseVersion,
+      production: { width: 2560, height: 1440, upscaled: true, engine: "ffmpeg-lanczos" },
+    }} />);
+    expect(resized).toContain("Production 2560×1440 · Clean resized (Lanczos)");
     const notUpscaled = renderToStaticMarkup(<ArtworkVersionMetadata version={{
       ...baseVersion,
       original: { width: 2752, height: 1536 },

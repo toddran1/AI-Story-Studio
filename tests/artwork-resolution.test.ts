@@ -6,6 +6,7 @@ import { generateStoredArtwork, bestProductionAsset, reviewStoredArtwork, reupsc
 import { ImageGenerationRequest, ImageProvider } from "../src/artwork/provider.js";
 import { imageDimensions, planResolution, resolveTargetDimensions } from "../src/artwork/resolution.js";
 import { ffmpegResizer, LocalRealEsrganUpscaler } from "../src/artwork/local-realesrgan.upscaler.js";
+import { FfmpegLanczosUpscaler } from "../src/artwork/ffmpeg-lanczos.upscaler.js";
 import { ImageUpscaler, ImageUpscaleRequest } from "../src/artwork/upscaler.js";
 import { ConfigurationError } from "../src/pipeline/errors.js";
 import { chapterSchema } from "../src/domain/chapter.js";
@@ -172,7 +173,21 @@ describe("artwork resolution model", () => {
 
   it("keeps legacy artwork settings parsing with new fields defaulted", () => {
     const legacy = artworkSettingsSchema.parse({ provider: "openai", model: "gpt-image-1", quality: "low", size: "1024x1024" });
-    expect(legacy).toMatchObject({ quality: "low", size: "1024x1024", outputResolution: "native", upscaling: "automatic", upscaler: "local-realesrgan" });
+    expect(legacy).toMatchObject({ quality: "low", size: "1024x1024", outputResolution: "native", upscaling: "automatic", upscaler: "ffmpeg-lanczos" });
+  });
+});
+
+describe("clean local resize", () => {
+  it("uses the original and exact requested dimensions without invoking an AI engine", async () => {
+    const calls: Array<{ input: string; source: unknown; target: unknown }> = [];
+    const upscaler = new FfmpegLanczosUpscaler(async (input, output, source, target) => {
+      calls.push({ input, source, target });
+      await atomicWrite(output, pngWithDims(target.width, target.height));
+      return { fit: "crop" };
+    });
+    const outputPath = join(await mkdtemp(join(tmpdir(), "clean-resize-")), "production.png");
+    await expect(upscaler.upscale({ sourcePath: "original.png", sourceWidth: 1536, sourceHeight: 1024, targetWidth: 2560, targetHeight: 1440, outputPath })).resolves.toMatchObject({ engine: "ffmpeg-lanczos", fit: "crop", finalDimensions: { width: 2560, height: 1440 } });
+    expect(calls).toEqual([{ input: "original.png", source: { width: 1536, height: 1024 }, target: { width: 2560, height: 1440 } }]);
   });
 });
 
@@ -197,13 +212,33 @@ describe("local Real-ESRGAN upscaler adapter", () => {
     const upscaler = new LocalRealEsrganUpscaler("realesrgan-ncnn-vulkan", "realesrgan-x4plus", 1000, bannerRunner);
     await expect(upscaler.validateConfiguration()).resolves.toBeUndefined();
   });
-  it("fails when the upscaler produces no output", async () => {
+  it("uses a clean deterministic resize when the upscaler produces no output", async () => {
     const silentRunner = async (_command: string, args: string[]): Promise<CommandResult> => {
       if (args[0] === "-h") return { stdout: "", stderr: "" };
       return { stdout: "", stderr: "" }; // exit 0 but never writes the -o file
     };
-    const upscaler = new LocalRealEsrganUpscaler("realesrgan-ncnn-vulkan", "realesrgan-x4plus", 1000, silentRunner);
-    await expect(upscaler.upscale({ ...request, outputPath: join(await mkdtemp(join(tmpdir(), "upscale-")), "out.png") })).rejects.toThrow(/produced no output/);
+    const resize = async (_input: string, output: string, _source: any, target: any) => { await atomicWrite(output, pngWithDims(target.width, target.height)); return { fit: "crop" as const }; };
+    const upscaler = new LocalRealEsrganUpscaler("realesrgan-ncnn-vulkan", "realesrgan-x4plus", 1000, silentRunner, resize);
+    await expect(upscaler.upscale({ ...request, outputPath: join(await mkdtemp(join(tmpdir(), "upscale-")), "out.png") })).resolves.toMatchObject({ engine: "ffmpeg-lanczos", finalDimensions: { width: 3840, height: 2160 } });
+  });
+  it("rejects a tiled-looking AI result and replaces it with a clean resize", async () => {
+    const calls: string[] = [];
+    let aiRuns = 0;
+    const imageRunner = async (_command: string, args: string[]): Promise<CommandResult> => {
+      if (args.includes("-o")) {
+        aiRuns += 1;
+        await atomicWrite(args[args.indexOf("-o") + 1]!, pngWithDims(5504, 3072));
+      }
+      return { stdout: "", stderr: args.some((arg) => arg.includes("[ref][out]ssim")) ? "SSIM Y:0.25 U:0.70 V:0.52 All:0.37" : "" };
+    };
+    const resize = async (input: string, output: string, _source: any, target: any) => { calls.push(input); await atomicWrite(output, pngWithDims(target.width, target.height)); return { fit: "crop" as const }; };
+    const upscaler = new LocalRealEsrganUpscaler("realesrgan-ncnn-vulkan", "realesrgan-x4plus", 1000, imageRunner, resize);
+    const result = await upscaler.upscale({ ...request, outputPath: join(await mkdtemp(join(tmpdir(), "upscale-")), "out.png") });
+    expect(result.engine).toBe("ffmpeg-lanczos");
+    expect(calls.at(-1)).toBe("in.png");
+    const second = await upscaler.upscale({ ...request, outputPath: join(await mkdtemp(join(tmpdir(), "upscale-")), "out.png") });
+    expect(second).toMatchObject({ engine: "ffmpeg-lanczos", warning: expect.stringContaining("distorted image earlier") });
+    expect(aiRuns).toBe(1);
   });
   it("picks the smallest factor reaching the target and normalizes to exact dimensions", async () => {
     const captured: any = {};

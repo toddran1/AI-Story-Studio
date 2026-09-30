@@ -19,6 +19,7 @@ export type ImageUpscaleResult = {
   model?: string;
   scaleFactor?: number;
   fit: "exact" | "crop" | "pad";
+  warning?: string;
 };
 
 /** Provider-neutral local image upscaler contract. Implementations wrap local
@@ -28,8 +29,8 @@ export interface ImageUpscaler {
   readonly version: string;
   readonly model?: string;
   validateConfiguration(): Promise<void>;
-  /** AI upscale pass from the ORIGINAL provider image, followed by a
-   * deterministic normalization to the exact target when needed. */
+  /** Build a larger production image from the ORIGINAL provider image,
+   * then normalize to the exact target when needed. */
   upscale(request: ImageUpscaleRequest): Promise<ImageUpscaleResult>;
   /** Deterministic resize/pad/crop to the exact target — no AI pass. */
   normalize(request: ImageUpscaleRequest): Promise<ImageUpscaleResult>;
@@ -54,6 +55,6 @@ export function upscaleFingerprint(input: {
     engine: input.engine,
     model: input.model,
     target: input.target,
-    version: "artwork-upscale-v1",
+    version: "artwork-upscale-v2",
   });
 }

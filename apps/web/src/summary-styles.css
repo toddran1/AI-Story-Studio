@@ -47,6 +47,8 @@
 .summary-layer-tabs button { min-width: 70px; font-size: 13px; }
 .summary-media-editor { gap: 16px; }
 .summary-media-editor > p, .summary-media-editor > h3 { margin: 0; }
+.summary-video-subtitle-toggle { display: inline-flex; align-items: center; gap: 9px; width: fit-content; padding: 9px 12px; border: 1px solid #353541; border-radius: 7px; color: #ececf4; font-size: 13px; cursor: pointer; }
+.summary-video-subtitle-toggle input { accent-color: #8277e8; }
 .summary-artwork-grid { grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr)); align-items: start; }
 .summary-artwork-grid .summary-scene-card { margin-top: 0; min-width: 0; }
 .summary-scene-card { overflow-wrap: anywhere; }

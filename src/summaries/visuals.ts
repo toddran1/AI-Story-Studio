@@ -58,6 +58,7 @@ export class SummaryArtifactNotFoundError extends Error {}
 
 export const summaryVisualInputSchema = z.object({
   force: z.boolean().default(false),
+  subtitleMode: z.enum(["none", "burn", "soft", "both"]).optional(),
   missingOnly: z.boolean().default(false),
   dryRun: z.boolean().default(false),
   scenes: z.array(z.string().regex(/^scene-\d{3}$/)).min(1).max(100).optional(),
@@ -65,6 +66,7 @@ export const summaryVisualInputSchema = z.object({
 }).strict();
 export const summaryReupscaleInputSchema = z.object({
   sceneId: z.string().regex(/^scene-\d{3}$/).optional(),
+  sceneIds: z.array(z.string().regex(/^scene-\d{3}$/)).min(1).max(100).optional(),
   versionNumber: z.number().int().positive().optional(),
 }).strict();
 export const summaryProduceInputSchema = summaryScenesInputSchema.safeExtend({
@@ -308,7 +310,7 @@ export class SummaryVisualService {
     const intact = (summary.scenePlan?.scenes.filter((scene) => !scene.disabled) ?? []).every((scene) => freshness.get(scene.id)?.current);
     if ((summary.artwork?.status === "current" || summary.artwork?.status === "stale") && summary.scenePlan) summary.artwork.status = intact ? "current" : "stale";
     const { story } = await this.context(slug);
-    const settings = { ...resolveVideoSettings(story.video), introDurationSeconds: 0 };
+    const settings = { ...resolveVideoSettings(story.video), ...(summary.video?.subtitleMode ? { subtitleMode: summary.video.subtitleMode } : {}), introDurationSeconds: 0 };
     if (summary.video?.status === "current" || summary.video?.status === "stale") {
       const videoCurrent = summary.audio?.status === "current" && summary.scenes?.status === "current" && intact &&
         summary.video.inputFingerprint === this.videoFingerprint(summary, settings) && summary.video.outputFingerprint === await fileFingerprint(paths.video);
@@ -447,7 +449,7 @@ export class SummaryVisualService {
     const { story } = context;
     const paths = this.paths(slug, id);
     const continuity = await this.sceneContinuity(slug, id, summary.scenePlan.scenes);
-    const upscaler = needsProductionDerivative(story) ? resolveUpscaler(upscalerOverride ?? this.upscaler) : undefined;
+    const upscaler = needsProductionDerivative(story) ? resolveUpscaler(upscalerOverride ?? this.upscaler, story.artwork.upscaler) : undefined;
 
     let imagesToGenerate = 0;
     let reusable = 0;
@@ -697,16 +699,16 @@ export class SummaryVisualService {
       throw error;
     }
   }
-  async reupscale(slug: string, id: string, raw: unknown = {}, upscalerOverride?: ImageUpscaler) {
+  async reupscale(slug: string, id: string, raw: unknown = {}, upscalerOverride?: ImageUpscaler, progress?: SummaryVisualProgress) {
     const options = summaryReupscaleInputSchema.parse(raw);
     const summary = await this.get(slug, id);
     if (!summary.scenePlan) throw new Error("Summary has no scene plan");
     const { story } = await this.context(slug);
     const paths = this.paths(slug, id);
-    const scenes = options.sceneId
-      ? summary.scenePlan.scenes.filter((scene) => scene.id === options.sceneId)
-      : summary.scenePlan.scenes;
-    if (options.sceneId && !scenes.length) throw new Error(`Scene '${options.sceneId}' was not found`);
+    const requestedIds = options.sceneIds ?? (options.sceneId ? [options.sceneId] : undefined);
+    const scenes = requestedIds ? summary.scenePlan.scenes.filter((scene) => requestedIds.includes(scene.id)) : summary.scenePlan.scenes;
+    if (requestedIds && scenes.length !== new Set(requestedIds).size) throw new Error("One or more selected scenes were not found");
+    progress?.({ type: "summary.reupscale.started", total: scenes.length });
 
     // Migrate any legacy scenes without versions array
     for (const scene of scenes) {
@@ -746,11 +748,12 @@ export class SummaryVisualService {
     }
 
     const warnings: string[] = [];
-    const upscaler = needsProductionDerivative(story) ? resolveUpscaler(upscalerOverride ?? this.upscaler) : undefined;
+    const upscaler = needsProductionDerivative(story) ? resolveUpscaler(upscalerOverride ?? this.upscaler, story.artwork.upscaler) : undefined;
     const rederived: Array<{ sceneId: string; versionId: string; status: string }> = [];
     let changed = false;
 
-    for (const scene of scenes) {
+    for (const [index, scene] of scenes.entries()) {
+      progress?.({ type: "summary.reupscale.scene.started", scene: scene.id, index: index + 1, total: scenes.length });
       for (const version of scene.artwork.versions ?? []) {
         if (options.versionNumber !== undefined && version.versionNumber !== options.versionNumber) continue;
         const originalPath = paths.sceneVersionImage(scene.id, version.versionNumber);
@@ -783,6 +786,7 @@ export class SummaryVisualService {
           changed = true;
         }
       }
+      progress?.({ type: "summary.reupscale.scene.completed", scene: scene.id, index: index + 1, total: scenes.length });
     }
 
     if (changed) {
@@ -834,20 +838,19 @@ export class SummaryVisualService {
     return { path, name: `${id}-${sceneId}-${versionId}.png`, contentType: "image/png" };
   }
   async video(slug: string, id: string, raw: unknown = {}, progress?: SummaryVisualProgress) {
-    const { force } = summaryVisualInputSchema.parse(raw); const summary = await this.get(slug, id); const { story } = await this.context(slug);
+    const { force, subtitleMode } = summaryVisualInputSchema.parse(raw); const summary = await this.get(slug, id); const { story } = await this.context(slug);
     const paths = this.paths(slug, id);
-    const continuity = await this.sceneContinuity(slug, id, summary.scenePlan?.scenes ?? []);
     // Availability + integrity, not freshness: stale-but-valid audio/scenes render with a warning upstream in the UI.
     if (!summary.scenePlan || !summaryScenePlanAvailable(summary) || !summary.audio?.outputFingerprint || !summary.audio.durationSeconds || (await fileFingerprint(paths.audio)) !== summary.audio.outputFingerprint) throw new Error("Usable mastered audio and a scene plan are required for summary video");
     const scenes = summary.scenePlan.scenes.filter((scene) => !scene.disabled);
+    if (!scenes.length) throw new Error("At least one enabled scene is required for summary video");
     for (const scene of scenes) {
-      const visual = continuity.get(scene.id); const input = await this.imageInput(slug, id, scene, visual?.text, visual?.decision, summary.artDirectionOverride, Math.max(...summary.chapters));
       const actual = await validPngFingerprint(paths.image(scene.id));
-      if (!actual || actual !== scene.artwork.imageFingerprint || scene.artwork.status !== "complete" || scene.artwork.fingerprint !== input.inputFingerprint || ["rejected", "needs-regeneration"].includes(scene.artwork.review)) {
-        throw new Error(`${scene.id} needs current artwork; review protected artwork or regenerate it explicitly`);
+      if (!actual || actual !== scene.artwork.imageFingerprint || ["rejected", "needs-regeneration"].includes(scene.artwork.review)) {
+        throw new Error(`${scene.id} has missing, damaged, or rejected artwork; repair or select a usable image before rendering`);
       }
     }
-    const settings = { ...resolveVideoSettings(story.video), introDurationSeconds: 0 };
+    const settings = { ...resolveVideoSettings(story.video), ...(subtitleMode ? { subtitleMode } : {}), introDurationSeconds: 0 };
     const inputFingerprint = this.videoFingerprint(summary, settings);
     if (!force && summary.video?.status === "current" && summary.video.inputFingerprint === inputFingerprint) return summary;
     let subtitles: string | undefined;
@@ -869,9 +872,7 @@ export class SummaryVisualService {
         const originalPath = paths.sceneVersionImage(scene.id, backing.versionNumber);
         const productionPath = paths.sceneVersionProductionImage(scene.id, backing.versionNumber);
         const asset = await resolveBestProductionAssetForPaths({ story, version: backing, originalPath, productionPath });
-        if (await validPngFingerprint(asset.path)) {
-          path = asset.path;
-        }
+        if (await validPngFingerprint(asset.path) === asset.fingerprint) path = asset.path;
       }
       return { path, durationSeconds: scene.endSeconds - scene.startSeconds };
     }));
@@ -899,6 +900,7 @@ export class SummaryVisualService {
         width: probe.width,
         height: probe.height,
         sceneCount: scenes.length,
+        subtitleMode: settings.subtitleMode,
         sourceFingerprint: summary.audio.outputFingerprint,
         generatedAt: new Date().toISOString(),
         manuallyEdited: false,
@@ -934,7 +936,11 @@ export class SummaryVisualService {
       if ("preflight" in report && !report.preflight.ready) return this.produceBlocked(id, report.preflight, true);
     }
     progress?.({ type: "summary.narration.preparing" });
-    if (paused?.()) return this.get(slug, id); await withUsageScope({ story: slug, stage: "narration" }, () => this.media.narration(slug, id, { force: options.force }));
+    // A manual narration is the retained editorial source even when upstream
+    // changes have marked it stale. Refreshing inputs must not replace it.
+    if (paused?.()) return this.get(slug, id);
+    if (!(initial.narration?.manuallyEdited && initial.narration.text?.trim() && !options.force))
+      await withUsageScope({ story: slug, stage: "narration" }, () => this.media.narration(slug, id, { force: options.force }));
     if (paused?.()) return this.get(slug, id); progress?.({ type: "summary.audio.preparing" }); await withUsageScope({ story: slug, stage: "tts" }, () => this.media.audio(slug, id, { force: options.force }));
     if (paused?.()) return this.get(slug, id);
     await withUsageScope({ story: slug, stage: "scenePlanning" }, () => this.scenes(slug, id, sceneOptions, progress));

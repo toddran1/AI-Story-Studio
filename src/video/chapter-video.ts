@@ -16,6 +16,7 @@ import { SceneManifest, sceneManifestSchema } from "../scenes/types.js";
 import { resolveVideoSettings, VideoSettings } from "./config.js";
 import { imageDimensions } from "../artwork/resolution.js";
 import { enabledProductionScenes, retimeScenesToDuration } from "../scenes/production.js";
+import { backingArtworkVersion, bestProductionAsset, validPngFingerprint } from "../artwork/generator.js";
 
 export type VideoEvent = { status: "started" | "completed" | "reused"; chapter: number; state: StageState };
 export async function renderStoredChapterVideo(options: { root: string; story: Story; chapter: number; processor: VideoProcessor; force?: boolean; allowMissingSubtitles?: boolean; onEvent?: (event: VideoEvent) => void }) {
@@ -36,7 +37,7 @@ export async function renderStoredChapterVideo(options: { root: string; story: S
   if (audioArtifact.freshness === "stale") warnings.push(stalePrerequisiteWarning("audioMastering"));
   if (needsSubtitles && subtitleArtifact?.freshness === "stale") warnings.push(stalePrerequisiteWarning("subtitles"));
   if (configuredSubtitles && !needsSubtitles) warnings.push("Subtitles are unavailable; rendering this Chapter without subtitles.");
-  const sceneArtwork = await approvedSceneArtwork(options.root, options.story.slug, options.chapter, chapter.audio.durationSeconds); const availableCover = await findCover(options.root, options.story.slug); const cover = sceneArtwork ? undefined : options.story.video.backgroundMode === "gradient" ? undefined : availableCover; const backgroundFingerprint = sceneArtwork ? fingerprint(sceneArtwork.map((item) => ({ id: item.id, durationSeconds: item.durationSeconds, fingerprint: item.fingerprint }))) : cover ? await fileFingerprint(cover) : "generated-fallback-v1"; const audioFingerprint = await fileFingerprint(paths.audio); const subtitleFileFingerprint = needsSubtitles ? await fileFingerprint(paths.subtitlesSrt) : undefined; const inputFingerprint = videoFingerprint(audioFingerprint, subtitleFileFingerprint, backgroundFingerprint, videoSettings, chapter.translatedTitle ?? chapter.originalTitle);
+  const sceneArtwork = await approvedSceneArtwork(options.root, options.story, options.chapter, chapter.audio.durationSeconds); const availableCover = await findCover(options.root, options.story.slug); const cover = sceneArtwork ? undefined : options.story.video.backgroundMode === "gradient" ? undefined : availableCover; const backgroundFingerprint = sceneArtwork ? fingerprint(sceneArtwork.map((item) => ({ id: item.id, durationSeconds: item.durationSeconds, fingerprint: item.fingerprint }))) : cover ? await fileFingerprint(cover) : "generated-fallback-v1"; const audioFingerprint = await fileFingerprint(paths.audio); const subtitleFileFingerprint = needsSubtitles ? await fileFingerprint(paths.subtitlesSrt) : undefined; const inputFingerprint = videoFingerprint(audioFingerprint, subtitleFileFingerprint, backgroundFingerprint, videoSettings, chapter.translatedTitle ?? chapter.originalTitle);
   const belowTarget = sceneArtwork ? await artworkBelowCanvas(sceneArtwork, videoSettings) : false; if (belowTarget) warnings.push(`Chapter ${options.chapter} artwork is below the ${videoSettings.width}x${videoSettings.height} canvas; FFmpeg will scale it up.`);
   const currentOutput = await fileFingerprint(paths.video); if (!options.force && chapter.stages.video.status === "complete" && chapter.stages.video.fingerprint === inputFingerprint && currentOutput === chapter.stages.video.outputFingerprint && chapter.video) { options.onEvent?.({ status: "reused", chapter: options.chapter, state: chapter.stages.video }); return { chapter, reused: true, cover: Boolean(cover), scenes: sceneArtwork?.length ?? 0, warnings, belowTargetResolution: belowTarget }; }
   const started = Date.now(); chapter.video = undefined; chapter.stages.video = { status: "running", provider: "ffmpeg", model: options.processor.version, fingerprint: inputFingerprint, startedAt: new Date().toISOString() }; await persist(paths.chapterMeta, chapter); options.onEvent?.({ status: "started", chapter: options.chapter, state: chapter.stages.video }); const staged = `${paths.video}.stage-${randomUUID()}.mp4`;
@@ -52,14 +53,16 @@ async function artworkBelowCanvas(sceneArtwork: Array<{ path: string }>, setting
   }
   return false;
 }
-async function approvedSceneArtwork(root: string, slug: string, chapter: number, durationSeconds: number) {
+async function approvedSceneArtwork(root: string, story: Story, chapter: number, durationSeconds: number) {
+  const slug = story.slug;
   const raw = await readJsonIfExists<SceneManifest>(storyPaths(root, slug, chapter).scenesManifest);
   const parsed = raw ? sceneManifestSchema.safeParse(raw) : undefined;
   if (!parsed?.success || !parsed.data.scenes.length) return undefined;
   const enabled = enabledProductionScenes(parsed.data.scenes);
   if (!enabled.length) return undefined;
-  const allApproved = enabled.every((scene) => scene.artwork.review === "approved");
-  if (!allApproved) return undefined;
+  if (enabled.some((scene) => ["rejected", "needs-regeneration"].includes(scene.artwork.review))) {
+    throw new VideoError(`Chapter ${chapter} has rejected scene artwork; select usable artwork before rendering.`);
+  }
   const timeline = retimeScenesToDuration(enabled, durationSeconds);
   const result: Array<{ id: string; path: string; durationSeconds: number; fingerprint: string }> = [];
   for (const scene of timeline) {
@@ -79,7 +82,10 @@ async function approvedSceneArtwork(root: string, slug: string, chapter: number,
       }
       throw new VideoError(`Approved artwork for Scene ${scene.id} is corrupt.`);
     }
-    result.push({ id: scene.id, path: inspected.imagePath, durationSeconds: scene.endSeconds - scene.startSeconds, fingerprint: scene.artwork.imageFingerprint });
+    const backing = backingArtworkVersion(scene);
+    const asset = backing ? await bestProductionAsset(root, story, chapter, scene.id, backing) : undefined;
+    const usableAsset = asset && await validPngFingerprint(asset.path) === asset.fingerprint ? asset : undefined;
+    result.push({ id: scene.id, path: usableAsset?.path ?? inspected.imagePath, durationSeconds: scene.endSeconds - scene.startSeconds, fingerprint: usableAsset?.fingerprint ?? scene.artwork.imageFingerprint });
   }
   if (Math.abs(result.reduce((sum, item) => sum + item.durationSeconds, 0) - durationSeconds) > 0.02) throw new VideoError("Enabled scene artwork timing does not cover the mastered Chapter duration");
   return result;

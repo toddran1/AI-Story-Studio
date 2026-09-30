@@ -7,7 +7,16 @@ import { ConfigurationError } from "../pipeline/errors.js";
 import { Environment } from "../config/env.js";
 import { ImageUpscaleRequest, ImageUpscaleResult, ImageUpscaler } from "./upscaler.js";
 
-export const LOCAL_REALESRGAN_VERSION = "local-realesrgan-v1";
+export const LOCAL_REALESRGAN_VERSION = "local-realesrgan-v2";
+
+/** An AI upscale should retain the original composition. A low score catches
+ * the rearranged tile grid produced by some local Vulkan runs. */
+export async function upscaleSimilarity(sourcePath: string, outputPath: string, runner: CommandRunner = runCommand): Promise<number | undefined> {
+  const filter = "[0:v]scale=512:288:force_original_aspect_ratio=increase,crop=512:288,format=yuv420p[ref];[1:v]scale=512:288,format=yuv420p[out];[ref][out]ssim";
+  const result = await runner(process.env.FFMPEG_PATH || "ffmpeg", ["-hide_banner", "-nostdin", "-i", sourcePath, "-i", outputPath, "-filter_complex", filter, "-frames:v", "1", "-f", "null", "-"], 60_000);
+  const match = result.stderr.match(/\bAll:([0-9.]+)/);
+  return match ? Number(match[1]) : undefined;
+}
 
 /** Deterministic FFmpeg resize to exact target dimensions. Matches the video
  * renderer's fit semantics (scale to cover, then crop — never stretch). */
@@ -34,6 +43,7 @@ export class LocalRealEsrganUpscaler implements ImageUpscaler {
   private validation?: Promise<void>;
   private resolvedExecutable?: string;
   private resolvedModelPath?: string;
+  private unusableAiOutput = false;
 
   constructor(
     private readonly executable = "realesrgan-ncnn-vulkan",
@@ -141,6 +151,7 @@ export class LocalRealEsrganUpscaler implements ImageUpscaler {
   }
 
   async upscale(request: ImageUpscaleRequest): Promise<ImageUpscaleResult> {
+    if (this.unusableAiOutput) return this.resizeFallback(request, "Local AI upscaler produced a distorted image earlier in this run");
     await this.validateConfiguration();
     const executable = this.resolvedExecutable ?? this.executable;
     const modelPath = this.resolvedModelPath ?? this.modelPath;
@@ -159,6 +170,7 @@ export class LocalRealEsrganUpscaler implements ImageUpscaler {
     await mkdir(directory, { recursive: true });
     // Not a dotfile: realesrgan-ncnn-vulkan silently skips hidden output paths.
     const staged = join(directory, `upscale-${randomUUID()}.staging.png`);
+    let result: ImageUpscaleResult;
     try {
       await this.runner(
         executable,
@@ -173,11 +185,33 @@ export class LocalRealEsrganUpscaler implements ImageUpscaler {
         this.timeoutMs
       );
       await access(staged).catch(() => { throw new Error(`Upscaler produced no output at ${staged}`); });
-      return await this.finish(request, staged, factor);
+      result = await this.finish(request, staged, factor);
     } catch (error) {
       await rm(staged, { force: true });
-      throw error;
+      return this.resizeFallback(request, `Local AI upscaler failed: ${error instanceof Error ? error.message : String(error)}`);
     }
+    let similarity: number | undefined;
+    try {
+      similarity = await upscaleSimilarity(request.sourcePath, result.outputPath, this.runner);
+    } catch (error) {
+      return this.resizeFallback(request, `Local AI upscale visual check failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    if (similarity === undefined && this.runner === runCommand) {
+      this.unusableAiOutput = true;
+      return this.resizeFallback(request, "Local AI upscale could not be visually verified");
+    }
+    if (similarity !== undefined && similarity < 0.65) {
+      this.unusableAiOutput = true;
+      return this.resizeFallback(request, `Local AI upscale failed the visual integrity check (similarity ${similarity.toFixed(3)})`);
+    }
+    return result;
+  }
+
+  private async resizeFallback(request: ImageUpscaleRequest, reason: string): Promise<ImageUpscaleResult> {
+    const source = { width: request.sourceWidth, height: request.sourceHeight };
+    const target = { width: request.targetWidth, height: request.targetHeight };
+    const { fit } = await this.resizer(request.sourcePath, request.outputPath, source, target);
+    return { outputPath: request.outputPath, sourceDimensions: source, finalDimensions: target, engine: "ffmpeg-lanczos", model: request.model ?? this.model, fit, warning: `${reason}; used a clean Lanczos resize instead.` };
   }
 
   async normalize(request: ImageUpscaleRequest): Promise<ImageUpscaleResult> {

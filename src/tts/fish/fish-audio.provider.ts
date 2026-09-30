@@ -53,8 +53,8 @@ export class FishAudioProvider implements TTSProvider {
     } = {},
   ) {
     this.inputNormalizationVersion = speechOptions.tskRendering === "direction"
-      ? "fish-speech-normalization-v12-multispeaker-safe-chunks-tsk-direction"
-      : "fish-speech-normalization-v12-multispeaker-safe-chunks";
+      ? "fish-speech-normalization-v14-scene-dividers-multispeaker-safe-chunks-tsk-direction"
+      : "fish-speech-normalization-v14-scene-dividers-multispeaker-safe-chunks";
   }
 
   resolveReferenceId(referenceId?: string): string | undefined {

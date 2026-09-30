@@ -318,6 +318,18 @@ describe("summary visual production M23 parity", () => {
     // Second reupscale call is idempotent (no-op)
     const secondReupscale = await visuals.reupscale("demo-story", id);
     expect(secondReupscale.rederived).toHaveLength(0);
+
+    story.artwork.outputResolution = "2160p";
+    await atomicWriteJson(storyFile, story);
+    const progress: Array<{ type: string; scene?: string; index?: number; total?: number }> = [];
+    const selectedReupscale = await visuals.reupscale("demo-story", id, { sceneIds: ["scene-001"] }, undefined, (event) => progress.push(event as typeof progress[number]));
+    expect(selectedReupscale.rederived).toHaveLength(1);
+    expect(selectedReupscale.rederived[0]?.sceneId).toBe("scene-001");
+    expect(progress).toEqual([
+      { type: "summary.reupscale.started", total: 1 },
+      { type: "summary.reupscale.scene.started", scene: "scene-001", index: 1, total: 1 },
+      { type: "summary.reupscale.scene.completed", scene: "scene-001", index: 1, total: 1 },
+    ]);
   });
 
   it("injects aspect-ratio composition guidance into prompts with modern aspect ratio override", async () => {
@@ -336,7 +348,7 @@ describe("summary visual production M23 parity", () => {
     expect(prompt).not.toContain("vertical");
   });
 
-  it("selects best production derivative for video rendering and falls back to original if missing", async () => {
+  it("selects verified production derivatives for video rendering and falls back to originals", async () => {
     await visuals.artwork("demo-story", id);
     await visuals.video("demo-story", id);
 

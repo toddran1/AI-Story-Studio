@@ -55,6 +55,9 @@ const UNIT_REPLACEMENTS: ReadonlyArray<readonly [RegExp, string]> = [
 
 function stripMarkdownForSpeech(text: string): string {
   return text
+    // Markdown scene dividers are silent; the list-marker rule below would
+    // otherwise leave a stray asterisk for the voice model to interpret.
+    .replace(/^[ \t]*(?:(?:\*[ \t]*){3,}|(?:-[ \t]*){3,}|(?:_[ \t]*){3,})$/gm, "")
     .replace(/```[\s\S]*?```/g, " ")
     .replace(/`([^`\n]+)`/g, "$1")
     .replace(/!\[[^\]]*]\([^)]+\)/g, " ")
@@ -76,6 +79,19 @@ function stripEmojiForSpeech(text: string): string {
     .replace(/[\u200D\uFE0E\uFE0F]/g, " ");
 }
 
+/** Music notes marking a lyric are editorial notation, not words or a Fish
+ * delivery cue. Keep the displayed narration unchanged and speak the lyric. */
+function stripMusicCuesForSpeech(text: string): string {
+  return text.split("\n").map((line) => {
+    let spoken = line.replace(/(^|[“"‘'])([ \t]*)(?:[♪♫♬♩🎵🎶][ \t]*:?[ \t]*)+(?=\p{L})/gu, "$1$2");
+    if (spoken === line) return line;
+    spoken = spoken.replace(/[ \t]*[♪♫♬♩🎵🎶]+(?=[ \t]*[”"’']?(?:\[[^\]\n]+\])?[ \t]*$)/u, "");
+    spoken = spoken.replace(/~+[ \t]*(?=(?:\.{3,}|…+)?[ \t]*[”"’']?(?:\[[^\]\n]+\])?[ \t]*$)/u, "");
+    // A trailing lyric ellipsis invites the model to continue inventing words.
+    return spoken.replace(/(?:\.{3,}|…+)(?=[ \t]*[”"’']?(?:\[[^\]\n]+\])?[ \t]*$)/u, ".");
+  }).join("\n");
+}
+
 function replaceAll(text: string, replacements: ReadonlyArray<readonly [RegExp, string]>): string {
   return replacements.reduce((current, [pattern, replacement]) => current.replace(pattern, replacement), text);
 }
@@ -86,7 +102,7 @@ function replaceAll(text: string, replacements: ReadonlyArray<readonly [RegExp, 
  * fictional terminology are not silently changed.
  */
 export function normalizeFishSpeechText(text: string, model?: string, options: { tskRendering?: "preserve" | "direction" } = {}): string {
-  const structured = normalizeFishLeadingHesitations(stripStandaloneEllipsisLines(text), model).replace(/【[^【】\n]{1,500}】/gu, normalizeStructuredSpeechBlock)
+  const structured = normalizeFishLeadingHesitations(stripMusicCuesForSpeech(stripStandaloneEllipsisLines(text)), model).replace(/【[^【】\n]{1,500}】/gu, normalizeStructuredSpeechBlock)
     .replace(/(?<![\p{L}\p{N}])([A-Z][\p{L}\p{N} -]{1,80})\s+\((Passive|Active)\)\s+\((Level [^()\n]{1,30}|Rank [^()\n]{1,30})\)/gu, normalizeSystemMetadataText);
   const withoutMarkup = renderFishVocalizations(disambiguateFishS2Brackets(stripFishMarkdownEmphasis(stripEmojiForSpeech(stripMarkdownForSpeech(structured))), model), model, options)
     // A performed reaction can be tagged more than once by earlier preparation.

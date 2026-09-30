@@ -84,6 +84,51 @@ export function FigureSettings({ gender, figure, onChange }: { gender?: string; 
   </details>;
 }
 
+type DetailSection = "character" | "location" | "creature" | "item";
+const additionalDetailFields = {
+  character: [
+    ["faceShape", "Face Shape"], ["facialHair", "Facial Hair"],
+    ["scars", "Scars"], ["tattoos", "Tattoos"],
+    ["shoes", "Shoes"], ["accessories", "Accessories"],
+    ["equipment", "Equipment"], ["additionalAppearanceNotes", "Additional Appearance Notes"],
+  ],
+  location: [
+    ["environmentDescription", "Environment Description"], ["vegetation", "Vegetation"],
+    ["weatherTendencies", "Typical Weather"], ["atmosphere", "Atmosphere"],
+    ["recurringLandmarks", "Recurring Landmarks"],
+  ],
+  creature: [
+    ["scale", "Scale"], ["coloration", "Coloration"], ["eyes", "Eyes"],
+    ["armorFur", "Armor / Fur"], ["distinguishingFeatures", "Distinguishing Features"],
+  ],
+  item: [
+    ["shape", "Shape"], ["color", "Color"], ["ornamentation", "Ornamentation"],
+    ["wearDamage", "Wear / Damage"],
+  ],
+} as const satisfies Record<DetailSection, readonly (readonly [string, string])[]>;
+
+function AdditionalDetailFields({ section, profile, onChange }: {
+  section: DetailSection;
+  profile: VisualEntityProfile;
+  onChange: (profile: VisualEntityProfile) => void;
+}) {
+  const details = profile[section] as Record<string, string | undefined> | undefined;
+  return <div className="form-grid-2col">
+    {additionalDetailFields[section].map(([key, label]) => {
+      const path = `${section}.${key}`;
+      const multiline = ["additionalAppearanceNotes", "environmentDescription", "recurringLandmarks", "distinguishingFeatures", "accessories", "equipment", "ornamentation"].includes(key);
+      return <div key={path} className="form-row">
+        <label htmlFor={`visual-profile-${path}`}>{label}</label>
+        {multiline
+          ? <textarea id={`visual-profile-${path}`} rows={2} value={details?.[key] ?? ""}
+              onChange={(event) => onChange({ ...profile, [section]: { ...profile[section], [key]: event.target.value } })} />
+          : <input id={`visual-profile-${path}`} type="text" value={details?.[key] ?? ""}
+              onChange={(event) => onChange({ ...profile, [section]: { ...profile[section], [key]: event.target.value } })} />}
+      </div>;
+    })}
+  </div>;
+}
+
 export function VisualProfileModal({
   slug,
   entityId,
@@ -731,7 +776,7 @@ export function VisualProfileModal({
                   </div>
 
                   <div className="form-row">
-                    <label>Weapons & Equipment</label>
+                    <label>Weapons</label>
                     <input
                       type="text"
                       value={profile.character?.weapons || ""}
@@ -749,7 +794,7 @@ export function VisualProfileModal({
                   </div>
 
                   <div className="form-row">
-                    <label>Scars, Tattoos, or Marks</label>
+                    <label>Distinguishing Features</label>
                     <input
                       type="text"
                       value={profile.character?.distinguishingFeatures || ""}
@@ -765,6 +810,7 @@ export function VisualProfileModal({
                       placeholder="e.g. Thin scar across left eyebrow, runic tattoo on right wrist"
                     />
                   </div>
+                  <AdditionalDetailFields section="character" profile={profile} onChange={setProfile} />
                 </>
               )}
 
@@ -788,7 +834,7 @@ export function VisualProfileModal({
                     />
                   </div>
                   <div className="form-row">
-                    <label>Terrain & Vegetation</label>
+                    <label>Terrain</label>
                     <input
                       type="text"
                       value={profile.location?.terrain || ""}
@@ -805,7 +851,7 @@ export function VisualProfileModal({
                     />
                   </div>
                   <div className="form-row">
-                    <label>Lighting & Atmosphere</label>
+                    <label>Lighting</label>
                     <input
                       type="text"
                       value={profile.location?.lighting || ""}
@@ -854,6 +900,7 @@ export function VisualProfileModal({
                       }
                     />
                   </div>
+                  <AdditionalDetailFields section="location" profile={profile} onChange={setProfile} />
                 </>
               )}
 
@@ -877,7 +924,7 @@ export function VisualProfileModal({
                       />
                     </div>
                     <div>
-                      <label>Scale / Size Relative to Human</label>
+                      <label>Size Relative to Human</label>
                       <input
                         type="text"
                         value={profile.creature?.sizeRelativeToHuman || ""}
@@ -894,7 +941,7 @@ export function VisualProfileModal({
                     </div>
                   </div>
                   <div className="form-row">
-                    <label>Anatomy & Distinctive Features</label>
+                    <label>Anatomy</label>
                     <textarea
                       rows={3}
                       value={profile.creature?.anatomy || ""}
@@ -925,6 +972,7 @@ export function VisualProfileModal({
                       }
                     />
                   </div>
+                  <AdditionalDetailFields section="creature" profile={profile} onChange={setProfile} />
                 </>
               )}
 
@@ -949,7 +997,7 @@ export function VisualProfileModal({
                       />
                     </div>
                     <div>
-                      <label>Dimensions / Shape</label>
+                      <label>Dimensions</label>
                       <input
                         type="text"
                         value={profile.item?.dimensions || ""}
@@ -998,6 +1046,7 @@ export function VisualProfileModal({
                       }
                     />
                   </div>
+                  <AdditionalDetailFields section="item" profile={profile} onChange={setProfile} />
                 </>
               )}
 

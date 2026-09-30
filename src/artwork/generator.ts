@@ -27,6 +27,7 @@ import { stageFreshness, stalePrerequisiteWarning } from "../studio/artifact-sta
 import { estimateNativeDimensions, imageDimensions, planResolution, qualityTierIndex, resolveTargetDimensions } from "./resolution.js";
 import { ImageUpscaler, upscaleFingerprint } from "./upscaler.js";
 import { createLocalUpscaler } from "./local-realesrgan.upscaler.js";
+import { FfmpegLanczosUpscaler } from "./ffmpeg-lanczos.upscaler.js";
 import { loadEnvironment } from "../config/env.js";
 import { inspectArtworkVisualPreflight } from "../visual-canon/preflight.js";
 import { enabledProductionScenes } from "../scenes/production.js";
@@ -83,8 +84,8 @@ export function needsProductionDerivative(story: Story): boolean {
   return story.artwork.outputResolution !== "native" && story.artwork.upscaling !== "off";
 }
 
-export function resolveUpscaler(provided?: ImageUpscaler): ImageUpscaler {
-  return provided ?? createLocalUpscaler(loadEnvironment());
+export function resolveUpscaler(provided?: ImageUpscaler, engine: "ffmpeg-lanczos" | "local-realesrgan" = "ffmpeg-lanczos"): ImageUpscaler {
+  return provided ?? (engine === "ffmpeg-lanczos" ? new FfmpegLanczosUpscaler() : createLocalUpscaler(loadEnvironment()));
 }
 
 export async function generateStoredArtwork(options: {
@@ -273,7 +274,7 @@ export async function generateStoredArtwork(options: {
   // still get stale/missing production derivatives rebuilt from those
   // originals (no provider calls).
   const candidateSceneIds = new Set(candidates.map((item) => item.scene.id));
-  const upscaler = needsProductionDerivative(options.story) ? resolveUpscaler(options.upscaler) : undefined;
+  const upscaler = needsProductionDerivative(options.story) ? resolveUpscaler(options.upscaler, options.story.artwork.upscaler) : undefined;
   let derivativesChanged = false;
   for (const scene of selected) {
     if (candidateSceneIds.has(scene.id) || scene.artwork.status !== "complete") continue;
@@ -1057,12 +1058,15 @@ export async function ensureArtworkVersionProductionAssetForPaths(options: {
     if (!outputFingerprint) throw new Error("upscaler produced an invalid image");
     version.upscale = {
       ...base,
+      engine: result.engine,
       status: "applied",
       finalDimensions: result.finalDimensions,
       scaleFactor: result.scaleFactor,
       fit: result.fit,
+      warning: result.warning,
       outputFingerprint,
     };
+    if (result.warning) options.warnings.push(`Scene ${options.sceneId}: ${result.warning}`);
     return true;
   } catch (error) {
     const unavailable = error instanceof ConfigurationError;
@@ -1122,7 +1126,7 @@ export async function reupscaleStoredArtwork(options: {
   const skippedDisabledSceneIds = requestedScenes.filter((scene) => scene.disabled).map((scene) => scene.id);
   if (skippedDisabledSceneIds.length) warnings.push(`Skipped disabled scene${skippedDisabledSceneIds.length === 1 ? "" : "s"}: ${skippedDisabledSceneIds.join(", ")}`);
   if (!scenes.length) return { chapter: options.chapter, rederived: [], warnings, skippedDisabledSceneIds };
-  const upscaler = needsProductionDerivative(options.story) ? resolveUpscaler(options.upscaler) : undefined;
+  const upscaler = needsProductionDerivative(options.story) ? resolveUpscaler(options.upscaler, options.story.artwork.upscaler) : undefined;
   const rederived: Array<{ sceneId: string; versionId: string; status: string }> = [];
   let changed = false;
   for (const scene of scenes) {

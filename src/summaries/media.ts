@@ -272,7 +272,8 @@ export class SummaryMediaService {
 
   async audio(slug: string, id: string, raw: unknown = {}, progress?: (event: { phase: string; completed: number; total: number; detail?: string }) => void) {
     const { force } = summaryMediaInputSchema.parse(raw); let summary = await this.get(slug, id);
-    if (summary.narration?.status !== "current") summary = await this.narration(slug, id);
+    if (summary.narration?.status !== "current" && !(summary.narration?.manuallyEdited && summary.narration.text?.trim()))
+      summary = await this.narration(slug, id);
     const pronunciationStory = await loadStory(storyPaths(this.root, slug, 1).storyConfig);
     const pronunciationEntities = await loadPronunciationEntities(this.root, slug);
     const missing = pronunciationEntities.filter(entity => !entity.pronunciation).map(entity => ({ ...entity, pronunciation: { mode: "automatic" as const } }));
