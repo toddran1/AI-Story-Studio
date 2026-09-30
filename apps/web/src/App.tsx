@@ -33,6 +33,9 @@ import { emptySceneAtEnd, enabledProductionScenes, retimeScenesToDuration } from
 import type { SceneSettings } from "../../../src/scenes/types.js";
 import { SceneFilmstrip } from "./SceneFilmstrip.js";
 import { AdvancedVisualDirection } from "./AdvancedVisualDirection.js";
+import { VideoTreatmentEditor } from "./VideoTreatmentEditor.js";
+import { VideoTimelineEditor, VideoPresentationSummary, treatmentDirty } from "./VideoTimelineEditor.js";
+import { matchVideoPresentationPreset, videoPresentationPresets } from "../../../src/video/presets.js";
 import { VisualGroundingPanel } from "./VisualGroundingPanel.js";
 import { VideoReadinessPanel, type ReadinessCheck } from "./VideoReadinessPanel.js";
 export { Pagination, type PaginationProps, type PaginationVariant } from "./Pagination.js";
@@ -2841,8 +2844,8 @@ export function SceneContinuityPanel({
 }
 
 function chapterSceneEditableValues(scene: Scene) {
-  const { summary, startSeconds, endSeconds, characters, location, visualPrompt, importance, disabled, direction, overrides, visualChanges } = scene;
-  return { summary, startSeconds, endSeconds, characters, location, visualPrompt, importance, disabled, direction, overrides, visualChanges };
+  const { summary, startSeconds, endSeconds, characters, location, visualPrompt, importance, disabled, direction, overrides, visualChanges, videoTreatment } = scene;
+  return { summary, startSeconds, endSeconds, characters, location, visualPrompt, importance, disabled, direction, overrides, visualChanges, videoTreatment };
 }
 
 function chapterSceneDirty(scene: Scene, saved: Scene[]) {
@@ -3750,6 +3753,7 @@ export function ScenesPage({ slug, onJob, navigate, initialData }: { slug: strin
 
                     <AdvancedVisualDirection source="chapter" direction={scene.direction} overrides={scene.overrides} artDirection={data.artDirection}
                       onDirection={(patch) => editDirection(scene.id, patch)} onOverrides={(patch) => editOverrides(scene.id, patch)} />
+                    <VideoTreatmentEditor scene={scene} hasNext={!scene.disabled && draft.slice(draftIndex + 1).some((item) => !item.disabled)} onChange={(videoTreatment) => edit(scene.id, { videoTreatment })} />
 
                     <SceneContinuityPanel
                       key={`${scene.id}:${scene.continuity?.manualOverride?.revision ?? 0}`}
@@ -3830,17 +3834,51 @@ export function VideoPage({ slug, onJob }: { slug: string; onJob: (job: Job) => 
   const [chapterExport, setChapterExport] = useState<{ chapter: number; url: string }>();
   const [error, setError] = useState(""); const [pageError, setPageError] = useState(""); const watcher = useRef<(() => void) | undefined>(undefined);
   const summaryRequest = useRef(0); const pageRequest = useRef(0);
+  const [editChapter, setEditChapter] = useState<number>();
+  const [timelineSaved, setTimelineSaved] = useState<Scene[]>([]);
+  const [timelineDraft, setTimelineDraft] = useState<Scene[]>([]);
+  const [timelineBusy, setTimelineBusy] = useState(false);
+  const [timelineError, setTimelineError] = useState("");
+  const [timelineNeedsRender, setTimelineNeedsRender] = useState(false);
+  const [playhead, setPlayhead] = useState(0);
+  const timelineVideo = useRef<HTMLVideoElement>(null);
+  const loadTimeline = async (chapter: number) => {
+    const result = await api<ScenesDashboard>(`/stories/${slug}/scenes/${chapter}`);
+    const scenes = structuredClone(result.manifest?.scenes ?? []);
+    setTimelineSaved(scenes); setTimelineDraft(scenes); setEditChapter(chapter); setTimelineError(""); setPlayhead(0); setTimelineNeedsRender(false);
+  };
+  const saveTimelineScene = async (scene: Scene) => {
+    if (!editChapter) return;
+    const original = timelineSaved.find((item) => item.id === scene.id);
+    if (!original?.contentFingerprint) { setTimelineError("Refresh this chapter's scene plan before saving."); return; }
+    setTimelineBusy(true); setTimelineError("");
+    try { await put(`/stories/${slug}/chapters/${editChapter}/scenes/${scene.id}`, { scene, expectedFingerprint: original.contentFingerprint });
+      const fresh = await api<ScenesDashboard>(`/stories/${slug}/scenes/${editChapter}`);
+      const incoming = fresh.manifest?.scenes ?? [];
+      setTimelineDraft((current) => current.map((item) => item.id === scene.id ? incoming.find((next) => next.id === item.id) ?? item : item));
+      setTimelineSaved(incoming); setTimelineNeedsRender(true); setRefreshVersion((value) => value + 1);
+    } catch (error) { setTimelineError(message(error)); } finally { setTimelineBusy(false); }
+  };
+  const saveTimelineAll = async () => {
+    if (!editChapter) return;
+    setTimelineBusy(true); setTimelineError("");
+    try { await put(`/stories/${slug}/chapters/${editChapter}/scenes`, { scenes: timelineDraft }); await loadTimeline(editChapter); setTimelineNeedsRender(true); setRefreshVersion((value) => value + 1);
+    } catch (error) { setTimelineError(message(error)); } finally { setTimelineBusy(false); }
+  };
+  useEffect(() => { setEditChapter(undefined); setTimelineDraft([]); setTimelineSaved([]); }, [slug]);
   useEffect(() => { const request = ++summaryRequest.current; api<Omit<VideoDashboard, "chapters"> & { minChapter?: number; maxChapter?: number }>(`/stories/${slug}/video/summary`).then((next) => { if (request !== summaryRequest.current) return; setData(next); setError(""); setRange((current) => ({ ...current, ...(!current.from ? { from: String(next.minChapter ?? ""), to: String(next.maxChapter ?? "") } : {}) })); }).catch((value) => { if (request === summaryRequest.current) setError(message(value)); }); return () => { summaryRequest.current++; }; }, [slug, refreshVersion]);
   useEffect(() => { setRange((current) => ({ ...current, subtitleMode: "none" })); }, [slug]);
   useEffect(() => { const request = ++pageRequest.current; api<{ items: VideoDashboard["chapters"]; page: number; pages: number; total: number }>(`/stories/${slug}/video/chapters?page=${page}&pageSize=${pageSize}`).then((next) => { if (request === pageRequest.current) { setChapterPage(next); setPageError(""); } }).catch((value) => { if (request === pageRequest.current) setPageError(message(value)); }); return () => { pageRequest.current++; }; }, [slug, page, pageSize, refreshVersion]);
   useEffect(() => () => watcher.current?.(), [slug]);
-  const run = async (kind: "subtitles" | "video" | "video-export") => { try { setError(""); const job = await post<Job>(`/stories/${slug}/jobs/${kind}`, { from: Number(range.from), to: Number(range.to), ...(kind === "video" ? { subtitleMode: range.subtitleMode } : {}), ...(kind === "video-export" ? { music, musicOverrides, subtitleMode: range.subtitleMode } : {}) }); onJob(job); watcher.current?.(); watcher.current = watchJob(job.id, (next) => { onJob(next); if (next.status === "completed") setRefreshVersion((value) => value + 1); else if (next.status === "failed") setError(next.error ?? "Video job failed"); }, (value) => setError(message(value))); } catch (value) { setError(message(value)); } };
+  const run = async (kind: "subtitles" | "video" | "video-export") => { try { setError(""); const job = await post<Job>(`/stories/${slug}/jobs/${kind}`, { from: Number(range.from), to: Number(range.to), ...(kind === "video" ? { subtitleMode: range.subtitleMode } : {}), ...(kind === "video-export" ? { music, musicOverrides, subtitleMode: range.subtitleMode } : {}) }); onJob(job); watcher.current?.(); watcher.current = watchJob(job.id, (next) => { onJob(next); if (next.status === "completed") { setRefreshVersion((value) => value + 1); if (kind !== "subtitles") setTimelineNeedsRender(false); } else if (next.status === "failed") setError(next.error ?? "Video job failed"); }, (value) => setError(message(value))); } catch (value) { setError(message(value)); } };
   const exportChapter = async (chapter: number) => { try { setError(""); if (music.mode === "none") { setChapterExport({ chapter, url: `/api/stories/${slug}/chapters/${chapter}/video?download=1` }); return; } const job = await post<Job>(`/stories/${slug}/jobs/chapter-music-export`, { chapter, kind: "video", music, musicOverrides }); onJob(job); watcher.current?.(); watcher.current = watchJob(job.id, (next) => { onJob(next); if (next.status === "completed") { const result = next.result as { edition?: string } | undefined; if (result?.edition) setChapterExport({ chapter, url: `/api/stories/${slug}/chapters/${chapter}/video-exports/${result.edition}.mp4` }); } else if (next.status === "failed") setError(next.error ?? "Video export failed"); }, (value) => setError(message(value))); } catch (value) { setError(message(value)); } };
   if (!data && !chapterPage) return error ? <LoadFailure error={error} /> : <Loading />;
   if (!data) return <section className="page video-page">{error && <ErrorBox text={error} />}{pageError && <ErrorBox text={pageError} />}{chapterPage?.items.map((item) => <p key={item.chapter}>Chapter {item.chapter} · {item.title}</p>)}</section>;
   return <section className="page video-page"><div className="section-heading"><div><span className="eyebrow">Picture desk</span><h2>Chapter video editions</h2><p>Mastered narration becomes a restrained, readable screen edition.</p></div><div className="video-format-stamp">{data.settings.width}<i>×</i>{data.settings.height}<small>{data.settings.fps} FPS · H.264</small></div></div>
     <div className="render-rail"><span className={`rail-node ${data.counts.mastered ? "complete" : ""}`}><i>01</i><b>Mastered audio</b><small>{data.counts.mastered} / {data.counts.total}</small></span><span className={`rail-node ${data.counts.subtitles ? "complete" : ""}`}><i>02</i><b>Subtitle timing</b><small>{data.counts.subtitles} / {data.counts.total}</small></span><span className={`rail-node ${data.background.coverAvailable ? "complete" : "fallback"}`}><i>03</i><b>Visual field</b><small>{data.background.coverAvailable ? `${data.background.coverName} · ${data.background.effectiveMode}` : "Generated studio fallback"}</small></span><span className={`rail-node ${data.counts.videos ? "complete" : ""}`}><i>04</i><b>Chapter renders</b><small>{data.counts.videos} / {data.counts.total}</small></span></div>
     <div className="video-console"><div><span className="eyebrow">Render range</span><h3>Screen edition</h3><p>{data.settings.introDurationSeconds}s title card · CRF {data.settings.quality} · {pretty(data.settings.backgroundMode)}</p></div><Field label="From"><input value={range.from} onChange={(e) => setRange({ ...range, from: e.target.value })} /></Field><Field label="To"><input value={range.to} onChange={(e) => setRange({ ...range, to: e.target.value })} /></Field><Field label="Subtitles"><select value={range.subtitleMode} onChange={(e) => setRange({ ...range, subtitleMode: e.target.value as typeof range.subtitleMode })}><option value="burn">Burned in</option><option value="soft">Optional track</option><option value="both">Burned + track</option><option value="none">No subtitles</option></select></Field><div className="video-actions"><button className="button" onClick={() => run("subtitles")}>Generate subtitles</button><button className="button" onClick={() => run("video")}>Render chapters</button><button className="button primary" onClick={() => run("video-export")}>Build combined video</button></div></div>
+    <div className="video-edit-desk"><div><span className="eyebrow">Presentation desk</span><h3>Review a chapter</h3><p>Choose a chapter to shape its scene motion and transitions. Saved edits update the next render.</p></div><label>Chapter<select value={editChapter ?? ""} onChange={(event) => { const chapter = Number(event.target.value); if (timelineDraft.some((scene) => treatmentDirty(scene.videoTreatment, timelineSaved.find((saved) => saved.id === scene.id)?.videoTreatment)) && !confirm("Discard unsaved video treatment changes?")) return; if (chapter) void loadTimeline(chapter).catch((error) => setTimelineError(message(error))); else setEditChapter(undefined); }}><option value="">Select chapter…</option>{chapterPage?.items.map((item) => <option key={item.chapter} value={item.chapter}>Chapter {item.chapter} · {item.title ?? "Untitled"}</option>)}</select></label></div>
+    {editChapter && <>{timelineNeedsRender && <p className="video-render-notice">Video needs re-render to include saved presentation changes. The previous render remains available for review.</p>}<VideoPresentationSummary settings={data.settings} scenes={timelineDraft} />{timelineError && <ErrorBox text={timelineError} />}{chapterPage?.items.find((item) => item.chapter === editChapter)?.videoAvailable && <video ref={timelineVideo} className="video-review-player" controls preload="metadata" src={`/api/stories/${slug}/chapters/${editChapter}/video`} onTimeUpdate={(event) => setPlayhead(Math.floor(event.currentTarget.currentTime))} aria-label={`Chapter ${editChapter} video preview`} />}{timelineDraft.length > 0 && <VideoTimelineEditor scenes={timelineDraft} savedScenes={timelineSaved} settings={data.settings} onChange={setTimelineDraft} onSaveScene={saveTimelineScene} onSaveAll={saveTimelineAll} disabled={timelineBusy} videoRef={chapterPage?.items.find((item) => item.chapter === editChapter)?.videoAvailable ? timelineVideo : undefined} currentTime={playhead} videoOffsetSeconds={data.settings.introDurationSeconds} artworkUrl={(scene) => scene.imageUrl} />}</>}
     <BackgroundMusicControls slug={slug} selection={music} onSelectionChange={(next) => { setMusic(next); setChapterExport(undefined); }} overrides={musicOverrides} onOverridesChange={(next) => { setMusicOverrides(next); setChapterExport(undefined); }} />
     {error && <ErrorBox text={error} />}{pageError && <ErrorBox text={pageError} />}<div className="video-ledger"><section><div className="ledger-head"><h3>Render queue</h3><span className="mono">{data.counts.videos} ready</span><label>Rows <select value={pageSize} onChange={(event) => { setPageSize(Number(event.target.value)); setPage(1); }}><option value="10">10</option><option value="25">25</option><option value="50">50</option></select></label></div>{chapterPage && chapterPage.pages > 1 && <Pagination position="top" page={chapterPage.page} pages={chapterPage.pages} total={chapterPage.total} itemLabel="chapters" onPrevious={() => setPage(chapterPage.page - 1)} onNext={() => setPage(chapterPage.page + 1)} />}{chapterPage?.items.map((chapter) => <article key={chapter.chapter}><span className="chapter-index">{String(chapter.chapter).padStart(4, "0")}</span><div><b>{chapter.title ?? `Chapter ${chapter.chapter}`}</b><small>{chapter.durationSeconds ? `${formatDuration(chapter.durationSeconds)} audio` : "Master audio first"}</small></div><Stage value={chapter.subtitleStatus} /><Stage value={chapter.videoStatus} />{chapter.videoAvailable ? <>{chapter.videoStale && <Status status="warn" label="stale" />}<video controls preload="none" src={`/api/stories/${slug}/chapters/${chapter.chapter}/video`} /><button type="button" onClick={() => void exportChapter(chapter.chapter)}>Export chapter</button>{chapterExport?.chapter === chapter.chapter && <a href={chapterExport.url} download>Download edition</a>}</> : <span className="render-empty">—</span>}</article>)}{chapterPage && chapterPage.pages > 1 && <Pagination position="bottom" page={chapterPage.page} pages={chapterPage.pages} total={chapterPage.total} itemLabel="chapters" onPrevious={() => setPage(chapterPage.page - 1)} onNext={() => setPage(chapterPage.page + 1)} />}</section><aside><h3>Combined editions</h3>{data.exports.length ? data.exports.map((item) => <a href={item.downloadUrl} download key={item.fingerprint}><span>MP4</span><div><b>Chapters {item.from}–{item.to}</b><small>{formatDuration(item.durationSeconds)} · {item.music ? `Background Music · ${item.music.title} · ` : "Clean · "}{new Date(item.createdAt).toLocaleString()}</small></div><strong>↓</strong></a>) : <Empty title="No video edition yet" text="Render a range, then build one continuous MP4." />}</aside></div>
   </section>;
@@ -3901,6 +3939,7 @@ function formatSpeechAbbreviations(value: Record<string, string> | undefined) { 
 function parseSpeechAbbreviations(value: string) { return Object.fromEntries(value.split("\n").map((line) => line.split("=")).map(([written, spoken]) => [written?.trim(), spoken?.trim()] as const).filter(([written, spoken]) => Boolean(written && spoken))); }
 export function SettingsPage({ slug, onJob, initialStory, initialEffectiveRouting }: { slug: string; onJob: (job: Job) => void; initialStory?: StoryConfig; initialEffectiveRouting?: Record<string, ResolvedModelRouting> }) {
   const [story, setStory] = useState<StoryConfig | undefined>(initialStory);
+  const [savedVideoPresentation, setSavedVideoPresentation] = useState<VideoSettings | undefined>(initialStory?.video);
   const [effectiveRouting, setEffectiveRouting] = useState<Record<string, ResolvedModelRouting> | undefined>(initialEffectiveRouting);
   const [saved, setSaved] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -3912,11 +3951,14 @@ export function SettingsPage({ slug, onJob, initialStory, initialEffectiveRoutin
     setError("");
     api<any>("/stories/" + slug).then((x) => {
       setStory(x.story);
+      setSavedVideoPresentation(x.story.video);
       setEffectiveRouting(x.effectiveRouting);
     }).catch((value) => setError(message(value)));
   }, [slug, initialStory]);
   if (error && !story) return <LoadFailure error={error} />;
   if (!story) return <Loading />;
+  const presentationMotion = story.video.motion ?? { mode: "auto_subtle" as const, intensity: "subtle" as const };
+  const presentationTransition = story.video.transition ?? { mode: "dissolve" as const, durationSeconds: 0.5 };
   const save = async (event: FormEvent) => {
     event.preventDefault();
     if (saving) return;
@@ -3963,6 +4005,7 @@ export function SettingsPage({ slug, onJob, initialStory, initialEffectiveRoutin
         artwork: story.artwork,
       });
       setStory(response.story);
+      setSavedVideoPresentation(response.story.video);
       if (response.effectiveRouting) setEffectiveRouting(response.effectiveRouting);
       setSaved(true);
       setTimeout(() => setSaved(false), 2500);
@@ -4248,6 +4291,13 @@ export function SettingsPage({ slug, onJob, initialStory, initialEffectiveRoutin
         })()}
       </div>
       <div className="settings-group video-settings"><h3>Video</h3>
+        <div className="video-presentation-settings"><h4>Video presentation</h4><p className="field-note">Visual effects use the saved scene timing. Audio and subtitles keep their original timing.</p>
+          <Field label="Style preset"><select value={matchVideoPresentationPreset(story.video)} onChange={(event) => { const preset = videoPresentationPresets[event.target.value as keyof typeof videoPresentationPresets]; if (preset) setStory({ ...story, video: { ...story.video, motion: { ...preset.motion }, transition: { ...preset.transition } } }); }}><option value="custom" disabled>Custom</option>{Object.entries(videoPresentationPresets).map(([id, preset]) => <option key={id} value={id}>{preset.label}</option>)}</select></Field>
+          <p className="field-note">{matchVideoPresentationPreset(story.video) === "custom" ? "Custom values are selected. Choose a style to preview its settings before saving." : videoPresentationPresets[matchVideoPresentationPreset(story.video) as keyof typeof videoPresentationPresets].description}</p>
+          {savedVideoPresentation && (JSON.stringify(savedVideoPresentation.motion) !== JSON.stringify(story.video.motion) || JSON.stringify(savedVideoPresentation.transition) !== JSON.stringify(story.video.transition)) && <div className="video-preset-compare" aria-label="Video presentation changes before saving"><span>Saved <b>{(savedVideoPresentation.motion?.mode ?? "auto_subtle").replaceAll("_", " ")} · {(savedVideoPresentation.transition?.mode ?? "dissolve").replaceAll("_", " ")} {savedVideoPresentation.transition?.durationSeconds ?? 0.5}s</b></span><span>Selected <b>{presentationMotion.mode.replaceAll("_", " ")} · {presentationTransition.mode.replaceAll("_", " ")} {presentationTransition.durationSeconds}s</b></span></div>}
+          <div className="field-row"><Field label="Scene motion"><select value={presentationMotion.mode} onChange={(event) => setStory({ ...story, video: { ...story.video, motion: { ...presentationMotion, mode: event.target.value as VideoSettings["motion"]["mode"] } } })}>{[["still", "Still"], ["auto_subtle", "Auto subtle"], ["zoom_in", "Slow zoom in"], ["zoom_out", "Slow zoom out"], ["pan_left", "Pan left"], ["pan_right", "Pan right"], ["pan_up", "Pan up"], ["pan_down", "Pan down"]].map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></Field>{presentationMotion.mode !== "still" && <Field label="Motion intensity"><select value={presentationMotion.intensity} onChange={(event) => setStory({ ...story, video: { ...story.video, motion: { ...presentationMotion, intensity: event.target.value as "subtle" | "normal" } } })}><option value="subtle">Subtle</option><option value="normal">Normal</option></select></Field>}</div>
+          <div className="field-row"><Field label="Scene transition"><select value={presentationTransition.mode} onChange={(event) => setStory({ ...story, video: { ...story.video, transition: { ...presentationTransition, mode: event.target.value as VideoSettings["transition"]["mode"] } } })}><option value="cut">Cut</option><option value="dissolve">Dissolve</option><option value="fade_black">Fade through black</option><option value="slide">Slide</option></select></Field>{presentationTransition.mode !== "cut" && <Field label="Transition duration · seconds"><input type="number" min="0" max="2" step="0.05" value={presentationTransition.durationSeconds} onChange={(event) => setStory({ ...story, video: { ...story.video, transition: { ...presentationTransition, durationSeconds: Math.min(2, Math.max(0, Number(event.target.value))) } } })} /></Field>}</div>
+        </div>
         <Field label="Resolution">
           <select
             value={videoResolutionFor(story.video)}
@@ -4266,6 +4316,11 @@ export function SettingsPage({ slug, onJob, initialStory, initialEffectiveRoutin
             <Field label="Height"><input type="number" min="360" max="2160" value={story.video.height} onChange={(event) => setStory({ ...story, video: { ...story.video, height: Number(event.target.value) } })} /></Field>
           </div>
         )}
+        <details className="settings-advanced"><summary>Output and subtitle settings</summary>
+          <div className="field-row"><Field label="Frame rate"><select value={story.video.fps} onChange={(event) => setStory({ ...story, video: { ...story.video, fps: Number(event.target.value) as VideoSettings["fps"] } })}>{[24, 25, 30, 60].map((fps) => <option key={fps} value={fps}>{fps} FPS</option>)}</select></Field><Field label="Quality · CRF"><input type="number" min="0" max="40" value={story.video.quality} onChange={(event) => setStory({ ...story, video: { ...story.video, quality: Math.max(0, Math.min(40, Number(event.target.value))) } })} /></Field></div>
+          <div className="field-row"><Field label="Subtitles"><select value={story.video.subtitleMode} onChange={(event) => setStory({ ...story, video: { ...story.video, subtitleMode: event.target.value as VideoSettings["subtitleMode"] } })}><option value="none">None</option><option value="burn">Burned in</option><option value="soft">Optional track</option><option value="both">Burned + track</option></select></Field><Field label="Subtitle style"><select value={story.video.subtitleStyle} onChange={(event) => setStory({ ...story, video: { ...story.video, subtitleStyle: event.target.value as VideoSettings["subtitleStyle"] } })}><option value="default">Default</option><option value="minimal">Minimal</option><option value="large">Large</option></select></Field></div>
+          <div className="field-row"><Field label="Background"><select value={story.video.backgroundMode} onChange={(event) => setStory({ ...story, video: { ...story.video, backgroundMode: event.target.value as VideoSettings["backgroundMode"] } })}><option value="cover">Cover</option><option value="gradient">Gradient</option><option value="kenBurns">Legacy Ken Burns</option></select></Field><Field label="Chapter title intro · seconds"><input type="number" min="0" max="10" step="0.5" value={story.video.introDurationSeconds} onChange={(event) => setStory({ ...story, video: { ...story.video, introDurationSeconds: Math.max(0, Math.min(10, Number(event.target.value))) } })} /></Field></div>
+        </details>
       </div>
       <div className="settings-group"><h3>Voice</h3>
         <Field label="Audio provider"><select value={story.pipeline.tts.provider} disabled={audioProviderIds.length === 1}>{audioProviderIds.map((id) => <option key={id} value={id}>{audioProviderCatalog[id].label}</option>)}</select></Field>

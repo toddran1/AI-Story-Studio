@@ -12,7 +12,7 @@ import { fingerprint } from "../utils/hash.js";
 import { productionSceneFingerprint, sceneContentFingerprint } from "../scenes/manifest.js";
 import { retimeScenesToDuration } from "../scenes/production.js";
 import { resolveSceneVisualEntity } from "../scenes/identity.js";
-import { sceneSchema, sceneDirectionSchema, sceneOverridesSchema, artworkReviewSchema, type Scene, type ArtworkVersion } from "../scenes/types.js";
+import { sceneSchema, sceneDirectionSchema, sceneOverridesSchema, sceneVideoTreatmentSchema, artworkReviewSchema, type Scene, type ArtworkVersion } from "../scenes/types.js";
 import { bindNarrationSpans, timeNarrationScenes } from "../scenes/narration-spans.js";
 import {
   generateSceneImage,
@@ -85,7 +85,7 @@ export const summarySingleSceneEditSchema = z.object({ scene: z.object({
   characters: z.array(z.string().trim().min(1)).max(20), entityIds: z.array(z.string().trim().min(1)).max(100),
   location: z.string().trim().max(300).optional(), startSeconds: z.number().min(0), endSeconds: z.number().positive(),
   disabled: z.boolean().optional(), importance: z.enum(["transition", "standard", "major"]),
-  direction: sceneDirectionSchema.optional(), overrides: sceneOverridesSchema.optional(),
+  direction: sceneDirectionSchema.optional(), overrides: sceneOverridesSchema.optional(), videoTreatment: sceneVideoTreatmentSchema.optional(),
 }).strict() }).strict();
 export type SummaryVisualProgress = (event: {
   type: string;
@@ -295,7 +295,7 @@ export class SummaryVisualService {
       }),
     };
   }
-  private videoFingerprint(summary: StorySummary, settings: unknown) { return fingerprint({ version: "summary-video-v1", audio: summary.audio?.outputFingerprint, scenes: summary.scenePlan?.scenes.filter((scene) => !scene.disabled).map((scene) => ({ id: scene.id, start: scene.startSeconds, end: scene.endSeconds, image: scene.artwork.imageFingerprint, review: scene.artwork.review })), settings, alignment: (settings as { subtitleMode?: string }).subtitleMode === "none" ? undefined : summary.alignment?.inputFingerprint, renderer: this.renderer.version }); }
+  private videoFingerprint(summary: StorySummary, settings: unknown) { return fingerprint({ version: "summary-video-v2", audio: summary.audio?.outputFingerprint, scenes: summary.scenePlan?.scenes.filter((scene) => !scene.disabled).map((scene) => ({ id: scene.id, start: scene.startSeconds, end: scene.endSeconds, image: scene.artwork.imageFingerprint, review: scene.artwork.review, videoTreatment: scene.videoTreatment })), settings, alignment: (settings as { subtitleMode?: string }).subtitleMode === "none" ? undefined : summary.alignment?.inputFingerprint, renderer: this.renderer.version }); }
   private async sceneArtworkFreshness(slug: string, summary: StorySummary) {
     const paths = this.paths(slug, summary.id);
     const [continuity, context] = await Promise.all([this.sceneContinuity(slug, summary.id, summary.scenePlan?.scenes ?? []), this.context(slug)]);
@@ -391,6 +391,17 @@ export class SummaryVisualService {
   private async alignWithPlan(slug: string, summary: StorySummary, progress?: SummaryVisualProgress) { await this.save(slug, summary); return this.align(slug, summary.id, progress); }
   async editScenes(slug: string, id: string, raw: unknown) {
     const input = summarySceneEditSchema.parse(raw); const summary = await this.media.get(slug, id); if (!summary.scenePlan || !summary.narration?.text) throw new Error("Generate scenes before editing them");
+    if ("scenes" in input && input.scenes.length === summary.scenePlan.scenes.length && input.scenes.some((scene, index) => fingerprint(scene.videoTreatment ?? null) !== fingerprint(summary.scenePlan!.scenes[index]!.videoTreatment ?? null)) && input.scenes.every((scene, index) => {
+      const previous = summary.scenePlan!.scenes[index];
+      if (!previous || scene.id !== previous.id) return false;
+      const { videoTreatment: _newTreatment, ...newContent } = scene;
+      const { videoTreatment: _oldTreatment, ...oldContent } = previous;
+      return fingerprint(newContent) === fingerprint(oldContent);
+    })) {
+      summary.scenePlan.scenes = input.scenes;
+      if (summary.video) summary.video.status = "stale";
+      return this.save(slug, summary);
+    }
     // Editorial policy (not availability): accepting or hand-editing a scene timeline marks it
     // authoritative against reviewed, current narration, so it deliberately requires current narration
     // even though scene *generation* only requires usable narration text.
@@ -436,12 +447,19 @@ export class SummaryVisualService {
     const summary = await this.media.get(slug, id);
     const previous = summary.scenePlan?.scenes.find((scene) => scene.id === sceneId);
     if (!previous || !summary.scenePlan) throw new Error("Scene was not found");
-    const replacement = sceneSchema.parse({ ...previous, ...input.scene, id: previous.id, artwork: previous.artwork,
+    const replacement = sceneSchema.parse({ ...previous, ...input.scene, videoTreatment: input.scene.videoTreatment, id: previous.id, artwork: previous.artwork,
       narrationText: previous.narrationText, narrationStartWord: previous.narrationStartWord, narrationEndWord: previous.narrationEndWord });
     const editable = (scene: Scene) => ({ summary: scene.summary, visualPrompt: scene.visualPrompt, characters: scene.characters,
       entityIds: scene.entityIds, location: scene.location, startSeconds: scene.startSeconds, endSeconds: scene.endSeconds,
-      disabled: scene.disabled, importance: scene.importance, direction: scene.direction, overrides: scene.overrides });
+      disabled: scene.disabled, importance: scene.importance, direction: scene.direction, overrides: scene.overrides, videoTreatment: scene.videoTreatment });
     if (fingerprint(editable(previous)) === fingerprint(editable(replacement))) return this.get(slug, id);
+    const { videoTreatment: _previousTreatment, ...previousContent } = editable(previous);
+    const { videoTreatment: _replacementTreatment, ...replacementContent } = editable(replacement);
+    if (fingerprint(previousContent) === fingerprint(replacementContent)) {
+      summary.scenePlan.scenes = summary.scenePlan.scenes.map((scene) => scene.id === sceneId ? replacement : scene);
+      if (summary.video) summary.video.status = "stale";
+      return this.save(slug, summary);
+    }
     const scenes = summary.scenePlan.scenes.map((scene) => scene.id === sceneId ? replacement : scene);
     return this.editScenes(slug, id, { scenes });
   }
@@ -909,6 +927,7 @@ export class SummaryVisualService {
       await atomicWrite(paths.subtitles, toSrt(document));
       subtitles = paths.subtitles;
     }
+    const previousVideo = summary.video ? { ...summary.video } : undefined;
     summary.video = { ...summary.video, status: "generating", inputFingerprint, manuallyEdited: false, reviewRequired: false };
     await this.save(slug, summary);
     progress?.({ type: "summary.video.started" });
@@ -922,7 +941,7 @@ export class SummaryVisualService {
         const asset = await resolveBestProductionAssetForPaths({ story, version: backing, originalPath, productionPath });
         if (await validPngFingerprint(asset.path) === asset.fingerprint) path = asset.path;
       }
-      return { path, durationSeconds: scene.endSeconds - scene.startSeconds };
+      return { path, durationSeconds: scene.endSeconds - scene.startSeconds, videoTreatment: scene.videoTreatment };
     }));
 
     const staging = join(paths.directory, `video-${randomUUID()}.mp4`);
@@ -957,8 +976,7 @@ export class SummaryVisualService {
       progress?.({ type: "summary.video.completed" });
       return this.save(slug, summary);
     } catch (error) {
-      summary.video!.status = "failed";
-      summary.video!.error = error instanceof Error ? error.message : String(error);
+      summary.video = { ...previousVideo, status: previousVideo?.outputFingerprint ? "stale" : "failed", inputFingerprint: previousVideo?.inputFingerprint ?? inputFingerprint, manuallyEdited: previousVideo?.manuallyEdited ?? false, reviewRequired: previousVideo?.reviewRequired ?? false, error: error instanceof Error ? error.message : String(error) };
       await this.save(slug, summary);
       throw error;
     } finally {

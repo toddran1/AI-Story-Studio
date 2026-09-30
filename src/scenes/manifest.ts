@@ -98,6 +98,24 @@ export async function updateStoredSceneManifest(options: { root: string; story: 
     return next;
   });
   const active = scenes.filter((scene) => !scene.disabled);
+  const presentationOnly = scenes.length === manifest.scenes.length && scenes.every((scene, index) => {
+    const prior = manifest.scenes[index];
+    if (!prior || prior.id !== scene.id) return false;
+    const { videoTreatment: _oldTreatment, ...oldScene } = prior;
+    const { videoTreatment: _newTreatment, ...newScene } = scene;
+    return fingerprint(oldScene) === fingerprint(newScene);
+  });
+  if (presentationOnly) {
+    const updated = sceneManifestSchema.parse({ ...manifest, scenes });
+    await atomicWriteJson(paths.scenesManifest, updated);
+    const rawChapter = await readJsonIfExists<Chapter>(paths.chapterMeta);
+    if (rawChapter) {
+      const chapter = chapterSchema.parse(rawChapter);
+      if (chapter.stages.scenePlanning.status === "complete") chapter.stages.scenePlanning.outputFingerprint = await streamedFileFingerprint(paths.scenesManifest);
+      await persistChapter(paths.chapterMeta, chapter);
+    }
+    return updated;
+  }
   if (active.some((scene) => !scene.summary || !scene.visualPrompt)) throw new SceneError("Fill in the scene beat and image prompt before enabling a scene");
   const retimed = retimeScenesToDuration(active, manifest.durationSeconds, options.story.scenes);
   const byId = new Map(retimed.map((scene) => [scene.id, scene]));
@@ -123,6 +141,7 @@ export async function updateStoredScene(options: { root: string; story: Story; c
     characters: input.characters, entityIds: previous.entityIds ?? [], location: input.location, visualPrompt: input.visualPrompt,
     importance: input.importance, disabled: input.disabled, direction: input.direction,
     overrides: input.overrides, visualChanges: input.visualChanges,
+    videoTreatment: input.videoTreatment,
   });
   const scenes = manifest.scenes.map((item, position) => position === index ? replacement : item);
   return updateStoredSceneManifest({ ...options, scenes });
@@ -189,7 +208,7 @@ export async function applyStoredSceneRegeneration(options: { root: string; stor
 export function scenePlanningFingerprint(narration: string, bible: string, audio: string | undefined, settings: Story["scenes"], provider: string, model: string, continuity = "none") { return fingerprint({ narration, bible, audio, settings, provider, model, continuity, promptVersion: SCENE_PLANNER_PROMPT_VERSION }); }
 export function productionSceneFingerprint(plan: { scenes: Scene[]; [key: string]: unknown } | undefined) {
   if (!plan) return fingerprint(undefined);
-  return fingerprint({ ...plan, updatedAt: undefined, scenes: plan.scenes.map(({ artwork, ...scene }) => scene) });
+  return fingerprint({ ...plan, updatedAt: undefined, scenes: plan.scenes.map(({ artwork, videoTreatment, ...scene }) => scene) });
 }
 export function sceneContentFingerprint(scene: Scene) { return fingerprint(sceneEditableState(scene)); }
 async function invalidateAfterSceneEdit(root: string, slug: string, chapterNumber: number, path: string, manifest: SceneManifest) {

@@ -252,3 +252,4 @@
 
 .visual-profile-modal .visual-profile-header-actions { display: flex; align-items: center; gap: 8px; }
 .visual-profile-modal .visual-profile-header-actions .btn { white-space: nowrap; }
+.video-treatment-editor{margin:14px 0;padding:12px 14px;border:1px solid #4b4569;border-radius:8px;background:#191923;color:#e9e5f2}.video-treatment-editor summary{cursor:pointer;font-weight:700;color:#d8ccff}.video-treatment-fields{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin-top:13px}.video-treatment-fields label{display:grid;gap:6px;font-size:.78rem;color:#bdb7ce}.video-treatment-fields select,.video-treatment-fields input{width:100%;min-width:0}.video-treatment-editor small{display:block;margin-top:8px;color:#aba5ba}@media(max-width:700px){.video-treatment-fields{grid-template-columns:1fr}}

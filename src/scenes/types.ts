@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { visualContinuityChangeInputSchema, visualContinuityChangeSchema } from "../visual-canon/continuity-state.js";
 import { artworkOutputResolutionSchema, artworkUpscalingModeSchema, upscalerEngineSchema } from "../artwork/resolution.js";
+import { videoMotionModeSchema, videoTransitionModeSchema } from "../video/config.js";
 
 export const sceneSettingsSchema = z.object({
   targetDurationSeconds: z.number().min(10).max(30).default(20),
@@ -28,6 +29,11 @@ export const artworkSettingsSchema = z.object({
 
 export const artworkReviewSchema = z.enum(["unreviewed", "approved", "rejected", "needs-regeneration"]);
 export const sceneImportanceSchema = z.enum(["transition", "standard", "major"]);
+export const sceneVideoTreatmentSchema = z.object({
+  motion: z.union([videoMotionModeSchema, z.literal("story_default")]).optional(),
+  transitionOut: z.object({ mode: z.union([videoTransitionModeSchema, z.literal("story_default")]).optional(), durationSeconds: z.number().min(0).max(2).optional() }).optional(),
+});
+export type SceneVideoTreatment = z.infer<typeof sceneVideoTreatmentSchema>;
 
 export const shotTypeSchema = z.enum([
   "extreme_wide",
@@ -195,6 +201,7 @@ export const sceneSchema = z.object({
   direction: sceneDirectionSchema.optional(),
   overrides: sceneOverridesSchema.optional(),
   visualChanges: visualContinuityChangeSchema.optional(),
+  videoTreatment: sceneVideoTreatmentSchema.optional(),
 }).refine((value) => value.endSeconds > value.startSeconds, { message: "Scene end must be after its start" });
 
 export const productionSceneManifestSchema = z.object({

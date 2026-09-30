@@ -93,7 +93,9 @@ export type StoryConfig = {
 export type AudioSettings = { loudnessTarget: number; truePeak: number; segmentGapSeconds: number; chapterGapSeconds: number; format: "mp3"; bitrate: "64k" | "96k" | "128k" | "160k" | "192k" | "256k" | "320k"; sampleRate: 32000 | 44100 | 48000 };
 export type SubtitleSettings = { maxCharactersPerLine: number; maxLines: number; minimumDurationSeconds: number; maximumDurationSeconds: number };
 export type VideoResolution = "720p" | "1080p" | "1440p" | "2160p";
-export type VideoSettings = { width: number; height: number; fps: 24 | 25 | 30 | 60; codec: "libx264"; quality: number; subtitleMode: "none" | "burn" | "soft" | "both"; subtitleStyle: "default" | "large" | "minimal"; backgroundMode: "cover" | "gradient" | "kenBurns"; introDurationSeconds: number; resolution?: VideoResolution };
+export type VideoTransitionMode = "cut" | "dissolve" | "fade_black" | "slide";
+export type VideoMotionMode = "still" | "zoom_in" | "zoom_out" | "pan_left" | "pan_right" | "pan_up" | "pan_down" | "auto_subtle";
+export type VideoSettings = { width: number; height: number; fps: 24 | 25 | 30 | 60; codec: "libx264"; quality: number; subtitleMode: "none" | "burn" | "soft" | "both"; subtitleStyle: "default" | "large" | "minimal"; backgroundMode: "cover" | "gradient" | "kenBurns"; introDurationSeconds: number; resolution?: VideoResolution; transition: { mode: VideoTransitionMode; durationSeconds: number }; motion: { mode: VideoMotionMode; intensity: "subtle" | "normal" } };
 export type SceneSettings = { targetDurationSeconds: number; minimumDurationSeconds: number; maximumDurationSeconds: number; maximumScenesPerChapter: number };
 export type ArtworkOutputResolution = "native" | "720p" | "1080p" | "1440p" | "2160p";
 export type ArtworkUpscalingMode = "off" | "automatic" | "always";
@@ -457,6 +459,7 @@ export type Scene = {
   direction?: SceneDirection;
   overrides?: SceneOverrides;
   visualChanges?: VisualContinuityChange;
+  videoTreatment?: { motion?: VideoMotionMode | "story_default"; transitionOut?: { mode?: VideoTransitionMode | "story_default"; durationSeconds?: number } };
   continuity?: SceneContinuity;
 };
 

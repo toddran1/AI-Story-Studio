@@ -654,6 +654,29 @@ describe("summary visual production", () => {
     await visuals.video("demo-story", id); render.mockImplementationOnce(async (input: any, output: string, settings: any) => { await atomicWrite(output, "bad-duration"); return { durationSeconds: input.audioDurationSeconds + 2, width: settings.width, height: settings.height, videoCodec: "h264", audioCodec: "aac", container: "mp4" }; });
     await expect(visuals.video("demo-story", id, { force: true })).rejects.toThrow("duration does not match"); expect(await visuals.export("demo-story", id, "video")).toMatchObject({ contentType: "video/mp4" });
   });
+  it("keeps summary scenes and artwork current when only video treatment changes", async () => {
+    await media.audio("demo-story", id);
+    await visuals.scenes("demo-story", id, { sceneCount: 2 });
+    await visuals.artwork("demo-story", id);
+    await visuals.video("demo-story", id);
+    const before = await visuals.get("demo-story", id);
+    const scene = before.scenePlan!.scenes[0]!;
+    const changed = await visuals.updateScene("demo-story", id, scene.id, sceneEdit(scene, { videoTreatment: { motion: "pan_right", transitionOut: { mode: "fade_black", durationSeconds: 0.4 } } }));
+    expect(changed.scenes?.status).toBe(before.scenes?.status);
+    expect(changed.scenes?.outputFingerprint).toBe(before.scenes?.outputFingerprint);
+    expect(changed.artwork?.status).toBe(before.artwork?.status);
+    expect(changed.scenePlan!.scenes[0]!.artwork.imageFingerprint).toBe(scene.artwork.imageFingerprint);
+    expect(changed.video?.status).toBe("stale");
+    await visuals.video("demo-story", id);
+    expect(render.mock.lastCall?.[0].sceneArtwork[0].videoTreatment.motion).toBe("pan_right");
+    const bulk = await visuals.editScenes("demo-story", id, { scenes: changed.scenePlan!.scenes.map((item, index) => index === 1 ? { ...item, videoTreatment: { motion: "zoom_out" } } : item) });
+    expect(bulk.scenes?.outputFingerprint).toBe(before.scenes?.outputFingerprint);
+    expect(bulk.artwork?.status).toBe(before.artwork?.status);
+    expect(bulk.video?.status).toBe("stale");
+    const reset = await visuals.updateScene("demo-story", id, scene.id, sceneEdit(bulk.scenePlan!.scenes[0]!, { videoTreatment: undefined }));
+    expect(reset.scenePlan!.scenes[0]!.videoTreatment).toBeUndefined();
+    expect(reset.scenes?.outputFingerprint).toBe(before.scenes?.outputFingerprint);
+  });
   it("returns actionable nonzero CLI failure for unresolved Produce profiles without image or video calls", async () => {
     const planned = await produce(); const entityId = planned.scenePlan!.scenes[0]!.entityIds![0]!;
     await saveVisualProfiles(root, "demo-story", {}); images.generate.mockClear(); render.mockClear();

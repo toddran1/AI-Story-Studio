@@ -33,6 +33,19 @@ describe("chapter video", () => {
   it("uses compact burned captions and omits subtitles when disabled", () => { const story = testStory(); const input = { audio: "audio.mp3", subtitles: "subtitles.srt", storyTitle: "Book", chapterLabel: "Chapter 1", chapterTitle: "Opening", audioDurationSeconds: 10 }; const burned = buildVideoArgs(input, "video.mp4", { ...story.video, subtitleMode: "burn" }).join(" "); expect(burned).toContain("FontSize=12"); expect(burned).toContain("MarginV=14"); const disabled = buildVideoArgs(input, "video.mp4", { ...story.video, subtitleMode: "none" }).join(" "); expect(disabled).not.toContain("subtitles=filename="); expect(disabled).not.toContain("mov_text"); });
   it("validates ffprobe video streams, codec, resolution, and duration", async () => { const tools = new FfmpegVideoTools("ffmpeg", "ffprobe", async () => ({ stdout: JSON.stringify({ format: { duration: "13", format_name: "mp4" }, streams: [{ codec_type: "video", codec_name: "h264", width: 1920, height: 1080 }, { codec_type: "audio", codec_name: "aac" }] }), stderr: "" })); await expect(tools.probe("video.mp4")).resolves.toMatchObject({ videoCodec: "h264", audioCodec: "aac", width: 1920 }); expect(() => validateChapterVideo({ durationSeconds: 13, videoCodec: "h264", audioCodec: "aac", width: 720, height: 480, container: "mp4" }, testStory().video, 13)).toThrow("Expected 1920x1080"); });
   it("reuses video fingerprints and video settings invalidate no upstream stage", async () => { const { root, story } = await fixture(); await generateStoredSubtitles({ root, story, chapter: 1 }); const processor = new FakeVideo(); const first = await renderStoredChapterVideo({ root, story, chapter: 1, processor }); const second = await renderStoredChapterVideo({ root, story, chapter: 1, processor }); expect(first.reused).toBe(false); expect(second.reused).toBe(true); const changed = { ...story, video: { ...story.video, quality: 24 } }; await renderStoredChapterVideo({ root, story: changed, chapter: 1, processor }); expect(processor.calls).toBe(2); const metadata = chapterSchema.parse(JSON.parse(await readFile(storyPaths(root, story.slug, 1).chapterMeta, "utf8"))); expect(metadata.stages.tts.status).toBe("complete"); expect(metadata.stages.audioMastering.status).toBe("complete"); expect(videoFingerprint("a", "s", "b", story.video, "t")).not.toBe(videoFingerprint("a", "s", "b", changed.video, "t")); });
+  it("keeps the previous chapter video when a presentation rerender fails", async () => {
+    const { root, story } = await fixture();
+    await generateStoredSubtitles({ root, story, chapter: 1 });
+    await renderStoredChapterVideo({ root, story, chapter: 1, processor: new FakeVideo() });
+    const path = storyPaths(root, story.slug, 1);
+    const previousBytes = await readFile(path.video);
+    const failed: VideoProcessor = { version: "failed", render: async () => { throw new Error("transition failure"); } };
+    await expect(renderStoredChapterVideo({ root, story: { ...story, video: { ...story.video, transition: { mode: "slide", durationSeconds: 0.4 } } }, chapter: 1, processor: failed })).rejects.toThrow("transition failure");
+    expect(await readFile(path.video)).toEqual(previousBytes);
+    const metadata = chapterSchema.parse(JSON.parse(await readFile(path.chapterMeta, "utf8")));
+    expect(metadata.video?.durationSeconds).toBe(13);
+    expect(metadata.stages.video.status).toBe("complete");
+  });
 });
 
 describe("combined video export", () => {

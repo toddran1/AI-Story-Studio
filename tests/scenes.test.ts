@@ -280,7 +280,25 @@ describe("artwork generation", () => {
 });
 
 describe("scene artwork video selection", () => {
-  it("uses a complete approved scene reel and emits ordered FFmpeg image inputs", async () => { const { root, story, paths } = await fixture(); await planStoredScenes({ root, story, chapter: 1, provider: new SceneLLM() }); const images = new FakeImages(); await generateStoredArtwork({ root, story, chapter: 1, provider: images }); const raw = JSON.parse(await readFile(paths.scenesManifest, "utf8")) as SceneManifest; for (const scene of raw.scenes) scene.artwork.review = "approved"; await atomicWriteJson(paths.scenesManifest, raw); const video = new CaptureVideo(); await renderStoredChapterVideo({ root, story: { ...story, video: { ...story.video, subtitleMode: "none" } }, chapter: 1, processor: video }); expect(video.input.sceneArtwork).toHaveLength(2); const command = buildVideoArgs({ ...video.input, audioDurationSeconds: 30 }, "out.mp4", { ...story.video, subtitleMode: "none" }).join(" "); expect(command).toContain("scene-001-v1.png"); expect(command).toContain("concat=n=2:v=1:a=0"); });
+  it("changes only the chapter video input when a scene treatment is edited", async () => {
+    const { root, story, paths } = await fixture();
+    await planStoredScenes({ root, story, chapter: 1, provider: new SceneLLM() });
+    await generateStoredArtwork({ root, story, chapter: 1, provider: new FakeImages() });
+    const initial = sceneManifestSchema.parse(JSON.parse(await readFile(paths.scenesManifest, "utf8")));
+    const scene = initial.scenes[0]!;
+    const result = await updateStoredScene({ root, story, chapter: 1, sceneId: scene.id, scene: { ...scene, videoTreatment: { motion: "pan_left", transitionOut: { mode: "slide", durationSeconds: 0.4 } } }, expectedFingerprint: sceneContentFingerprint(scene) });
+    expect(result.scenes[0]!.artwork.imageFingerprint).toBe(scene.artwork.imageFingerprint);
+    expect(result.manualRevision).toBe(initial.manualRevision);
+    const chapter = chapterSchema.parse(JSON.parse(await readFile(paths.chapterMeta, "utf8")));
+    expect(chapter.stages.audioMastering.status).toBe("complete");
+    expect(chapter.stages.scenePlanning.status).toBe("complete");
+    expect(chapter.stages.artwork.status).toBe("complete");
+    expect(result.scenes[0]!.videoTreatment?.motion).toBe("pan_left");
+    const reset = await updateStoredScene({ root, story, chapter: 1, sceneId: scene.id, scene: { ...result.scenes[0], videoTreatment: undefined }, expectedFingerprint: sceneContentFingerprint(result.scenes[0]!) });
+    expect(reset.scenes[0]!.videoTreatment).toBeUndefined();
+    expect(reset.scenes[0]!.artwork.imageFingerprint).toBe(scene.artwork.imageFingerprint);
+  });
+  it("uses a complete approved scene reel and emits ordered FFmpeg image inputs", async () => { const { root, story, paths } = await fixture(); await planStoredScenes({ root, story, chapter: 1, provider: new SceneLLM() }); const images = new FakeImages(); await generateStoredArtwork({ root, story, chapter: 1, provider: images }); const raw = JSON.parse(await readFile(paths.scenesManifest, "utf8")) as SceneManifest; for (const scene of raw.scenes) scene.artwork.review = "approved"; await atomicWriteJson(paths.scenesManifest, raw); const video = new CaptureVideo(); await renderStoredChapterVideo({ root, story: { ...story, video: { ...story.video, subtitleMode: "none" } }, chapter: 1, processor: video }); expect(video.input.sceneArtwork).toHaveLength(2); const command = buildVideoArgs({ ...video.input, audioDurationSeconds: 30 }, "out.mp4", { ...story.video, subtitleMode: "none" }).join(" "); expect(command).toContain("scene-001-v1.png"); expect(command).toContain("xfade=transition=fade"); });
   it("omits disabled Chapter artwork, re-times active scenes to audio, and fingerprints enablement only", async () => {
     const { root, story, paths } = await fixture();
     const planned = await planStoredScenes({ root, story, chapter: 1, provider: new SceneLLM() });

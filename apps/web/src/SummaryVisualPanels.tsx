@@ -8,6 +8,8 @@ import type { Scene } from "../../../src/scenes/types.js";
 import { dirtySceneIds, reconcileSceneDrafts, sceneEditableValues, scenePlanStructureDirty } from "./summary-scene-draft.js";
 import { VisualProfileCheckDialog, type VisualPreflightReport } from "./VisualProfileCheckDialog.js";
 import { SceneFilmstrip } from "./SceneFilmstrip.js";
+import { VideoTreatmentEditor } from "./VideoTreatmentEditor.js";
+import { VideoTimelineEditor, VideoPresentationSummary, treatmentDirty } from "./VideoTimelineEditor.js";
 import { AdvancedVisualDirection } from "./AdvancedVisualDirection.js";
 import { VideoReadinessPanel, type ReadinessCheck } from "./VideoReadinessPanel.js";
 import { VisualGroundingPanel } from "./VisualGroundingPanel.js";
@@ -226,6 +228,7 @@ export function SummaryScenePanel(props: SummaryVisualProps) {
       <div className="summary-form-row"><label>Start seconds<input disabled={working} type="number" step="0.1" min={0} value={scene.startSeconds} onChange={(event) => edit(scene.id, { startSeconds: Number(event.target.value) })} /></label><label>End seconds<input disabled={working} type="number" step="0.1" min={0} value={scene.endSeconds} onChange={(event) => edit(scene.id, { endSeconds: Number(event.target.value) })} /></label></div>
       <AdvancedVisualDirection source="summary" direction={scene.direction} overrides={scene.overrides} artDirection={artDirection} summaryPreset={inheritedDirectionLabel()}
         disabled={working} onDirection={(patch) => updateDirection(scene, patch)} onOverrides={(patch) => updateOverrides(scene, patch)} />
+      <VideoTreatmentEditor scene={scene} hasNext={!scene.disabled && draft.slice(index + 1).some((item) => !item.disabled)} disabled={working} onChange={(videoTreatment) => edit(scene.id, { videoTreatment })} />
       <SummaryContinuityEditor key={`${scene.id}:${continuity[scene.id]?.manualOverride?.revision ?? 0}`} continuity={continuity[scene.id]} busy={continuityBusy === scene.id} onSave={(input) => void updateContinuity(scene.id, input)} onReset={() => void updateContinuity(scene.id)} />
       {sceneError[scene.id] && <div className="error-box">{sceneError[scene.id]}</div>}
       <div className="summary-visual-actions"><button className="button primary" disabled={working || !dirtyIds.has(scene.id) || !saved.some((item) => item.id === scene.id)} onClick={() => void saveScene(scene)}>Save this scene</button>
@@ -377,6 +380,29 @@ export function SummaryArtworkPanel(props: SummaryVisualProps) {
 export function SummaryVideoPanel(props: SummaryVisualProps) {
   const { summary } = props; const { run, disabled } = useActions(props);
   const [videoSettings, setVideoSettings] = useState<StoryConfig["video"]>();
+  const [timelineSaved, setTimelineSaved] = useState<Scene[]>(() => structuredClone(summary.scenePlan?.scenes ?? []));
+  const [timelineDraft, setTimelineDraft] = useState<Scene[]>(() => structuredClone(summary.scenePlan?.scenes ?? []));
+  const [timelineBusy, setTimelineBusy] = useState(false);
+  const [timelineError, setTimelineError] = useState("");
+  const [timelineNeedsRender, setTimelineNeedsRender] = useState(false);
+  const [playhead, setPlayhead] = useState(0);
+  const timelineVideo = useRef<HTMLVideoElement>(null);
+  useEffect(() => { setTimelineNeedsRender(false); }, [summary.id, summary.video?.outputFingerprint]);
+  const timelineSavedRef = useRef(timelineSaved);
+  const timelineSummaryId = useRef(summary.id);
+  useEffect(() => {
+    const incoming = structuredClone(summary.scenePlan?.scenes ?? []);
+    if (timelineSummaryId.current !== summary.id) { timelineSummaryId.current = summary.id; setTimelineDraft(incoming); setPlayhead(0); }
+    else { const previous = timelineSavedRef.current; setTimelineDraft((current) => incoming.map((scene) => { const local = current.find((item) => item.id === scene.id); const old = previous.find((item) => item.id === scene.id); return local && treatmentDirty(local.videoTreatment, old?.videoTreatment) ? { ...scene, videoTreatment: local.videoTreatment } : scene; })); }
+    setTimelineSaved(incoming); timelineSavedRef.current = incoming;
+  }, [summary.id, summary.scenePlan]);
+  const acceptTimelineSave = (updated: StorySummary, savedId?: string) => {
+    const incoming = structuredClone(updated.scenePlan?.scenes ?? []);
+    setTimelineDraft((current) => savedId ? current.map((scene) => scene.id === savedId ? incoming.find((item) => item.id === savedId) ?? scene : scene) : incoming);
+    setTimelineSaved(incoming); timelineSavedRef.current = incoming; setTimelineNeedsRender(true); props.onChange(updated);
+  };
+  const saveTimelineScene = async (scene: Scene) => { setTimelineBusy(true); setTimelineError(""); try { const { visualChanges: _visualChanges, ...values } = sceneEditableValues(scene); const result = await put<{ summary: StorySummary }>(`${props.base}/scenes/${scene.id}`, { scene: values }); acceptTimelineSave(result.summary, scene.id); } catch (error) { setTimelineError(error instanceof Error ? error.message : String(error)); } finally { setTimelineBusy(false); } };
+  const saveTimelineAll = async () => { setTimelineBusy(true); setTimelineError(""); try { const result = await put<{ summary: StorySummary }>(`${props.base}/scenes`, { scenes: timelineDraft }); acceptTimelineSave(result.summary); } catch (error) { setTimelineError(error instanceof Error ? error.message : String(error)); } finally { setTimelineBusy(false); } };
   const [subtitlesEnabled, setSubtitlesEnabled] = useState(false);
   const [preflight, setPreflight] = useState<VisualPreflightReport>();
   const [pendingProduceRequest, setPendingProduceRequest] = useState<Record<string, unknown>>();
@@ -430,13 +456,14 @@ export function SummaryVideoPanel(props: SummaryVisualProps) {
   ];
   return <section className="summary-media-editor"><header><span className="eyebrow">Recap screening room</span><h3>Summary video</h3><p>Uses mastered recap audio, scene artwork, and this book’s video settings. The recap has no silent intro; video length matches its audio.</p></header>
     <VideoReadinessPanel checks={checks} />
-    {videoSettings && <div className="summary-meta" aria-label="Effective summary video settings"><span>{videoSettings.resolution ?? `${videoSettings.width}×${videoSettings.height}`} · {videoSettings.fps} FPS</span><span>Subtitles: {summary.video?.subtitleMode ?? videoSettings.subtitleMode}</span><span>Background: {videoSettings.backgroundMode}</span><span>No silent intro</span></div>}
+    {videoSettings && <div className="summary-meta" aria-label="Effective summary video settings"><span>{videoSettings.resolution ?? `${videoSettings.width}×${videoSettings.height}`} · {videoSettings.fps} FPS</span><span>Subtitles: {summary.video?.subtitleMode ?? videoSettings.subtitleMode}</span><span>Motion: {(videoSettings.motion?.mode ?? "auto_subtle").replaceAll("_", " ")} · {videoSettings.motion?.intensity ?? "subtle"}</span><span>Transition: {(videoSettings.transition?.mode ?? "dissolve").replaceAll("_", " ")} · {videoSettings.transition?.durationSeconds ?? 0.5}s</span><span>Scene overrides: {enabledScenes.filter((scene) => scene.videoTreatment?.motion && scene.videoTreatment.motion !== "story_default" || scene.videoTreatment?.transitionOut?.mode && scene.videoTreatment.transitionOut.mode !== "story_default" || scene.videoTreatment?.transitionOut?.durationSeconds !== undefined).length}</span><span>No silent intro</span></div>}
     <label className="summary-video-subtitle-toggle"><input type="checkbox" checked={subtitlesEnabled} onChange={(event) => setSubtitlesEnabled(event.target.checked)} /> Include subtitles in the video</label>
     <div className="summary-meta"><span>{summary.video?.status ?? "Not generated"}</span>{summary.video?.durationSeconds && <span>{clock(summary.video.durationSeconds)}</span>}{summary.video?.width && <span>{summary.video.width} × {summary.video.height}</span>}{summary.video?.sceneCount && <span>{summary.video.sceneCount} scenes</span>}{summary.video?.generatedAt && <span>{new Date(summary.video.generatedAt).toLocaleString()}</span>}<span>Audio: mastered summary narration</span></div>
     {summary.video?.status === "stale" && <p className="summary-media-warning">This video uses older inputs. Produce again to update only missing/stale stages.</p>}{summary.video?.error && <div className="error-box">{summary.video.error}</div>}
     {(summary.audio?.status === "stale" || summary.scenes?.status === "stale" || summary.artwork?.status === "stale") && summaryAudioAvailable(summary) && summaryScenePlanAvailable(summary) && <p className="summary-media-warning">Video will use available saved audio, scene, and artwork inputs even when they are stale. Regenerate a stage first only if you want its latest changes in the video.</p>}
-    {summary.video?.outputFingerprint && <video controls preload="metadata" aria-label="Summary video preview" src={`/api${props.base}/export/video?v=${summary.video.outputFingerprint}`} />}
-    <div className="summary-visual-actions"><button className="button primary" disabled={disabled || !summaryAudioAvailable(summary) || !summaryNarrationTextAvailable(summary) || !summaryScenePlanAvailable(summary)} onClick={() => void run("video", { force: false, subtitleMode: selectedSubtitleMode })}>Produce summary video</button><button className="button" disabled={disabled || checkingProfiles || summary.status !== "complete"} onClick={() => produce({})}>Refresh all inputs &amp; video</button><button className="button" disabled={disabled || !summary.video} onClick={() => { if (confirm("Re-render the video using the existing audio and artwork?")) void run("video", { force: true, subtitleMode: selectedSubtitleMode }); }}>Regenerate video</button>{summary.video?.outputFingerprint && <a className="button" download href={`/api${props.base}/export/video?download=1`}>Download MP4</a>}</div>
+    {summary.video?.outputFingerprint && <video ref={timelineVideo} controls preload="metadata" aria-label="Summary video preview" src={`/api${props.base}/export/video?v=${summary.video.outputFingerprint}`} onTimeUpdate={(event) => setPlayhead(Math.floor(event.currentTarget.currentTime))} />}
+    {videoSettings && <>{timelineNeedsRender && <p className="video-render-notice">Video needs re-render to include saved presentation changes. The previous render remains available for review.</p>}<VideoPresentationSummary settings={videoSettings} scenes={timelineDraft} />{timelineError && <div className="error-box">{timelineError}</div>}{timelineDraft.length > 0 && <VideoTimelineEditor scenes={timelineDraft} savedScenes={timelineSaved} settings={videoSettings} onChange={setTimelineDraft} onSaveScene={saveTimelineScene} onSaveAll={saveTimelineAll} disabled={disabled || timelineBusy} videoRef={summary.video?.outputFingerprint ? timelineVideo : undefined} currentTime={playhead} artworkUrl={(scene) => scene.artwork.imageFingerprint ? `/api${props.base}/artwork/${scene.id}?v=${scene.artwork.imageFingerprint}` : undefined} />}</>}
+    <div className="summary-visual-actions"><button className="button primary" disabled={disabled || !summaryAudioAvailable(summary) || !summaryNarrationTextAvailable(summary) || !summaryScenePlanAvailable(summary)} onClick={() => void run("video", { force: false, subtitleMode: selectedSubtitleMode })}>Produce summary video</button><button className="button" disabled={disabled || checkingProfiles || summary.status !== "complete"} onClick={() => produce({})}>Refresh all inputs &amp; video</button><button className="button" disabled={disabled || !summary.video} onClick={() => { if (confirm("Re-render the video using the existing audio and artwork?")) void run("video", { force: true, subtitleMode: selectedSubtitleMode }); }}>{summary.video?.status === "stale" ? "Render video with current edits" : "Re-render video"}</button>{summary.video?.outputFingerprint && <a className="button" download href={`/api${props.base}/export/video?download=1`}>Download MP4</a>}</div>
     {checkingProfiles && <p className="summary-media-working" role="status">Checking Visual Profiles for summary scenes…</p>}
     {preflight && <VisualProfileCheckDialog slug={props.slug ?? props.base.split("/")[2] ?? ""} report={preflight} oneTimeEntityIds={oneTimeFallbackIds} onOneTimeEntityIds={setOneTimeFallbackIds} onCancel={cancelProduce} onContinue={() => void continueProduce()} onRefresh={refreshPreflight} onError={props.onError} />}
   </section>;

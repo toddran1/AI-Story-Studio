@@ -5,7 +5,7 @@ export function sceneEditableValues(scene: Scene) {
     summary: scene.summary, visualPrompt: scene.visualPrompt, characters: scene.characters,
     entityIds: scene.entityIds ?? [], location: scene.location, startSeconds: scene.startSeconds,
     endSeconds: scene.endSeconds, disabled: scene.disabled, importance: scene.importance,
-    direction: scene.direction, overrides: scene.overrides, visualChanges: scene.visualChanges,
+    direction: scene.direction, overrides: scene.overrides, visualChanges: scene.visualChanges, videoTreatment: scene.videoTreatment,
   };
 }
 
