@@ -182,10 +182,10 @@ export const resolvedSceneCharacterSchema = z.object({
 export type ResolvedSceneCharacter = z.infer<typeof resolvedSceneCharacterSchema>;
 
 export const sceneSchema = z.object({
-  id: z.string().regex(/^scene-\d{3}$/), summary: z.string().trim().min(1).max(1000),
+  id: z.string().regex(/^scene-\d{3}$/), summary: z.string().trim().max(1000),
   startSeconds: z.number().min(0), endSeconds: z.number().positive(),
   characters: z.array(z.string().trim().min(1)).max(20).default([]), location: z.string().trim().max(300).optional(),
-  visualPrompt: z.string().trim().min(1).max(8000), importance: sceneImportanceSchema.default("standard"), artwork: sceneArtworkSchema,
+  visualPrompt: z.string().trim().max(8000), importance: sceneImportanceSchema.default("standard"), artwork: sceneArtworkSchema,
   narrationText: z.string().max(1000000).optional(),
   narrationStartWord: z.number().int().nonnegative().optional(), narrationEndWord: z.number().int().positive().optional(),
   entityIds: z.array(z.string().trim().min(1)).max(100).optional().default([]),
@@ -204,6 +204,7 @@ export const productionSceneManifestSchema = z.object({
   timingMethod: z.enum(["estimated", "aligned"]).optional(),
   planningFingerprint: z.string(), planner: z.object({ provider: z.string(), model: z.string(), promptVersion: z.string() }),
   manualRevision: z.number().int().nonnegative().default(0), manuallyEdited: z.boolean().default(false),
+  nextSceneNumber: z.number().int().positive().max(1000).optional(),
   createdAt: z.string(), updatedAt: z.string(), scenes: z.array(sceneSchema).min(1).max(100),
 });
 

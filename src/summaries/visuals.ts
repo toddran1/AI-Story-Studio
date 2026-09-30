@@ -396,21 +396,37 @@ export class SummaryVisualService {
     // even though scene *generation* only requires usable narration text.
     if (summary.narration.status !== "current") throw new Error("Review narration before accepting or editing scenes");
     let keepTiming = false;
+    let preserveAlignedTiming = false;
     if ("scenes" in input) {
       keepTiming = input.scenes.length === summary.scenePlan.scenes.length && input.scenes.every((scene, index) => scene.id === summary.scenePlan!.scenes[index]!.id && Boolean(scene.disabled) === Boolean(summary.scenePlan!.scenes[index]!.disabled));
+      preserveAlignedTiming = keepTiming && input.scenes.every((scene, index) => scene.startSeconds === summary.scenePlan!.scenes[index]!.startSeconds && scene.endSeconds === summary.scenePlan!.scenes[index]!.endSeconds);
       const prior = new Map(summary.scenePlan.scenes.map((scene) => [scene.id, scene])); const ids = new Set<string>();
-      for (const scene of input.scenes) { if (!prior.has(scene.id) || ids.has(scene.id)) throw new Error("Scene IDs must remain unique and stable"); ids.add(scene.id); scene.artwork = prior.get(scene.id)!.artwork; }
-      // Reordering visual beats is supported; narration spans remain chronological slots.
-      const slots = summary.scenePlan.scenes.filter((scene) => ids.has(scene.id));
-      summary.scenePlan.scenes = input.scenes.map((scene, index) => ({ ...scene, narrationStartWord: slots[index]!.narrationStartWord, narrationEndWord: slots[index]!.narrationEndWord }));
-      if (summary.scenePlan.scenes.length !== prior.size) summary.scenePlan.scenes.forEach((scene) => { scene.narrationStartWord = undefined; scene.narrationEndWord = undefined; });
-      summary.scenePlan.scenes = bindNarrationSpans(summary.scenePlan.scenes, summary.narration.text);
+      for (const scene of input.scenes) {
+        if (ids.has(scene.id) || (!prior.has(scene.id) && !(scene.disabled && !scene.summary && !scene.visualPrompt))) throw new Error("New scenes must be empty and disabled; scene IDs must be unique");
+        ids.add(scene.id); scene.artwork = prior.get(scene.id)?.artwork ?? scene.artwork;
+      }
+      if (input.scenes.every((scene) => scene.disabled)) throw new Error("Keep at least one scene enabled");
+      if (input.scenes.some((scene) => !scene.disabled && (!scene.summary || !scene.visualPrompt))) throw new Error("Fill in the scene beat and image prompt before enabling a scene");
+      const oldActive = summary.scenePlan.scenes.filter((scene) => !scene.disabled);
+      const newActive = input.scenes.filter((scene) => !scene.disabled);
+      const preserveSlots = oldActive.length === newActive.length && oldActive.every((scene) => scene.narrationStartWord !== undefined && scene.narrationEndWord !== undefined);
+      const durationForSlots = summary.audio?.durationSeconds ?? summary.scenePlan.durationSeconds;
+      const weightedActive = preserveSlots ? newActive : retimeScenesToDuration(newActive, durationForSlots);
+      const active = bindNarrationSpans(weightedActive.map((scene, index) => ({ ...scene,
+        narrationStartWord: preserveSlots ? oldActive[index]!.narrationStartWord : undefined,
+        narrationEndWord: preserveSlots ? oldActive[index]!.narrationEndWord : undefined,
+      })), summary.narration.text);
+      const activeById = new Map(active.map((scene) => [scene.id, scene]));
+      summary.scenePlan.scenes = input.scenes.map((scene) => activeById.get(scene.id) ?? { ...scene, narrationStartWord: undefined, narrationEndWord: undefined, narrationText: undefined });
     }
-    const duration = summary.audio?.status === "current" ? summary.audio.durationSeconds! : summary.scenePlan.durationSeconds;
+    const duration = summary.audio?.durationSeconds ?? summary.scenePlan.durationSeconds;
     if (keepTiming) validateSceneCoverage(summary.scenePlan.scenes.filter((scene) => !scene.disabled), duration);
-    const timed = keepTiming ? { scenes: summary.scenePlan.scenes.filter((scene) => !scene.disabled), timingMethod: "estimated" as const } : timeNarrationScenes(summary.scenePlan.scenes, duration, summary.alignment?.mode === "aligned" ? summary.alignment.words : undefined);
+    const timed = keepTiming ? { scenes: summary.scenePlan.scenes.filter((scene) => !scene.disabled), timingMethod: preserveAlignedTiming ? summary.scenePlan.timingMethod ?? "estimated" as const : "estimated" as const } : timeNarrationScenes(summary.scenePlan.scenes, duration, summary.alignment?.mode === "aligned" ? summary.alignment.words : undefined);
     const byId = new Map(timed.scenes.map((scene) => [scene.id, scene])); summary.scenePlan.scenes = summary.scenePlan.scenes.map((scene) => byId.get(scene.id) ?? scene); summary.scenePlan.durationSeconds = timed.scenes.at(-1)!.endSeconds;
     summary.scenePlan.manuallyEdited = true; summary.scenePlan.manualRevision++; summary.scenePlan.timingMethod = timed.timingMethod;
+    summary.scenePlan.nextSceneNumber = Math.max(summary.scenePlan.nextSceneNumber ?? 1, ...summary.scenePlan.scenes.map((scene) => Number(scene.id.slice(6)) + 1));
+    if (summary.scenePacing?.pacing === "custom" && summary.scenePacing.sceneCount !== undefined)
+      summary.scenePacing.sceneCount = timed.scenes.length;
     const { story } = await this.context(slug);
     summary.scenes = { ...summary.scenes!, status: "current", manuallyEdited: true, reviewRequired: false, outputFingerprint: productionSceneFingerprint(summary.scenePlan), sourceFingerprint: fingerprint(summary.narration.text), configurationFingerprint: fingerprint({ config: story.pipeline.scenePlanner, settings: story.scenes }) };
     if (summary.video) summary.video.status = "stale"; return this.save(slug, summary);

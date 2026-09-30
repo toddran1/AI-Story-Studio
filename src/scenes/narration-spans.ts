@@ -29,10 +29,10 @@ export function bindNarrationSpans(scenes: Scene[], narration: string) {
 }
 
 export function timeNarrationScenes(scenes: Scene[], duration: number, words?: AlignedWord[]) {
-  const lastWord = scenes.at(-1)?.narrationEndWord;
+  const active = scenes.filter((scene) => !scene.disabled);
+  const lastWord = active.at(-1)?.narrationEndWord;
   if (!lastWord) throw new Error("Scene narration spans are missing");
   const usable = words?.length === lastWord && words.every((word, index) => word.end > word.start && word.end <= duration && (!index || word.start >= words[index - 1]!.end));
-  const active = scenes.filter((scene) => !scene.disabled);
   if (!active.length) throw new Error("Keep at least one scene enabled");
   // Estimated word timing can leave the final visual beat on screen for a
   // fraction of a second. Keep every scene visible for a useful minimum while

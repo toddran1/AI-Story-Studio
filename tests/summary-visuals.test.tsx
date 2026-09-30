@@ -15,6 +15,7 @@ import { summaryPath } from "../src/summaries/service.js";
 import { emptyStoryBible, storyBibleUpdateSchema } from "../src/domain/story-bible.js";
 import { mergeStoryBible } from "../src/story-bible/updater.js";
 import { tokenizeNarration } from "../src/alignment/quality.js";
+import { emptySceneAtEnd } from "../src/scenes/production.js";
 import { MockLLM, MockTTS, pngWithDims, testStory } from "./helpers.js";
 import { parseSummaryArgs, runSummaryCommand } from "../apps/cli/summary.js";
 import { SummaryArtworkPanel, SummaryScenePanel, SummaryVideoPanel, summaryArtDirectionChoiceOptions } from "../apps/web/src/SummaryVisualPanels.js";
@@ -555,6 +556,25 @@ describe("summary visual production", () => {
     const scenes = structuredClone(reordered.scenePlan!.scenes); scenes[0]!.disabled = true; const disabled = await visuals.editScenes("demo-story", id, { scenes }); expect(disabled.scenePlan?.scenes[1]?.startSeconds).toBe(0); expect(disabled.scenePlan?.scenes[1]?.endSeconds).toBe(12);
     const kept = [{ ...disabled.scenePlan!.scenes[1]!, disabled: false }]; const deleted = await visuals.editScenes("demo-story", id, { scenes: kept }); expect(deleted.scenePlan?.scenes).toHaveLength(1); expect(deleted.scenePlan?.scenes[0]?.narrationEndWord).toBe(8);
     await expect(visuals.editScenes("demo-story", id, { scenes: [{ ...kept[0]!, disabled: true }] })).rejects.toThrow("at least one");
+  });
+  it("adds a disabled blank summary scene without opening a timing gap", async () => {
+    const initial = await produce();
+    const blank = emptySceneAtEnd(initial.scenePlan!.scenes, initial.scenePlan!.durationSeconds);
+    const added = await visuals.editScenes("demo-story", id, { scenes: [...initial.scenePlan!.scenes, blank] });
+    const active = added.scenePlan!.scenes.filter((scene) => !scene.disabled);
+    expect(added.scenePlan!.scenes.at(-1)).toMatchObject({ id: "scene-003", disabled: true, summary: "", visualPrompt: "" });
+    expect(active[0]!.startSeconds).toBe(0);
+    expect(active[1]!.startSeconds).toBe(active[0]!.endSeconds);
+    expect(active[1]!.endSeconds).toBe(added.scenePlan!.durationSeconds);
+    expect(active[1]!.narrationEndWord).toBe(8);
+    await expect(visuals.editScenes("demo-story", id, { scenes: added.scenePlan!.scenes.map((scene) => scene.id === blank.id ? { ...scene, disabled: false } : scene) })).rejects.toThrow("Fill in");
+    const enabled = await visuals.editScenes("demo-story", id, { scenes: added.scenePlan!.scenes.map((scene) => scene.id === blank.id ? { ...scene, disabled: false, summary: "Closing beat", visualPrompt: "A final frame" } : scene) });
+    const production = enabled.scenePlan!.scenes.filter((scene) => !scene.disabled);
+    expect(production.at(-1)!.endSeconds).toBe(enabled.scenePlan!.durationSeconds);
+    expect(production.slice(1).every((scene, index) => scene.startSeconds === production[index]!.endSeconds)).toBe(true);
+    expect(production.at(-1)!.narrationEndWord).toBe(8);
+    const removed = await visuals.editScenes("demo-story", id, { scenes: enabled.scenePlan!.scenes.filter((scene) => scene.id !== blank.id) });
+    expect(emptySceneAtEnd(removed.scenePlan!.scenes, removed.scenePlan!.durationSeconds, removed.scenePlan!.nextSceneNumber).id).toBe("scene-004");
   });
   it("saves only the selected scene, validates full-plan timing and avoids provider calls", async () => {
     const before = await produce(); const first = before.scenePlan!.scenes[0]!, second = structuredClone(before.scenePlan!.scenes[1]!);

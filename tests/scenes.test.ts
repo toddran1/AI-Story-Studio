@@ -11,7 +11,7 @@ import { applyStoredSceneRegeneration, planStoredScenes, previewStoredSceneRegen
 import { sceneProposalSourceFingerprint } from "../src/scenes/regeneration.js";
 import { SCENE_PLANNER_PROMPT_VERSION, scenePlannerInstructions } from "../src/scenes/prompts.js";
 import { normalizeSceneTiming, validateSceneCoverage } from "../src/scenes/timing.js";
-import { enabledProductionScenes, retimeScenesToDuration } from "../src/scenes/production.js";
+import { emptySceneAtEnd, enabledProductionScenes, retimeScenesToDuration } from "../src/scenes/production.js";
 import { SceneManifest, sceneManifestSchema } from "../src/scenes/types.js";
 import { atomicWrite, atomicWriteJson } from "../src/storage/atomic-write.js";
 import { sceneImagePath, storyPaths } from "../src/storage/paths.js";
@@ -181,6 +181,23 @@ describe("scene planning", () => {
 });
 
 describe("artwork generation", () => {
+  it("keeps chapter audio covered after adding and enabling a blank scene", async () => {
+    const { root, story } = await fixture();
+    const planned = await planStoredScenes({ root, story, chapter: 1, provider: new SceneLLM() });
+    const blank = emptySceneAtEnd(planned.manifest.scenes, planned.manifest.durationSeconds);
+    const added = await updateStoredSceneManifest({ root, story, chapter: 1, scenes: [...planned.manifest.scenes, blank] });
+    expect(added.scenes[2]).toMatchObject({ id: "scene-003", disabled: true, summary: "", visualPrompt: "" });
+    expect(added.scenes.filter((scene) => !scene.disabled).map((scene) => [scene.startSeconds, scene.endSeconds])).toEqual([[0, 12], [12, 30]]);
+    await expect(updateStoredSceneManifest({ root, story, chapter: 1, scenes: added.scenes.map((scene) => scene.id === blank.id ? { ...scene, disabled: false } : scene) })).rejects.toThrow("Fill in");
+    const enabled = await updateStoredSceneManifest({ root, story, chapter: 1, scenes: added.scenes.map((scene) => scene.id === blank.id ? { ...scene, disabled: false, summary: "A new beat", visualPrompt: "A new frame" } : scene) });
+    const active = enabled.scenes.filter((scene) => !scene.disabled);
+    expect(active[0]!.startSeconds).toBe(0);
+    expect(active[1]!.startSeconds).toBe(active[0]!.endSeconds);
+    expect(active[2]!.startSeconds).toBe(active[1]!.endSeconds);
+    expect(active[2]!.endSeconds).toBe(30);
+    const removed = await updateStoredSceneManifest({ root, story, chapter: 1, scenes: enabled.scenes.filter((scene) => scene.id !== blank.id) });
+    expect(emptySceneAtEnd(removed.scenes, removed.durationSeconds, removed.nextSceneNumber).id).toBe("scene-004");
+  });
   it("supports dry-run estimates, partial regeneration, fingerprints, and review states", async () => { const { root, story, paths } = await fixture(); await planStoredScenes({ root, story, chapter: 1, provider: new SceneLLM() }); const images = new FakeImages(); const estimate = await generateStoredArtwork({ root, story, chapter: 1, provider: images, dryRun: true }); expect(estimate.imagesToGenerate).toBe(2); expect(images.calls).toHaveLength(0); const one = await generateStoredArtwork({ root, story, chapter: 1, provider: images, sceneId: "scene-001" }); expect(one.generated).toBe(1); expect(images.calls).toHaveLength(1); const reused = await generateStoredArtwork({ root, story, chapter: 1, provider: images, sceneId: "scene-001" }); expect(reused.generated).toBe(0); await reviewStoredArtwork({ root, story, chapter: 1, sceneId: "scene-001", review: "approved" }); const manifest = sceneManifestSchema.parse(JSON.parse(await readFile(paths.scenesManifest, "utf8"))); expect(manifest.scenes[0]!.artwork.review).toBe("approved"); expect(artworkFingerprint(manifest.scenes[0]!, [], story, images.version)).toBe(manifest.scenes[0]!.artwork.fingerprint); });
   it("excludes disabled scenes from artwork generation, preflight, freshness, and stage counts while preserving their history", async () => {
     const { root, story, paths } = await fixture();

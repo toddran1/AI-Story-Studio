@@ -21,6 +21,7 @@ import { resolveVisualEntities } from "./identity.js";
 import { sceneArtworkContentState, sceneEditableState } from "./editable-state.js";
 import { planScenes, SCENE_PLANNER_PROMPT_VERSION } from "./planner.js";
 import { normalizeSceneTiming, validateSceneCoverage } from "./timing.js";
+import { retimeScenesToDuration } from "./production.js";
 import { planVisualScenes } from "./planner.js";
 import { sceneRegenerationModeSchema, sceneRegenerationProposalSchema, sceneProposalSourceFingerprint, sceneVisualSnapshot, sceneVisualSnapshotSchema } from "./regeneration.js";
 import { loadStoryArtDirection } from "../visual-canon/art-direction.js";
@@ -87,16 +88,21 @@ export async function updateStoredSceneManifest(options: { root: string; story: 
     ? (await rebuildStoryBibleBeforeChapter(options.root, options.story.slug, options.chapter + 1)).canonicalEntities
     : undefined;
   const scenes = incoming.map((scene) => {
-    if (ids.has(scene.id) || !previous.has(scene.id)) throw new SceneError("Scene IDs must remain unique and stable");
+    if (ids.has(scene.id) || (!previous.has(scene.id) && !(scene.disabled && !scene.summary && !scene.visualPrompt))) throw new SceneError("New scenes must be empty and disabled; scene IDs must be unique");
     ids.add(scene.id);
-    const before = previous.get(scene.id)!;
+    const before = previous.get(scene.id) ?? scene;
     const entityIds = JSON.stringify(before.characters) !== JSON.stringify(scene.characters)
       ? resolveVisualEntities(scene.characters, canonicalEntities ?? []).map((entity) => entity.id)
       : before.entityIds ?? [];
     const next = { ...scene, entityIds, artwork: fingerprint(sceneArtworkContentState(before)) === fingerprint(sceneArtworkContentState({ ...scene, entityIds })) ? before.artwork : { ...before.artwork, status: "pending" as const, review: "unreviewed" as const } };
     return next;
   });
-  validateSceneCoverage(scenes, manifest.durationSeconds, options.story.scenes); const updated = sceneManifestSchema.parse({ ...manifest, scenes, manuallyEdited: true, manualRevision: manifest.manualRevision + 1, updatedAt: new Date().toISOString() }); await writeArtworkOutputManifest(options.root, options.story.slug, options.chapter, updated); await invalidateAfterSceneEdit(options.root, options.story.slug, options.chapter, paths.chapterMeta, updated); await persistChapterVisualContinuity({ root: options.root, slug: options.story.slug, chapter: options.chapter, manifest: updated }); return updated;
+  const active = scenes.filter((scene) => !scene.disabled);
+  if (active.some((scene) => !scene.summary || !scene.visualPrompt)) throw new SceneError("Fill in the scene beat and image prompt before enabling a scene");
+  const retimed = retimeScenesToDuration(active, manifest.durationSeconds, options.story.scenes);
+  const byId = new Map(retimed.map((scene) => [scene.id, scene]));
+  const nextSceneNumber = Math.max(manifest.nextSceneNumber ?? 1, ...incoming.map((scene) => Number(scene.id.slice(6)) + 1));
+  const updated = sceneManifestSchema.parse({ ...manifest, scenes: scenes.map((scene) => byId.get(scene.id) ?? scene), nextSceneNumber, manuallyEdited: true, manualRevision: manifest.manualRevision + 1, updatedAt: new Date().toISOString() }); await writeArtworkOutputManifest(options.root, options.story.slug, options.chapter, updated); await invalidateAfterSceneEdit(options.root, options.story.slug, options.chapter, paths.chapterMeta, updated); await persistChapterVisualContinuity({ root: options.root, slug: options.story.slug, chapter: options.chapter, manifest: updated }); return updated;
 }
 
 /** Persist one visual beat without accepting unrelated drafts or structural edits. */

@@ -7,6 +7,22 @@ export function enabledProductionScenes<T extends { disabled?: boolean }>(scenes
   return scenes.filter((scene) => !scene.disabled);
 }
 
+export function nextSceneId(scenes: readonly Pick<Scene, "id">[], nextSceneNumber?: number): string {
+  const next = Math.max(nextSceneNumber ?? 1, Math.max(0, ...scenes.map((scene) => Number(scene.id.slice(6)) || 0)) + 1);
+  if (next > 999) throw new SceneError("Scene ID limit reached");
+  return `scene-${String(next).padStart(3, "0")}`;
+}
+
+/** A new scene starts disabled so its blank visual fields cannot enter artwork or video. */
+export function emptySceneAtEnd(scenes: readonly Scene[], durationSeconds: number, nextSceneNumber?: number): Scene {
+  if (!scenes.length) throw new SceneError("Create a scene plan before adding a scene");
+  return {
+    id: nextSceneId(scenes, nextSceneNumber), summary: "", visualPrompt: "", characters: [], entityIds: [],
+    startSeconds: Math.max(0, durationSeconds - Math.min(10, durationSeconds / 2)), endSeconds: durationSeconds,
+    importance: "standard", disabled: true, artwork: { status: "pending", review: "unreviewed", versions: [] },
+  };
+}
+
 /** Derive a contiguous, deterministic production timeline without mutating the saved scene records. */
 export function retimeScenesToDuration(scenes: readonly Scene[], durationSeconds: number, settings?: SceneSettings): Scene[] {
   if (!scenes.length) throw new SceneError("At least one enabled scene is required for a production timeline");
