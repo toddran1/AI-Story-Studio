@@ -69,4 +69,21 @@ describe("Story Bible", () => {
     expect(normalized.characters[0]).toMatchObject({ firstSeenChapter: 3, lastSeenChapter: 3 });
     expect(normalized.relationships[0]).toMatchObject({ firstSeenChapter: 3, lastSeenChapter: 3 });
   });
+
+  it("supports large cumulative Story Bible datasets exceeding 2000 relationships without array size errors", () => {
+    const base = emptyStoryBible();
+    const relationships = Array.from({ length: 2500 }, (_, index) => ({
+      subject: `Entity ${index}`,
+      object: `Target ${index}`,
+      relationship: "allies with",
+      firstSeenChapter: 1,
+      lastSeenChapter: 1,
+    }));
+    const update = storyBibleUpdateSchema.parse({
+      relationships,
+      chapterSummary: "Large relationship update",
+    });
+    const merged = mergeStoryBible(base, update, 608);
+    expect(merged.relationships).toHaveLength(2500);
+  });
 });
