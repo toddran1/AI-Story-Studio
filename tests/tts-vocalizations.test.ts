@@ -66,6 +66,12 @@ describe("Fish vocalization strategy", () => {
     expect(normalizeFishSpeechText(original, "s2-pro")).toContain("[cough] You’re right");
     expect(original).toContain("Ahem, ahem, ahem");
   });
+
+  it("renders a leading single heh as a supported cue without an open ellipsis", () => {
+    const narration = "Zhou Ao looked serious and spoke earnestly, showing no sign of letting his guard down.\n\n“Heh... then you’d better do your best!”\n\nGhost Sakura said with a smile.";
+    expect(normalizeFishSpeechText(narration, "s2.1-pro")).toBe("Zhou Ao looked serious and spoke earnestly, showing no sign of letting his guard down.\n\n“[laugh] then you’d better do your best!”\n\nGhost Sakura said with a smile.");
+    expect(normalizeFishSpeechText("She wrote “Heh...” in the margin.", "s2.1-pro")).toContain("“Heh...”");
+  });
 });
 
 describe("vocalization rendering coexists with pronunciation hints (M20)", () => {

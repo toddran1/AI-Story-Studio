@@ -159,6 +159,7 @@ export function renderFishVocalizations(text: string, model?: string, options: {
     const openingReaction = /(?:^|[.!?…\n“"‘']\s*)$/u.test(before) && /[,!?.…]/u.test(item.sourceText);
     const replacement = item.vocalization === "throat_clear" ? "[cough]"
       : item.vocalization === "laugh" && item.confidence >= .8 && openingReaction ? "[laugh]"
+      : item.vocalization === "chuckle" && /^heh(?:\.{3,}|…+|[!,])$/iu.test(item.sourceText) && openingReaction ? "[laugh]"
       : item.vocalization === "scoff" && /^tsk\b/iu.test(item.sourceText) && options.tskRendering === "direction" ? "[clicks tongue disapprovingly]"
       : undefined;
     if (replacement) result = result.slice(0, item.start) + replacement + result.slice(item.end);

@@ -2,7 +2,7 @@ import { fingerprint } from "../utils/hash.js";
 import { scanVocalizations, type VocalizationRenderStrategy } from "./vocalizations.js";
 import type { TTSProvider } from "./provider.js";
 
-export const SPEECH_NORMALIZATION_VERSION = "speech-normalization-v4";
+export const SPEECH_NORMALIZATION_VERSION = "speech-normalization-v5";
 export type SpeechNormalizationMode = "automatic" | "enabled" | "disabled";
 export type TimeSpeechMode = "natural_12h" | "natural_24h" | "preserve";
 export type VocalizationMode = "automatic" | "preserve" | "disabled";
@@ -155,9 +155,10 @@ export function speechNormalizationSettingsFromNarration(narrationSettings: {
 /** The one shared speech-normalization entry point for every TTS consumer. */
 export function stripStandaloneEllipsisLines(text: string): string {
   // Scene-break/silent-response lines have no words to synthesize. Preserve
-  // paragraph separation and ellipses inside actual sentences.
+  // paragraph separation and punctuation inside actual sentences.
   return text.replace(/^[\t ]*(?:["“”‘’']?[\t ]*)(?:\.[\t ]*){3,}["“”‘’']?[\t ]*\r?$/gm, "")
-    .replace(/^[\t ]*["“”‘’']?[\t ]*(?:…[\t ]*)+["“”‘’']?[\t ]*\r?$/gm, "");
+    .replace(/^[\t ]*["“”‘’']?[\t ]*(?:…[\t ]*)+["“”‘’']?[\t ]*\r?$/gm, "")
+    .replace(/^[\t ]*["“”‘’']?[\t ]*(?:[?？][\t ]*){2,}["“”‘’']?[\t ]*\r?$/gm, "");
 }
 
 export function normalizeSpeechForProvider(text: string, language: string, narrationSettings: Parameters<typeof speechNormalizationSettingsFromNarration>[0], provider?: TTSProvider, model?: string) {

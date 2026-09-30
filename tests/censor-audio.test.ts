@@ -29,6 +29,16 @@ describe("censor audio", () => {
     ]);
   });
 
+  it("keeps a quote before a bleep with the following dialogue", () => {
+    const source = "Leo awkwardly scratched his head and apologized awith a grin.\n\n“Bullshit! You think I’m an idiot? You did that on purpose!”";
+    const plan = planCensoredSpeech(source);
+    expect(plan).toEqual([
+      { kind: "speech", text: "Leo awkwardly scratched his head and apologized awith a grin." },
+      expect.objectContaining({ kind: "censor", original: "Bullshit" }),
+      { kind: "speech", text: "“You think I’m an idiot? You did that on purpose!”" },
+    ]);
+  });
+
   it("sends only speech to a provider and inserts deterministic local tone segments", async () => {
     const calls: TTSRequest[] = []; const ffmpegArgs: string[][] = [];
     const tools = { validateAvailability: async () => undefined, ffmpeg: async (args: string[]) => { ffmpegArgs.push(args); await atomicWrite(args.at(-1)!, new Uint8Array([1, 2, 3])); } };

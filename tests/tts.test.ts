@@ -64,7 +64,7 @@ describe("Fish TTS", () => {
     await provider.synthesize({ text: "**Important:** *whisper this.* [sad] 2 * 2", model: "s2.1-pro", speed: 1, format: "mp3", sampleRate: 44100, bitrate: 128, normalize: true, maxCharsPerRequest: 500 });
     const body = JSON.parse(String((fetcher.mock.calls[0]?.[1] as RequestInit).body));
     expect(body.text).toBe("Important: whisper this. [sad] 2 * 2");
-    expect(provider.inputNormalizationVersion).toBe("fish-speech-normalization-v14-scene-dividers-multispeaker-safe-chunks");
+    expect(provider.inputNormalizationVersion).toBe("fish-speech-normalization-v16-leading-heh");
   });
 
   it("does not turn profanity into the literal word bleep inside Fish", async () => {
@@ -199,6 +199,12 @@ describe("Fish TTS", () => {
     expect(normalizeFishSpeechText(narration, "s2-pro")).toBe("Before.\n\nAfter... still speaking.\n\n[laugh] Hello.");
     expect(narration).toContain("......");
     expect(normalizeFishSpeechText("......", "s2-pro")).toBe("");
+  });
+
+  it("omits punctuation-only question reactions from Fish input", () => {
+    const narration = "Then he turned off the phone.\n\n“???”\n\nHu Zhenbang was left with a head full of question marks.";
+    expect(normalizeFishSpeechText(narration, "s2-pro")).toBe("Then he turned off the phone.\n\nHu Zhenbang was left with a head full of question marks.");
+    expect(normalizeFishSpeechText("“What??” she asked.", "s2-pro")).toBe("“What??” she asked.");
   });
 
   it("omits Markdown scene dividers without leaving punctuation for Fish", () => {

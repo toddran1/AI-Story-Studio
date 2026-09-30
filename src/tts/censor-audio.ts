@@ -10,7 +10,7 @@ import { summarizeQuality } from "./quality-guard.js";
 
 import { z } from "zod";
 
-export const CENSOR_AUDIO_VERSION = "censor-tone-v2";
+export const CENSOR_AUDIO_VERSION = "censor-tone-v3-quoted-leading-bleep";
 export const CENSOR_BLEEP_MARKER = "[CENSOR_BLEEP]" as const;
 export const censorToneConfig = {
   frequencyHz: 1000,
@@ -49,9 +49,19 @@ const strongWord = /(?<![\p{L}\p{N}_])(?:motherfuck(?:ers?|ing|ed|s)?|fuck(?:ers
 export function planCensoredSpeech(text: string): CensorSegment[] {
   const segments: CensorSegment[] = [];
   let cursor = 0;
+  let quoteAfterCensor = "";
   for (const match of text.matchAll(strongWord)) {
     const start = match.index ?? 0;
-    const speech = text.slice(cursor, start).trim();
+    let speech = `${quoteAfterCensor}${text.slice(cursor, start)}`.trim();
+    quoteAfterCensor = "";
+    // If a censored word opens dialogue, the quote belongs with the speech
+    // after the tone. Leaving it before the tone creates a punctuation-only
+    // Fish chunk (and an unbalanced closing quote in the next chunk).
+    const danglingQuote = /[“‘"]$/u.exec(speech)?.[0];
+    if (danglingQuote) {
+      speech = speech.slice(0, -1).trimEnd();
+      quoteAfterCensor = danglingQuote;
+    }
     if (speech) segments.push({ kind: "speech", text: speech });
     const original = match[0];
     segments.push({ kind: "censor", marker: CENSOR_BLEEP_MARKER, original, durationSeconds: censorDuration(original) });
@@ -62,7 +72,7 @@ export function planCensoredSpeech(text: string): CensorSegment[] {
     const punctuation = /^(?:[,.!?;:。！？；：]+\s*)/.exec(text.slice(afterWord));
     cursor = afterWord + (punctuation?.[0].length ?? 0);
   }
-  const tail = text.slice(cursor).trim();
+  const tail = `${quoteAfterCensor}${text.slice(cursor)}`.trim();
   if (tail) segments.push({ kind: "speech", text: tail });
   return segments;
 }

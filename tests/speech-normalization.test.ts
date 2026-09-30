@@ -167,4 +167,12 @@ describe("vocalization speech normalization", () => {
     expect(tagged.normalized.text).toBe("[laugh] He left.");
     expect(tagged.fingerprint).not.toBe(neutral.fingerprint);
   });
+
+  it("omits standalone question-mark reactions only from Fish speech", () => {
+    const text = "Then he turned off the phone.\n\n“???”\n\nHu Zhenbang was left with a head full of question marks.\n\n“What??” she asked.";
+    const fish = { name: "fish" as const, validateConfiguration: async () => {}, synthesize: async () => { throw new Error("not called"); } };
+    const spoken = normalizeSpeechForProvider(text, "en-US", {}, fish).normalized.text;
+    expect(spoken).toBe("Then he turned off the phone.\n\n\n\nHu Zhenbang was left with a head full of question marks.\n\n“What??” she asked.");
+    expect(normalizeSpeechForProvider(text, "en-US", {}).normalized.text).toBe(text);
+  });
 });
