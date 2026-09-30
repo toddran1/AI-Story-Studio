@@ -1,49 +1,133 @@
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
-import { api, del, Job, post, put, StorySummary } from "./api.js";
+import { api, del, isTerminalJob, Job, post, put, StorySummary } from "./api.js";
 import "./summary-styles.css";
 import { SummaryLayers, SummaryLength } from "./SummaryLayers.js";
 import { Pagination } from "./Pagination.js";
+import { isSummaryRelatedJob, summaryJobProgressView } from "./summary-job-progress.js";
 
 type Props = { slug: string; onJob: (job: Job) => void; activeJob?: Job };
 type SummaryRow = Pick<StorySummary, "id" | "title" | "summaryType" | "sourceMode" | "status" | "chapters" | "updatedAt" | "createdAt" | "manuallyEdited"> & { wordCount: number };
 type SummaryPage = { items: SummaryRow[]; page: number; pageSize: number; pages: number; total: number };
 const types = [["brief", "Brief recap"], ["detailed", "Detailed recap"], ["mini-chapter", "Mini chapter"], ["arc", "Arc summary"], ["character-focused", "Character-focused"], ["custom", "Custom"]] as const;
 
-export function SummariesPage({ slug, onJob, activeJob }: Props) {
-  const [items, setItems] = useState<SummaryRow[]>([]); const [selected, setSelected] = useState<StorySummary>();
-  const [context, setContext] = useState<{ minChapter?: number; maxChapter?: number }>();
-  const [creating, setCreating] = useState(false); const [error, setError] = useState(""); const [listError, setListError] = useState(""); const [contextError, setContextError] = useState("");
-  const [query, setQuery] = useState(""); const [debouncedQuery, setDebouncedQuery] = useState("");
-  const [typeFilter, setTypeFilter] = useState(""); const [statusFilter, setStatusFilter] = useState(""); const [sort, setSort] = useState("updated");
-  const [page, setPage] = useState(1); const [pageMeta, setPageMeta] = useState<SummaryPage>(); const [job, setJob] = useState<Job>();
-  const loadGeneration = useRef(0); const selectionGeneration = useRef(0); const selectedId = useRef<string>(); const dirty = useRef(false);
-  const [draft, setDraft] = useState({ title: "", summaryType: "detailed", sourceMode: "translated", targetWords: 800, selection: "range", from: "1", to: "1", chapters: "", focus: "", instructions: "", contextEligible: false });
-  const pollTimer = useRef<number>(); const pollGeneration = useRef(0);
-  const doneCallbacks = useRef<Map<string, (finished: Job) => void | Promise<void>>>(new Map());
-  const currentJob = activeJob && activeJob.story === slug && (activeJob.type === "summary" || activeJob.type === "summaryMusicExport")
-    ? activeJob
-    : job;
+type SummaryJobCompletionIntent = {
+  kind: "create" | "regenerate" | "media";
+  selectionAtStart: number;
+  summaryId?: string;
+  handleTerminal: (job: Job) => void | Promise<void>;
+};
 
-  useEffect(() => { const timer = window.setTimeout(() => setDebouncedQuery(query.trim()), 300); return () => window.clearTimeout(timer); }, [query]);
+export function SummariesPage({ slug, onJob, activeJob }: Props) {
+  const [items, setItems] = useState<SummaryRow[]>([]);
+  const [selected, setSelected] = useState<StorySummary>();
+  const [context, setContext] = useState<{ minChapter?: number; maxChapter?: number }>();
+  const [creating, setCreating] = useState(false);
+  const [error, setError] = useState("");
+  const [listError, setListError] = useState("");
+  const [contextError, setContextError] = useState("");
+  const [query, setQuery] = useState("");
+  const [debouncedQuery, setDebouncedQuery] = useState("");
+  const [typeFilter, setTypeFilter] = useState("");
+  const [statusFilter, setStatusFilter] = useState("");
+  const [sort, setSort] = useState("updated");
+  const [page, setPage] = useState(1);
+  const [pageMeta, setPageMeta] = useState<SummaryPage>();
+  const loadGeneration = useRef(0);
+  const selectionGeneration = useRef(0);
+  const selectedId = useRef<string>();
+  const dirty = useRef(false);
+  const [draft, setDraft] = useState({
+    title: "",
+    summaryType: "detailed",
+    sourceMode: "translated",
+    targetWords: 800,
+    selection: "range",
+    from: "1",
+    to: "1",
+    chapters: "",
+    focus: "",
+    instructions: "",
+    contextEligible: false,
+  });
+
+  const completionIntents = useRef<Map<string, SummaryJobCompletionIntent>>(new Map());
+  const currentJob = activeJob && activeJob.story === slug && isSummaryRelatedJob(activeJob)
+    ? activeJob
+    : undefined;
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => setDebouncedQuery(query.trim()), 300);
+    return () => window.clearTimeout(timer);
+  }, [query]);
+
   const loadList = async () => {
-    const generation = ++loadGeneration.current; const params = new URLSearchParams({ sort, page: String(page), pageSize: "25" });
-    if (debouncedQuery) params.set("q", debouncedQuery); if (typeFilter) params.set("type", typeFilter); if (statusFilter) params.set("status", statusFilter);
-    try { const result = await api<SummaryPage>(`/stories/${slug}/summaries?${params}`); if (generation !== loadGeneration.current) return; setItems(Array.isArray(result?.items) ? result.items : []); setPageMeta(result); setListError(""); }
-    catch (value) { if (generation === loadGeneration.current) setListError(message(value)); }
+    const generation = ++loadGeneration.current;
+    const params = new URLSearchParams({ sort, page: String(page), pageSize: "25" });
+    if (debouncedQuery) params.set("q", debouncedQuery);
+    if (typeFilter) params.set("type", typeFilter);
+    if (statusFilter) params.set("status", statusFilter);
+    try {
+      const result = await api<SummaryPage>(`/stories/${slug}/summaries?${params}`);
+      if (generation !== loadGeneration.current) return;
+      setItems(Array.isArray(result?.items) ? result.items : []);
+      setPageMeta(result);
+      setListError("");
+    } catch (value) {
+      if (generation === loadGeneration.current) setListError(message(value));
+    }
   };
-  useEffect(() => { if (debouncedQuery !== query.trim()) return; void loadList(); return () => { loadGeneration.current++; }; }, [slug, query, debouncedQuery, typeFilter, statusFilter, sort, page]);
-  useEffect(() => { let cancelled = false; api<{ minChapter?: number; maxChapter?: number }>(`/stories/${slug}/summaries/context`).then((value) => { if (!cancelled) { setContext(value); setContextError(""); } }).catch((value) => { if (!cancelled) setContextError(message(value)); }); return () => { cancelled = true; }; }, [slug]);
-  useEffect(() => { if (!context) return; const from = context.minChapter ?? 1; const to = context.maxChapter ?? from; setDraft((value) => value.title ? value : { ...value, from: String(from), to: String(to), title: `Chapters ${from}–${to} recap` }); }, [context]);
-  useEffect(() => () => { pollGeneration.current++; if (pollTimer.current !== undefined) clearTimeout(pollTimer.current); }, []);
-  useEffect(() => { if (currentJob?.status === "completed" && currentJob.result?.reason === "visual-profile-decisions-required") window.dispatchEvent(new CustomEvent("summary-produce-blocked", { detail: currentJob.result })); }, [currentJob?.status, currentJob?.result]);
+
+  useEffect(() => {
+    if (debouncedQuery !== query.trim()) return;
+    void loadList();
+    return () => {
+      loadGeneration.current++;
+    };
+  }, [slug, query, debouncedQuery, typeFilter, statusFilter, sort, page]);
+
+  useEffect(() => {
+    let cancelled = false;
+    api<{ minChapter?: number; maxChapter?: number }>(`/stories/${slug}/summaries/context`)
+      .then((value) => {
+        if (!cancelled) {
+          setContext(value);
+          setContextError("");
+        }
+      })
+      .catch((value) => {
+        if (!cancelled) setContextError(message(value));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [slug]);
+
+  useEffect(() => {
+    if (!context) return;
+    const from = context.minChapter ?? 1;
+    const to = context.maxChapter ?? from;
+    setDraft((value) => (value.title ? value : { ...value, from: String(from), to: String(to), title: `Chapters ${from}–${to} recap` }));
+  }, [context]);
+
+  useEffect(() => {
+    if (currentJob?.status === "completed" && currentJob.result?.reason === "visual-profile-decisions-required") {
+      window.dispatchEvent(new CustomEvent("summary-produce-blocked", { detail: currentJob.result }));
+    }
+  }, [currentJob?.status, currentJob?.result]);
+
   const lastCompletedJobId = useRef<string>();
+  const lastHandledJobStatus = useRef<string>();
   useEffect(() => {
     if (!currentJob) return;
-    if (["completed", "failed", "paused"].includes(currentJob.status)) {
-      const cb = doneCallbacks.current.get(currentJob.id);
-      if (cb) {
-        doneCallbacks.current.delete(currentJob.id);
-        void cb(currentJob);
+    if (isTerminalJob(currentJob)) {
+      const statusKey = `${currentJob.id}:${currentJob.status}`;
+      if (lastHandledJobStatus.current === statusKey) return;
+      lastHandledJobStatus.current = statusKey;
+
+      const intent = completionIntents.current.get(currentJob.id);
+      if (intent) {
+        completionIntents.current.delete(currentJob.id);
+        void intent.handleTerminal(currentJob);
       }
       if (currentJob.status === "completed" && lastCompletedJobId.current !== currentJob.id) {
         lastCompletedJobId.current = currentJob.id;
@@ -51,60 +135,592 @@ export function SummariesPage({ slug, onJob, activeJob }: Props) {
       }
     }
   }, [currentJob?.id, currentJob?.status]);
-  const watch = (id: string, done?: (job: Job) => void | Promise<void>) => {
-    if (done) doneCallbacks.current.set(id, done);
-    const generation = ++pollGeneration.current;
-    if (pollTimer.current !== undefined) clearTimeout(pollTimer.current);
-    let failures = 0;
-    const schedule = (delay: number) => { pollTimer.current = window.setTimeout(poll, delay); };
-    const poll = async () => {
-      if (generation !== pollGeneration.current) return;
-      try {
-        const next = await api<Job>(`/jobs/${id}`);
-        if (generation !== pollGeneration.current) return;
-        failures = 0;
-        setJob(next);
-        onJob(next);
-        if (["completed", "failed", "paused"].includes(next.status)) {
-          const cb = doneCallbacks.current.get(next.id);
-          if (cb) {
-            doneCallbacks.current.delete(next.id);
-            await cb(next);
-          }
-        } else schedule(700);
-      } catch (value) {
-        if (generation !== pollGeneration.current) return;
-        failures++;
-        if (failures >= 10) {
-          setError(`Stopped checking summary progress after repeated connection failures. The server job may still be running. ${message(value)}`);
-          return;
-        }
-        schedule(1400);
-      }
-    };
-    schedule(400);
-  };
+
   const chapters = useMemo(() => parseChapters(draft), [draft.selection, draft.from, draft.to, draft.chapters]);
-  const generate = async (event: FormEvent) => { event.preventDefault(); try { setError(""); const selectionAtStart = selectionGeneration.current; const started = await post<Job>(`/stories/${slug}/summaries`, { title: draft.title, summaryType: draft.summaryType, sourceMode: draft.sourceMode, targetWords: draft.targetWords, focus: draft.focus || undefined, instructions: draft.instructions || undefined, contextEligible: draft.contextEligible, ...(draft.selection === "range" ? { from: Number(draft.from), to: Number(draft.to) } : { chapters }) }); setJob(started); onJob(started); watch(started.id, async (finished) => { if (finished.status === "completed") { setCreating(false); await loadList(); if (selectionGeneration.current === selectionAtStart && finished.result?.id) await open(finished.result.id); } else setError(finished.error ?? "Summary generation failed"); }); } catch (value) { setError(message(value)); } };
-  const open = async (id: string) => { const generation = ++selectionGeneration.current; selectedId.current = id; dirty.current = false; try { const value = await api<{ summary: StorySummary }>(`/stories/${slug}/summaries/${id}`); if (generation !== selectionGeneration.current || selectedId.current !== id) return; setSelected(value.summary); setCreating(false); } catch (value) { if (generation === selectionGeneration.current) setError(message(value)); } };
-  const save = async () => { if (!selected) return; const id = selected.id; try { const value = await put<{ summary: StorySummary }>(`/stories/${slug}/summaries/${id}`, { title: selected.title, text: selected.text, contextEligible: selected.contextEligible }); if (selectedId.current === id) { dirty.current = false; setSelected(value.summary); } setItems((current) => current.map((item) => item.id === id ? summaryRow(value.summary) : item)); void loadList(); } catch (value) { setError(message(value)); } };
-  const regenerate = async () => { if (!selected) return; const instructions = prompt("Instructions for this regeneration (optional):", selected.instructions ?? ""); if (instructions === null || !confirm("Replace this summary with a newly generated version? Manual edits will be replaced.")) return; try { const summaryId = selected.id; const selectionAtStart = selectionGeneration.current; const started = await post<Job>(`/stories/${slug}/summaries/${summaryId}/regenerate`, { instructions }); setJob(started); onJob(started); watch(started.id, async (finished) => { if (finished.status === "completed") { await loadList(); if (selectionGeneration.current === selectionAtStart && selectedId.current === summaryId) await open(summaryId); } else setError(finished.error ?? "Summary regeneration failed"); }); } catch (value) { setError(message(value)); } };
-  const remove = async () => { if (!selected || !confirm(`Delete “${selected.title}”?`)) return; const id = selected.id; try { await del(`/stories/${slug}/summaries/${id}`); selectedId.current = undefined; dirty.current = false; setSelected(undefined); setItems((current) => current.filter((item) => item.id !== id)); void loadList(); } catch (value) { setError(message(value)); } };
-  const busy = Boolean(currentJob && !["completed", "failed", "paused"].includes(currentJob.status));
-  return <section className="page summaries-page"><div className="summary-mast"><div><span className="eyebrow">Condensed story history</span><h2>Summary library</h2><p>Build readable recaps from any set of chapters without changing the manuscript or Story Bible.</p></div><button className="button primary" onClick={() => { selectionGeneration.current++; selectedId.current = undefined; dirty.current = false; setCreating(true); setSelected(undefined); }}>Create summary</button></div>
-    {error && <div className="error-box"><span>{error}</span></div>}{listError && <div className="error-box"><span>{listError}</span></div>}{contextError && <div className="error-box"><span>{contextError}</span></div>}
-    <div className="summary-tools"><input aria-label="Search summaries" placeholder="Search titles and summary text" value={query} onChange={(event) => { setQuery(event.target.value); setPage(1); }} /><select aria-label="Filter summary type" value={typeFilter} onChange={(event) => { setTypeFilter(event.target.value); setPage(1); }}><option value="">All summary types</option>{types.map(([value, label]) => <option value={value} key={value}>{label}</option>)}</select><select aria-label="Filter summary status" value={statusFilter} onChange={(event) => { setStatusFilter(event.target.value); setPage(1); }}><option value="">All statuses</option><option value="complete">Complete</option><option value="generating">Generating</option><option value="failed">Failed</option></select><select aria-label="Sort summaries" value={sort} onChange={(event) => { setSort(event.target.value); setPage(1); }}><option value="updated">Recently updated</option><option value="created">Recently created</option><option value="coverage">Chapter coverage</option></select></div>
-    <div className="summary-workbench"><div className="summary-index">{pageMeta && pageMeta.pages > 1 && <Pagination position="top" page={pageMeta.page} pages={pageMeta.pages} total={pageMeta.total} itemLabel="summaries" onPrevious={() => setPage(pageMeta.page - 1)} onNext={() => setPage(pageMeta.page + 1)} />}{items.length ? items.map((item) => <button key={item.id} className={selected?.id === item.id ? "active" : ""} onClick={() => void open(item.id)}><div><span>{coverage(item.chapters)}</span><i className={item.status} />{item.status}</div><h3>{item.title}</h3><p>{labelType(item.summaryType)} · {item.sourceMode.replace("-", " ")} · {item.wordCount} words</p><small>Updated {new Date(item.updatedAt).toLocaleDateString()}{item.manuallyEdited ? " · edited" : ""}</small></button>) : <div className="summary-empty"><b>No summaries yet</b><span>Select chapters and create the first recap.</span></div>}{pageMeta && pageMeta.pages > 1 && <Pagination position="bottom" page={pageMeta.page} pages={pageMeta.pages} total={pageMeta.total} itemLabel="summaries" onPrevious={() => setPage(pageMeta.page - 1)} onNext={() => setPage(pageMeta.page + 1)} />}</div>
-      <div className="summary-desk">{creating ? <form className="summary-create" onSubmit={generate}><header><span>NEW SUMMARY</span><h3>Choose the story you want to condense.</h3></header><label>Title<input required maxLength={200} value={draft.title} onChange={(event) => setDraft({ ...draft, title: event.target.value })} /></label><div className="summary-form-row"><label>Summary type<select value={draft.summaryType} onChange={(event) => setDraft({ ...draft, summaryType: event.target.value })}>{types.map(([value, label]) => <option value={value} key={value}>{label}</option>)}</select></label><label>Source text<select value={draft.sourceMode} onChange={(event) => setDraft({ ...draft, sourceMode: event.target.value })}><option value="translated">Translated chapters</option><option value="original">Original chapters</option><option value="chapter-summaries">Existing chapter summaries</option></select></label></div><div className="selection-switch"><button type="button" className={draft.selection === "range" ? "active" : ""} onClick={() => setDraft({ ...draft, selection: "range" })}>Chapter range</button><button type="button" className={draft.selection === "custom" ? "active" : ""} onClick={() => setDraft({ ...draft, selection: "custom" })}>Custom selection</button></div>{draft.selection === "range" ? <div className="summary-form-row"><label>From<input type="number" min="1" value={draft.from} onChange={(event) => setDraft({ ...draft, from: event.target.value })} /></label><label>To<input type="number" min="1" value={draft.to} onChange={(event) => setDraft({ ...draft, to: event.target.value })} /></label></div> : <label>Chapters<input placeholder="12, 18, 31, 44" value={draft.chapters} onChange={(event) => setDraft({ ...draft, chapters: event.target.value })} /></label>}<div className="coverage-proof"><span>SELECTED COVERAGE</span><b>{chapters.length ? coverage(chapters) : "No valid chapters selected"}</b><small>{chapters.length} chapter{chapters.length === 1 ? "" : "s"}{chapters.length > 25 ? ` · ${Math.ceil(chapters.length / 25)} first-pass batches` : " · one first-pass batch"}</small></div><SummaryLength words={draft.targetWords} onChange={(targetWords) => setDraft({ ...draft, targetWords })} /><details><summary>Focus and advanced instructions</summary><label>Character or topic focus<input maxLength={500} value={draft.focus} onChange={(event) => setDraft({ ...draft, focus: event.target.value })} /></label><label>Instructions<textarea maxLength={5000} value={draft.instructions} onChange={(event) => setDraft({ ...draft, instructions: event.target.value })} /></label><label className="summary-context-toggle"><input type="checkbox" checked={draft.contextEligible} onChange={(event) => setDraft({ ...draft, contextEligible: event.target.checked })} /><span><b>Eligible for future context</b><small>May include this recap in later chapter prompts when it is relevant and within the context budget.</small></span></label></details>{busy && currentJob && <Progress job={currentJob} />}<footer><button type="button" className="button" onClick={() => setCreating(false)}>Cancel</button><button className="button primary" disabled={!chapters.length || Boolean(busy) || draft.targetWords < 50 || draft.targetWords > 20000}>Generate summary</button></footer></form> : selected ? <SummaryLayers slug={slug} summary={selected} busy={Boolean(busy)} onChange={(value) => { dirty.current = true; setSelected(value); }} onError={(value) => setError(message(value))} onGenerate={(started) => { const id = selected.id; const selectionAtStart = selectionGeneration.current; setJob(started); onJob(started); watch(started.id, async (finished) => { if (selectionGeneration.current === selectionAtStart && selectedId.current === id) await open(id); if (finished.status !== "completed") setError(finished.error ?? "Summary processing failed"); }); }}><div className="summary-editor"><header><div><span>{coverage(selected.chapters)}</span><input aria-label="Summary title" value={selected.title} onChange={(event) => { dirty.current = true; setSelected({ ...selected, title: event.target.value }); }} /></div><div><span className={`summary-status ${selected.status}`}>{selected.status}</span>{selected.manuallyEdited && <span className="summary-status manual">manual edit</span>}</div></header><div className="summary-meta"><span>{labelType(selected.summaryType)}</span><span>{selected.sourceMode.replace("-", " ")}</span><span>{words(selected.text)} words</span><span>{selected.provenance.levels.length} reduction level{selected.provenance.levels.length === 1 ? "" : "s"}</span><span>{selected.provenance.model.provider} · {selected.provenance.model.model}</span></div>{selected.error && <div className="error-box"><span>{selected.error}</span></div>}<label className="summary-context-toggle editor"><input type="checkbox" checked={selected.contextEligible} onChange={(event) => { dirty.current = true; setSelected({ ...selected, contextEligible: event.target.checked }); }} /><span><b>Eligible for future context</b><small>Only selected when relevant, before a later chapter, and within a strict context budget.</small></span></label><textarea aria-label="Edit summary text" value={selected.text} onChange={(event) => { dirty.current = true; setSelected({ ...selected, text: event.target.value }); }} /><footer><div><button className="button danger" onClick={() => void remove()}>Delete</button><button className="button" disabled={Boolean(busy)} onClick={() => void regenerate()}>Regenerate with instructions</button></div><button className="button primary" disabled={!selected.title.trim() || !selected.text.trim()} onClick={() => void save()}>Save edits</button></footer></div></SummaryLayers> : <div className="summary-landing"><span>¶</span><h3>Recaps live beside the manuscript.</h3><p>Create an arc summary for a long run, a mini chapter for listeners, or a focused recap across scattered appearances.</p><button className="button primary" onClick={() => setCreating(true)}>Create your first summary</button></div>}</div>
-    </div></section>;
+
+  const generate = async (event: FormEvent) => {
+    event.preventDefault();
+    try {
+      setError("");
+      const selectionAtStart = selectionGeneration.current;
+      const started = await post<Job>(`/stories/${slug}/summaries`, {
+        title: draft.title,
+        summaryType: draft.summaryType,
+        sourceMode: draft.sourceMode,
+        targetWords: draft.targetWords,
+        focus: draft.focus || undefined,
+        instructions: draft.instructions || undefined,
+        contextEligible: draft.contextEligible,
+        ...(draft.selection === "range" ? { from: Number(draft.from), to: Number(draft.to) } : { chapters }),
+      });
+      completionIntents.current.set(started.id, {
+        kind: "create",
+        selectionAtStart,
+        handleTerminal: async (finished) => {
+          if (finished.status === "completed") {
+            setCreating(false);
+            await loadList();
+            if (selectionGeneration.current === selectionAtStart && finished.result?.id) {
+              await open(finished.result.id);
+            }
+          } else {
+            setError(finished.error ?? "Summary generation failed");
+          }
+        },
+      });
+      onJob(started);
+    } catch (value) {
+      setError(message(value));
+    }
+  };
+
+  const open = async (id: string) => {
+    const generation = ++selectionGeneration.current;
+    selectedId.current = id;
+    dirty.current = false;
+    try {
+      const value = await api<{ summary: StorySummary }>(`/stories/${slug}/summaries/${id}`);
+      if (generation !== selectionGeneration.current || selectedId.current !== id) return;
+      setSelected(value.summary);
+      setCreating(false);
+    } catch (value) {
+      if (generation === selectionGeneration.current) setError(message(value));
+    }
+  };
+
+  const save = async () => {
+    if (!selected) return;
+    const id = selected.id;
+    try {
+      const value = await put<{ summary: StorySummary }>(`/stories/${slug}/summaries/${id}`, {
+        title: selected.title,
+        text: selected.text,
+        contextEligible: selected.contextEligible,
+      });
+      if (selectedId.current === id) {
+        dirty.current = false;
+        setSelected(value.summary);
+      }
+      setItems((current) => current.map((item) => (item.id === id ? summaryRow(value.summary) : item)));
+      void loadList();
+    } catch (value) {
+      setError(message(value));
+    }
+  };
+
+  const regenerate = async () => {
+    if (!selected) return;
+    const instructions = prompt("Instructions for this regeneration (optional):", selected.instructions ?? "");
+    if (instructions === null || !confirm("Replace this summary with a newly generated version? Manual edits will be replaced.")) return;
+    try {
+      const summaryId = selected.id;
+      const selectionAtStart = selectionGeneration.current;
+      const started = await post<Job>(`/stories/${slug}/summaries/${summaryId}/regenerate`, { instructions });
+      completionIntents.current.set(started.id, {
+        kind: "regenerate",
+        selectionAtStart,
+        summaryId,
+        handleTerminal: async (finished) => {
+          if (finished.status === "completed") {
+            await loadList();
+            if (selectionGeneration.current === selectionAtStart && selectedId.current === summaryId) {
+              await open(summaryId);
+            }
+          } else {
+            setError(finished.error ?? "Summary regeneration failed");
+          }
+        },
+      });
+      onJob(started);
+    } catch (value) {
+      setError(message(value));
+    }
+  };
+
+  const remove = async () => {
+    if (!selected || !confirm(`Delete “${selected.title}”?`)) return;
+    const id = selected.id;
+    try {
+      await del(`/stories/${slug}/summaries/${id}`);
+      selectedId.current = undefined;
+      dirty.current = false;
+      setSelected(undefined);
+      setItems((current) => current.filter((item) => item.id !== id));
+      void loadList();
+    } catch (value) {
+      setError(message(value));
+    }
+  };
+
+  const busy = Boolean(currentJob && !isTerminalJob(currentJob));
+
+  return (
+    <section className="page summaries-page">
+      <div className="summary-mast">
+        <div>
+          <span className="eyebrow">Condensed story history</span>
+          <h2>Summary library</h2>
+          <p>Build readable recaps from any set of chapters without changing the manuscript or Story Bible.</p>
+        </div>
+        <button
+          className="button primary"
+          onClick={() => {
+            selectionGeneration.current++;
+            selectedId.current = undefined;
+            dirty.current = false;
+            setCreating(true);
+            setSelected(undefined);
+          }}
+        >
+          Create summary
+        </button>
+      </div>
+      {error && <div className="error-box"><span>{error}</span></div>}
+      {listError && <div className="error-box"><span>{listError}</span></div>}
+      {contextError && <div className="error-box"><span>{contextError}</span></div>}
+      <div className="summary-tools">
+        <input
+          aria-label="Search summaries"
+          placeholder="Search titles and summary text"
+          value={query}
+          onChange={(event) => {
+            setQuery(event.target.value);
+            setPage(1);
+          }}
+        />
+        <select
+          aria-label="Filter summary type"
+          value={typeFilter}
+          onChange={(event) => {
+            setTypeFilter(event.target.value);
+            setPage(1);
+          }}
+        >
+          <option value="">All summary types</option>
+          {types.map(([value, label]) => (
+            <option value={value} key={value}>
+              {label}
+            </option>
+          ))}
+        </select>
+        <select
+          aria-label="Filter summary status"
+          value={statusFilter}
+          onChange={(event) => {
+            setStatusFilter(event.target.value);
+            setPage(1);
+          }}
+        >
+          <option value="">All statuses</option>
+          <option value="complete">Complete</option>
+          <option value="generating">Generating</option>
+          <option value="failed">Failed</option>
+        </select>
+        <select
+          aria-label="Sort summaries"
+          value={sort}
+          onChange={(event) => {
+            setSort(event.target.value);
+            setPage(1);
+          }}
+        >
+          <option value="updated">Recently updated</option>
+          <option value="created">Recently created</option>
+          <option value="coverage">Chapter coverage</option>
+        </select>
+      </div>
+      <div className="summary-workbench">
+        <div className="summary-index">
+          {pageMeta && pageMeta.pages > 1 && (
+            <Pagination
+              position="top"
+              page={pageMeta.page}
+              pages={pageMeta.pages}
+              total={pageMeta.total}
+              itemLabel="summaries"
+              onPrevious={() => setPage(pageMeta.page - 1)}
+              onNext={() => setPage(pageMeta.page + 1)}
+            />
+          )}
+          {items.length ? (
+            items.map((item) => (
+              <button
+                key={item.id}
+                className={selected?.id === item.id ? "active" : ""}
+                onClick={() => void open(item.id)}
+              >
+                <div>
+                  <span>{coverage(item.chapters)}</span>
+                  <i className={item.status} />
+                  {item.status}
+                </div>
+                <h3>{item.title}</h3>
+                <p>
+                  {labelType(item.summaryType)} · {item.sourceMode.replace("-", " ")} · {item.wordCount} words
+                </p>
+                <small>
+                  Updated {new Date(item.updatedAt).toLocaleDateString()}
+                  {item.manuallyEdited ? " · edited" : ""}
+                </small>
+              </button>
+            ))
+          ) : (
+            <div className="summary-empty">
+              <b>No summaries yet</b>
+              <span>Select chapters and create the first recap.</span>
+            </div>
+          )}
+          {pageMeta && pageMeta.pages > 1 && (
+            <Pagination
+              position="bottom"
+              page={pageMeta.page}
+              pages={pageMeta.pages}
+              total={pageMeta.total}
+              itemLabel="summaries"
+              onPrevious={() => setPage(pageMeta.page - 1)}
+              onNext={() => setPage(pageMeta.page + 1)}
+            />
+          )}
+        </div>
+        <div className="summary-desk">
+          {creating ? (
+            <form className="summary-create" onSubmit={generate}>
+              <header>
+                <span>NEW SUMMARY</span>
+                <h3>Choose the story you want to condense.</h3>
+              </header>
+              <label>
+                Title
+                <input
+                  required
+                  maxLength={200}
+                  value={draft.title}
+                  onChange={(event) => setDraft({ ...draft, title: event.target.value })}
+                />
+              </label>
+              <div className="summary-form-row">
+                <label>
+                  Summary type
+                  <select
+                    value={draft.summaryType}
+                    onChange={(event) => setDraft({ ...draft, summaryType: event.target.value })}
+                  >
+                    {types.map(([value, label]) => (
+                      <option value={value} key={value}>
+                        {label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label>
+                  Source text
+                  <select
+                    value={draft.sourceMode}
+                    onChange={(event) => setDraft({ ...draft, sourceMode: event.target.value })}
+                  >
+                    <option value="translated">Translated chapters</option>
+                    <option value="original">Original chapters</option>
+                    <option value="chapter-summaries">Existing chapter summaries</option>
+                  </select>
+                </label>
+              </div>
+              <div className="selection-switch">
+                <button
+                  type="button"
+                  className={draft.selection === "range" ? "active" : ""}
+                  onClick={() => setDraft({ ...draft, selection: "range" })}
+                >
+                  Chapter range
+                </button>
+                <button
+                  type="button"
+                  className={draft.selection === "custom" ? "active" : ""}
+                  onClick={() => setDraft({ ...draft, selection: "custom" })}
+                >
+                  Custom selection
+                </button>
+              </div>
+              {draft.selection === "range" ? (
+                <div className="summary-form-row">
+                  <label>
+                    From
+                    <input
+                      type="number"
+                      min="1"
+                      value={draft.from}
+                      onChange={(event) => setDraft({ ...draft, from: event.target.value })}
+                    />
+                  </label>
+                  <label>
+                    To
+                    <input
+                      type="number"
+                      min="1"
+                      value={draft.to}
+                      onChange={(event) => setDraft({ ...draft, to: event.target.value })}
+                    />
+                  </label>
+                </div>
+              ) : (
+                <label>
+                  Chapters
+                  <input
+                    placeholder="12, 18, 31, 44"
+                    value={draft.chapters}
+                    onChange={(event) => setDraft({ ...draft, chapters: event.target.value })}
+                  />
+                </label>
+              )}
+              <div className="coverage-proof">
+                <span>SELECTED COVERAGE</span>
+                <b>{chapters.length ? coverage(chapters) : "No valid chapters selected"}</b>
+                <small>
+                  {chapters.length} chapter{chapters.length === 1 ? "" : "s"}
+                  {chapters.length > 25
+                    ? ` · ${Math.ceil(chapters.length / 25)} first-pass batches`
+                    : " · one first-pass batch"}
+                </small>
+              </div>
+              <SummaryLength words={draft.targetWords} onChange={(targetWords) => setDraft({ ...draft, targetWords })} />
+              <details>
+                <summary>Focus and advanced instructions</summary>
+                <label>
+                  Character or topic focus
+                  <input
+                    maxLength={500}
+                    value={draft.focus}
+                    onChange={(event) => setDraft({ ...draft, focus: event.target.value })}
+                  />
+                </label>
+                <label>
+                  Instructions
+                  <textarea
+                    maxLength={5000}
+                    value={draft.instructions}
+                    onChange={(event) => setDraft({ ...draft, instructions: event.target.value })}
+                  />
+                </label>
+                <label className="summary-context-toggle">
+                  <input
+                    type="checkbox"
+                    checked={draft.contextEligible}
+                    onChange={(event) => setDraft({ ...draft, contextEligible: event.target.checked })}
+                  />
+                  <span>
+                    <b>Eligible for future context</b>
+                    <small>
+                      May include this recap in later chapter prompts when it is relevant and within the context budget.
+                    </small>
+                  </span>
+                </label>
+              </details>
+              {busy && currentJob && <Progress job={currentJob} />}
+              <footer>
+                <button type="button" className="button" onClick={() => setCreating(false)}>
+                  Cancel
+                </button>
+                <button
+                  className="button primary"
+                  disabled={!chapters.length || Boolean(busy) || draft.targetWords < 50 || draft.targetWords > 20000}
+                >
+                  Generate summary
+                </button>
+              </footer>
+            </form>
+          ) : selected ? (
+            <SummaryLayers
+              slug={slug}
+              summary={selected}
+              busy={Boolean(busy)}
+              onChange={(value) => {
+                dirty.current = true;
+                setSelected(value);
+              }}
+              onError={(value) => setError(message(value))}
+              onGenerate={(started) => {
+                const id = selected.id;
+                const selectionAtStart = selectionGeneration.current;
+                completionIntents.current.set(started.id, {
+                  kind: "media",
+                  selectionAtStart,
+                  summaryId: id,
+                  handleTerminal: async (finished) => {
+                    if (finished.status === "completed") {
+                      await loadList();
+                      if (selectionGeneration.current === selectionAtStart && selectedId.current === id) {
+                        await open(id);
+                      }
+                    } else {
+                      setError(finished.error ?? "Summary processing failed");
+                    }
+                  },
+                });
+                onJob(started);
+              }}
+            >
+              <div className="summary-editor">
+                <header>
+                  <div>
+                    <span>{coverage(selected.chapters)}</span>
+                    <input
+                      aria-label="Summary title"
+                      value={selected.title}
+                      onChange={(event) => {
+                        dirty.current = true;
+                        setSelected({ ...selected, title: event.target.value });
+                      }}
+                    />
+                  </div>
+                  <div>
+                    <span className={`summary-status ${selected.status}`}>{selected.status}</span>
+                    {selected.manuallyEdited && <span className="summary-status manual">manual edit</span>}
+                  </div>
+                </header>
+                <div className="summary-meta">
+                  <span>{labelType(selected.summaryType)}</span>
+                  <span>{selected.sourceMode.replace("-", " ")}</span>
+                  <span>{words(selected.text)} words</span>
+                  <span>{selected.provenance.levels.length} reduction level{selected.provenance.levels.length === 1 ? "" : "s"}</span>
+                  <span>{selected.provenance.model.provider} · {selected.provenance.model.model}</span>
+                </div>
+                {selected.error && (
+                  <div className="error-box">
+                    <span>{selected.error}</span>
+                  </div>
+                )}
+                <label className="summary-context-toggle editor">
+                  <input
+                    type="checkbox"
+                    checked={selected.contextEligible}
+                    onChange={(event) => {
+                      dirty.current = true;
+                      setSelected({ ...selected, contextEligible: event.target.checked });
+                    }}
+                  />
+                  <span>
+                    <b>Eligible for future context</b>
+                    <small>Only selected when relevant, before a later chapter, and within a strict context budget.</small>
+                  </span>
+                </label>
+                <textarea
+                  aria-label="Edit summary text"
+                  value={selected.text}
+                  onChange={(event) => {
+                    dirty.current = true;
+                    setSelected({ ...selected, text: event.target.value });
+                  }}
+                />
+                <footer>
+                  <div>
+                    <button className="button danger" onClick={() => void remove()}>
+                      Delete
+                    </button>
+                    <button className="button" disabled={Boolean(busy)} onClick={() => void regenerate()}>
+                      Regenerate with instructions
+                    </button>
+                  </div>
+                  <button
+                    className="button primary"
+                    disabled={!selected.title.trim() || !selected.text.trim()}
+                    onClick={() => void save()}
+                  >
+                    Save edits
+                  </button>
+                </footer>
+              </div>
+            </SummaryLayers>
+          ) : (
+            <div className="summary-landing">
+              <span>¶</span>
+              <h3>Recaps live beside the manuscript.</h3>
+              <p>Create an arc summary for a long run, a mini chapter for listeners, or a focused recap across scattered appearances.</p>
+              <button className="button primary" onClick={() => setCreating(true)}>
+                Create your first summary
+              </button>
+            </div>
+          )}
+        </div>
+      </div>
+    </section>
+  );
 }
 
-function Progress({ job }: { job: Job }) { const progress = job.progress; return <div className="summary-generation"><i style={{ width: `${Math.round((progress?.completed ?? 0) / Math.max(1, progress?.total ?? 1) * 100)}%` }} /><div><b>{phase(progress?.phase)}</b><span>{progress?.total ? `${progress.completed} of ${progress.total}` : "Starting"}</span></div></div>; }
-function parseChapters(draft: { selection:string;from:string;to:string;chapters:string }) { if (draft.selection === "custom") return [...new Set(draft.chapters.split(/[\s,]+/).map(Number).filter((value) => Number.isSafeInteger(value) && value > 0))].sort((a, b) => a - b); const from = Number(draft.from), to = Number(draft.to); if (!Number.isSafeInteger(from) || !Number.isSafeInteger(to) || from < 1 || to < from || to - from > 9999) return []; return Array.from({ length: to - from + 1 }, (_, index) => from + index); }
-function coverage(chapters: number[]) { if (!Array.isArray(chapters) || !chapters.length) return "No chapters"; const contiguous = chapters.every((chapter, index) => index === 0 || chapter === chapters[index - 1]! + 1); if (contiguous) return `Chapters ${chapters[0]}–${chapters.at(-1)}`; const shown = chapters.slice(0, 7).join(", "); return `Chapters ${shown}${chapters.length > 7 ? ` +${chapters.length - 7} more` : ""}`; }
-function words(text: string) { return text.trim() ? text.trim().split(/\s+/).length : 0; }
-function labelType(value: string) { return types.find(([id]) => id === value)?.[1] ?? value; }
-function phase(value?: string) { return ({ preparing:"Preparing chapters",summarizing:"Summarizing batches",combining:"Combining summaries",finalizing:"Finalizing recap",complete:"Complete" } as Record<string,string>)[value ?? ""] ?? "Preparing chapters"; }
-function message(value: unknown) { return value instanceof Error ? value.message : String(value); }
+function Progress({ job }: { job: Job }) {
+  const view = summaryJobProgressView(job);
+  const progress = job.progress as Record<string, unknown> | undefined;
+  const rawCompleted = typeof progress?.completed === "number" ? progress.completed : undefined;
+  const rawTotal = typeof progress?.total === "number" && progress.total > 0 ? progress.total : undefined;
+  const widthPercent = view?.percent !== undefined
+    ? view.percent
+    : rawCompleted !== undefined && rawTotal !== undefined
+      ? Math.round((rawCompleted / rawTotal) * 100)
+      : 0;
+  const stage = view?.stageLabel ?? phase(typeof progress?.phase === "string" ? progress.phase : undefined);
+  const detail = view?.detail ?? (rawTotal ? `${rawCompleted ?? 0} of ${rawTotal}` : "Starting");
+  return (
+    <div className="summary-generation">
+      <i style={{ width: `${widthPercent}%` }} />
+      <div>
+        <b>{stage}</b>
+        <span>{detail}</span>
+      </div>
+    </div>
+  );
+}
 
-function summaryRow(item: StorySummary): SummaryRow { return { id: item.id, title: item.title, summaryType: item.summaryType, sourceMode: item.sourceMode, status: item.status, chapters: item.chapters, updatedAt: item.updatedAt, createdAt: item.createdAt, manuallyEdited: item.manuallyEdited, wordCount: words(item.text) }; }
+function parseChapters(draft: { selection: string; from: string; to: string; chapters: string }) {
+  if (draft.selection === "custom") {
+    return [...new Set(draft.chapters.split(/[\s,]+/).map(Number).filter((value) => Number.isSafeInteger(value) && value > 0))].sort((a, b) => a - b);
+  }
+  const from = Number(draft.from);
+  const to = Number(draft.to);
+  if (!Number.isSafeInteger(from) || !Number.isSafeInteger(to) || from < 1 || to < from || to - from > 9999) return [];
+  return Array.from({ length: to - from + 1 }, (_, index) => from + index);
+}
+
+function coverage(chapters: number[]) {
+  if (!Array.isArray(chapters) || !chapters.length) return "No chapters";
+  const contiguous = chapters.every((chapter, index) => index === 0 || chapter === chapters[index - 1]! + 1);
+  if (contiguous) return `Chapters ${chapters[0]}–${chapters.at(-1)}`;
+  const shown = chapters.slice(0, 7).join(", ");
+  return `Chapters ${shown}${chapters.length > 7 ? ` +${chapters.length - 7} more` : ""}`;
+}
+
+function words(text: string) {
+  return text.trim() ? text.trim().split(/\s+/).length : 0;
+}
+
+function labelType(value: string) {
+  return types.find(([id]) => id === value)?.[1] ?? value;
+}
+
+function phase(value?: string) {
+  return (
+    ({
+      preparing: "Preparing chapters",
+      summarizing: "Summarizing batches",
+      combining: "Combining summaries",
+      finalizing: "Finalizing recap",
+      complete: "Complete",
+    } as Record<string, string>)[value ?? ""] ?? "Preparing chapters"
+  );
+}
+
+function message(value: unknown) {
+  return value instanceof Error ? value.message : String(value);
+}
+
+function summaryRow(item: StorySummary): SummaryRow {
+  return {
+    id: item.id,
+    title: item.title,
+    summaryType: item.summaryType,
+    sourceMode: item.sourceMode,
+    status: item.status,
+    chapters: item.chapters,
+    updatedAt: item.updatedAt,
+    createdAt: item.createdAt,
+    manuallyEdited: item.manuallyEdited,
+    wordCount: words(item.text),
+  };
+}

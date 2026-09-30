@@ -1,8 +1,9 @@
 import { useMusicExportPreferences } from "./useMusicExportPreferences.js";
 import { Component, ErrorInfo, FormEvent, ReactNode, useDeferredValue, useEffect, useId, useRef, useState } from "react";
 import type { StageName } from "../../../src/domain/chapter.js";
-import type { SummaryJobOperation, SummaryProgressEvent } from "../../../src/summaries/types.js";
 import { api, ApiError, AudioDashboard, ChapterDetail, ChapterQaDetail, ChapterRow, CostAnalytics, Counts, del, ErrorDiagnostic, formatDiagnostic, Job, Model, OutputItem, post, put, ProductionManifest, ProductionPlan, QaException, QaExceptionMatchKind, QaFinding, QaRecheckSummary, QaResult, Scene, ScenesDashboard, StoryCard, StoryConfig, StoryDashboard, TtsQualityArtifact, TtsQualityIssueType, TtsSegmentQuality, VideoDashboard, acceptChapterTtsSegment, chapterTtsSegmentAudioUrl, getChapterTtsQuality, regenerateChapterTtsSegment, verifyChapterTtsQuality } from "./api.js";
+import { summaryJobProgressView, isSummaryRelatedJob, type SummaryJobProgressView, SUMMARY_OPERATION_TITLES, SUMMARY_PHASE_LABELS } from "./summary-job-progress.js";
+export { summaryJobProgressView, type SummaryJobProgressView, isSummaryRelatedJob, SUMMARY_OPERATION_TITLES, SUMMARY_PHASE_LABELS };
 import { ArtifactStatusNotice } from "./ArtifactStatusNotice.js";
 import { pretty } from "./format.js";
 import { GlobalSettingsPage, LibraryPage, ManageStoryPage, NewStoryPage } from "./Milestone12.js";
@@ -4327,160 +4328,6 @@ export function ProductionPage({ slug, activeJob, onJob, navigate }: { slug: str
   </section>;
 }
 
-export type SummaryJobProgressView = {
-  title: string;
-  stageLabel: string;
-  detail: string;
-  completed?: number;
-  total?: number;
-  percent?: number;
-};
-
-const SUMMARY_OPERATION_TITLES: Record<SummaryJobOperation, string> = {
-  generate: "Generating summary",
-  regenerate: "Regenerating summary",
-  narration: "Generating summary narration",
-  audio: "Generating summary audio",
-  scenes: "Planning summary scenes",
-  artwork: "Generating summary artwork",
-  video: "Rendering summary video",
-  produce: "Producing summary media",
-  reupscale: "Re-upscaling summary artwork",
-  music_export: "Exporting summary music",
-};
-
-const SUMMARY_PHASE_LABELS: Record<string, string> = {
-  preparing: "Preparing",
-  extracting: "Extracting events",
-  analyzing: "Analyzing storyline",
-  drafting: "Drafting recap",
-  summarizing: "Summarizing batches",
-  combining: "Combining summaries",
-  finalizing: "Finalizing recap",
-  narration: "Narration",
-  pronunciation: "Pronunciation",
-  tts: "Speech synthesis",
-  quality_check: "Quality verification",
-  retry: "TTS retry",
-  mastering: "Audio mastering",
-  planning: "Scene planning",
-  artwork: "Artwork generation",
-  upscaling: "Artwork upscaling",
-  scenes: "Scene planning",
-  audio: "Audio generation",
-  video: "Video rendering",
-  rendering: "Video rendering",
-  exporting: "Exporting audio",
-  complete: "Complete",
-};
-
-export function summaryJobProgressView(job: Job): SummaryJobProgressView | undefined {
-  if (job.type !== "summary" && job.type !== "summaryMusicExport") {
-    return undefined;
-  }
-
-  const rawProgress = (job.progress && typeof job.progress === "object" ? job.progress : undefined) as Record<string, unknown> | undefined;
-  const rawPayload = (job.payload && typeof job.payload === "object" ? job.payload : undefined) as Record<string, unknown> | undefined;
-
-  let operation: SummaryJobOperation | undefined =
-    (rawProgress?.operation as SummaryJobOperation | undefined) ??
-    (rawPayload?.operation as SummaryJobOperation | undefined);
-
-  const progressType = typeof rawProgress?.type === "string" ? rawProgress.type : "";
-
-  if (!operation) {
-    if (job.type === "summaryMusicExport") {
-      operation = "music_export";
-    } else if (progressType.startsWith("summary.reupscale.")) {
-      operation = "reupscale";
-    } else if (progressType.startsWith("summary.artwork.")) {
-      operation = "artwork";
-    }
-  }
-
-  const baseTitle = operation && SUMMARY_OPERATION_TITLES[operation]
-    ? SUMMARY_OPERATION_TITLES[operation]
-    : "Building story recap";
-
-  if (progressType.startsWith("summary.artwork.") || progressType.startsWith("summary.reupscale.")) {
-    const isReupscale = progressType.startsWith("summary.reupscale.");
-    const isCompleted = progressType.endsWith("completed");
-    const sceneRaw = typeof rawProgress?.scene === "string" ? rawProgress.scene : undefined;
-    const sceneMatch = sceneRaw?.match(/^scene-(\d+)$/i);
-    const sceneLabel = sceneMatch ? `Scene ${sceneMatch[1]}` : sceneRaw;
-    const index = typeof rawProgress?.index === "number" ? rawProgress.index : undefined;
-    const total = typeof rawProgress?.total === "number" && rawProgress.total > 0 ? rawProgress.total : undefined;
-
-    let completed: number | undefined;
-    let percent: number | undefined;
-    if (index !== undefined && total !== undefined) {
-      completed = Math.max(0, index - (isCompleted ? 0 : 1));
-      percent = Math.min(100, Math.max(0, Math.round((completed / total) * 100)));
-    }
-
-    const countLabel = index !== undefined && total !== undefined
-      ? `${isReupscale ? "Upscaling" : "Artwork"} ${index} of ${total}`
-      : undefined;
-
-    const detailParts = [sceneLabel, countLabel, isCompleted ? "complete" : "in progress"].filter(Boolean);
-    const detail = detailParts.length > 0 ? detailParts.join(" · ") : (isReupscale ? "Upscaling artwork" : "Generating artwork");
-    const stageLabel = isReupscale ? "Artwork upscaling" : "Artwork generation";
-
-    return {
-      title: baseTitle,
-      stageLabel,
-      detail,
-      completed,
-      total,
-      percent,
-    };
-  }
-
-  const phase = typeof rawProgress?.phase === "string" ? rawProgress.phase : undefined;
-  const stageLabel = phase && SUMMARY_PHASE_LABELS[phase]
-    ? SUMMARY_PHASE_LABELS[phase]
-    : phase
-      ? pretty(phase)
-      : operation
-        ? pretty(operation)
-        : "Working";
-
-  let completed: number | undefined = typeof rawProgress?.completed === "number" ? rawProgress.completed : undefined;
-  let total: number | undefined = typeof rawProgress?.total === "number" && rawProgress.total > 0 ? rawProgress.total : undefined;
-  let percent: number | undefined;
-
-  if (completed !== undefined && total !== undefined) {
-    percent = Math.min(100, Math.max(0, Math.round((completed / total) * 100)));
-  } else if (job.status === "completed" || phase === "complete") {
-    percent = 100;
-  }
-
-  let detail = typeof rawProgress?.detail === "string" && rawProgress.detail.trim().length > 0
-    ? rawProgress.detail.trim()
-    : "";
-
-  if (!detail) {
-    if (completed !== undefined && total !== undefined) {
-      detail = `${stageLabel} · ${completed} of ${total}`;
-    } else if (phase === "complete" || job.status === "completed") {
-      detail = `${baseTitle} complete`;
-    } else if (job.status === "failed") {
-      detail = job.error || "Operation failed";
-    } else {
-      detail = `${stageLabel} in progress`;
-    }
-  }
-
-  return {
-    title: baseTitle,
-    stageLabel,
-    detail,
-    completed,
-    total,
-    percent,
-  };
-}
-
 export function JobConsole({ job, onUpdate, onClose, navigate, initialQaComparison, initialMinimized }: {
   job: Job;
   onUpdate: (job: Job) => void;
@@ -4526,7 +4373,7 @@ export function JobConsole({ job, onUpdate, onClose, navigate, initialQaComparis
   const stage = diagnostic?.stage ?? job.progress?.stage ?? job.progress?.event?.stage ?? job.progress?.type?.replace("chapter.", "");
   const chapter = diagnostic?.chapter ?? job.progress?.chapter;
   const detail = job.progress?.event?.detail ?? job.progress?.detail;
-  const summaryView = (job.type === "summary" || job.type === "summaryMusicExport") ? summaryJobProgressView(job) : undefined;
+  const summaryView = isSummaryRelatedJob(job) ? summaryJobProgressView(job) : undefined;
   // QA-related failures carry the failure-time dependency fingerprint; compare
   // it against the chapter's current QA state so stale failures read as history.
   const qaRelated = Boolean(diagnostic && diagnostic.chapter && (diagnostic.category === "content_qa" || diagnostic.issues?.length));

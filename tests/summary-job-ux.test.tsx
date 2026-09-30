@@ -7,6 +7,41 @@ import { App, JobConsole, summaryJobProgressView } from "../apps/web/src/App.js"
 import { SummariesPage } from "../apps/web/src/SummariesPage.js";
 import type { Job, StorySummary } from "../apps/web/src/api.js";
 
+class MockEventSource {
+  addEventListener = vi.fn();
+  removeEventListener = vi.fn();
+  close = vi.fn();
+  onerror = null;
+}
+vi.stubGlobal("EventSource", MockEventSource);
+
+function makeSummary(overrides: Partial<StorySummary> = {}): StorySummary {
+  return {
+    id: "sum_test_12345",
+    storyId: "undead-disaster",
+    title: "Arc 1 Recap",
+    chapters: [1, 2, 3],
+    chapterRange: { from: 1, to: 3 },
+    summaryType: "detailed",
+    sourceMode: "translated",
+    targetLength: { words: 800 },
+    text: "Recap text",
+    status: "complete",
+    origin: "generated",
+    manuallyEdited: false,
+    contextEligible: false,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    provenance: {
+      model: { provider: "openai", model: "gpt-4o" },
+      promptVersion: "1.0",
+      chapterSources: [],
+      levels: [],
+    },
+    ...overrides,
+  };
+}
+
 describe("Summary Job UX — Stage Progress View", () => {
   const baseJob: Job = {
     id: "job-sum-1",
@@ -373,7 +408,7 @@ describe("Summary Job UX — JobConsole Component Rendering", () => {
 });
 
 describe("Summary Job UX — App Persistence & Route Hydration", () => {
-  it("preserves running summary job across route changes and ignores null active job from server", async () => {
+  it("preserves running summary job across multi-page navigation, cross-story switching, and active job hydration precedence", async () => {
     const runningJob: Job = {
       id: "job-sum-persistent",
       type: "summary",
@@ -389,7 +424,7 @@ describe("Summary Job UX — App Persistence & Route Hydration", () => {
       },
     };
 
-    let activeJobResponse: { job: Job | null } = { job: null };
+    let activeJobResponse: { job: Job | null } = { job: runningJob };
 
     vi.stubGlobal("fetch", vi.fn(async (url: string) => {
       const urlStr = String(url);
@@ -397,7 +432,34 @@ describe("Summary Job UX — App Persistence & Route Hydration", () => {
         return new Response(JSON.stringify(activeJobResponse), { headers: { "content-type": "application/json" } });
       }
       if (urlStr.endsWith("/stories")) {
-        return new Response(JSON.stringify({ stories: [{ slug: "undead-disaster", title: "Undead Disaster" }, { slug: "second-story", title: "Second Story" }] }), { headers: { "content-type": "application/json" } });
+        return new Response(
+          JSON.stringify({
+            stories: [
+              { slug: "undead-disaster", title: "Undead Disaster", progress: 50, importedChapters: 10, processedChapters: 5, qa: { pass: 5, warn: 0, fail: 0 }, sourceType: "txt" },
+              { slug: "second-story", title: "Second Story", progress: 10, importedChapters: 5, processedChapters: 1, qa: { pass: 1, warn: 0, fail: 0 }, sourceType: "txt" },
+            ],
+          }),
+          { headers: { "content-type": "application/json" } },
+        );
+      }
+      if (urlStr.includes("/dashboard")) {
+        return new Response(
+          JSON.stringify({
+            story: { title: "Undead Disaster", author: "Author", sourceLanguage: "zh", outputLanguage: "en", source: { type: "txt" } },
+            counts: { chapters: 10, pass: 8, warn: 2, fail: 0 },
+            progress: { processed: 10, audio: 5, artwork: 0, video: 0 },
+          }),
+          { headers: { "content-type": "application/json" } },
+        );
+      }
+      if (urlStr.includes("/chapters?")) {
+        return new Response(JSON.stringify({ items: [], page: 1, pages: 1, total: 0 }), { headers: { "content-type": "application/json" } });
+      }
+      if (urlStr.includes("/chapters/1")) {
+        return new Response(JSON.stringify({ chapter: { chapter: 1, story: "undead-disaster", originalTitle: "One" } }), { headers: { "content-type": "application/json" } });
+      }
+      if (urlStr.includes("/summaries/context")) {
+        return new Response(JSON.stringify({ minChapter: 1, maxChapter: 10 }), { headers: { "content-type": "application/json" } });
       }
       if (urlStr.includes("/summaries")) {
         return new Response(JSON.stringify({ items: [], page: 1, pages: 1, total: 0 }), { headers: { "content-type": "application/json" } });
@@ -411,28 +473,58 @@ describe("Summary Job UX — App Persistence & Route Hydration", () => {
     const root = createRoot(host);
 
     try {
+      // 1. Mount App at /stories/undead-disaster/summaries (activeJob is hydrated from server as runningJob)
       await act(async () => {
-        root.render(<App initialStories={[{ slug: "undead-disaster", title: "Undead Disaster" }]} />);
+        root.render(<App />);
       });
 
-      activeJobResponse = { job: runningJob };
+      // Strict check: JobConsole must be present and display operation & live progress
+      let jobConsole = host.querySelector(".job-console");
+      expect(jobConsole).not.toBeNull();
+      expect(jobConsole!.textContent).toContain("Generating summary audio");
+      expect(jobConsole!.textContent).toContain("Synthesizing speech (chunk 3 of 6)");
+
+      // 2. Navigate: Summaries → Chapters
       await act(async () => {
         window.history.pushState({}, "", "/stories/undead-disaster/chapters/1");
         window.dispatchEvent(new PopStateEvent("popstate"));
       });
+      jobConsole = host.querySelector(".job-console");
+      expect(jobConsole).not.toBeNull();
+      expect(jobConsole!.textContent).toContain("Generating summary audio");
+      expect(jobConsole!.textContent).toContain("Synthesizing speech (chunk 3 of 6)");
 
+      // 3. Navigate: Chapters → Audio / Export
+      await act(async () => {
+        window.history.pushState({}, "", "/stories/undead-disaster/audio");
+        window.dispatchEvent(new PopStateEvent("popstate"));
+      });
+      jobConsole = host.querySelector(".job-console");
+      expect(jobConsole).not.toBeNull();
+      expect(jobConsole!.textContent).toContain("Generating summary audio");
+
+      // 4. Navigate: Audio / Export → Stories (root)
+      await act(async () => {
+        window.history.pushState({}, "", "/");
+        window.dispatchEvent(new PopStateEvent("popstate"));
+      });
+      jobConsole = host.querySelector(".job-console");
+      expect(jobConsole).not.toBeNull();
+      expect(jobConsole!.textContent).toContain("Generating summary audio");
+
+      // 5. Cross-story navigation: Story A running Summary audio job → navigate to Story B
+      // Story B's /jobs/active returns null
       activeJobResponse = { job: null };
-
       await act(async () => {
         window.history.pushState({}, "", "/stories/second-story/summaries");
         window.dispatchEvent(new PopStateEvent("popstate"));
       });
 
-      const jobConsole = host.querySelector(".job-console");
-      if (jobConsole) {
-        expect(jobConsole.textContent).toContain("Generating summary audio");
-        expect(jobConsole.textContent).toContain("Synthesizing speech (chunk 3 of 6)");
-      }
+      // Active job hydration precedence: known non-terminal job wins over null route hydration
+      jobConsole = host.querySelector(".job-console");
+      expect(jobConsole).not.toBeNull();
+      expect(jobConsole!.textContent).toContain("Generating summary audio");
+      expect(jobConsole!.textContent).toContain("Synthesizing speech (chunk 3 of 6)");
     } finally {
       act(() => root.unmount());
       host.remove();
@@ -444,42 +536,46 @@ describe("Summary Job UX — App Persistence & Route Hydration", () => {
     const summaryListRequests: number[] = [];
     const id = "sum_test_unmount";
     const summariesData: StorySummary[] = [
-      {
+      makeSummary({
         id,
-        story: "undead-disaster",
+        storyId: "undead-disaster",
         title: "Arc 1 Recap",
         summaryType: "detailed",
         sourceMode: "translated",
         chapters: [1, 2, 3],
-        range: { from: 1, to: 3 },
-        targetWords: 800,
+        chapterRange: { from: 1, to: 3 },
+        targetLength: { words: 800 },
         text: "Recap text",
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-      },
+      }),
     ];
 
     vi.stubGlobal("fetch", vi.fn(async (url: string) => {
       const urlStr = String(url);
+      if (urlStr.includes("/summaries/context")) {
+        return new Response(JSON.stringify({ minChapter: 1, maxChapter: 5 }), { headers: { "content-type": "application/json" } });
+      }
       if (urlStr.includes("/summaries")) {
         summaryListRequests.push(Date.now());
-        return new Response(JSON.stringify({
-          items: summariesData.map((s) => ({
-            id: s.id,
-            title: s.title,
-            summaryType: s.summaryType,
-            sourceMode: s.sourceMode,
-            status: s.status ?? "complete",
-            chapters: s.chapters,
-            updatedAt: s.updatedAt,
-            createdAt: s.createdAt,
-            manuallyEdited: false,
-            wordCount: 10,
-          })),
-          page: 1,
-          pages: 1,
-          total: summariesData.length,
-        }), { headers: { "content-type": "application/json" } });
+        return new Response(
+          JSON.stringify({
+            items: summariesData.map((s) => ({
+              id: s.id,
+              title: s.title,
+              summaryType: s.summaryType,
+              sourceMode: s.sourceMode,
+              status: s.status ?? "complete",
+              chapters: s.chapters,
+              updatedAt: s.updatedAt,
+              createdAt: s.createdAt,
+              manuallyEdited: false,
+              wordCount: 10,
+            })),
+            page: 1,
+            pages: 1,
+            total: summariesData.length,
+          }),
+          { headers: { "content-type": "application/json" } },
+        );
       }
       return new Response(JSON.stringify({}), { headers: { "content-type": "application/json" } });
     }));
@@ -489,9 +585,10 @@ describe("Summary Job UX — App Persistence & Route Hydration", () => {
     const root = createRoot(host);
 
     try {
+      const onJob = vi.fn();
       // Mount SummariesPage with activeJob undefined
       await act(async () => {
-        root.render(<SummariesPage slug="undead-disaster" />);
+        root.render(<SummariesPage slug="undead-disaster" onJob={onJob} />);
       });
       expect(summaryListRequests.length).toBeGreaterThanOrEqual(1);
       const initialFetchCount = summaryListRequests.length;
@@ -504,7 +601,7 @@ describe("Summary Job UX — App Persistence & Route Hydration", () => {
         status: "running",
       };
       await act(async () => {
-        root.render(<SummariesPage slug="undead-disaster" activeJob={runningJob} />);
+        root.render(<SummariesPage slug="undead-disaster" onJob={onJob} activeJob={runningJob} />);
       });
 
       // Pass completed active job -> triggers refresh
@@ -513,10 +610,121 @@ describe("Summary Job UX — App Persistence & Route Hydration", () => {
         status: "completed",
       };
       await act(async () => {
-        root.render(<SummariesPage slug="undead-disaster" activeJob={completedJob} />);
+        root.render(<SummariesPage slug="undead-disaster" onJob={onJob} activeJob={completedJob} />);
       });
 
       expect(summaryListRequests.length).toBeGreaterThan(initialFetchCount);
+    } finally {
+      act(() => root.unmount());
+      host.remove();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("does not poll /jobs/:id independently from SummariesPage", async () => {
+    const jobPollRequests: string[] = [];
+    const onJob = vi.fn();
+
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+      const urlStr = String(url);
+      if (urlStr.includes("/jobs/")) {
+        jobPollRequests.push(urlStr);
+        return new Response(
+          JSON.stringify({ id: "job-running-test", type: "summary", story: "undead-disaster", status: "running" }),
+          { headers: { "content-type": "application/json" } },
+        );
+      }
+      if (urlStr.includes("/summaries/context")) {
+        return new Response(JSON.stringify({ minChapter: 1, maxChapter: 5 }), { headers: { "content-type": "application/json" } });
+      }
+      if (urlStr.includes("/summaries")) {
+        return new Response(JSON.stringify({ items: [], page: 1, pages: 1, total: 0 }), { headers: { "content-type": "application/json" } });
+      }
+      return new Response(JSON.stringify({}), { headers: { "content-type": "application/json" } });
+    }));
+
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+
+    try {
+      const runningJob: Job = {
+        id: "job-running-test",
+        type: "summary",
+        story: "undead-disaster",
+        status: "running",
+        progress: {
+          type: "summary.progress",
+          operation: "audio",
+          phase: "tts",
+          completed: 1,
+          total: 4,
+          detail: "Synthesizing speech (chunk 2 of 4)",
+        },
+      };
+
+      await act(async () => {
+        root.render(<SummariesPage slug="undead-disaster" onJob={onJob} activeJob={runningJob} />);
+      });
+
+      // Wait a short time to verify SummariesPage has no background polling loops
+      await new Promise((resolve) => setTimeout(resolve, 100));
+
+      expect(jobPollRequests.length).toBe(0);
+    } finally {
+      act(() => root.unmount());
+      host.remove();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("renders inline progress with granular summary phase without falling back to Preparing chapters", async () => {
+    const audioJob: Job = {
+      id: "job-audio-progress",
+      type: "summary",
+      story: "undead-disaster",
+      status: "running",
+      progress: {
+        type: "summary.progress",
+        operation: "audio",
+        phase: "tts",
+        completed: 2,
+        total: 5,
+        detail: "Synthesizing speech (chunk 3 of 5)",
+      },
+    };
+
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+      const urlStr = String(url);
+      if (urlStr.includes("/summaries/context")) {
+        return new Response(JSON.stringify({ minChapter: 1, maxChapter: 5 }), { headers: { "content-type": "application/json" } });
+      }
+      if (urlStr.includes("/summaries")) {
+        return new Response(JSON.stringify({ items: [], page: 1, pages: 1, total: 0 }), { headers: { "content-type": "application/json" } });
+      }
+      return new Response(JSON.stringify({}), { headers: { "content-type": "application/json" } });
+    }));
+
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+
+    try {
+      await act(async () => {
+        root.render(<SummariesPage slug="undead-disaster" onJob={vi.fn()} activeJob={audioJob} />);
+      });
+
+      // Click "Create summary" to enter creation mode where Progress renders
+      const createButton = host.querySelector<HTMLButtonElement>("button.button.primary");
+      await act(async () => {
+        createButton?.click();
+      });
+
+      const progressElement = host.querySelector(".summary-generation");
+      expect(progressElement).not.toBeNull();
+      expect(progressElement!.textContent).toContain("Speech synthesis");
+      expect(progressElement!.textContent).toContain("Synthesizing speech (chunk 3 of 5)");
+      expect(progressElement!.textContent).not.toContain("Preparing chapters");
     } finally {
       act(() => root.unmount());
       host.remove();
