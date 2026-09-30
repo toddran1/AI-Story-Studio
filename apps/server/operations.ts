@@ -126,8 +126,8 @@ import { LLMRouter } from "../../src/llm/router.js";
 import { validateChapterQuality } from "../../src/qa/validator.js";
 import { canonicalEntitySchema, emptyStoryBible, entityTypeSchema, storyBibleSchema, visualEvidenceDecisionSchema, type CanonicalEntity } from "../../src/domain/story-bible.js";
 import { SummaryService } from "../../src/summaries/service.js";
-import { SummaryMediaService, summaryMediaInputSchema, summaryNarrationEditSchema, summaryScenesInputSchema } from "../../src/summaries/media.js";
-import { SummaryVisualService, summaryVisualInputSchema, summaryProduceInputSchema, summaryReupscaleInputSchema } from "../../src/summaries/visuals.js";
+import { SummaryMediaService, summaryMediaInputSchema, summaryNarrationEditSchema } from "../../src/summaries/media.js";
+import { SummaryVisualService, summaryVisualInputSchema, summaryProduceInputSchema, summaryReupscaleInputSchema, summaryTimingInputSchema } from "../../src/summaries/visuals.js";
 import type { SummaryArtDirectionOverride } from "../../src/summaries/types.js";
 import { generateLocalizedNameSuggestions, localizationSuggestionRequestSchema } from "../../src/story-bible/localization.js";
 import { inspectStagesForCurrent, markCurrentInputSchema, markStagesCurrent } from "../../src/studio/stage-acceptance.js";
@@ -527,12 +527,52 @@ export class StudioOperations {
   getSummary(slug: string, id: string) { slugSchema.parse(slug); return this.summaryVisuals().get(slug, id); }
   summarySpeech(slug: string, id: string) { slugSchema.parse(slug); return this.summaryMedia().speech(slug, id); }
   startSummaryMedia(slug: string, id: string, stage: "narration" | "audio" | "scenes" | "artwork" | "video" | "produce", raw: unknown) {
-    slugSchema.parse(slug); const input = stage === "produce" ? summaryProduceInputSchema.parse(raw) : stage === "scenes" ? summaryScenesInputSchema.parse(raw) : ["artwork", "video"].includes(stage) ? summaryVisualInputSchema.parse(raw) : summaryMediaInputSchema.parse(raw);
+    slugSchema.parse(slug); const input = stage === "produce" ? summaryProduceInputSchema.parse(raw) : stage === "scenes" ? summaryTimingInputSchema.parse(raw) : ["artwork", "video"].includes(stage) ? summaryVisualInputSchema.parse(raw) : summaryMediaInputSchema.parse(raw);
+    const initialDetail = stage === "produce"
+      ? "Preparing summary production"
+      : stage === "narration"
+        ? "Preparing summary narration"
+        : stage === "audio"
+          ? "Preparing summary audio"
+          : stage === "scenes"
+            ? "Preparing summary scenes"
+            : stage === "artwork"
+              ? "Preparing summary artwork"
+              : "Preparing summary video";
     return this.jobs.createDurable(this.summaryJobsDirectory(), slug, async (control) => withStoryLock(this.root, slug, `summary ${stage}`, async () => {
-      const shutdown = new ShutdownController(); control.setPause(() => shutdown.request()); const progress = (event: unknown) => control.update(event);
+      control.update({
+        type: "summary.progress",
+        summaryId: id,
+        operation: stage,
+        phase: "preparing",
+        detail: initialDetail,
+      });
+      const shutdown = new ShutdownController(); control.setPause(() => shutdown.request());
+      const progress = (event: unknown) => {
+        if (typeof event === "object" && event !== null) {
+          const ev = event as Record<string, unknown>;
+          const type = typeof ev.type === "string" ? ev.type : "";
+          if (type.startsWith("summary.artwork.") || type.startsWith("summary.reupscale.")) {
+            control.update({ summaryId: id, operation: stage, ...ev });
+            return;
+          }
+          if (type === "summary.progress") {
+            control.update({ summaryId: id, operation: stage, ...ev });
+            return;
+          }
+          control.update({
+            type: "summary.progress",
+            summaryId: id,
+            operation: stage,
+            ...ev,
+          });
+          return;
+        }
+        control.update(event);
+      };
       const result: unknown = await withUsageScope<unknown>({ story: slug, stage: stage === "audio" ? "tts" : stage === "scenes" ? "scenePlanning" : stage === "artwork" ? "artwork" : stage === "video" ? "video" : "narration" }, () => stage === "narration" ? this.summaryMedia().narration(slug, id, input) : stage === "audio" ? this.summaryMedia().audio(slug, id, input, progress) : stage === "produce" ? this.summaryVisuals().produce(slug, id, input, progress, () => shutdown.isRequested) : stage === "artwork" ? this.summaryVisuals().artwork(slug, id, input, progress, () => shutdown.isRequested) : this.summaryVisuals()[stage](slug, id, input, progress));
       return shutdown.isRequested ? { status: "paused", summary: result } : result;
-    }));
+    }), { summaryId: id, operation: stage });
   }
   editSummaryScenes(slug: string, id: string, raw: unknown) { slugSchema.parse(slug); return withStoryLock(this.root, slug, "summary scene edits", () => this.summaryVisuals().editScenes(slug, id, raw)); }
   updateSummaryScene(slug: string, id: string, scene: string, raw: unknown) { slugSchema.parse(slug); z.string().regex(/^scene-\d{3}$/).parse(scene); return withStoryLock(this.root, slug, "summary single scene edit", () => this.summaryVisuals().updateScene(slug, id, scene, raw)); }
@@ -567,8 +607,16 @@ export class StudioOperations {
   reupscaleSummaryArtwork(slug: string, id: string, raw: unknown) {
     slugSchema.parse(slug);
     const input = summaryReupscaleInputSchema.parse(raw);
-    return this.jobs.createDurable(this.summaryJobsDirectory(), slug, (control) => withStoryLock(this.root, slug, "summary artwork re-upscale", () =>
-      this.summaryVisuals().reupscale(slug, id, input, undefined, (event) => control.update(event))));
+    return this.jobs.createDurable(this.summaryJobsDirectory(), slug, (control) => withStoryLock(this.root, slug, "summary artwork re-upscale", () => {
+      control.update({
+        type: "summary.progress",
+        summaryId: id,
+        operation: "reupscale",
+        phase: "preparing",
+        detail: "Preparing summary artwork re-upscale",
+      });
+      return this.summaryVisuals().reupscale(slug, id, input, undefined, (event) => control.update({ summaryId: id, operation: "reupscale", ...event }));
+    }), { summaryId: id, operation: "reupscale" });
   }
   editSummaryNarration(slug: string, id: string, raw: unknown) {
     slugSchema.parse(slug); summaryNarrationEditSchema.parse(raw);
@@ -576,10 +624,34 @@ export class StudioOperations {
   }
   startSummary(slug: string, raw: unknown) {
     slugSchema.parse(slug);
+    const summaryId = `sum_${randomUUID()}`;
     return this.jobs.create("summary", slug, async (control) => withStoryLock(this.root, slug, "summary generation", async () => {
-      const result = await withUsageScope({ story: slug, stage: "summary" }, () => new SummaryService(this.root, this.llm).generate(slug, raw, (event) => control.update(event)));
+      control.update({
+        type: "summary.progress",
+        summaryId,
+        operation: "generate",
+        phase: "preparing",
+        detail: "Preparing chapters",
+      });
+      const result = await withUsageScope({ story: slug, stage: "summary" }, () => new SummaryService(this.root, this.llm).generate(slug, raw, (event) => {
+        control.update({
+          ...event,
+          type: "summary.progress",
+          summaryId,
+          operation: "generate",
+          detail: event.phase === "summarizing"
+            ? `Summarizing batches · ${event.completed} of ${event.total}`
+            : event.phase === "combining"
+              ? `Combining summaries · ${event.completed} of ${event.total}`
+              : event.phase === "finalizing"
+                ? `Finalizing recap · ${event.completed} of ${event.total}`
+                : event.phase === "complete"
+                  ? "Summary complete"
+                  : "Preparing chapters",
+        });
+      }, summaryId));
       await recordActivity(this.root, slug, "summary.generated", `Generated summary '${result.title}' for ${result.chapters.length} chapter(s)`); return result;
-    }));
+    }), { summaryId, operation: "generate" });
   }
   updateSummary(slug: string, id: string, raw: unknown) { slugSchema.parse(slug); return withStoryLock(this.root, slug, "summary edit", async () => {
     const service = new SummaryService(this.root, this.llm);
@@ -594,9 +666,32 @@ export class StudioOperations {
   regenerateSummary(slug: string, id: string, raw: unknown) {
     slugSchema.parse(slug);
     return this.jobs.create("summary", slug, async (control) => withStoryLock(this.root, slug, "summary regeneration", async () => {
-      const result = await withUsageScope({ story: slug, stage: "summary" }, () => new SummaryService(this.root, this.llm).regenerate(slug, id, raw, (event) => control.update(event)));
+      control.update({
+        type: "summary.progress",
+        summaryId: id,
+        operation: "regenerate",
+        phase: "preparing",
+        detail: "Preparing summary regeneration",
+      });
+      const result = await withUsageScope({ story: slug, stage: "summary" }, () => new SummaryService(this.root, this.llm).regenerate(slug, id, raw, (event) => {
+        control.update({
+          ...event,
+          type: "summary.progress",
+          summaryId: id,
+          operation: "regenerate",
+          detail: event.phase === "summarizing"
+            ? `Summarizing batches · ${event.completed} of ${event.total}`
+            : event.phase === "combining"
+              ? `Combining summaries · ${event.completed} of ${event.total}`
+              : event.phase === "finalizing"
+                ? `Finalizing recap · ${event.completed} of ${event.total}`
+                : event.phase === "complete"
+                  ? "Summary complete"
+                  : "Preparing summary regeneration",
+        });
+      }));
       await recordActivity(this.root, slug, "summary.regenerated", `Regenerated summary '${result.title}'`); return result;
-    }));
+    }), { summaryId: id, operation: "regenerate" });
   }
   deleteSummary(slug: string, id: string) { slugSchema.parse(slug); return withStoryLock(this.root, slug, "summary deletion", async () => { const result = await new SummaryService(this.root, this.llm).delete(slug, id); await recordActivity(this.root, slug, "summary.deleted", `Deleted summary ${id}`); return result; }); }
 
@@ -1732,10 +1827,27 @@ export class StudioOperations {
     slugSchema.parse(slug);
     summaryIdSchema.parse(id);
     const input = chapterMusicInputSchema.omit({ chapter: true }).parse(raw);
-    return this.jobs.create("summaryMusicExport", slug, async () => withStoryLock(this.root, slug, "summary music export", async () => {
+    return this.jobs.create("summaryMusicExport", slug, async (control) => withStoryLock(this.root, slug, "summary music export", async () => {
+      control.update({
+        type: "summary.progress",
+        summaryId: id,
+        operation: "music_export",
+        phase: "preparing",
+        detail: "Exporting summary with background music",
+      });
       const story = await loadStory(storyPaths(this.root, slug, 1).storyConfig);
-      return exportSummaryWithMusic({ root: this.root, story, summaryId: id, ...input });
-    }));
+      const result = await exportSummaryWithMusic({ root: this.root, story, summaryId: id, ...input });
+      control.update({
+        type: "summary.progress",
+        summaryId: id,
+        operation: "music_export",
+        phase: "complete",
+        completed: 1,
+        total: 1,
+        detail: "Background music export complete",
+      });
+      return result;
+    }), { summaryId: id, operation: "music_export" });
   }
 
   startChapterMusicExport(slug: string, raw: unknown) { slugSchema.parse(slug); const input = chapterMusicInputSchema.parse(raw); return this.jobs.create("chapterMusicExport", slug, async () => withStoryLock(this.root, slug, "web chapter music export", async () => {

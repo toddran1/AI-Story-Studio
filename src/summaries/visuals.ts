@@ -41,7 +41,7 @@ import { generateSubtitleTiming } from "../subtitles/timing.js";
 import { generateAlignedSubtitleTiming } from "../subtitles/aligned-timing.js";
 import { toSrt } from "../subtitles/srt.js";
 import { SummaryMediaService, summaryMediaPaths, summaryScenesInputSchema, summarySceneProposalSourceFingerprint, summarySceneRegenerationProposalSchema, SummarySceneProposalConflictError } from "./media.js";
-import { summarySchema, summaryAudioAvailable, summaryNarrationTextAvailable, summaryScenePlanAvailable, type StorySummary } from "./types.js";
+import { summarySchema, summaryAudioAvailable, summaryNarrationTextAvailable, summaryScenePlanAvailable, type StorySummary, type SummaryJobOperation } from "./types.js";
 import { summaryPath } from "./service.js";
 import { validateSceneCoverage } from "../scenes/timing.js";
 import { withUsageScope } from "../cost/context.js";
@@ -75,6 +75,7 @@ export const summaryProduceInputSchema = summaryScenesInputSchema.safeExtend({
   dryRun: z.boolean().default(false),
   allowUnprofiledEntityIds: z.array(z.string().regex(/^ent_[a-f0-9]{24}$/)).max(100).default([]),
 });
+export const summaryTimingInputSchema = summaryScenesInputSchema.safeExtend({ timingOnly: z.boolean().default(false) });
 export const summarySceneEditSchema = z.union([
   z.object({ scenes: z.array(sceneSchema).min(1).max(100) }).strict(),
   z.object({ acceptCurrent: z.literal(true) }).strict(),
@@ -88,9 +89,14 @@ export const summarySingleSceneEditSchema = z.object({ scene: z.object({
 }).strict() }).strict();
 export type SummaryVisualProgress = (event: {
   type: string;
+  summaryId?: string;
+  operation?: SummaryJobOperation;
+  phase?: string;
+  detail?: string;
   scene?: string;
   index?: number;
   total?: number;
+  completed?: number;
   imagesToGenerate?: number;
   reusable?: number;
   derivativesToBuild?: number;
@@ -289,7 +295,7 @@ export class SummaryVisualService {
       }),
     };
   }
-  private videoFingerprint(summary: StorySummary, settings: unknown) { return fingerprint({ version: "summary-video-v1", audio: summary.audio?.outputFingerprint, scenes: summary.scenePlan?.scenes.filter((scene) => !scene.disabled).map((scene) => ({ id: scene.id, start: scene.startSeconds, end: scene.endSeconds, image: scene.artwork.imageFingerprint, review: scene.artwork.review })), settings, alignment: summary.alignment?.inputFingerprint, renderer: this.renderer.version }); }
+  private videoFingerprint(summary: StorySummary, settings: unknown) { return fingerprint({ version: "summary-video-v1", audio: summary.audio?.outputFingerprint, scenes: summary.scenePlan?.scenes.filter((scene) => !scene.disabled).map((scene) => ({ id: scene.id, start: scene.startSeconds, end: scene.endSeconds, image: scene.artwork.imageFingerprint, review: scene.artwork.review })), settings, alignment: (settings as { subtitleMode?: string }).subtitleMode === "none" ? undefined : summary.alignment?.inputFingerprint, renderer: this.renderer.version }); }
   private async sceneArtworkFreshness(slug: string, summary: StorySummary) {
     const paths = this.paths(slug, summary.id);
     const [continuity, context] = await Promise.all([this.sceneContinuity(slug, summary.id, summary.scenePlan?.scenes ?? []), this.context(slug)]);
@@ -342,8 +348,10 @@ export class SummaryVisualService {
     await this.save(slug, summary);
   }
   async align(slug: string, id: string, progress?: SummaryVisualProgress) {
-    const summary = await this.media.get(slug, id); if (summary.audio?.status !== "current" || !summary.audio.durationSeconds || !summary.narration?.text) throw new Error("Current mastered summary audio is required for alignment");
-    const { story } = await this.context(slug); const paths = this.paths(slug, id);
+    const summary = await this.media.get(slug, id); const paths = this.paths(slug, id);
+    if (!summary.audio?.outputFingerprint || !summary.audio.durationSeconds || !summary.narration?.text ||
+      await fileFingerprint(paths.audio) !== summary.audio.outputFingerprint) throw new Error("Intact mastered summary audio is required for alignment");
+    const { story } = await this.context(slug);
     const inputFingerprint = fingerprint({ version: "summary-alignment-v1", audio: summary.audio.outputFingerprint, narration: summary.narration.outputFingerprint, config: this.alignmentConfig, engine: this.aligner?.version });
     if (summary.alignment?.inputFingerprint === inputFingerprint) return summary;
     progress?.({ type: "summary.alignment.started" }); const narration = summary.narration.text;
@@ -353,10 +361,14 @@ export class SummaryVisualService {
     return this.save(slug, summary);
   }
   async scenes(slug: string, id: string, raw: unknown = {}, progress?: SummaryVisualProgress) {
-    const options = summaryScenesInputSchema.parse(raw); const before = await this.media.get(slug, id);
+    const { timingOnly, ...options } = summaryTimingInputSchema.parse(raw); const before = await this.media.get(slug, id);
     // Retiming is local: do not call the scene model merely because audio duration changed.
     const { story } = await this.context(slug);
-    const onlyTiming = this.willReuseScenePlan(before, story, options);
+    const sameSavedPlan = Boolean(before.scenePlan && before.narration?.text?.trim() &&
+      before.scenes?.sourceFingerprint === fingerprint(before.narration.text) &&
+      before.scenes.outputFingerprint === productionSceneFingerprint(before.scenePlan));
+    const onlyTiming = timingOnly ? sameSavedPlan : this.willReuseScenePlan(before, story, options);
+    if (timingOnly && !onlyTiming) throw new Error("The saved scene plan no longer matches the narration; regenerate scenes before updating timing");
     // A reviewed manual timeline is authoritative while its narration and audio remain current.
     const audioDuration = before.audio?.outputFingerprint && (before.audio.durationSeconds ?? 0) > 0 &&
       await fileFingerprint(this.paths(slug, id).audio) === before.audio.outputFingerprint ? before.audio.durationSeconds : undefined;
@@ -366,7 +378,7 @@ export class SummaryVisualService {
       const [oldContinuity, nextContinuity] = await Promise.all([this.sceneContinuity(slug, id, before.scenePlan.scenes), this.sceneContinuity(slug, id, summary.scenePlan.scenes)]);
       for (const scene of summary.scenePlan.scenes) { const previous = before.scenePlan.scenes.find((item) => item.id === scene.id); if (previous) { const oldVisual = oldContinuity.get(previous.id), nextVisual = nextContinuity.get(scene.id); const oldInput = await this.imageInput(slug, id, previous, oldVisual?.text, oldVisual?.decision, before.artDirectionOverride, Math.max(...before.chapters)); const nextInput = await this.imageInput(slug, id, scene, nextVisual?.text, nextVisual?.decision, summary.artDirectionOverride, Math.max(...summary.chapters)); if (oldInput.inputFingerprint === nextInput.inputFingerprint || previous.artwork.review === "approved" || previous.artwork.manuallyEdited) scene.artwork = previous.artwork; } }
     }
-    if (summary.audio?.status === "current") summary = await this.alignWithPlan(slug, summary, progress);
+    if (audioDuration) summary = await this.alignWithPlan(slug, summary, progress);
     if (!summary.scenePlan || !summary.narration?.text) throw new Error("Summary scene plan is missing");
     summary.scenePlan.scenes = bindNarrationSpans(summary.scenePlan.scenes, summary.narration.text);
     const timed = timeNarrationScenes(summary.scenePlan.scenes, audioDuration ?? summary.scenePlan.durationSeconds, summary.alignment?.mode === "aligned" && summary.alignment.audioFingerprint === summary.audio?.outputFingerprint ? summary.alignment.words : undefined);
@@ -955,20 +967,36 @@ export class SummaryVisualService {
       const report = await this.artwork(slug, id, { missingOnly: options.missingOnly, dryRun: true, allowUnprofiledEntityIds: options.allowUnprofiledEntityIds });
       if ("preflight" in report && !report.preflight.ready) return this.produceBlocked(id, report.preflight, true);
     }
-    progress?.({ type: "summary.narration.preparing" });
+    progress?.({ type: "summary.progress", summaryId: id, operation: "produce", phase: "narration", detail: "Preparing summary narration" });
     // A manual narration is the retained editorial source even when upstream
     // changes have marked it stale. Refreshing inputs must not replace it.
     if (paused?.()) return this.get(slug, id);
     if (!(initial.narration?.manuallyEdited && initial.narration.text?.trim() && !options.force))
       await withUsageScope({ story: slug, stage: "narration" }, () => this.media.narration(slug, id, { force: options.force }));
-    if (paused?.()) return this.get(slug, id); progress?.({ type: "summary.audio.preparing" }); await withUsageScope({ story: slug, stage: "tts" }, () => this.media.audio(slug, id, { force: options.force }));
     if (paused?.()) return this.get(slug, id);
+    progress?.({ type: "summary.progress", summaryId: id, operation: "produce", phase: "audio", detail: "Preparing summary audio" });
+    await withUsageScope({ story: slug, stage: "tts" }, () => this.media.audio(slug, id, { force: options.force }, (audioEv) => {
+      progress?.({
+        type: "summary.progress",
+        summaryId: id,
+        operation: "produce",
+        phase: audioEv.phase,
+        detail: audioEv.detail,
+        completed: audioEv.completed,
+        total: audioEv.total,
+      });
+    }));
+    if (paused?.()) return this.get(slug, id);
+    progress?.({ type: "summary.progress", summaryId: id, operation: "produce", phase: "scenes", detail: "Planning summary scenes" });
     await withUsageScope({ story: slug, stage: "scenePlanning" }, () => this.scenes(slug, id, sceneOptions, progress));
     if (paused?.()) return this.get(slug, id);
     const artworkPlan = await this.artwork(slug, id, { force: options.force, missingOnly, dryRun: true, allowUnprofiledEntityIds }, progress, paused);
     if ("preflight" in artworkPlan && !artworkPlan.preflight.ready) return this.produceBlocked(id, artworkPlan.preflight, false);
+    progress?.({ type: "summary.progress", summaryId: id, operation: "produce", phase: "artwork", detail: "Generating summary artwork" });
     await this.artwork(slug, id, { force: options.force, missingOnly, allowUnprofiledEntityIds }, progress, paused);
-    if (paused?.()) return this.get(slug, id); return this.video(slug, id, { force: options.force }, progress);
+    if (paused?.()) return this.get(slug, id);
+    progress?.({ type: "summary.progress", summaryId: id, operation: "produce", phase: "video", detail: "Rendering summary video" });
+    return this.video(slug, id, { force: options.force }, progress);
   }
   private produceBlocked(id: string, preflight: Awaited<ReturnType<typeof inspectArtworkVisualPreflightForScenes>>, beforeUpstream: boolean) {
     return { id, status: "blocked" as const, reason: "visual-profile-decisions-required" as const, beforeUpstream,

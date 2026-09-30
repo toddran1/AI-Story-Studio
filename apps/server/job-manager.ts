@@ -34,7 +34,7 @@ export class JobManager {
   /** Persist non-chapter jobs without putting story content into the production
    * queue. Interrupted work is paused on startup, never silently replayed/paid. */
   async restoreDurable(directory: string) {
-    const schema = z.object({ id: z.string().uuid(), type: z.literal("summary"), story: z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/), status: z.enum(["queued", "running", "completed", "failed", "paused"]), createdAt: z.string().datetime(), updatedAt: z.string().datetime(), progress: z.unknown().optional(), result: z.unknown().optional(), error: z.string().optional() });
+    const schema = z.object({ id: z.string().uuid(), type: z.literal("summary"), story: z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/), status: z.enum(["queued", "running", "completed", "failed", "paused"]), createdAt: z.string().datetime(), updatedAt: z.string().datetime(), payload: z.unknown().optional(), progress: z.unknown().optional(), result: z.unknown().optional(), error: z.string().optional() });
     for (const name of await readdir(directory).catch((error: NodeJS.ErrnoException) => { if (error.code === "ENOENT") return []; throw error; })) {
       if (!/^[a-f0-9-]{36}\.json$/.test(name)) continue;
       const path = join(directory, name), parsed = schema.safeParse(await readJsonIfExists(path).catch((error) => { logger.warn({ error, path }, "Ignoring unreadable summary job record"); return undefined; }));
@@ -47,10 +47,10 @@ export class JobManager {
     await this.flushDurable();
   }
 
-  async createDurable(directory: string, story: string, runner: (control: JobControl) => Promise<unknown>) {
+  async createDurable(directory: string, story: string, runner: (control: JobControl) => Promise<unknown>, payload?: unknown) {
     this.prune();
     const active = this.activeStories.get(story); if (active) throw new JobConflictError(`Story '${story}' already has active job ${active}`);
-    const now = new Date().toISOString(), job: Job = { id: randomUUID(), type: "summary", story, status: "queued", createdAt: now, updatedAt: now };
+    const now = new Date().toISOString(), job: Job = { id: randomUUID(), type: "summary", story, status: "queued", createdAt: now, updatedAt: now, payload };
     const path = join(directory, `${job.id}.json`);
     // Reserve the story before awaiting IO, preventing concurrent submission races.
     this.activeStories.set(story, job.id);

@@ -146,6 +146,7 @@ describe("large story pages", () => {
     await act(async () => root!.render(<VideoPage slug="test-story" onJob={() => undefined} />));
     expect(calls.some((url) => url.endsWith("/video/summary"))).toBe(true);
     expect(calls.some((url) => url.includes("/video/chapters?page=1&pageSize=25"))).toBe(true);
+    expect(container!.querySelector<HTMLSelectElement>(".video-console select")?.value).toBe("none");
   });
 
   it("does not request artwork outputs until that group is opened", async () => {

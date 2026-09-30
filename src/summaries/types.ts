@@ -116,6 +116,30 @@ export function summaryAudioAvailable(summary: Pick<StorySummary, "audio">) {
 export type SummaryGenerationInput = z.infer<typeof summaryGenerationInputSchema>;
 export type SummaryType = z.infer<typeof summaryTypeSchema>;
 export type SummarySourceMode = z.infer<typeof summarySourceModeSchema>;
+export type SummaryJobOperation =
+  | "generate"
+  | "regenerate"
+  | "narration"
+  | "audio"
+  | "scenes"
+  | "artwork"
+  | "video"
+  | "produce"
+  | "reupscale"
+  | "music_export";
+
+export interface SummaryProgressEvent {
+  type: "summary.progress";
+  summaryId?: string;
+  operation: SummaryJobOperation;
+  phase?: string;
+  detail?: string;
+  completed?: number;
+  total?: number;
+  scene?: string;
+  index?: number;
+}
+
 export type SummaryProgress = { phase: "preparing" | "summarizing" | "combining" | "finalizing" | "complete"; completed: number; total: number; level?: number; chapters?: number[] };
 
 export function normalizeSummaryChapters(input: z.input<typeof summarySelectionSchema>): number[] {

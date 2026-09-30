@@ -1,6 +1,7 @@
 import { useMusicExportPreferences } from "./useMusicExportPreferences.js";
 import { Component, ErrorInfo, FormEvent, ReactNode, useDeferredValue, useEffect, useId, useRef, useState } from "react";
 import type { StageName } from "../../../src/domain/chapter.js";
+import type { SummaryJobOperation, SummaryProgressEvent } from "../../../src/summaries/types.js";
 import { api, ApiError, AudioDashboard, ChapterDetail, ChapterQaDetail, ChapterRow, CostAnalytics, Counts, del, ErrorDiagnostic, formatDiagnostic, Job, Model, OutputItem, post, put, ProductionManifest, ProductionPlan, QaException, QaExceptionMatchKind, QaFinding, QaRecheckSummary, QaResult, Scene, ScenesDashboard, StoryCard, StoryConfig, StoryDashboard, TtsQualityArtifact, TtsQualityIssueType, TtsSegmentQuality, VideoDashboard, acceptChapterTtsSegment, chapterTtsSegmentAudioUrl, getChapterTtsQuality, regenerateChapterTtsSegment, verifyChapterTtsQuality } from "./api.js";
 import { ArtifactStatusNotice } from "./ArtifactStatusNotice.js";
 import { pretty } from "./format.js";
@@ -140,40 +141,33 @@ export function App({ initialJob, initialRoute }: { initialJob?: Job; initialRou
   useEffect(() => { const handler = () => setRoute(parseRoute(location.pathname)); addEventListener("popstate", handler); return () => removeEventListener("popstate", handler); }, []);
   useEffect(() => { let cancelled = false; const refreshStories = () => { setStoriesError(""); api<{ stories: StoryCard[]; warnings?: string[] }>("/stories").then((value) => { if (!cancelled) { setStories(value.stories); setStoriesError(value.warnings?.join(" ") ?? ""); } }).catch((error) => { if (!cancelled) setStoriesError(message(error)); }); }; refreshStories(); window.addEventListener("stories:changed", refreshStories); return () => { cancelled = true; window.removeEventListener("stories:changed", refreshStories); }; }, [jobRefreshVersion]);
   useEffect(() => {
+    if (latestJob.current && !isTerminalJob(latestJob.current)) {
+      return;
+    }
     const storySlug = route.story;
     if (!storySlug) {
-      if (latestJob.current?.story) {
+      if (latestJob.current?.story && isTerminalJob(latestJob.current)) {
         latestJob.current = undefined;
         setJob(undefined);
       }
       return;
     }
-    if (latestJob.current && latestJob.current.story !== storySlug) {
+    if (latestJob.current && latestJob.current.story !== storySlug && isTerminalJob(latestJob.current)) {
       latestJob.current = undefined;
       setJob(undefined);
-    }
-    if (latestJob.current && latestJob.current.story === storySlug && !isTerminalJob(latestJob.current)) {
-      return;
     }
     let cancelled = false;
     api<{ job: Job | null }>(`/stories/${storySlug}/jobs/active`)
       .then((res) => {
         if (cancelled) return;
+        if (latestJob.current && !isTerminalJob(latestJob.current)) {
+          return;
+        }
         const serverJob = res?.job;
         if (serverJob && !isTerminalJob(serverJob)) {
           if (!isJobDismissed(serverJob.id)) {
             latestJob.current = serverJob;
             setJob(serverJob);
-          }
-        } else {
-          if (latestJob.current?.story === storySlug && !isTerminalJob(latestJob.current)) {
-            if (serverJob) {
-              latestJob.current = serverJob;
-              setJob(serverJob);
-            } else {
-              latestJob.current = undefined;
-              setJob(undefined);
-            }
           }
         }
       })
@@ -207,7 +201,7 @@ export function App({ initialJob, initialRoute }: { initialJob?: Job; initialRou
         {route.page === "bible" && route.story && <BiblePage slug={route.story} navigate={navigate} locationSearch={location.search} />}
         {route.page === "names" && route.story && <NamesLocalizationPage slug={route.story} navigate={navigate} onJob={updateJob} />}
         {route.page === "continuity" && route.story && <ContinuityPage slug={route.story} navigate={navigate} />}
-        {route.page === "summaries" && route.story && <SummariesPage slug={route.story} onJob={updateJob} />}
+        {route.page === "summaries" && route.story && <SummariesPage slug={route.story} onJob={updateJob} activeJob={job} />}
         {route.page === "audio" && route.story && <AudioPage slug={route.story} onJob={updateJob} />}
         {route.page === "video" && route.story && <VideoPage slug={route.story} onJob={updateJob} />}
         {route.page === "scenes" && route.story && <ScenesPage slug={route.story} onJob={updateJob} navigate={navigate} />}
@@ -3827,12 +3821,13 @@ export function VideoPage({ slug, onJob }: { slug: string; onJob: (job: Job) => 
   const [data, setData] = useState<Omit<VideoDashboard, "chapters"> & { minChapter?: number; maxChapter?: number }>();
   const [chapterPage, setChapterPage] = useState<{ items: VideoDashboard["chapters"]; page: number; pages: number; total: number }>();
   const [page, setPage] = useState(1); const [pageSize, setPageSize] = useState(25); const [refreshVersion, setRefreshVersion] = useState(0);
-  const [range, setRange] = useState({ from: "", to: "", subtitleMode: "burn" as "none" | "burn" | "soft" | "both" });
+  const [range, setRange] = useState({ from: "", to: "", subtitleMode: "none" as "none" | "burn" | "soft" | "both" });
   const { music, setMusic, overrides: musicOverrides, setOverrides: setMusicOverrides } = useMusicExportPreferences(`story-music-export:${slug}`);
   const [chapterExport, setChapterExport] = useState<{ chapter: number; url: string }>();
   const [error, setError] = useState(""); const [pageError, setPageError] = useState(""); const watcher = useRef<(() => void) | undefined>(undefined);
   const summaryRequest = useRef(0); const pageRequest = useRef(0);
-  useEffect(() => { const request = ++summaryRequest.current; api<Omit<VideoDashboard, "chapters"> & { minChapter?: number; maxChapter?: number }>(`/stories/${slug}/video/summary`).then((next) => { if (request !== summaryRequest.current) return; setData(next); setError(""); setRange((current) => ({ ...current, subtitleMode: next.settings.subtitleMode, ...(!current.from ? { from: String(next.minChapter ?? ""), to: String(next.maxChapter ?? "") } : {}) })); }).catch((value) => { if (request === summaryRequest.current) setError(message(value)); }); return () => { summaryRequest.current++; }; }, [slug, refreshVersion]);
+  useEffect(() => { const request = ++summaryRequest.current; api<Omit<VideoDashboard, "chapters"> & { minChapter?: number; maxChapter?: number }>(`/stories/${slug}/video/summary`).then((next) => { if (request !== summaryRequest.current) return; setData(next); setError(""); setRange((current) => ({ ...current, ...(!current.from ? { from: String(next.minChapter ?? ""), to: String(next.maxChapter ?? "") } : {}) })); }).catch((value) => { if (request === summaryRequest.current) setError(message(value)); }); return () => { summaryRequest.current++; }; }, [slug, refreshVersion]);
+  useEffect(() => { setRange((current) => ({ ...current, subtitleMode: "none" })); }, [slug]);
   useEffect(() => { const request = ++pageRequest.current; api<{ items: VideoDashboard["chapters"]; page: number; pages: number; total: number }>(`/stories/${slug}/video/chapters?page=${page}&pageSize=${pageSize}`).then((next) => { if (request === pageRequest.current) { setChapterPage(next); setPageError(""); } }).catch((value) => { if (request === pageRequest.current) setPageError(message(value)); }); return () => { pageRequest.current++; }; }, [slug, page, pageSize, refreshVersion]);
   useEffect(() => () => watcher.current?.(), [slug]);
   const run = async (kind: "subtitles" | "video" | "video-export") => { try { setError(""); const job = await post<Job>(`/stories/${slug}/jobs/${kind}`, { from: Number(range.from), to: Number(range.to), ...(kind === "video" ? { subtitleMode: range.subtitleMode } : {}), ...(kind === "video-export" ? { music, musicOverrides, subtitleMode: range.subtitleMode } : {}) }); onJob(job); watcher.current?.(); watcher.current = watchJob(job.id, (next) => { onJob(next); if (next.status === "completed") setRefreshVersion((value) => value + 1); else if (next.status === "failed") setError(next.error ?? "Video job failed"); }, (value) => setError(message(value))); } catch (value) { setError(message(value)); } };
@@ -4332,6 +4327,160 @@ export function ProductionPage({ slug, activeJob, onJob, navigate }: { slug: str
   </section>;
 }
 
+export type SummaryJobProgressView = {
+  title: string;
+  stageLabel: string;
+  detail: string;
+  completed?: number;
+  total?: number;
+  percent?: number;
+};
+
+const SUMMARY_OPERATION_TITLES: Record<SummaryJobOperation, string> = {
+  generate: "Generating summary",
+  regenerate: "Regenerating summary",
+  narration: "Generating summary narration",
+  audio: "Generating summary audio",
+  scenes: "Planning summary scenes",
+  artwork: "Generating summary artwork",
+  video: "Rendering summary video",
+  produce: "Producing summary media",
+  reupscale: "Re-upscaling summary artwork",
+  music_export: "Exporting summary music",
+};
+
+const SUMMARY_PHASE_LABELS: Record<string, string> = {
+  preparing: "Preparing",
+  extracting: "Extracting events",
+  analyzing: "Analyzing storyline",
+  drafting: "Drafting recap",
+  summarizing: "Summarizing batches",
+  combining: "Combining summaries",
+  finalizing: "Finalizing recap",
+  narration: "Narration",
+  pronunciation: "Pronunciation",
+  tts: "Speech synthesis",
+  quality_check: "Quality verification",
+  retry: "TTS retry",
+  mastering: "Audio mastering",
+  planning: "Scene planning",
+  artwork: "Artwork generation",
+  upscaling: "Artwork upscaling",
+  scenes: "Scene planning",
+  audio: "Audio generation",
+  video: "Video rendering",
+  rendering: "Video rendering",
+  exporting: "Exporting audio",
+  complete: "Complete",
+};
+
+export function summaryJobProgressView(job: Job): SummaryJobProgressView | undefined {
+  if (job.type !== "summary" && job.type !== "summaryMusicExport") {
+    return undefined;
+  }
+
+  const rawProgress = (job.progress && typeof job.progress === "object" ? job.progress : undefined) as Record<string, unknown> | undefined;
+  const rawPayload = (job.payload && typeof job.payload === "object" ? job.payload : undefined) as Record<string, unknown> | undefined;
+
+  let operation: SummaryJobOperation | undefined =
+    (rawProgress?.operation as SummaryJobOperation | undefined) ??
+    (rawPayload?.operation as SummaryJobOperation | undefined);
+
+  const progressType = typeof rawProgress?.type === "string" ? rawProgress.type : "";
+
+  if (!operation) {
+    if (job.type === "summaryMusicExport") {
+      operation = "music_export";
+    } else if (progressType.startsWith("summary.reupscale.")) {
+      operation = "reupscale";
+    } else if (progressType.startsWith("summary.artwork.")) {
+      operation = "artwork";
+    }
+  }
+
+  const baseTitle = operation && SUMMARY_OPERATION_TITLES[operation]
+    ? SUMMARY_OPERATION_TITLES[operation]
+    : "Building story recap";
+
+  if (progressType.startsWith("summary.artwork.") || progressType.startsWith("summary.reupscale.")) {
+    const isReupscale = progressType.startsWith("summary.reupscale.");
+    const isCompleted = progressType.endsWith("completed");
+    const sceneRaw = typeof rawProgress?.scene === "string" ? rawProgress.scene : undefined;
+    const sceneMatch = sceneRaw?.match(/^scene-(\d+)$/i);
+    const sceneLabel = sceneMatch ? `Scene ${sceneMatch[1]}` : sceneRaw;
+    const index = typeof rawProgress?.index === "number" ? rawProgress.index : undefined;
+    const total = typeof rawProgress?.total === "number" && rawProgress.total > 0 ? rawProgress.total : undefined;
+
+    let completed: number | undefined;
+    let percent: number | undefined;
+    if (index !== undefined && total !== undefined) {
+      completed = Math.max(0, index - (isCompleted ? 0 : 1));
+      percent = Math.min(100, Math.max(0, Math.round((completed / total) * 100)));
+    }
+
+    const countLabel = index !== undefined && total !== undefined
+      ? `${isReupscale ? "Upscaling" : "Artwork"} ${index} of ${total}`
+      : undefined;
+
+    const detailParts = [sceneLabel, countLabel, isCompleted ? "complete" : "in progress"].filter(Boolean);
+    const detail = detailParts.length > 0 ? detailParts.join(" · ") : (isReupscale ? "Upscaling artwork" : "Generating artwork");
+    const stageLabel = isReupscale ? "Artwork upscaling" : "Artwork generation";
+
+    return {
+      title: baseTitle,
+      stageLabel,
+      detail,
+      completed,
+      total,
+      percent,
+    };
+  }
+
+  const phase = typeof rawProgress?.phase === "string" ? rawProgress.phase : undefined;
+  const stageLabel = phase && SUMMARY_PHASE_LABELS[phase]
+    ? SUMMARY_PHASE_LABELS[phase]
+    : phase
+      ? pretty(phase)
+      : operation
+        ? pretty(operation)
+        : "Working";
+
+  let completed: number | undefined = typeof rawProgress?.completed === "number" ? rawProgress.completed : undefined;
+  let total: number | undefined = typeof rawProgress?.total === "number" && rawProgress.total > 0 ? rawProgress.total : undefined;
+  let percent: number | undefined;
+
+  if (completed !== undefined && total !== undefined) {
+    percent = Math.min(100, Math.max(0, Math.round((completed / total) * 100)));
+  } else if (job.status === "completed" || phase === "complete") {
+    percent = 100;
+  }
+
+  let detail = typeof rawProgress?.detail === "string" && rawProgress.detail.trim().length > 0
+    ? rawProgress.detail.trim()
+    : "";
+
+  if (!detail) {
+    if (completed !== undefined && total !== undefined) {
+      detail = `${stageLabel} · ${completed} of ${total}`;
+    } else if (phase === "complete" || job.status === "completed") {
+      detail = `${baseTitle} complete`;
+    } else if (job.status === "failed") {
+      detail = job.error || "Operation failed";
+    } else {
+      detail = `${stageLabel} in progress`;
+    }
+  }
+
+  return {
+    title: baseTitle,
+    stageLabel,
+    detail,
+    completed,
+    total,
+    percent,
+  };
+}
+
 export function JobConsole({ job, onUpdate, onClose, navigate, initialQaComparison, initialMinimized }: {
   job: Job;
   onUpdate: (job: Job) => void;
@@ -4377,24 +4526,7 @@ export function JobConsole({ job, onUpdate, onClose, navigate, initialQaComparis
   const stage = diagnostic?.stage ?? job.progress?.stage ?? job.progress?.event?.stage ?? job.progress?.type?.replace("chapter.", "");
   const chapter = diagnostic?.chapter ?? job.progress?.chapter;
   const detail = job.progress?.event?.detail ?? job.progress?.detail;
-  const summaryArtworkProgress = job.type === "summary" && typeof job.progress?.type === "string" && (job.progress.type.startsWith("summary.artwork.") || job.progress.type.startsWith("summary.reupscale."))
-    ? job.progress as { type: string; scene?: string; index?: number; total?: number }
-    : undefined;
-  const isSummaryReupscale = summaryArtworkProgress?.type.startsWith("summary.reupscale.") ?? false;
-  const artworkSceneNumber = summaryArtworkProgress?.scene?.match(/^scene-(\d+)$/i)?.[1];
-  const artworkSceneLabel = artworkSceneNumber
-    ? `Scene ${artworkSceneNumber}`
-    : summaryArtworkProgress?.scene;
-  const artworkCountLabel = Number.isFinite(summaryArtworkProgress?.index) && Number.isFinite(summaryArtworkProgress?.total)
-    ? `${isSummaryReupscale ? "Upscaling" : "Artwork"} ${summaryArtworkProgress!.index} of ${summaryArtworkProgress!.total}`
-    : undefined;
-  const artworkIndex = Number.isInteger(summaryArtworkProgress?.index) ? summaryArtworkProgress!.index! : undefined;
-  const artworkTotal = Number.isInteger(summaryArtworkProgress?.total) && summaryArtworkProgress!.total! > 0 ? summaryArtworkProgress!.total : undefined;
-  const artworkCompleted = artworkIndex === undefined ? undefined : Math.max(0, artworkIndex - (summaryArtworkProgress?.type.endsWith("completed") ? 0 : 1));
-  const artworkPercent = artworkCompleted !== undefined && artworkTotal ? Math.round(artworkCompleted / artworkTotal * 100) : undefined;
-  const summaryArtworkDetail = summaryArtworkProgress
-    ? [artworkSceneLabel, artworkCountLabel, summaryArtworkProgress.type.endsWith("completed") ? "complete" : "in progress"].filter(Boolean).join(" · ")
-    : undefined;
+  const summaryView = (job.type === "summary" || job.type === "summaryMusicExport") ? summaryJobProgressView(job) : undefined;
   // QA-related failures carry the failure-time dependency fingerprint; compare
   // it against the chapter's current QA state so stale failures read as history.
   const qaRelated = Boolean(diagnostic && diagnostic.chapter && (diagnostic.category === "content_qa" || diagnostic.issues?.length));
@@ -4452,7 +4584,7 @@ export function JobConsole({ job, onUpdate, onClose, navigate, initialQaComparis
     }
   };
   const isSceneJob = job.type === "scenes" || stage === "scenePlanning" || stage === "scenes";
-  const label = summaryArtworkProgress ? isSummaryReupscale ? "Re-upscaling summary artwork" : "Generating summary artwork" : ({ batch: "Processing chapters", preview: "Rendering comparison", metadataTranslation: "Translating reader metadata", qaRepair: "Repairing selected QA findings", qaRecheck: "Rechecking chapter QA", stageExecution: "Processing stage", summary: "Building story recap", audio: "Mastering chapter audio", audiobook: "Building audiobook", alignment: "Aligning narration to audio", subtitles: "Timing subtitles", video: "Rendering chapter video", videoExport: "Building combined video", scenes: "Planning chapter scenes", artwork: "Generating scene artwork", production: "Producing finished story", ttsQualityVerify: "Verifying TTS quality", ttsSegmentRegenerate: "Regenerating TTS segment" } as Record<string, string>)[job.type] ?? "Working";
+  const label = summaryView?.title ?? ({ batch: "Processing chapters", preview: "Rendering comparison", metadataTranslation: "Translating reader metadata", qaRepair: "Repairing selected QA findings", qaRecheck: "Rechecking chapter QA", stageExecution: "Processing stage", summary: "Building story recap", audio: "Mastering chapter audio", audiobook: "Building audiobook", alignment: "Aligning narration to audio", subtitles: "Timing subtitles", video: "Rendering chapter video", videoExport: "Building combined video", scenes: "Planning chapter scenes", artwork: "Generating scene artwork", production: "Producing finished story", ttsQualityVerify: "Verifying TTS quality", ttsSegmentRegenerate: "Regenerating TTS segment" } as Record<string, string>)[job.type] ?? "Working";
   const modelBadge = [diagnostic?.provider, diagnostic?.model].filter(Boolean).join(" · ");
   const terminal = isTerminalJob(job);
   const title = terminal ? (job.status === "completed" ? `${label} — completed` : `${label} — ${job.status}`) : label;
@@ -4473,8 +4605,8 @@ export function JobConsole({ job, onUpdate, onClose, navigate, initialQaComparis
         <div className="job-minimized-info">
           {!terminal && <span className="live-dot" />}
           <b className="job-minimized-title">{label}</b>
-          {summaryArtworkDetail ? (
-            <span className="job-minimized-detail">{summaryArtworkDetail}</span>
+          {summaryView ? (
+            <span className="job-minimized-detail">{summaryView.detail}</span>
           ) : chapter != null ? (
             <span className="job-minimized-detail">
               Chapter {chapter}{stage ? ` · ${pretty(stage)}` : ""}
@@ -4514,9 +4646,19 @@ export function JobConsole({ job, onUpdate, onClose, navigate, initialQaComparis
             </button>
           </div>
         </div>
-        {artworkPercent !== undefined && artworkIndex !== undefined && artworkTotal !== undefined && artworkCompleted !== undefined ? (
-          <div className="job-progress job-progress-detailed" role="progressbar" aria-label={isSummaryReupscale ? "Summary artwork re-upscale progress" : "Summary artwork progress"} aria-valuemin={0} aria-valuemax={artworkTotal} aria-valuenow={artworkCompleted} aria-valuetext={`${artworkCompleted} of ${artworkTotal} artwork items complete; ${summaryArtworkProgress?.type.endsWith("completed") ? "scene finished" : `working on item ${artworkIndex}`}`}>
-            <span style={{ width: `${artworkPercent}%` }} />
+        {summaryView?.percent !== undefined ? (
+          <div
+            className="job-progress job-progress-detailed"
+            role="progressbar"
+            aria-label={summaryView.stageLabel === "Artwork upscaling" ? "Summary artwork re-upscale progress" : summaryView.stageLabel === "Artwork generation" ? "Summary artwork progress" : `${summaryView.title} progress`}
+            aria-valuemin={0}
+            aria-valuemax={summaryView.total ?? 100}
+            aria-valuenow={summaryView.completed ?? summaryView.percent}
+            aria-valuetext={summaryView.total !== undefined && summaryView.completed !== undefined
+              ? `${summaryView.completed} of ${summaryView.total} complete; ${summaryView.detail}`
+              : `${summaryView.percent}% complete; ${summaryView.detail}`}
+          >
+            <span style={{ width: `${summaryView.percent}%` }} />
           </div>
         ) : <div className="job-progress"><i /><i /><i /><i /><i /></div>}
         {diagnostic ? <div className="incident">
@@ -4542,7 +4684,7 @@ export function JobConsole({ job, onUpdate, onClose, navigate, initialQaComparis
             ? <details><summary>Issues reported by this attempt</summary><ul>{diagnostic.issues.slice(0, 3).map((issue, index) => <li key={`${issue.category}-${index}`}><b>{pretty(issue.category)}</b>{issue.message}</li>)}</ul></details>
             : <ul>{diagnostic.issues.slice(0, 3).map((issue, index) => <li key={`${issue.category}-${index}`}><b>{pretty(issue.category)}</b>{issue.message}</li>)}</ul>) : null}          <div className="incident-next"><small>Recommended next step</small><p>{diagnostic.recommendedAction}</p></div>
           <details><summary>Technical details</summary><p>{diagnostic.technicalDetails ?? "No additional provider details were supplied."}</p><small>{new Date(diagnostic.timestamp).toLocaleString()} · {diagnostic.id} · Job {job.id.slice(0, 8)}</small></details>
-        </div> : <p className={summaryArtworkDetail ? "job-artwork-detail" : undefined} aria-live={summaryArtworkDetail ? "polite" : undefined}>{actionError || job.error || (summaryArtworkDetail ? summaryArtworkDetail : chapter ? `Chapter ${chapter} · ${pretty(stage ?? "working")}${detail ? ` — ${detail}` : ""}` : pretty(job.status))}</p>}
+        </div> : <p className={summaryView ? "job-artwork-detail" : undefined} aria-live={summaryView ? "polite" : undefined}>{actionError || job.error || (summaryView ? summaryView.detail : chapter ? `Chapter ${chapter} · ${pretty(stage ?? "working")}${detail ? ` — ${detail}` : ""}` : pretty(job.status))}</p>}
         {jobWarnings.length > 0 && <ul className="job-warnings">{jobWarnings.map((warning, index) => <li key={index}>{warning}</li>)}</ul>}
         <div className="job-actions">
           {diagnostic && <button type="button" onClick={() => void copyDiagnostic()}>{copied ? "Copied" : "Copy details"}</button>}

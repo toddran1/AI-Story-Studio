@@ -686,8 +686,8 @@ describe("summary visual production", () => {
     const llmCalls = llm.calls.length; const ttsCalls = tts.calls; const structured = vi.mocked(llm.generateStructured).mock.calls.length;
     const result = await visuals.scenes("demo-story", id, { sceneCount: 2 });
     expect(result.scenes?.status).toBe("current"); expect(result.scenePlan?.scenes).toHaveLength(2);
-    // Stale audio is not a scene-generation dependency: estimated timing fallback is used.
-    expect(result.scenePlan?.timingMethod).toBe("estimated");
+    // An intact stale recording can still provide precise local word timing.
+    expect(result.scenePlan?.timingMethod).toBe("aligned");
     // Only the scene planner ran: no narration regeneration, no TTS regeneration, upstream stays stale.
     expect(vi.mocked(llm.generateStructured).mock.calls.length).toBe(structured + 1); expect(llm.calls.length).toBe(llmCalls);
     expect(tts.calls).toBe(ttsCalls);
@@ -737,6 +737,16 @@ describe("summary visual production", () => {
     expect(rendered.scenePlan?.scenes.at(-1)?.endSeconds).toBeCloseTo(produced.audio!.durationSeconds!, 3);
     const renderedScenes = render.mock.lastCall?.[0].sceneArtwork ?? [];
     expect(renderedScenes.reduce((total, scene) => total + scene.durationSeconds, 0)).toBeCloseTo(produced.audio!.durationSeconds!, 3);
+  });
+  it("updates timing from stale intact audio without regenerating saved scenes", async () => {
+    await produce();
+    await markStale("narration", "audio", "scenes");
+    const calls = llm.calls.length;
+    const refreshed = await visuals.scenes("demo-story", id, { timingOnly: true });
+    expect(llm.calls.length).toBe(calls);
+    expect(refreshed.scenePlan?.scenes.at(-1)?.endSeconds).toBeCloseTo(refreshed.audio!.durationSeconds!, 3);
+    expect(refreshed.scenePlan?.scenes).toHaveLength(2);
+    expect((await media.get("demo-story", id)).alignment?.mode).toBe("aligned");
   });
   it("renders from retained manually edited narration when it is stale", async () => {
     await produce();

@@ -126,8 +126,10 @@ export class SummaryMediaService {
     if (summary.audio?.status === "current" && (summary.tts?.status !== "current" || summary.audio.inputFingerprint !== input.audioFingerprint || await fileFingerprint(paths.audio) !== summary.audio.outputFingerprint)) summary.audio.status = "stale";
     // Alignment is tied to the exact mastered recording, not merely its duration.
     // A replacement recording of identical length still has different word timing.
-    if (summary.alignment && (summary.audio?.status !== "current" || summary.narration?.status !== "current" ||
-      summary.alignment.audioFingerprint !== summary.audio.outputFingerprint || summary.alignment.narrationFingerprint !== summary.narration.outputFingerprint)) summary.alignment = undefined;
+    if (summary.alignment && (!summary.audio?.outputFingerprint || !summary.narration?.outputFingerprint ||
+      summary.alignment.audioFingerprint !== summary.audio.outputFingerprint ||
+      summary.alignment.narrationFingerprint !== summary.narration.outputFingerprint ||
+      await fileFingerprint(paths.audio) !== summary.audio.outputFingerprint)) summary.alignment = undefined;
     if (summary.scenes?.status === "current" && (summary.narration?.status !== "current" ||
       summary.scenes.sourceFingerprint !== fingerprint(summary.narration.text) ||
       summary.scenes.configurationFingerprint !== fingerprint({ config: input.story.pipeline.scenePlanner, settings: input.story.scenes }) ||
@@ -275,13 +277,16 @@ export class SummaryMediaService {
 
   async audio(slug: string, id: string, raw: unknown = {}, progress?: (event: { phase: string; completed: number; total: number; detail?: string }) => void) {
     const { force } = summaryMediaInputSchema.parse(raw); let summary = await this.get(slug, id);
-    if (summary.narration?.status !== "current" && !(summary.narration?.manuallyEdited && summary.narration.text?.trim()))
+    if (summary.narration?.status !== "current" && !(summary.narration?.manuallyEdited && summary.narration.text?.trim())) {
+      progress?.({ phase: "narration", completed: 0, total: 2, detail: "Polishing summary narration" });
       summary = await this.narration(slug, id);
+    }
     const pronunciationStory = await loadStory(storyPaths(this.root, slug, 1).storyConfig);
     const pronunciationEntities = await loadPronunciationEntities(this.root, slug);
     const missing = pronunciationEntities.filter(entity => !entity.pronunciation).map(entity => ({ ...entity, pronunciation: { mode: "automatic" as const } }));
     const referenced = [...new Set(resolvePronunciations(summary.narration?.ttsText ?? summary.narration?.text ?? "", missing).map(occurrence => occurrence.entityId))];
     if (referenced.length) {
+      progress?.({ phase: "pronunciation", completed: 0, total: 2, detail: "Enriching pronunciation guides" });
       const base = storyBibleSchema.parse(await readJsonIfExists(storyPaths(this.root, slug, 1).bible) ?? emptyStoryBible());
       await enrichStoryPronunciations(this.root, slug, base, this.llms.forStage(pronunciationStory.pipeline.storyBible), pronunciationStory.pipeline.storyBible, pronunciationStory.sourceLanguage, referenced, false);
       summary = await this.get(slug, id);
@@ -291,7 +296,7 @@ export class SummaryMediaService {
     await mkdir(paths.directory, { recursive: true });
     try {
       if (force || summary.tts?.status !== "current") {
-        progress?.({ phase: "tts", completed: 0, total: 2 });
+        progress?.({ phase: "tts", completed: 0, total: 2, detail: "Generating audio · Preparing speech synthesis" });
         summary.tts = { status: "generating", inputFingerprint: input.ttsFingerprint, manuallyEdited: false, reviewRequired: false };
         await this.save(slug, summary);
         const config = input.story.pipeline.tts;
@@ -347,7 +352,7 @@ export class SummaryMediaService {
         if (summary.audio) summary.audio.status = "stale";
         await this.save(slug, summary);
       }
-      progress?.({ phase: "mastering", completed: 1, total: 2 });
+      progress?.({ phase: "mastering", completed: 1, total: 2, detail: "Mastering summary audio" });
       const inputs = await masteringInputs(paths.segments, paths.raw);
       const audioFingerprint = audioMasteringFingerprint(summary.tts!.outputFingerprint, input.story.audio, this.mastering.version, await inputFingerprints(inputs));
       const inheritedReviewRequired = summary.tts?.reviewRequired === true;
@@ -361,7 +366,7 @@ export class SummaryMediaService {
           manuallyEdited: false, reviewRequired: inheritedReviewRequired, provider: summary.tts!.provider, model: summary.tts!.model, voice: summary.tts!.voice,
           generatedAt: new Date().toISOString(), durationSeconds: probe.durationSeconds, bytes: (await stat(paths.audio)).size };
       } finally { await rm(temporary, { force: true }); }
-      progress?.({ phase: "complete", completed: 2, total: 2 }); return await this.save(slug, summary);
+      progress?.({ phase: "complete", completed: 2, total: 2, detail: "Summary audio complete" }); return await this.save(slug, summary);
     } catch (error) {
       const stage = summary.tts?.status === "generating" ? "tts" : "audio";
       summary[stage] = { ...summary[stage]!, status: "failed", error: error instanceof Error ? error.message : String(error) };
