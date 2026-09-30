@@ -288,7 +288,7 @@ describe("mature artwork styling in prompts", () => {
     await generateStoredArtwork({ root, story, chapter: 1, provider, sceneId: "scene-001" });
     expect(provider.calls).toHaveLength(1);
     expect(provider.calls[0]!.prompt).toContain("MATURE CHARACTER STYLING");
-    expect(provider.calls[0]!.prompt).toContain("never explicit or nude");
+    expect(provider.calls[0]!.prompt).toContain("Keep it tasteful — alluring and elegant.");
   });
 
   it("omits the mature styling block by default", async () => {
