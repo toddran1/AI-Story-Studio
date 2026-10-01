@@ -356,7 +356,7 @@ export class ChapterPipeline {
       if (JSON.stringify(chapter.quality) !== JSON.stringify(expectedQuality)) { chapter.quality = expectedQuality; await persist(); }
       if (qaResult && !options.qaRecoveryAttempted) {
         const issueCount = activeQaIssues(quality).filter((issue) => issue.severity === "warn" || issue.severity === "fail").length;
-        if (issueCount > 4) {
+        if (issueCount > 5) {
           logger.info({ event: "pipeline.qa.auto_recovery", story: options.story.slug, chapter: options.chapter, issueCount, threshold: 4,
             detail: `QA found ${issueCount} issues. Regenerating Translation, Narration, and QA once.` });
           const [savedEnglish, savedNarration, savedNarrationTts, savedQa] = await Promise.all([
