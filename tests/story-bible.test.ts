@@ -70,20 +70,74 @@ describe("Story Bible", () => {
     expect(normalized.relationships[0]).toMatchObject({ firstSeenChapter: 3, lastSeenChapter: 3 });
   });
 
-  it("supports large cumulative Story Bible datasets exceeding 2000 relationships without array size errors", () => {
-    const base = emptyStoryBible();
-    const relationships = Array.from({ length: 2500 }, (_, index) => ({
-      subject: `Entity ${index}`,
-      object: `Target ${index}`,
-      relationship: "allies with",
-      firstSeenChapter: 1,
-      lastSeenChapter: 1,
-    }));
-    const update = storyBibleUpdateSchema.parse({
-      relationships,
-      chapterSummary: "Large relationship update",
-    });
-    const merged = mergeStoryBible(base, update, 608);
-    expect(merged.relationships).toHaveLength(2500);
+  it("supports cumulative Story Bible relationships exceeding 2000", () => {
+    let bible = emptyStoryBible();
+
+    for (let batch = 0; batch < 11; batch++) {
+      const relationships = Array.from(
+        { length: 200 },
+        (_, index) => ({
+          subject: `Entity ${batch}-${index}`,
+          object: `Target ${batch}-${index}`,
+          relationship: "allies with",
+          firstSeenChapter: batch + 1,
+          lastSeenChapter: batch + 1,
+        })
+      );
+
+      const update = storyBibleUpdateSchema.parse({
+        relationships,
+        chapterSummary: `Chapter ${batch + 1}`,
+      });
+
+      bible = mergeStoryBible(bible, update, batch + 1);
+    }
+
+    expect(bible.relationships).toHaveLength(2200);
+  });
+
+  it("rejects a single Story Bible update with more than 2000 relationships", () => {
+    const relationships = Array.from(
+      { length: 2001 },
+      (_, index) => ({
+        subject: `Entity ${index}`,
+        object: `Target ${index}`,
+        relationship: "allies with",
+        firstSeenChapter: 1,
+        lastSeenChapter: 1,
+      })
+    );
+
+    expect(() =>
+      storyBibleUpdateSchema.parse({
+        relationships,
+        chapterSummary: "Oversized update",
+      })
+    ).toThrow();
+  });
+
+  it("supports cumulative Story Bible translationTerms exceeding 2000", () => {
+    let bible = emptyStoryBible();
+
+    for (let batch = 0; batch < 11; batch++) {
+      const translationTerms = Array.from(
+        { length: 200 },
+        (_, index) => ({
+          original: `term_${batch}_${index}`,
+          canonicalEnglish: `Term ${batch} ${index}`,
+          firstSeenChapter: batch + 1,
+          lastSeenChapter: batch + 1,
+        })
+      );
+
+      const update = storyBibleUpdateSchema.parse({
+        translationTerms,
+        chapterSummary: `Chapter ${batch + 1}`,
+      });
+
+      bible = mergeStoryBible(bible, update, batch + 1);
+    }
+
+    expect(bible.translationTerms).toHaveLength(2200);
   });
 });

@@ -97,9 +97,9 @@ export const visualEvidenceDecisionSchema = z.object({ field: visualEvidenceFiel
 export type VisualEvidenceDecision = z.infer<typeof visualEvidenceDecisionSchema>;
 
 export const storyBibleUpdateSchema = z.object({
-  characters: z.array(character).default([]), locations: z.array(namedEntity).default([]), factions: z.array(namedEntity).default([]), abilities: z.array(namedEntity).default([]),
-  classes: z.array(namedEntity).default([]), ranks: z.array(namedEntity).default([]), items: z.array(namedEntity).default([]), creatures: z.array(namedEntity).default([]), systemTerms: z.array(namedEntity).default([]),
-  relationships: z.array(relationship).default([]), translationTerms: z.array(translationTerm).default([]), timelineEvents: z.array(extractedTimelineEventSchema).default([]), visualObservations: z.array(extractedVisualObservationSchema).default([]), chapterSummary: z.string().min(1).max(20_000),
+  characters: z.array(character).max(2000).default([]), locations: z.array(namedEntity).max(2000).default([]), factions: z.array(namedEntity).max(2000).default([]), abilities: z.array(namedEntity).max(2000).default([]),
+  classes: z.array(namedEntity).max(2000).default([]), ranks: z.array(namedEntity).max(2000).default([]), items: z.array(namedEntity).max(2000).default([]), creatures: z.array(namedEntity).max(2000).default([]), systemTerms: z.array(namedEntity).max(2000).default([]),
+  relationships: z.array(relationship).max(2000).default([]), translationTerms: z.array(translationTerm).max(2000).default([]), timelineEvents: z.array(extractedTimelineEventSchema).max(2000).default([]), visualObservations: z.array(extractedVisualObservationSchema).max(2000).default([]), chapterSummary: z.string().min(1).max(20_000),
 });
 
 export const canonicalEntitySchema = z.object({
@@ -169,6 +169,9 @@ export const granularityAuditSchema = z.object({
 });
 export type GranularityAudit = z.infer<typeof granularityAuditSchema>;
 
+// Extraction updates are bounded to protect structured model output.
+// The persisted Story Bible overrides cumulative arrays below so long-running
+// stories can grow beyond the per-update limit.
 export const storyBibleSchema = storyBibleUpdateSchema.extend({
   characters: z.array(character).default([]), locations: z.array(namedEntity).default([]), factions: z.array(namedEntity).default([]), abilities: z.array(namedEntity).default([]),
   classes: z.array(namedEntity).default([]), ranks: z.array(namedEntity).default([]), items: z.array(namedEntity).default([]), creatures: z.array(namedEntity).default([]), systemTerms: z.array(namedEntity).default([]),
