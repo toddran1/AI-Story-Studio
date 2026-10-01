@@ -18,7 +18,7 @@ import { withRetry } from "../batch/retry.js";
 import { z } from "zod";
 import { retryConfigSchema } from "../batch/types.js";
 import { resolveVisualEntities } from "./identity.js";
-import { sceneArtworkContentState, sceneEditableState } from "./editable-state.js";
+import { sceneArtworkContentState, sceneEditableState, sceneEditState } from "./editable-state.js";
 import { planScenes, SCENE_PLANNER_PROMPT_VERSION } from "./planner.js";
 import { normalizeSceneTiming, validateSceneCoverage } from "./timing.js";
 import { retimeScenesToDuration } from "./production.js";
@@ -60,7 +60,7 @@ export async function planStoredScenes(options: { root: string; story: Story; ch
       entityIds: resolveVisualEntities(scene.characters, fullBible.canonicalEntities).map((e) => e.id),
     })), audioDurationSeconds, options.story.scenes);
     const previousById = new Map(cached?.success ? cached.data.scenes.map((scene) => [scene.id, scene]) : []);
-    for (const scene of scenes) { const previous = previousById.get(scene.id); if (previous && fingerprint(sceneArtworkContentState(previous)) === fingerprint(sceneArtworkContentState(scene))) scene.artwork = previous.artwork; }
+    for (const scene of scenes) { const previous = previousById.get(scene.id); if (!previous) continue; scene.videoTreatment = previous.videoTreatment; if (fingerprint(sceneArtworkContentState(previous)) === fingerprint(sceneArtworkContentState(scene))) scene.artwork = previous.artwork; }
     validateSceneCoverage(scenes, audioDurationSeconds, options.story.scenes); const now = new Date().toISOString(); const manifest = sceneManifestSchema.parse({ version: 1, chapter: options.chapter, durationSeconds: audioDurationSeconds, planningFingerprint: inputFingerprint, planner: { provider: config.provider, model: config.model, promptVersion: SCENE_PLANNER_PROMPT_VERSION }, manualRevision: 0, manuallyEdited: false, createdAt: cached?.success ? cached.data.createdAt : now, updatedAt: now, scenes });
     await writeArtworkOutputManifest(options.root, options.story.slug, options.chapter, manifest); const outputFingerprint = await fileFingerprint(paths.scenesManifest); chapter.stages.scenePlanning = { ...chapter.stages.scenePlanning, status: "complete", outputFingerprint, completedAt: now, durationMs: Date.now() - started, usage: result.usage }; chapter.scenes = { total: scenes.length, generated: scenes.filter((scene) => scene.artwork.status === "complete").length, approved: scenes.filter((scene) => scene.artwork.review === "approved").length }; chapter.stages.artwork = { status: "pending" }; chapter.stages.video = { status: "pending" }; chapter.video = undefined; await persistChapter(paths.chapterMeta, chapter); await persistChapterVisualContinuity({ root: options.root, slug: options.story.slug, chapter: options.chapter, manifest }); return { manifest, reused: false, warnings };
   } catch (error) {
@@ -106,12 +106,14 @@ export async function updateStoredSceneManifest(options: { root: string; story: 
     return fingerprint(oldScene) === fingerprint(newScene);
   });
   if (presentationOnly) {
+    const treatmentChanged = scenes.some((scene, index) => sceneEditFingerprint(scene) !== sceneEditFingerprint(manifest.scenes[index]!));
     const updated = sceneManifestSchema.parse({ ...manifest, scenes });
     await atomicWriteJson(paths.scenesManifest, updated);
     const rawChapter = await readJsonIfExists<Chapter>(paths.chapterMeta);
     if (rawChapter) {
       const chapter = chapterSchema.parse(rawChapter);
       if (chapter.stages.scenePlanning.status === "complete") chapter.stages.scenePlanning.outputFingerprint = await streamedFileFingerprint(paths.scenesManifest);
+      if (treatmentChanged && chapter.stages.video.status === "complete") chapter.stages.video = { ...chapter.stages.video, status: "pending", staleReason: "Scene video treatment changed; render the video again." };
       await persistChapter(paths.chapterMeta, chapter);
     }
     return updated;
@@ -132,7 +134,7 @@ export async function updateStoredScene(options: { root: string; story: Story; c
   const index = manifest.scenes.findIndex((item) => item.id === options.sceneId);
   if (index < 0) throw new SceneError(`Scene ${options.sceneId} was not found`);
   const previous = manifest.scenes[index]!;
-  if (sceneContentFingerprint(previous) !== options.expectedFingerprint) throw new SceneError("Scene changed since it was opened. Refresh before saving this scene.");
+  if (sceneEditFingerprint(previous) !== options.expectedFingerprint) throw new SceneError("Scene changed since it was opened. Refresh before saving this scene.");
   const input = sceneSchema.parse(options.scene);
   if (input.id !== options.sceneId) throw new SceneError("Scene ID cannot change during a single-scene edit");
   const replacement = sceneSchema.parse({
@@ -202,7 +204,7 @@ export async function applyStoredSceneRegeneration(options: { root: string; stor
   if (sceneProposalSourceFingerprint(scene, continuityState) !== proposal.sourceFingerprint) throw new SceneError("This scene changed since the proposal was generated. Generate a new proposal before applying it.");
   const proposed = proposal.mode === "image_prompt" ? { visualPrompt: proposal.proposed.visualPrompt } : proposal.proposed;
   const replacement = sceneSchema.parse({ ...scene, ...proposed });
-  return updateStoredScene({ ...options, scene: replacement, expectedFingerprint: sceneContentFingerprint(scene) });
+  return updateStoredScene({ ...options, scene: replacement, expectedFingerprint: sceneEditFingerprint(scene) });
 }
 
 export function scenePlanningFingerprint(narration: string, bible: string, audio: string | undefined, settings: Story["scenes"], provider: string, model: string, continuity = "none") { return fingerprint({ narration, bible, audio, settings, provider, model, continuity, promptVersion: SCENE_PLANNER_PROMPT_VERSION }); }
@@ -211,6 +213,7 @@ export function productionSceneFingerprint(plan: { scenes: Scene[]; [key: string
   return fingerprint({ ...plan, updatedAt: undefined, scenes: plan.scenes.map(({ artwork, videoTreatment, ...scene }) => scene) });
 }
 export function sceneContentFingerprint(scene: Scene) { return fingerprint(sceneEditableState(scene)); }
+export function sceneEditFingerprint(scene: Scene) { return fingerprint(sceneEditState(scene)); }
 async function invalidateAfterSceneEdit(root: string, slug: string, chapterNumber: number, path: string, manifest: SceneManifest) {
   const raw = await readJsonIfExists<Chapter>(path); if (!raw) return;
   const chapter = chapterSchema.parse(raw);

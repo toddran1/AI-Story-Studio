@@ -99,7 +99,7 @@ describe("summary visual production", () => {
   const sceneEdit = (scene: NonNullable<Awaited<ReturnType<typeof produce>>["scenePlan"]>["scenes"][number], patch: Record<string, unknown> = {}) => ({ scene: {
     summary: scene.summary, visualPrompt: scene.visualPrompt, characters: scene.characters, entityIds: scene.entityIds ?? [],
     location: scene.location, startSeconds: scene.startSeconds, endSeconds: scene.endSeconds,
-    disabled: scene.disabled, importance: scene.importance, direction: scene.direction, overrides: scene.overrides,
+    disabled: scene.disabled, importance: scene.importance, direction: scene.direction, overrides: scene.overrides, videoTreatment: scene.videoTreatment,
     ...patch,
   } });
   it("resolves story, summary and scene art direction with safe fallback for deleted presets", async () => {
@@ -629,7 +629,7 @@ describe("summary visual production", () => {
     const before = await produce(); const original = structuredClone(before.scenePlan!.scenes[0]!);
     const direction = { ...original.direction!, composition: "symmetrical" as const, useLocationReferences: false };
     const overrides = { ...original.overrides!, customVisualPrompt: "Keep the cracked red lantern", wardrobeOverrides: { "Malakai": "black travel cloak" } };
-    await visuals.updateScene("demo-story", id, original.id, sceneEdit(original, { direction, overrides }));
+    await visuals.updateScene("demo-story", id, original.id, sceneEdit(original, { direction, overrides, videoTreatment: { motion: "pan_right" } }));
     const configured = (await summaries.get("demo-story", id)).scenePlan!.scenes[0]!;
     const storedBefore = await readFile(summaryPath(root, "demo-story", id), "utf8");
     let regenerationInput = "";
@@ -645,6 +645,7 @@ describe("summary visual production", () => {
     const applied = await visuals.applySceneRegeneration("demo-story", id, original.id, fresh);
     expect(applied.scenePlan!.scenes[0]).toMatchObject({ summary: newer.scenePlan!.scenes[0]!.summary, startSeconds: original.startSeconds, endSeconds: original.endSeconds, narrationText: original.narrationText, visualPrompt: "A tighter cinematic angle at the entrance" });
     expect(applied.scenePlan!.scenes[0]!.artwork.versions).toEqual(original.artwork.versions); expect(applied.scenePlan!.scenes[0]!.direction).toMatchObject(direction); expect(applied.scenePlan!.scenes[0]!.overrides).toMatchObject(overrides);
+    expect(applied.scenePlan!.scenes[0]!.videoTreatment).toEqual({ motion: "pan_right" });
     expect((await visuals.sceneArtworkGrounding("demo-story", id))[0]!.status).toBe("stale");
   });
   it("surfaces image/video failures, preserves successful work and rejects mismatched video duration", async () => {
@@ -676,6 +677,15 @@ describe("summary visual production", () => {
     const reset = await visuals.updateScene("demo-story", id, scene.id, sceneEdit(bulk.scenePlan!.scenes[0]!, { videoTreatment: undefined }));
     expect(reset.scenePlan!.scenes[0]!.videoTreatment).toBeUndefined();
     expect(reset.scenes?.outputFingerprint).toBe(before.scenes?.outputFingerprint);
+  });
+  it("retains treatment for surviving summary scenes after full regeneration", async () => {
+    await media.audio("demo-story", id);
+    const first = await visuals.scenes("demo-story", id, { sceneCount: 2 });
+    const original = first.scenePlan!.scenes[0]!;
+    await visuals.updateScene("demo-story", id, original.id, sceneEdit(original, { videoTreatment: { motion: "pan_left" } }));
+    const regenerated = await visuals.scenes("demo-story", id, { sceneCount: 2, force: true });
+    expect(regenerated.scenePlan!.scenes[0]!.videoTreatment).toEqual({ motion: "pan_left" });
+    expect(regenerated.scenePlan!.scenes[1]!.videoTreatment).toBeUndefined();
   });
   it("returns actionable nonzero CLI failure for unresolved Produce profiles without image or video calls", async () => {
     const planned = await produce(); const entityId = planned.scenePlan!.scenes[0]!.entityIds![0]!;

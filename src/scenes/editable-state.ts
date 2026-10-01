@@ -23,3 +23,8 @@ export function sceneArtworkContentState(scene: Scene) {
   const { disabled: _disabled, ...state } = sceneEditableState(scene);
   return state;
 }
+
+/** Optimistic edit state includes presentation, unlike artwork/continuity state. */
+export function sceneEditState(scene: Scene) {
+  return { ...sceneEditableState(scene), videoTreatment: scene.videoTreatment };
+}

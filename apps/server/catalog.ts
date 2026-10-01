@@ -24,7 +24,7 @@ import { exportManifestSchema } from "../../src/audio/audiobook.js";
 import { videoExportManifestSchema } from "../../src/video/video-export.js";
 import { chapterMusicExportManifestSchema, chapterMusicExportPath } from "../../src/music/chapter-export.js";
 import { SceneManifest, artworkSettingsSchema, sceneManifestSchema, sceneSettingsSchema } from "../../src/scenes/types.js";
-import { sceneContentFingerprint } from "../../src/scenes/manifest.js";
+import { sceneContentFingerprint, sceneEditFingerprint } from "../../src/scenes/manifest.js";
 import { getArtworkOutputReadRevision } from "../../src/artwork/output-index-revision.js";
 import { resolveChapterVisualContinuity, ResolvedSceneContinuity } from "../../src/visual-canon/continuity.js";
 import { resolveSceneVisualEntity } from "../../src/scenes/identity.js";
@@ -1424,7 +1424,7 @@ export async function getScenesChapter(root: string, slug: string, chapter: numb
         const continuityEntry = continuityByScene.get(scene.id);
         return {
           ...scene,
-          contentFingerprint: sceneContentFingerprint(scene),
+          contentFingerprint: sceneContentFingerprint(scene), editFingerprint: sceneEditFingerprint(scene),
           resolvedCharacters,
           imageUrl: hasMain
             ? `/api/stories/${slug}/chapters/${chapterNumber}/scenes/${scene.id}.png`

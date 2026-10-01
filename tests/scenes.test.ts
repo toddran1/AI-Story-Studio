@@ -7,7 +7,8 @@ import { ImageProviderRouter } from "../src/artwork/router.js";
 import { ImageProvider } from "../src/artwork/provider.js";
 import { chapterSchema } from "../src/domain/chapter.js";
 import { LLMProvider } from "../src/llm/provider.js";
-import { applyStoredSceneRegeneration, planStoredScenes, previewStoredSceneRegeneration, sceneContentFingerprint, scenePlanningFingerprint, updateStoredScene, updateStoredSceneManifest } from "../src/scenes/manifest.js";
+import { applyStoredSceneRegeneration, planStoredScenes, previewStoredSceneRegeneration, sceneContentFingerprint, sceneEditFingerprint, scenePlanningFingerprint, updateStoredScene, updateStoredSceneManifest } from "../src/scenes/manifest.js";
+import { getChapterStatusReadModel, invalidateChapterStatusDerivedReads } from "../apps/server/catalog.js";
 import { sceneProposalSourceFingerprint } from "../src/scenes/regeneration.js";
 import { SCENE_PLANNER_PROMPT_VERSION, scenePlannerInstructions } from "../src/scenes/prompts.js";
 import { normalizeSceneTiming, validateSceneCoverage } from "../src/scenes/timing.js";
@@ -280,6 +281,55 @@ describe("artwork generation", () => {
 });
 
 describe("scene artwork video selection", () => {
+  it("keeps presentation through full replanning, but never gives it to a new scene", async () => {
+    const { root, story, paths } = await fixture();
+    const planned = await planStoredScenes({ root, story, chapter: 1, provider: new SceneLLM() });
+    const scenes = structuredClone(planned.manifest.scenes);
+    scenes[0]!.videoTreatment = { motion: "pan_left" };
+    await updateStoredSceneManifest({ root, story, chapter: 1, scenes });
+    const provider = new SceneLLM();
+    provider.generateStructured = async (request: any) => ({ value: request.schema.parse({ scenes: [
+      { summary: "Replanned observatory", startSeconds: 0, endSeconds: 12, characters: ["Mara"], visualPrompt: "New observatory angle", importance: "major" },
+      { summary: "Replanned stars", startSeconds: 12, endSeconds: 20, characters: ["Mara"], visualPrompt: "Different stars", importance: "standard" },
+      { summary: "New final beat", startSeconds: 20, endSeconds: 30, characters: ["Mara"], visualPrompt: "An unfamiliar doorway", importance: "standard" },
+    ] }) });
+    const replanned = await planStoredScenes({ root, story: { ...story, scenes: { ...story.scenes, targetDurationSeconds: 10 } }, chapter: 1, provider, force: true });
+    expect(replanned.manifest.scenes[0]!.videoTreatment).toEqual({ motion: "pan_left" });
+    expect(replanned.manifest.scenes[2]!.videoTreatment).toBeUndefined();
+    expect(sceneManifestSchema.parse(JSON.parse(await readFile(paths.scenesManifest, "utf8"))).scenes[0]!.videoTreatment).toEqual({ motion: "pan_left" });
+  });
+  it("keeps edit concurrency separate from artwork and rejects a second stale treatment save", async () => {
+    const { root, story } = await fixture();
+    const scene = (await planStoredScenes({ root, story, chapter: 1, provider: new SceneLLM() })).manifest.scenes[0]!;
+    const changed = { ...scene, videoTreatment: { motion: "pan_left" as const } };
+    expect(sceneEditFingerprint(changed)).not.toBe(sceneEditFingerprint(scene));
+    expect(sceneContentFingerprint(changed)).toBe(sceneContentFingerprint(scene));
+    await updateStoredScene({ root, story, chapter: 1, sceneId: scene.id, scene: changed, expectedFingerprint: sceneEditFingerprint(scene) });
+    await expect(updateStoredScene({ root, story, chapter: 1, sceneId: scene.id, scene: { ...scene, videoTreatment: { motion: "zoom_out" } }, expectedFingerprint: sceneEditFingerprint(scene) })).rejects.toThrow("changed since it was opened");
+  });
+  it("retains the old chapter MP4 while presentation becomes stale and rerenders current", async () => {
+    const { root, story, paths } = await fixture();
+    const videoStory = { ...story, video: { ...story.video, subtitleMode: "none" as const } };
+    await planStoredScenes({ root, story: videoStory, chapter: 1, provider: new SceneLLM() });
+    await generateStoredArtwork({ root, story: videoStory, chapter: 1, provider: new FakeImages() });
+    const manifest = sceneManifestSchema.parse(JSON.parse(await readFile(paths.scenesManifest, "utf8")));
+    for (const scene of manifest.scenes) scene.artwork.review = "approved";
+    await atomicWriteJson(paths.scenesManifest, manifest);
+    const processor = new CaptureVideo();
+    await renderStoredChapterVideo({ root, story: videoStory, chapter: 1, processor });
+    expect((await getChapterStatusReadModel(root, story.slug))[0]).toMatchObject({ video: "complete", videoStale: false, videoAvailable: true });
+    const previousVideo = await readFile(paths.video);
+    const scene = sceneManifestSchema.parse(JSON.parse(await readFile(paths.scenesManifest, "utf8"))).scenes[0]!;
+    await updateStoredScene({ root, story: videoStory, chapter: 1, sceneId: scene.id, scene: { ...scene, videoTreatment: { motion: "still" } }, expectedFingerprint: sceneEditFingerprint(scene) });
+    await invalidateChapterStatusDerivedReads(root, story.slug);
+    expect(await readFile(paths.video)).toEqual(previousVideo);
+    expect((await getChapterStatusReadModel(root, story.slug))[0]).toMatchObject({ video: "stale", videoStale: true, videoAvailable: true, scenePlanning: "complete", artwork: "complete", audioMastering: "complete" });
+    const staleChapter = chapterSchema.parse(JSON.parse(await readFile(paths.chapterMeta, "utf8")));
+    expect(staleChapter.stages.subtitles.status).toBe("pending");
+    await renderStoredChapterVideo({ root, story: videoStory, chapter: 1, processor });
+    await invalidateChapterStatusDerivedReads(root, story.slug);
+    expect((await getChapterStatusReadModel(root, story.slug))[0]).toMatchObject({ video: "complete", videoStale: false });
+  });
   it("changes only the chapter video input when a scene treatment is edited", async () => {
     const { root, story, paths } = await fixture();
     await planStoredScenes({ root, story, chapter: 1, provider: new SceneLLM() });
@@ -294,7 +344,7 @@ describe("scene artwork video selection", () => {
     expect(chapter.stages.scenePlanning.status).toBe("complete");
     expect(chapter.stages.artwork.status).toBe("complete");
     expect(result.scenes[0]!.videoTreatment?.motion).toBe("pan_left");
-    const reset = await updateStoredScene({ root, story, chapter: 1, sceneId: scene.id, scene: { ...result.scenes[0], videoTreatment: undefined }, expectedFingerprint: sceneContentFingerprint(result.scenes[0]!) });
+    const reset = await updateStoredScene({ root, story, chapter: 1, sceneId: scene.id, scene: { ...result.scenes[0], videoTreatment: undefined }, expectedFingerprint: sceneEditFingerprint(result.scenes[0]!) });
     expect(reset.scenes[0]!.videoTreatment).toBeUndefined();
     expect(reset.scenes[0]!.artwork.imageFingerprint).toBe(scene.artwork.imageFingerprint);
   });

@@ -376,7 +376,7 @@ export class SummaryVisualService {
     let summary = onlyTiming ? before : await this.media.scenes(slug, id, options);
     if (before.scenePlan && summary.scenePlan && !onlyTiming) {
       const [oldContinuity, nextContinuity] = await Promise.all([this.sceneContinuity(slug, id, before.scenePlan.scenes), this.sceneContinuity(slug, id, summary.scenePlan.scenes)]);
-      for (const scene of summary.scenePlan.scenes) { const previous = before.scenePlan.scenes.find((item) => item.id === scene.id); if (previous) { const oldVisual = oldContinuity.get(previous.id), nextVisual = nextContinuity.get(scene.id); const oldInput = await this.imageInput(slug, id, previous, oldVisual?.text, oldVisual?.decision, before.artDirectionOverride, Math.max(...before.chapters)); const nextInput = await this.imageInput(slug, id, scene, nextVisual?.text, nextVisual?.decision, summary.artDirectionOverride, Math.max(...summary.chapters)); if (oldInput.inputFingerprint === nextInput.inputFingerprint || previous.artwork.review === "approved" || previous.artwork.manuallyEdited) scene.artwork = previous.artwork; } }
+      for (const scene of summary.scenePlan.scenes) { const previous = before.scenePlan.scenes.find((item) => item.id === scene.id); if (previous) { scene.videoTreatment = previous.videoTreatment; const oldVisual = oldContinuity.get(previous.id), nextVisual = nextContinuity.get(scene.id); const oldInput = await this.imageInput(slug, id, previous, oldVisual?.text, oldVisual?.decision, before.artDirectionOverride, Math.max(...before.chapters)); const nextInput = await this.imageInput(slug, id, scene, nextVisual?.text, nextVisual?.decision, summary.artDirectionOverride, Math.max(...summary.chapters)); if (oldInput.inputFingerprint === nextInput.inputFingerprint || previous.artwork.review === "approved" || previous.artwork.manuallyEdited) scene.artwork = previous.artwork; } }
     }
     if (audioDuration) summary = await this.alignWithPlan(slug, summary, progress);
     if (!summary.scenePlan || !summary.narration?.text) throw new Error("Summary scene plan is missing");
@@ -475,6 +475,7 @@ export class SummaryVisualService {
       summary: scene.summary, characters: scene.characters, entityIds: scene.entityIds ?? [],
       location: scene.location, startSeconds: scene.startSeconds, endSeconds: scene.endSeconds,
       disabled: scene.disabled, importance: scene.importance, direction: scene.direction, overrides: scene.overrides,
+      videoTreatment: scene.videoTreatment,
       ...proposed,
     } });
   }

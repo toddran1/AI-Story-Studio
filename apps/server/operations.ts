@@ -1943,12 +1943,14 @@ export class StudioOperations {
     }
   }
 
-  async updateScenes(slug: string, chapter: number, scenes: unknown) { slugSchema.parse(slug); return withStoryLock(this.root, slug, "manual scene edit", async () => { const story = await loadStory(storyPaths(this.root, slug, chapter).storyConfig); return updateStoredSceneManifest({ root: this.root, story, chapter, scenes }); }); }
+  async updateScenes(slug: string, chapter: number, scenes: unknown) { slugSchema.parse(slug); return withStoryLock(this.root, slug, "manual scene edit", async () => { const story = await loadStory(storyPaths(this.root, slug, chapter).storyConfig); const result = await updateStoredSceneManifest({ root: this.root, story, chapter, scenes }); await invalidateChapterStatusDerivedReads(this.root, slug); return result; }); }
   async updateScene(slug: string, chapter: number, sceneId: string, scene: unknown, expectedFingerprint: string) {
     slugSchema.parse(slug);
     return withStoryLock(this.root, slug, "manual single scene edit", async () => {
       const story = await loadStory(storyPaths(this.root, slug, chapter).storyConfig);
-      return updateStoredScene({ root: this.root, story, chapter, sceneId, scene, expectedFingerprint });
+      const result = await updateStoredScene({ root: this.root, story, chapter, sceneId, scene, expectedFingerprint });
+      await invalidateChapterStatusDerivedReads(this.root, slug);
+      return result;
     });
   }
   async previewChapterSceneRegeneration(slug: string, chapter: number, sceneId: string, mode: unknown) {
@@ -1961,7 +1963,9 @@ export class StudioOperations {
     slugSchema.parse(slug);
     return withStoryLock(this.root, slug, "chapter scene regeneration apply", async () => {
       const story = await loadStory(storyPaths(this.root, slug, chapter).storyConfig);
-      return applyStoredSceneRegeneration({ root: this.root, story, chapter, sceneId, proposal });
+      const result = await applyStoredSceneRegeneration({ root: this.root, story, chapter, sceneId, proposal });
+      await invalidateChapterStatusDerivedReads(this.root, slug);
+      return result;
     });
   }
   async updateSceneContinuity(slug: string, chapter: number, sceneId: string, raw: unknown) {

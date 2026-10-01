@@ -443,6 +443,7 @@ export type VisualContinuityOverrideEntryInput = {
 export type Scene = {
   id: string;
   contentFingerprint?: string;
+  editFingerprint?: string;
   summary: string;
   startSeconds: number;
   endSeconds: number;

@@ -55,4 +55,18 @@ describe("video timeline editing", () => {
     expect(ref.current?.currentTime).toBe(11);
     await act(async () => root.unmount()); host.remove();
   });
+
+  it("reviews retimed chapter scenes without saving derived timing into the plan", async () => {
+    const scenes = [scene(1, 0, 8, { videoTreatment: { motion: "pan_left" } }), scene(2, 8, 16)];
+    const host = document.createElement("div"); document.body.append(host);
+    const root = createRoot(host); const ref = createRef<HTMLVideoElement>();
+    let saved: Scene | undefined;
+    await act(async () => { root.render(<><video ref={ref} /><VideoTimelineEditor scenes={scenes} savedScenes={[scene(1, 0, 8), scenes[1]!]} settings={settings} onChange={() => undefined} onSaveScene={(value) => { saved = value; }} onSaveAll={() => undefined} videoRef={ref} currentTime={4} playbackTimings={{ "scene-001": { startSeconds: 0, endSeconds: 4 }, "scene-002": { startSeconds: 4, endSeconds: 10 } }} /></>); });
+    expect(host.querySelector(".video-scene-card.active")?.textContent).toContain("Scene 2");
+    await act(async () => { (host.querySelector('[aria-label="Seek video to scene-002"]') as HTMLButtonElement).click(); });
+    expect(ref.current?.currentTime).toBe(4);
+    await act(async () => { (host.querySelector(".video-scene-card .button.primary") as HTMLButtonElement).click(); });
+    expect(saved?.endSeconds).toBe(8);
+    await act(async () => root.unmount()); host.remove();
+  });
 });
