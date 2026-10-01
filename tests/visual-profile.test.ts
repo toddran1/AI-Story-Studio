@@ -463,16 +463,22 @@ describe("Visual Entity Profiles", () => {
   it("merges visual profiles when entities are merged", async () => {
     const targetId = "ent_aaaaaaaaaaaaaaaaaaaaaaaa";
     const sourceId = "ent_bbbbbbbbbbbbbbbbbbbbbbbb";
+    const now = new Date().toISOString();
+    const reference = (entityId: string) => ({ id: "shared-ref", entityId, imagePath: "shared-ref.png", role: "primary_reference" as const, createdAt: now, source: "uploaded" as const, approved: true });
 
     await updateVisualProfile(root, slug, targetId, {
       appearance: "Main Hero appearance",
       visualPrompt: "hero prompt",
       status: "approved",
+      appearanceEras: [{ id: "target-era", name: "Later hero", startChapter: 10, status: "approved", appearance: "silver hair", visualPrompt: "", referenceIds: [] }],
+      references: [reference(targetId)],
     });
     await updateVisualProfile(root, slug, sourceId, {
       appearance: "Alias appearance notes",
       notes: "Secondary info from alias",
       negativePrompt: "low quality",
+      appearanceEras: [{ id: "source-era", name: "Alias look", startChapter: 12, status: "approved", appearance: "red hair", visualPrompt: "", referenceIds: ["shared-ref"] }],
+      references: [reference(sourceId)],
     });
 
     await handleEntityMerge(root, slug, targetId, [sourceId]);
@@ -480,9 +486,30 @@ describe("Visual Entity Profiles", () => {
     const targetProfile = await getVisualProfile(root, slug, targetId);
     expect(targetProfile?.notes).toContain("Secondary info from alias");
     expect(targetProfile?.negativePrompt).toContain("low quality");
+    expect(targetProfile?.appearanceEras).toMatchObject([{ id: "target-era", status: "approved" }, { id: "source-era", status: "draft" }]);
+    const importedReferenceId = targetProfile?.appearanceEras?.[1]?.referenceIds[0];
+    expect(importedReferenceId).toBeTruthy();
+    expect(importedReferenceId).not.toBe("shared-ref");
+    expect(targetProfile?.references.some((item) => item.id === importedReferenceId)).toBe(true);
 
     const allProfiles = await loadVisualProfiles(root, slug);
     expect(sourceId in allProfiles).toBe(false);
+  });
+
+  it("keeps primary references separate by appearance era and removes deleted links", async () => {
+    const now = new Date().toISOString();
+    const reference = (id: string) => ({ id, entityId, imagePath: `${id}.png`, role: "general_reference" as const, createdAt: now, source: "uploaded" as const, approved: true });
+    await updateVisualProfile(root, slug, entityId, {
+      appearance: "Test character",
+      references: [reference("base"), reference("later")],
+      appearanceEras: [{ id: "later-era", name: "Later", startChapter: 10, status: "approved", appearance: "silver hair", visualPrompt: "", referenceIds: ["later"] }],
+    });
+    await approveVisualReference(root, slug, entityId, "base", true);
+    const approved = await approveVisualReference(root, slug, entityId, "later", true);
+    expect(approved.references.filter((item) => item.role === "primary_reference")).toHaveLength(2);
+    const deleted = await deleteVisualReferenceImage(root, slug, entityId, "later");
+    expect(deleted.profile.appearanceEras?.[0]?.referenceIds).toEqual([]);
+    expect(deleted.profile.references[0]?.role).toBe("primary_reference");
   });
 
   it("demotes an approved profile to draft when demoted in Story Bible", async () => {

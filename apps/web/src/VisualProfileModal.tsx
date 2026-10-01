@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from "react";
+import { VisualAppearanceEras } from "./VisualAppearanceEras.js";
 import {
   VisualEntityProfile,
   VisualRole,
@@ -153,7 +154,7 @@ export function VisualProfileModal({
   const [referenceZoom, setReferenceZoom] = useState(1);
   const [visualProfilePolicy, setVisualProfilePolicy] = useState<"prompt" | "skip">("prompt");
   const [error, setError] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<"appearance" | "details" | "references">("appearance");
+  const [activeTab, setActiveTab] = useState<"appearance" | "details" | "eras" | "references">("appearance");
   const [uploadRole, setUploadRole] = useState<VisualRole>("general_reference");
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -500,6 +501,12 @@ export function VisualProfileModal({
             Specific Visual Traits{completeness ? ` · ${completeness.coreComplete}/${completeness.coreTotal}` : ""}
           </button>
           <button
+            className={`tab-btn ${activeTab === "eras" ? "active" : ""}`}
+            onClick={() => setActiveTab("eras")}
+          >
+            Appearance eras ({profile.appearanceEras?.length ?? 0})
+          </button>
+          <button
             className={`tab-btn ${activeTab === "references" ? "active" : ""}`}
             onClick={() => setActiveTab("references")}
           >
@@ -508,7 +515,8 @@ export function VisualProfileModal({
         </div>
 
         <div className="modal-body">
-              {proposal && activeTab !== "references" && (
+          {activeTab === "eras" && <VisualAppearanceEras profile={profile} onChange={setProfile} />}
+              {proposal && activeTab !== "references" && activeTab !== "eras" && (
                 <details className="visual-proposal-panel" open={proposalExpanded} onToggle={(event) => setProposalExpanded(event.currentTarget.open)}>
                   <summary>AI visual proposal · {selectedProposalFields.length} selected</summary>
                   {proposal.rationale && <p className="hint-text">{proposal.rationale}</p>}

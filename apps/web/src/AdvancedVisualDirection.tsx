@@ -37,6 +37,7 @@ export function AdvancedVisualDirection({ source, direction, overrides, artDirec
     <option value="">Automatic</option>{choices[key].map((value) => <option key={value} value={value}>{title(value)}</option>)}
   </select></label>;
   const wardrobe = Object.entries(overrides?.wardrobeOverrides ?? {}).map(([name, outfit]) => `${name}: ${outfit}`).join("\n");
+  const appearanceEras = Object.entries(overrides?.appearanceEraOverrides ?? {}).map(([name, eraId]) => `${name}: ${eraId}`).join("\n");
   const expressions = Object.entries(direction?.characterExpressions ?? {}).map(([name, expression]) => `${name}: ${expression}`).join("\n");
   const parseLines = (value: string) => Object.fromEntries(value.split("\n").map((line) => {
     const divider = line.indexOf(":"); return divider > 0 ? [line.slice(0, divider).trim(), line.slice(divider + 1).trim()] : ["", ""];
@@ -58,6 +59,8 @@ export function AdvancedVisualDirection({ source, direction, overrides, artDirec
     ] as const).map(([key, label]) => <label key={key}><input type="checkbox" disabled={disabled} checked={direction?.[key] !== false} onChange={(event) => onDirection({ [key]: event.target.checked })} /> {label}</label>)}</div>
     <label>Character expressions<textarea disabled={disabled} value={expressions} onChange={(event) => onDirection({ characterExpressions: parseLines(event.target.value) })} /><small>One per line: Character: expression.</small></label>
     <label>Wardrobe / equipment overrides<textarea disabled={disabled} value={wardrobe} onChange={(event) => onOverrides({ wardrobeOverrides: parseLines(event.target.value) })} /><small>One per line: Character: outfit or equipment detail.</small></label>
+    <label>Appearance era overrides<textarea disabled={disabled} value={appearanceEras} onChange={(event) => onOverrides({ appearanceEraOverrides: parseLines(event.target.value) })} /><small>For a flashback, enter one per line: Character: approved era ID. Find the ID in the Visual Profile’s Appearance eras tab.</small></label>
+    <label>Appearance chapter<input type="number" min="1" step="1" disabled={disabled} value={overrides?.appearanceChapter ?? ""} onChange={(event) => onOverrides({ appearanceChapter: event.target.value ? Number(event.target.value) : undefined })} /><small>Optional chapter to use for historical looks in this scene, including summary flashbacks. Blank uses the production chapter (or the last chapter in a summary).</small></label>
     <label>Custom visual prompt<textarea disabled={disabled} maxLength={8000} value={overrides?.customVisualPrompt ?? ""} onChange={(event) => onOverrides({ customVisualPrompt: event.target.value || undefined })} /></label>
     <label>Custom negative prompt<textarea disabled={disabled} maxLength={2000} value={overrides?.customNegativePrompt ?? ""} onChange={(event) => onOverrides({ customNegativePrompt: event.target.value || undefined })} /></label>
   </details>;

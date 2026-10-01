@@ -1,7 +1,7 @@
 import { CanonicalEntity, StoryBible } from "../domain/story-bible.js";
 import { Story } from "../domain/story.js";
 import { ArtDirectionPreset } from "../domain/art-direction.js";
-import { VisualEntityProfile, VisualReferenceImage } from "../domain/visual-profile.js";
+import { VisualAppearanceEra, VisualEntityProfile, VisualReferenceImage } from "../domain/visual-profile.js";
 import { Scene, SceneDirection, SceneOverrides, sceneDirectionSchema, sceneOverridesSchema } from "../scenes/types.js";
 import { resolveVisualEntities } from "../scenes/identity.js";
 import { fingerprint } from "../utils/hash.js";
@@ -15,6 +15,7 @@ export type ResolvedEntityCanon = {
   type: string;
   hasApprovedProfile: boolean;
   profileRevision?: number;
+  appearanceEra?: { id: string; name: string; startChapter: number; endChapter?: number };
   description: string;
   wardrobe?: string;
   weapons?: string;
@@ -60,6 +61,9 @@ export function normalizeSceneOverridesForFingerprint(raw: SceneOverrides | unde
   const wardrobeOverrides = Object.fromEntries(Object.entries(overrides.wardrobeOverrides).filter(([, value]) => value.trim()));
   if (!Object.keys(wardrobeOverrides).length) delete normalized.wardrobeOverrides;
   else normalized.wardrobeOverrides = wardrobeOverrides;
+  const appearanceEraOverrides = Object.fromEntries(Object.entries(overrides.appearanceEraOverrides ?? {}).filter(([, value]) => value.trim()));
+  if (!Object.keys(appearanceEraOverrides).length) delete normalized.appearanceEraOverrides;
+  else normalized.appearanceEraOverrides = appearanceEraOverrides;
   if (overrides.artDirectionMode === "inherit-summary") delete normalized.artDirectionMode;
   if (!overrides.customVisualPrompt?.trim()) delete normalized.customVisualPrompt;
   if (!overrides.customNegativePrompt?.trim()) delete normalized.customNegativePrompt;
@@ -78,6 +82,30 @@ export const SCENE_STATE_PRIORITY_INSTRUCTION =
 //   "MATURE CHARACTER STYLING: Female characters have a seductive, alluring look with curvaceous figures, full busts and shapely hips. Keep it tasteful — alluring and elegant, never explicit or nude. Depict blood, injuries, and battle violence when the scene calls for it.";
 export const MATURE_ARTWORK_STYLING =
   "MATURE CHARACTER STYLING: Female characters have a seductive, alluring look with curvaceous figures, full busts and shapely hips. Keep it tasteful — alluring and elegant. Depict blood, injuries, and battle violence when the scene calls for it.";
+
+export function resolveApprovedAppearanceEra(profile: VisualEntityProfile, chapter: number): VisualAppearanceEra | undefined {
+  return profile.appearanceEras?.find((era) => era.status === "approved" && era.startChapter <= chapter && (era.endChapter === undefined || chapter <= era.endChapter));
+}
+
+function effectiveVisualProfile(profile: VisualEntityProfile, era: VisualAppearanceEra | undefined): VisualEntityProfile {
+  if (!era) {
+    const assigned = new Set(profile.appearanceEras?.filter((item) => item.status === "approved").flatMap((item) => item.referenceIds) ?? []);
+    return { ...profile, references: profile.references.filter((reference) => !assigned.has(reference.id)) };
+  }
+  const referenceIds = new Set(era.referenceIds);
+  const hasEraText = Boolean(era.appearance.trim() || era.visualPrompt.trim());
+  const characterChanges = era.character && Object.keys(era.character).length ? era.character : undefined;
+  const creatureChanges = era.creature && Object.keys(era.creature).length ? era.creature : undefined;
+  return {
+    ...profile,
+    appearance: era.appearance,
+    visualPrompt: era.visualPrompt,
+    negativePrompt: era.negativePrompt ?? "",
+    character: profile.visualType === "character" ? hasEraText ? characterChanges : profile.character ? { ...profile.character, ...(characterChanges ? { additionalAppearanceNotes: undefined } : {}), ...characterChanges } : characterChanges : undefined,
+    creature: profile.visualType === "creature" ? hasEraText ? creatureChanges : profile.creature ? { ...profile.creature, ...(creatureChanges ? { canonicalCreaturePrompt: undefined } : {}), ...creatureChanges } : creatureChanges : undefined,
+    references: profile.references.filter((reference) => referenceIds.has(reference.id)),
+  };
+}
 
 
 /** The one authoritative definition of entities visibly represented by a scene.
@@ -172,7 +200,12 @@ export function resolveVisualCanonPrompt(options: {
 
   for (const entity of matchedEntities) {
     const entityId = entity.id;
-    const profile = visualProfiles[entityId];
+    const savedProfile = visualProfiles[entityId];
+    const eraOverride = overrides.appearanceEraOverrides?.[entityId] ?? overrides.appearanceEraOverrides?.[entity.canonicalName];
+    const pinnedEra = savedProfile?.appearanceEras?.find((era) => era.id === eraOverride && era.status === "approved");
+    const effectiveChapter = overrides.appearanceChapter ?? options.chapter;
+    const appearanceEra = pinnedEra ?? (savedProfile && effectiveChapter ? resolveApprovedAppearanceEra(savedProfile, effectiveChapter) : undefined);
+    const profile = savedProfile ? effectiveVisualProfile(savedProfile, appearanceEra) : undefined;
     const useVisualProfile = shouldUseVisualProfileForEntity(scene, entity);
     const isApproved = useVisualProfile && profile?.status === "approved";
 
@@ -184,7 +217,7 @@ export function resolveVisualCanonPrompt(options: {
       entityVisualFingerprints[entityId] = fingerprint({
         id: profile.id,
         entityId: profile.entityId,
-        revision: profile.revision,
+        appearanceEraId: appearanceEra?.id,
         appearance: profile.appearance,
         visualPrompt: profile.visualPrompt,
         character: profile.character,
@@ -192,6 +225,7 @@ export function resolveVisualCanonPrompt(options: {
         creature: profile.creature,
         item: profile.item,
         status: profile.status,
+        references: profile.references.map((reference) => ({ id: reference.id, approved: reference.approved, role: reference.role, imagePath: reference.imagePath })),
       });
 
       // An editorial wardrobe override is the one exception to the profile's
@@ -203,7 +237,7 @@ export function resolveVisualCanonPrompt(options: {
 
       const traits: string[] = [];
 
-      if (profile.character) {
+      if (profile.visualType === "character" && profile.character) {
         const c = profile.character;
         const isFemale = c.gender?.trim().toLowerCase() === "female";
         const figureTrait = story.artwork.adultContent && isFemale
@@ -249,7 +283,7 @@ export function resolveVisualCanonPrompt(options: {
         if (preserveWardrobeEquipment && c.accessories) traits.push(`Default accessories (overridable by current scene): ${c.accessories}`);
         if (preserveWardrobeEquipment && c.weapons) traits.push(`Default weapons (overridable by current scene): ${c.weapons}`);
         if (preserveWardrobeEquipment && c.equipment) traits.push(`Default equipment (overridable by current scene): ${c.equipment}`);
-      } else if (profile.location) {
+      } else if (profile.visualType === "location" && profile.location) {
         if (profile.visualPrompt) traits.push(profile.visualPrompt);
         else if (profile.appearance) traits.push(profile.appearance);
         const l = profile.location;
@@ -257,7 +291,7 @@ export function resolveVisualCanonPrompt(options: {
         if (l.architecture) traits.push(`Architecture: ${l.architecture}`);
         if (l.lighting) traits.push(`Lighting: ${l.lighting}`);
         if (l.colorPalette) traits.push(`Palette: ${l.colorPalette}`);
-      } else if (profile.creature) {
+      } else if (profile.visualType === "creature" && profile.creature) {
         if (profile.visualPrompt) traits.push(profile.visualPrompt);
         else if (profile.appearance) traits.push(profile.appearance);
         const cr = profile.creature;
@@ -266,7 +300,11 @@ export function resolveVisualCanonPrompt(options: {
         if (cr.scale) traits.push(`Scale: ${cr.scale}`);
         if (cr.anatomy) traits.push(`Anatomy: ${cr.anatomy}`);
         if (cr.coloration) traits.push(`Coloration: ${cr.coloration}`);
-      } else if (profile.item) {
+        if (cr.eyes) traits.push(`Eyes: ${cr.eyes}`);
+        if (cr.armorFur) traits.push(`Armor or fur: ${cr.armorFur}`);
+        if (cr.distinguishingFeatures) traits.push(`Distinguishing features: ${cr.distinguishingFeatures}`);
+        if (cr.sizeRelativeToHuman) traits.push(`Size relative to humans: ${cr.sizeRelativeToHuman}`);
+      } else if (["item", "weapon", "object"].includes(profile.visualType) && profile.item) {
         if (profile.visualPrompt) traits.push(profile.visualPrompt);
         else if (profile.appearance) traits.push(profile.appearance);
         const it = profile.item;
@@ -286,6 +324,7 @@ export function resolveVisualCanonPrompt(options: {
         type: entity.type,
         hasApprovedProfile: true,
         profileRevision: profile.revision,
+        appearanceEra: appearanceEra && { id: appearanceEra.id, name: appearanceEra.name, startChapter: appearanceEra.startChapter, endChapter: appearanceEra.endChapter },
         description,
         wardrobe: activeWardrobe,
         weapons: preserveWardrobeEquipment ? profile.character?.weapons : undefined,
@@ -300,7 +339,7 @@ export function resolveVisualCanonPrompt(options: {
       // Fallback to Story Bible canonical description
       const namePrefix = entity.originalName ? `${entity.canonicalName} (${entity.originalName})` : entity.canonicalName;
       const visualDescription = entity.type === "character" ? fallbackArtworkDescription(entity.description ?? "") : entity.description;
-      const evidence = resolveEntityVisualEvidence(entity, options.chapter ?? Number.MAX_SAFE_INTEGER);
+      const evidence = resolveEntityVisualEvidence(entity, overrides.appearanceChapter ?? options.chapter ?? Number.MAX_SAFE_INTEGER);
       const persistent = Object.entries(evidence.values).filter(([, item]) => item.persistence === "persistent");
       const changing = Object.entries(evidence.values).filter(([, item]) => item.persistence === "changed");
       const draft = profile && profile.status !== "approved" ? profile : undefined;

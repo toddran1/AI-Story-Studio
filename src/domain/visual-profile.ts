@@ -149,6 +149,23 @@ export const visualVariantSchema = z.object({
 });
 export type VisualVariant = z.infer<typeof visualVariantSchema>;
 
+/** An approved, chapter-bound change to a lasting appearance. Draft eras are
+ * editorial work and never affect generated artwork. */
+export const visualAppearanceEraSchema = z.object({
+  id: z.string().min(1),
+  name: z.string().trim().min(1).max(200),
+  startChapter: z.number().int().positive(),
+  endChapter: z.number().int().positive().optional(),
+  status: visualProfileStatusSchema.default("draft"),
+  appearance: z.string().trim().max(10_000).default(""),
+  visualPrompt: z.string().trim().max(10_000).default(""),
+  negativePrompt: z.string().trim().max(2000).optional(),
+  character: characterVisualDetailsSchema.optional(),
+  creature: creatureVisualDetailsSchema.optional(),
+  referenceIds: z.array(z.string().min(1)).default([]),
+}).refine((era) => era.endChapter === undefined || era.endChapter >= era.startChapter, { message: "End chapter must be at or after start chapter" });
+export type VisualAppearanceEra = z.infer<typeof visualAppearanceEraSchema>;
+
 export const visualProfileSchema = z.object({
   id: z.string().min(1),
   entityId: z.string().regex(/^ent_[a-f0-9]{24}$/),
@@ -170,10 +187,27 @@ export const visualProfileSchema = z.object({
    * resolving one is an editorial decision, never a silent overwrite. */
   conflicts: z.array(visualProfileConflictSchema).optional(),
   variants: z.array(visualVariantSchema).default([]),
+  appearanceEras: z.array(visualAppearanceEraSchema).optional(),
   references: z.array(visualReferenceImageSchema).default([]),
   revision: z.number().int().nonnegative().default(1),
   createdAt: z.string().datetime(),
   updatedAt: z.string().datetime(),
   approvedAt: z.string().datetime().optional(),
+}).superRefine((profile, context) => {
+  if (profile.appearanceEras?.length && !["character", "creature"].includes(profile.visualType)) {
+    context.addIssue({ code: "custom", path: ["appearanceEras"], message: "Appearance eras apply to characters and creatures only" });
+  }
+  const approved = (profile.appearanceEras ?? []).filter((era) => era.status === "approved").sort((a, b) => a.startChapter - b.startChapter);
+  for (const era of approved) {
+    const details = { ...era.character, ...era.creature };
+    if (![era.appearance, era.visualPrompt, ...Object.values(details)].some((value) => typeof value === "string" && value.trim())) {
+      context.addIssue({ code: "custom", path: ["appearanceEras"], message: `Approved appearance era ${era.name} needs an appearance, prompt, or changed visual trait` });
+    }
+  }
+  for (let index = 1; index < approved.length; index++) {
+    if (approved[index].startChapter <= (approved[index - 1].endChapter ?? Number.MAX_SAFE_INTEGER)) {
+      context.addIssue({ code: "custom", path: ["appearanceEras"], message: `Approved appearance eras overlap: ${approved[index - 1].name} and ${approved[index].name}` });
+    }
+  }
 });
 export type VisualEntityProfile = z.infer<typeof visualProfileSchema>;

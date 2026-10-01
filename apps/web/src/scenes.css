@@ -217,6 +217,15 @@
 .visual-profile-modal .tab-btn { min-height: 36px; padding: 8px 12px; border: 1px solid transparent; border-radius: 6px; background: transparent; color: var(--muted); font-family: inherit; font-size: 12px; line-height: 1.4; cursor: pointer; }
 .visual-profile-modal .tab-btn.active { color: var(--violet-soft); border-color: rgba(119,114,232,.45); background: rgba(119,114,232,.12); }
 .visual-profile-modal .modal-body { padding: 22px 24px; }
+.visual-profile-modal .appearance-eras { display: grid; gap: 18px; }
+.visual-profile-modal .appearance-eras-intro, .visual-profile-modal .appearance-era-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; }
+.visual-profile-modal .appearance-eras-intro h4 { margin: 0; font: 500 22px/1.2 var(--serif); }
+.visual-profile-modal .appearance-era-card { display: grid; gap: 10px; padding: 18px; border: 1px solid var(--line-strong); border-left: 3px solid var(--violet); border-radius: 8px; background: #1b1a25; }
+.visual-profile-modal .appearance-era-card .form-grid-2col { margin: 0; }
+.visual-profile-modal .appearance-era-heading strong { flex: 1; font: 500 18px/1.3 var(--serif); }
+.visual-profile-modal .appearance-era-card fieldset { border: 1px solid var(--line-strong); border-radius: 6px; padding: 12px; }
+.visual-profile-modal .appearance-era-card legend, .visual-profile-modal .appearance-era-card > label { color: #b7b4c7; font: 10px/1.5 var(--mono); letter-spacing: .04em; }
+.visual-profile-modal .appearance-era-reference { display: flex; align-items: center; gap: 8px; padding: 6px 0; font-size: 12px; text-transform: capitalize; }
 .visual-profile-modal .form-group-stack { gap: 20px; }
 .visual-profile-modal .form-row { gap: 8px; margin: 12px 0; }
 .visual-profile-modal .form-grid-2col { grid-template-columns: repeat(2,minmax(0,1fr)); gap: 16px; margin: 16px 0; }

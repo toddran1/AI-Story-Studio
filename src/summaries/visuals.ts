@@ -280,6 +280,7 @@ export class SummaryVisualService {
         reference: references.loadedEntityIds.includes(entity.entityId),
         primaryReference: references.loadedEntityIds.includes(entity.entityId) && (entity.references ?? []).some((reference) => reference.approved && reference.role === "primary_reference" && references.loadedReferenceIds.includes(reference.id)),
         profileRevision: entity.profileRevision,
+        appearanceEra: entity.appearanceEra,
       })),
       inputFingerprint: fingerprint({
         version: "summary-visual-canon-v3-mixed-cast",

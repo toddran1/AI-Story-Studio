@@ -219,6 +219,20 @@ export type VisualVariant = {
   visualPrompt?: string;
 };
 
+export type VisualAppearanceEra = {
+  id: string;
+  name: string;
+  startChapter: number;
+  endChapter?: number;
+  status: "draft" | "approved";
+  appearance: string;
+  visualPrompt: string;
+  negativePrompt?: string;
+  character?: CharacterVisualDetails;
+  creature?: CreatureVisualDetails;
+  referenceIds: string[];
+};
+
 export type VisualEntityProfile = {
   id: string;
   entityId: string;
@@ -233,6 +247,7 @@ export type VisualEntityProfile = {
   creature?: CreatureVisualDetails;
   item?: ItemVisualDetails;
   variants: VisualVariant[];
+  appearanceEras?: VisualAppearanceEra[];
   references: VisualReferenceImage[];
   fieldProvenance?: Record<string, VisualFieldProvenance>;
   conflicts?: VisualProfileConflict[];
@@ -324,6 +339,8 @@ export type SceneDirection = {
 
 export type SceneOverrides = {
   wardrobeOverrides?: Record<string, string>;
+  appearanceEraOverrides?: Record<string, string>;
+  appearanceChapter?: number;
   artDirectionMode?: "inherit-summary" | "story-default";
   artDirectionPresetId?: string;
   customVisualPrompt?: string;

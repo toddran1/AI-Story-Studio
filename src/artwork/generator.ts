@@ -408,7 +408,7 @@ export async function generateStoredArtwork(options: {
           availableReferenceCount: references.available,
           continuityReference: references.continuityReference,
           characterReferences: characterReferenceProvenance(references.images),
-          visualGrounding: item.resolved.resolvedEntities.map((entity) => ({ entityId: entity.entityId, name: entity.name, mode: entity.groundingMode })),
+          visualGrounding: item.resolved.resolvedEntities.map((entity) => ({ entityId: entity.entityId, name: entity.name, mode: entity.groundingMode, appearanceEra: entity.appearanceEra })),
         },
         review: "unreviewed",
       };

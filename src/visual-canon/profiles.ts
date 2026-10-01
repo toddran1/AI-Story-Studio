@@ -137,6 +137,7 @@ export async function updateVisualProfile(
       creature: patch.creature,
       item: patch.item,
       variants: patch.variants ?? [],
+      appearanceEras: patch.appearanceEras ?? [],
       references: patch.references ?? [],
       fieldProvenance: patch.fieldProvenance ?? {},
       revision: 1,
@@ -174,8 +175,10 @@ export async function approveVisualReference(
   if (!profile) throw new Error(`Visual profile for entity '${entityId}' was not found`);
   const reference = profile.references.find((item) => item.id === refId);
   if (!reference) throw new Error(`Visual reference '${refId}' was not found`);
+  const referenceScope = profile.appearanceEras?.find((era) => era.referenceIds.includes(refId))?.id;
   for (const item of profile.references) {
-    if (primary && item.id !== refId && item.role === "primary_reference") item.role = "general_reference";
+    const itemScope = profile.appearanceEras?.find((era) => era.referenceIds.includes(item.id))?.id;
+    if (primary && item.id !== refId && item.role === "primary_reference" && itemScope === referenceScope) item.role = "general_reference";
   }
   reference.approved = true;
   if (primary) reference.role = "primary_reference";
@@ -221,6 +224,7 @@ export async function deleteVisualReferenceImage(
   }
 
   profile.references.splice(refIndex, 1);
+  profile.appearanceEras = profile.appearanceEras?.map((era) => ({ ...era, referenceIds: era.referenceIds.filter((id) => id !== refId) }));
   profile.revision += 1;
   profile.updatedAt = new Date().toISOString();
   await saveVisualProfiles(root, slug, profiles);
@@ -517,6 +521,7 @@ export async function prepareVisualCanonMerge(
 
   const migratedTargetPaths: string[] = [];
   const migratedSourceDirs: string[] = [];
+  const migratedRefIds = new Map<string, string>();
 
   const migrateRef = async (
     ref: VisualReferenceImage,
@@ -530,6 +535,7 @@ export async function prepareVisualCanonMerge(
       collisionOccurred = true;
     }
     existingIds.add(finalRefId);
+    migratedRefIds.set(`${sourceEntityId}:${ref.id}`, finalRefId);
 
     let hintExt: string | undefined;
     if (ref.imagePath) {
@@ -566,6 +572,22 @@ export async function prepareVisualCanonMerge(
   };
 
   const now = new Date().toISOString();
+  const migratedEras = (source: VisualEntityProfile) => (source.appearanceEras ?? []).map((era) => ({
+    ...era,
+    referenceIds: era.referenceIds.map((id) => migratedRefIds.get(`${source.entityId}:${id}`) ?? id),
+  }));
+  const appendEras = (existing: NonNullable<VisualEntityProfile["appearanceEras"]>, incoming: NonNullable<VisualEntityProfile["appearanceEras"]>) => {
+    const merged = [...existing];
+    for (const era of incoming) {
+      const overlaps = era.status === "approved" && merged.some((item) => item.status === "approved"
+        && era.startChapter <= (item.endChapter ?? Number.MAX_SAFE_INTEGER)
+        && item.startChapter <= (era.endChapter ?? Number.MAX_SAFE_INTEGER));
+      // Preserve both designs after an entity merge, but require editorial
+      // review before a conflicting imported range can affect artwork.
+      merged.push({ ...era, id: merged.some((item) => item.id === era.id) ? randomUUID() : era.id, status: overlaps ? "draft" : era.status });
+    }
+    return merged;
+  };
   const preparedProfiles: Record<string, VisualEntityProfile> = structuredClone(profiles);
 
   try {
@@ -591,12 +613,14 @@ export async function prepareVisualCanonMerge(
       const combinedNotes = [primary.notes, ...remainingSources.map((s) => s.notes).filter(Boolean)].filter(Boolean).join("\n");
       const combinedNegative = [primary.negativePrompt, ...remainingSources.map((s) => s.negativePrompt).filter(Boolean)].filter(Boolean).join(", ");
       const combinedVariants = [...primary.variants];
+      let combinedEras = migratedEras(primary);
       for (const src of remainingSources) {
         for (const v of src.variants) {
           if (!combinedVariants.some((existing) => existing.name.toLowerCase() === v.name.toLowerCase())) {
             combinedVariants.push(v);
           }
         }
+        combinedEras = appendEras(combinedEras, migratedEras(src));
       }
 
       preparedProfiles[targetEntityId] = visualProfileSchema.parse({
@@ -606,6 +630,7 @@ export async function prepareVisualCanonMerge(
         notes: combinedNotes,
         negativePrompt: combinedNegative,
         variants: combinedVariants,
+        appearanceEras: combinedEras,
         references: migratedRefs,
         revision: primary.revision + 1,
         updatedAt: now,
@@ -637,6 +662,7 @@ export async function prepareVisualCanonMerge(
             preparedTarget.variants.push(v);
           }
         }
+        preparedTarget.appearanceEras = appendEras(preparedTarget.appearanceEras ?? [], migratedEras(src));
         delete preparedProfiles[src.entityId];
       }
 

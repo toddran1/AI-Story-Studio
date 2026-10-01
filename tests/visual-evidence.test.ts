@@ -82,6 +82,9 @@ describe("Story Bible visual evidence", () => {
     expect(past.prompt).not.toContain("character.hairstyle: short hair");
     expect(future.prompt).toContain("character.hairstyle: short hair");
     expect(past.resolvedPromptFingerprint).not.toBe(future.resolvedPromptFingerprint);
+    const flashback = resolveVisualCanonPrompt({ ...options, chapter: 500, scene: { ...scene, overrides: { appearanceChapter: 100, wardrobeOverrides: {} } } });
+    expect(flashback.prompt).toContain("character.hairstyle: long hair");
+    expect(flashback.prompt).not.toContain("character.hairstyle: short hair");
     const approved = visualProfileSchema.parse({ id: "vp-li", entityId: entity(bible).id, visualType: "character", status: "approved", appearance: "Curly auburn hair", character: { hairstyle: "Curly auburn hair" }, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() });
     const protectedPrompt = resolveVisualCanonPrompt({ ...options, chapter: 500, visualProfiles: { [entity(bible).id]: approved } });
     expect(protectedPrompt.prompt).toContain("Curly auburn hair");
