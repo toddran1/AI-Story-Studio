@@ -4,12 +4,18 @@ export class WebHttpError extends Error {
   constructor(message: string, readonly status?: number, options?: ErrorOptions) { super(message, options); this.name = "WebHttpError"; }
 }
 
+export class WebSourceAccessError extends WebHttpError {
+  constructor(message: string, status: number, readonly code: "CHALLENGE_REQUIRED" | "BLOCKED") {
+    super(message, status); this.name = "WebSourceAccessError";
+  }
+}
+
 export class WebHttpClient {
   private readonly fetcher: typeof fetch; private readonly timeoutMs: number; private readonly delayMs: number;
   private readonly maxBytes: number; private readonly retries: number; private readonly maxRedirects: number;
   private readonly hosts?: Set<string>; private readonly cache?: WebHttpClientOptions["cache"];
   private readonly cacheTtlMs: number; private readonly sleep: (ms: number) => Promise<void>; private readonly maintainCookies: boolean;
-  private readonly defaultHeaders: Record<string, string>; private readonly cookies = new Map<string, Map<string, string>>(); private lastRequestAt = 0;
+  private defaultHeaders: Record<string, string>; private readonly cookies = new Map<string, Map<string, string>>(); private lastRequestAt = 0;
   private readonly solveBrowserChallenge: boolean; private readonly cookieStore?: WebHttpClientOptions["cookieStore"];
   private readonly loadedHosts = new Set<string>();
 
@@ -24,13 +30,13 @@ export class WebHttpClient {
     this.sleep = options.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
   }
 
-  async getText(input: string, options: { refresh?: boolean; signal?: AbortSignal } = {}): Promise<string> {
+  async getText(input: string, options: { refresh?: boolean; signal?: AbortSignal; allowedHosts?: string[] } = {}): Promise<string> {
     const initial = this.validateUrl(input); let cached: HttpCacheEntry | undefined;
     try { cached = await this.cache?.get(initial.href); } catch { /* Cache reads are optional; continue with the network. */ }
     if (!options.refresh && cached && !cached.etag && !cached.lastModified && Date.now() - Date.parse(cached.fetchedAt) < this.cacheTtlMs) return cached.body;
     let lastError: unknown;
     for (let attempt = 0; attempt <= this.retries; attempt++) {
-      try { return await this.request(initial, cached, 0, options.signal); }
+      try { return await this.request(initial, cached, 0, options.signal, options.allowedHosts); }
       catch (error) {
         lastError = error;
         if (options.signal?.aborted || attempt >= this.retries || !isTransient(error)) throw error;
@@ -116,7 +122,7 @@ export class WebHttpClient {
     }
   }
 
-  private async request(initial: URL, cached?: HttpCacheEntry, challengeAttempts = 0, externalSignal?: AbortSignal): Promise<string> {
+  private async request(initial: URL, cached?: HttpCacheEntry, challengeAttempts = 0, externalSignal?: AbortSignal, allowedHosts?: string[]): Promise<string> {
     let url = initial;
     for (let redirects = 0; redirects <= this.maxRedirects; redirects++) {
       await this.rateLimit();
@@ -132,13 +138,25 @@ export class WebHttpClient {
       if (response.status >= 300 && response.status < 400) {
         const location = response.headers.get("location"); if (!location) { await discard(response); throw new WebHttpError(`Redirect from ${url.href} has no Location header`, response.status); }
         if (redirects === this.maxRedirects) { await discard(response); throw new WebHttpError(`Too many redirects while fetching ${initial.href}`, response.status); }
-        await discard(response); url = this.validateUrl(new URL(location, url).href); continue;
+        await discard(response);
+        const redirected = this.validateUrl(new URL(location, url).href);
+        if (allowedHosts && !allowedHosts.includes(redirected.hostname)) throw new WebHttpError(`Redirect host is not allowed for this source: ${redirected.hostname}`, response.status);
+        url = redirected; continue;
       }
-      if (!response.ok) { await discard(response); throw new WebHttpError(`Web request failed (${response.status}) for ${url.href}`, response.status); }
+      if (!response.ok) {
+        if (response.status === 403 || response.headers.get("cf-mitigated") === "challenge") {
+          const body = await readLimitedText(response, this.maxBytes);
+          const challenge = response.headers.get("cf-mitigated") === "challenge" || /cf-chl-|just a moment|enable javascript and cookies|checking your browser|captcha/iu.test(body);
+          throw new WebSourceAccessError(challenge
+            ? `The source website requires browser verification (${response.status}) for ${url.href}. The studio cannot complete this challenge automatically.`
+            : `The source website blocked this request (${response.status}) for ${url.href}.`, response.status, challenge ? "CHALLENGE_REQUIRED" : "BLOCKED");
+        }
+        await discard(response); throw new WebHttpError(`Web request failed (${response.status}) for ${url.href}`, response.status);
+      }
       const contentLength = Number(response.headers.get("content-length"));
       if (Number.isFinite(contentLength) && contentLength > this.maxBytes) { await discard(response); throw new WebHttpError(`Web response exceeds ${this.maxBytes} bytes: ${url.href}`, response.status); }
       const body = await readLimitedText(response, this.maxBytes);
-      if (await this.challengeSolved(url, body, challengeAttempts)) return this.request(initial, cached, challengeAttempts + 1, externalSignal);
+      if (await this.challengeSolved(url, body, challengeAttempts)) return this.request(initial, cached, challengeAttempts + 1, externalSignal, allowedHosts);
       try {
         if (cacheable(body)) await this.cache?.set(initial.href, { url: initial.href, body, etag: response.headers.get("etag") ?? undefined,
           lastModified: response.headers.get("last-modified") ?? undefined, fetchedAt: new Date().toISOString() });
@@ -167,6 +185,24 @@ export class WebHttpClient {
     const retry = new URL(url.href); retry.search = `?challenge=${encodeURIComponent(token)}`;
     try { await this.request(this.validateUrl(retry.href), undefined, attempts + 1); return true; }
     catch { return false; }
+  }
+
+  /** Applies a verified browser User-Agent to every subsequent request, overriding the built-in default. */
+  setUserAgent(userAgent: string) {
+    const value = userAgent.trim(); if (!value) throw new WebHttpError("User-Agent must not be empty");
+    this.defaultHeaders = { ...this.defaultHeaders, "User-Agent": value };
+  }
+
+  /** Merges cookies earned in a verification browser into the jar and persists them for future runs. */
+  async seedCookies(host: string, cookies: Record<string, string>) {
+    if (!this.maintainCookies) return;
+    const key = host.toLowerCase(); const jar = this.cookies.get(key) ?? new Map<string, string>();
+    for (const [name, value] of Object.entries(cookies)) if (name && value) jar.set(name, value);
+    this.loadedHosts.add(key);
+    if (jar.size) this.cookies.set(key, jar); else this.cookies.delete(key);
+    if (this.cookieStore && jar.size) {
+      try { await this.cookieStore.set(key, Object.fromEntries(jar)); } catch { /* Cookie persistence is optional; the in-memory jar still applies. */ }
+    }
   }
 
   private async cookieHeaders(url: URL): Promise<Record<string, string>> {
@@ -217,6 +253,7 @@ async function readLimitedBytes(response: Response, limit: number): Promise<Uint
 }
 async function discard(response: Response) { try { await response.body?.cancel(); } catch { /* Best effort connection cleanup. */ } }
 function isTransient(error: unknown) {
+  if (error instanceof WebSourceAccessError) return false;
   if (error instanceof WebHttpError && error.status !== undefined) return error.status === 408 || error.status === 425 || error.status === 429 || error.status >= 500;
   const cause = error instanceof Error ? error.cause : undefined; const candidate = cause instanceof Error ? cause : error instanceof Error ? error : undefined;
   const code = String((candidate as NodeJS.ErrnoException | undefined)?.code ?? "").toUpperCase();
@@ -229,6 +266,6 @@ function jsChallengeToken(body: string) {
   if (!/location\.pathname\s*\+\s*["']\?challenge=["']/u.test(body)) return undefined;
   return /(?:let|var|const)\s+token\s*=\s*"([A-Za-z0-9+/=]{16,})"/u.exec(body)?.[1];
 }
-function cacheable(body: string) { return !/captcha|checking your browser|正在验证浏览器|正在進行安全驗證|安全验证|challenge\s*=/iu.test(body); }
+function cacheable(body: string) { return !/just a moment|cf-chl-|enable javascript and cookies|captcha|checking your browser|正在验证浏览器|正在進行安全驗證|安全验证|challenge\s*=/iu.test(body); }
 function hostAllowed(host: string, allowed: Set<string>) { if (allowed.has(host)) return true; for (const value of allowed) if (value.startsWith("*.") && host.endsWith(value.slice(1)) && host.length > value.length - 1) return true; return false; }
 function requestSignal(timeoutMs: number, external?: AbortSignal) { return external ? AbortSignal.any([AbortSignal.timeout(timeoutMs), external]) : AbortSignal.timeout(timeoutMs); }

@@ -1,3 +1,4 @@
+import { WfxsSource } from "./wfxs/wfxs-source.js";
 import { stat } from "node:fs/promises";
 import { extname, resolve } from "node:path";
 import { DocxSource } from "./docx-source.js";
@@ -18,7 +19,7 @@ export class SourceProviderRegistry {
   private readonly breaker: ProviderCircuitBreaker;
   constructor(providers?: StorySourceProvider[], webClient?: WebHttpClient, breaker = new ProviderCircuitBreaker()) {
     this.breaker = breaker;
-    const configured = providers ?? [new TxtSource(), new EpubSource(), new DocxSource(), new FanqieSource(webClient), new Ixdzs8Source(webClient), new ShuhaigeSource(webClient), ...builtinSelectorSources(webClient)];
+    const configured = providers ?? [new TxtSource(), new EpubSource(), new DocxSource(), new FanqieSource(webClient), new Ixdzs8Source(webClient), new ShuhaigeSource(webClient), new WfxsSource(webClient), ...builtinSelectorSources(webClient)];
     for (const provider of configured) {
       if (isNovelProvider(provider)) this.novelProviders.set(provider.id, provider);
       if (provider.type !== "web" || !this.providers.has("web")) this.providers.set(provider.type, provider);

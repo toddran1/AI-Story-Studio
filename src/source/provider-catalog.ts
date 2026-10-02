@@ -27,6 +27,14 @@ export type ProviderHealth = {
   cooldownUntil?: string;
 };
 
+export class ProviderCooldownError extends Error {
+  readonly code = "SOURCE_COOLDOWN";
+  constructor(readonly provider: string, readonly cooldownUntil: string, readonly lastError?: string) {
+    super(`Novel provider '${provider}' is cooling down after repeated failures. Retry after ${cooldownUntil}.${lastError ? ` Last failure: ${lastError}` : ""}`);
+    this.name = "ProviderCooldownError";
+  }
+}
+
 export class ProviderCircuitBreaker {
   private readonly states = new Map<string, ProviderHealth>();
   constructor(private readonly failureThreshold = 3, private readonly cooldownMs = 60_000) {}
@@ -39,7 +47,7 @@ export class ProviderCircuitBreaker {
   }
   assertAvailable(provider: string) {
     const current = this.state(provider); if (current.status === "disabled") throw new Error(`Novel provider '${provider}' is disabled`);
-    if (current.status === "cooldown" && current.cooldownUntil) throw new Error(`Novel provider '${provider}' is cooling down until ${current.cooldownUntil}`);
+    if (current.status === "cooldown" && current.cooldownUntil) throw new ProviderCooldownError(provider, current.cooldownUntil, current.lastError);
   }
   success(provider: string) { this.states.set(provider, { ...this.state(provider), status: "healthy", consecutiveFailures: 0, lastSuccessAt: new Date().toISOString(), cooldownUntil: undefined, lastError: undefined }); }
   failure(provider: string, error: unknown) {

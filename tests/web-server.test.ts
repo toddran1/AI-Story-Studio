@@ -39,6 +39,7 @@ import { SourceConflictError, SourceInputError, SourceUpstreamError, SourceValid
 import { ConfigurationError, SceneError } from "../src/pipeline/errors.js";
 import { SummaryArtifactNotFoundError } from "../src/summaries/visuals.js";
 import { SummarySceneProposalConflictError } from "../src/summaries/media.js";
+import { WebHttpClient } from "../src/source/web/http-client.js";
 import { QaFindingLifecycleConflictError } from "../src/qa/review.js";
 
 const webAudio: AudioMasteringProcessor = { version: "web-audio-v1", master: async (_inputs, output) => { await atomicWrite(output, Buffer.from("mastered")); return { durationSeconds: 9, codec: "mp3", container: "mp3" }; } };
@@ -477,8 +478,8 @@ describe("web service layer", () => {
     expect(await getChapter(root, "stale-story", 101)).toMatchObject({ stale: false, audioAvailable: true, audioStale: false });
     expect((await getChapterPage(root, "stale-story", { page: 1, pageSize: 50, filter: "all" })).items[0]).toMatchObject({ translation: "complete", narration: "complete" });
     inspection = await operations.inspectSource({ filename: "chapter.txt", file: Buffer.from("Changed"), chapter: 101 });
-    await expect(operations.importInspection("stale-story", inspection.id)).rejects.toThrow(/explicitly confirm replacement/);
-    await operations.importInspection("stale-story", inspection.id, false, true);
+    await expect(operations.importInspection("stale-story", inspection.id, false, false)).rejects.toThrow(/explicitly confirm replacement/);
+    await operations.importInspection("stale-story", inspection.id);
     const invalidated = JSON.parse(await readFile(paths.chapterMeta, "utf8")); expect(invalidated.stages.ingestion.status).toBe("pending"); expect(invalidated.stages.tts.status).toBe("pending");
     expect(await getChapter(root, "stale-story", 101)).toMatchObject({ stale: true, audioAvailable: true, audioStale: true, audioUrl: "/api/stories/stale-story/chapters/101/audio" });
     expect((await getChapterPage(root, "stale-story", { page: 1, pageSize: 50, filter: "all" })).items[0]).toMatchObject({ chapter: 101, translation: "pending", tts: "pending", audioAvailable: true, audioStale: true, audioMastering: "stale" });
@@ -680,6 +681,62 @@ describe("web service layer", () => {
     expect(jobs.getActiveForStory(story.slug)?.id).toBe(jobNew.id);
 
     await operations.close();
+  });
+});
+
+describe("browser verification routes", () => {
+  function fakeVerificationSession() {
+    const session = {
+      opened: [] as string[], cancelled: 0, completed: 0,
+      open: vi.fn(async (url: string) => { session.opened.push(url); }),
+      complete: vi.fn(async () => { session.completed++; return { userAgent: "Mozilla/5.0 VerifiedBrowser/1.0", cookies: { cf_clearance: "earned-token" } }; }),
+      cancel: vi.fn(async () => { session.cancelled++; }),
+      status: () => "open" as const,
+    };
+    return session;
+  }
+  async function callApi(handler: ReturnType<typeof createApiHandler>, url: string, body: unknown = {}) {
+    const req = Object.assign(Readable.from([JSON.stringify(body)]), { method: "POST", url, headers: { host: "localhost:3000", "content-type": "application/json" } });
+    const chunks: Buffer[] = []; let status = 0;
+    const res = Object.assign(new PassThrough(), { writeHead: (code: number) => { status = code; } });
+    res.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+    const done = new Promise<void>((resolve) => res.on("finish", resolve));
+    await handler(req as unknown as IncomingMessage, res as unknown as ServerResponse); await done;
+    return { status, body: JSON.parse(Buffer.concat(chunks).toString() || "{}") };
+  }
+  it("opens, completes, and cancels verification, applying the harvested session to the shared web client", async () => {
+    const root = await mkdtemp(join(tmpdir(), "story-web-verify-"));
+    const requests: Array<Record<string, string>> = [];
+    const fetcher = vi.fn(async (_url: unknown, init?: { headers?: Record<string, string> }) => { requests.push(init?.headers ?? {}); return new Response("ok", { status: 200 }); });
+    const webHttp = new WebHttpClient({ fetcher: fetcher as unknown as typeof fetch, requestDelayMs: 0, maintainCookies: true });
+    const session = fakeVerificationSession();
+    const operations = new StudioOperations(root, env, new JobManager(), { webHttp, browserVerification: () => session });
+    const handler = createApiHandler(operations);
+
+    expect((await callApi(handler, "/api/source-verification/open", { url: "https://m.wfxs.tw/xiaoshuo/8076783/" })).body).toEqual({ status: "open" });
+    expect(session.opened).toEqual(["https://m.wfxs.tw/xiaoshuo/8076783/"]);
+
+    const conflict = await callApi(handler, "/api/source-verification/open", { url: "https://m.wfxs.tw/other/" });
+    expect(conflict.status).toBe(409); expect(session.opened).toHaveLength(1);
+
+    expect((await callApi(handler, "/api/source-verification/open", { url: "http://m.wfxs.tw/" })).status).toBe(400);
+
+    const completed = await callApi(handler, "/api/source-verification/complete", {});
+    expect(completed.status).toBe(200); expect(completed.body).toEqual({ status: "verified", host: "m.wfxs.tw" });
+    expect(session.completed).toBe(1);
+
+    await webHttp.getText("https://m.wfxs.tw/xiaoshuo/8076783/");
+    expect(requests[0]?.["User-Agent"]).toBe("Mozilla/5.0 VerifiedBrowser/1.0");
+    expect(requests[0]?.Cookie).toBe("cf_clearance=earned-token");
+
+    expect((await callApi(handler, "/api/source-verification/complete", {})).status).toBe(400);
+
+    await callApi(handler, "/api/source-verification/open", { url: "https://m.wfxs.tw/xiaoshuo/8076783/" });
+    expect((await callApi(handler, "/api/source-verification/cancel", {})).body).toEqual({ status: "cancelled" });
+    expect(session.cancelled).toBe(1);
+
+    await operations.close();
+    await rm(root, { recursive: true, force: true });
   });
 });
 

@@ -81,6 +81,26 @@ describe("source ingestion", () => {
     expect(await readFile(join(root, "stories/novel/source/chapters/0001.txt"), "utf8")).toContain("Revised");
   });
 
+  it("preserves existing text and manifest when replacement validation fails, even with the same fingerprint", async () => {
+    const root = await mkdtemp(join(tmpdir(), "source-invalid-replacement-"));
+    const source = join(root, "novel.txt");
+    await writeFile(source, "Chapter 1\nOriginal", "utf8");
+    const inspection = await new TxtSource().inspect(source, { splitChapters: true });
+    await importSource(root, "novel", inspection);
+    const paths = storyPaths(root, "novel", 1);
+    const original = await readFile(join(paths.source, "chapters/0001.txt"), "utf8");
+    const manifest = await readFile(paths.sourceManifest, "utf8");
+    for (const invalid of [
+      { ...inspection, chapters: [{ ...inspection.chapters[0]!, text: " " }] },
+      { ...inspection, warnings: [{ code: "unavailable_chapter" as const, message: "Incomplete download" }] },
+      { ...inspection, warnings: [{ code: "empty_section" as const, message: "Empty chapter body" }] },
+    ]) {
+      await expect(importSource(root, "novel", invalid)).rejects.toThrow();
+      expect(await readFile(join(paths.source, "chapters/0001.txt"), "utf8")).toBe(original);
+      expect(await readFile(paths.sourceManifest, "utf8")).toBe(manifest);
+    }
+  });
+
   it("restores the previous source when finalization fails", async () => {
     const root = await mkdtemp(join(tmpdir(), "source-rollback-")); const source = join(root, "novel.txt"); const provider = new TxtSource();
     await writeFile(source, "Chapter 1\nOriginal", "utf8");

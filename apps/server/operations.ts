@@ -27,7 +27,9 @@ import { applySourceMetadata } from "../../src/source/story-metadata.js";
 import { translateStoryMetadata } from "../../src/translation/story-metadata.js";
 import { SourceInspection, SourceManifest, SourceType, StorySourceProvider, sourceManifestSchema, sourceTypeSchema } from "../../src/source/types.js";
 import { createWebHttpClient } from "../../src/source/web/create-client.js";
-import { SourceConflictError, SourceInputError, SourceOperationError, SourceValidationError } from "../../src/source/errors.js";
+import { WebHttpClient } from "../../src/source/web/http-client.js";
+import { BrowserVerificationFactory, BrowserVerificationSession, createPlaywrightBrowserVerification } from "../../src/source/web/browser-verification.js";
+import { SourceConflictError, SourceInputError, SourceOperationError, SourceUpstreamError, SourceValidationError } from "../../src/source/errors.js";
 import { atomicWrite, atomicWriteJson } from "../../src/storage/atomic-write.js";
 import { previewPaths, storyPaths } from "../../src/storage/paths.js";
 import { exists, readJsonIfExists, readTextIfExists } from "../../src/storage/story-files.js";
@@ -198,7 +200,7 @@ const artworkJobSchema = z.object({ from: z.number().int().positive(), to: z.num
 const productionInputSchema = z.object({ from: z.number().int().positive(), to: z.number().int().positive(), profile: z.string().optional(), outputs: z.array(productionOutputSchema).min(1).optional(), artwork: z.boolean().optional(), repairQa: z.boolean().optional(), alignment: z.boolean().optional(), refresh: z.boolean().default(false), dryRun: z.boolean().default(false), force: productionForceSchema.optional(), audiobookFormat: z.enum(["mp3", "m4b"]).optional(), maxProviderBudgetUsd: z.number().positive().max(1_000_000).optional() }).strict().refine((value) => value.to >= value.from, { message: "Range end must be at or after range start" });
 
 type InspectionRecord = { inspection: SourceInspection; temporaryDirectory?: string; createdAt: number; bytes: number };
-export type OperationsDependencies = { pipeline?: ChapterProcessor; preview?: PreviewRunner; registry?: SourceProviderRegistry; llm?: LLMRouter; audio?: AudioMasteringProcessor; audiobook?: AudiobookProcessor; video?: VideoProcessor; videoExport?: VideoExportProcessor; scenePlanner?: LLMProvider; image?: ImageProviderSource; tts?: TTSProvider | TTSProviderRouter; censor?: CensorAudioService; alignment?: AlignmentEngine; speechTranscriber?: SpeechTranscriber; queue?: ProductionQueueService; usage?: PostgresUsageRepository };
+export type OperationsDependencies = { pipeline?: ChapterProcessor; preview?: PreviewRunner; registry?: SourceProviderRegistry; webHttp?: WebHttpClient; browserVerification?: BrowserVerificationFactory; llm?: LLMRouter; audio?: AudioMasteringProcessor; audiobook?: AudiobookProcessor; video?: VideoProcessor; videoExport?: VideoExportProcessor; scenePlanner?: LLMProvider; image?: ImageProviderSource; tts?: TTSProvider | TTSProviderRouter; censor?: CensorAudioService; alignment?: AlignmentEngine; speechTranscriber?: SpeechTranscriber; queue?: ProductionQueueService; usage?: PostgresUsageRepository };
 
 async function attemptRollback(
   phase: string,
@@ -248,15 +250,45 @@ export class StudioOperations {
   private readonly summaryImages: ReturnType<typeof createPipelineRuntime>["images"] | ImageProvider;
   private readonly inspectionTimer: NodeJS.Timeout; private inspectionBytes = 0;
   readonly queue?: ProductionQueueService; readonly usage?: PostgresUsageRepository;
+  private readonly webHttp: WebHttpClient; private readonly browserVerification: BrowserVerificationFactory;
+  private verificationSession?: BrowserVerificationSession; private verificationUrl?: string;
   constructor(public readonly root: string, private readonly env: Environment, public readonly jobs = new JobManager(), dependencies: OperationsDependencies = {}) {
     this.jobs.configureErrorHistory(root);
     this.usage = dependencies.usage; const runtime = createPipelineRuntime(env, this.usage); this.runtime = runtime; this.llm = dependencies.llm ?? runtime.router; this.pipeline = dependencies.pipeline ?? runtime.pipeline; this.censor = dependencies.censor ?? runtime.censor ?? new FfmpegCensorAudioService(); this.preview = dependencies.preview ?? new PreviewRunner(this.llm, runtime.tts, this.censor);
-    this.registry = dependencies.registry ?? new SourceProviderRegistry(undefined, createWebHttpClient(root, env));
+    this.webHttp = dependencies.webHttp ?? createWebHttpClient(root, env);
+    this.registry = dependencies.registry ?? new SourceProviderRegistry(undefined, this.webHttp);
+    this.browserVerification = dependencies.browserVerification ?? createPlaywrightBrowserVerification;
     this.audio = dependencies.audio ?? runtime.audio ?? new FfmpegMasteringProcessor(); this.audiobook = dependencies.audiobook ?? new FfmpegAudiobookProcessor();
     this.video = dependencies.video ?? new FfmpegVideoProcessor(); this.videoExport = dependencies.videoExport ?? new FfmpegVideoExportProcessor();
     this.scenePlanner = dependencies.scenePlanner; this.image = dependencies.image ?? runtime.images; this.summaryImages = dependencies.image && typeof dependencies.image !== "function" ? dependencies.image : runtime.images; this.tts = dependencies.tts instanceof TTSProviderRouter ? dependencies.tts : dependencies.tts ? new TTSProviderRouter(dependencies.tts) : runtime.tts;
     this.queue = dependencies.queue; this.transcriber = dependencies.speechTranscriber; this.alignConfig = alignmentConfig(env, root); this.aligner = dependencies.alignment ?? createAlignmentEngine(this.alignConfig);
     this.inspectionTimer = setInterval(() => this.expireInspections(), 60_000); this.inspectionTimer.unref();
+  }
+  async openSourceVerification(raw: unknown) {
+    const input = z.object({ url: z.url().refine((value) => { try { const parsed = new URL(value); return parsed.protocol === "https:" && !parsed.username && !parsed.password; } catch { return false; } }, "Verification requires a plain HTTPS URL") }).strict().parse(raw);
+    if (this.verificationSession) throw new SourceConflictError("A verification window is already open. Complete or cancel it before starting another.");
+    const session = this.browserVerification();
+    try { await session.open(input.url); }
+    catch (error) { throw new SourceUpstreamError(error instanceof Error ? error.message : "The verification window could not be opened.", { cause: error }); }
+    this.verificationSession = session; this.verificationUrl = input.url;
+    return { status: "open" as const };
+  }
+  async completeSourceVerification() {
+    const session = this.verificationSession; const url = this.verificationUrl;
+    if (!session || !url) throw new SourceInputError("No verification window is open.");
+    this.verificationSession = undefined; this.verificationUrl = undefined;
+    let harvest: { userAgent: string; cookies: Record<string, string> };
+    try { harvest = await session.complete(); }
+    catch (error) { throw new SourceUpstreamError(error instanceof Error ? error.message : "Browser verification could not be completed.", { cause: error }); }
+    const host = new URL(url).hostname.toLowerCase();
+    this.webHttp.setUserAgent(harvest.userAgent);
+    await this.webHttp.seedCookies(host, harvest.cookies);
+    return { status: "verified" as const, host };
+  }
+  async cancelSourceVerification() {
+    const session = this.verificationSession; this.verificationSession = undefined; this.verificationUrl = undefined;
+    if (session) await session.cancel();
+    return { status: "cancelled" as const };
   }
   async previewMarkStagesCurrent(slug: string, raw: unknown) {
     const input = z.object({ chapters: z.array(z.number().int().positive()).min(1).max(2_000) }).strict().parse(raw);
@@ -332,6 +364,25 @@ export class StudioOperations {
     return this.registry.searchNovels(input.query, input.providers, input.limit);
   }
 
+  async attachNovelSource(slug: string, raw: unknown) {
+    slugSchema.parse(slug);
+    const input = z.object({ url: z.url() }).strict().parse(raw);
+    const providerId = this.registry.novelProviderIdForUrl(input.url);
+    if (!providerId) throw new SourceInputError("No novel provider recognizes this URL");
+    const provider = this.registry.getNovelProvider(providerId);
+    // Association changes configuration only; chapter replacement remains an import action.
+    const book = await provider.getBook(input.url);
+    return withStoryLock(this.root, slug, "attach novel source", async () => {
+      const paths = storyPaths(this.root, slug, 1); const current = await loadStory(paths.storyConfig);
+      if (current.sources.some((source) => source.provider === providerId && source.bookId === book.bookId)) return current;
+      const source = storyNovelSourceSchema.parse({ provider: providerId, bookId: book.bookId, url: book.url, title: book.title, author: book.author, addedAt: new Date().toISOString(), priority: provider.descriptor?.priority ?? 100, enabled: true });
+      const story = storySchema.parse({ ...current, sources: [...current.sources, source] });
+      await atomicWriteJson(paths.storyConfig, story); invalidateCatalogCache(this.root, slug);
+      await recordActivity(this.root, slug, "source.attached", `Attached ${provider.displayName}: ${book.title}`);
+      return story;
+    });
+  }
+
   async updateNovelSourcePriorities(slug: string, raw: unknown) {
     slugSchema.parse(slug);
     const input = z.object({ sources: z.array(z.object({ provider: novelProviderIdSchema, bookId: z.string().min(1), priority: z.number().int().min(0).max(10_000), enabled: z.boolean() }).strict()).max(100) }).strict().parse(raw);
@@ -348,7 +399,9 @@ export class StudioOperations {
     });
   }
 
-  async inspectSource(input: { url?: string; file?: Uint8Array; filename?: string; files?: Array<{ name: string; text: string }>; type?: SourceType; from?: number; to?: number; chapter?: number; splitChapters?: boolean; allowGaps?: boolean; acquisition?: "html" | "bulk-download" }, context?: { story: string; additive: boolean }) {
+  async inspectSource(input: { url?: string; file?: Uint8Array; filename?: string; files?: Array<{ name: string; text: string }>; type?: SourceType; from?: number; to?: number; chapter?: number; splitChapters?: boolean; allowGaps?: boolean; acquisition?: "html" | "bulk-download" }, context?: { story: string; additive: boolean }, progressOptions: Pick<import("../../src/source/types.js").SourceInspectOptions, "onProgress" | "signal"> = {}) {
+    progressOptions.signal?.throwIfAborted();
+    progressOptions.onProgress?.({ phase: "preparing" });
     this.expireInspections(); let source: string; let temporaryDirectory: string | undefined;
     const type = input.type === undefined ? undefined : sourceTypeSchema.parse(input.type);
     try {
@@ -366,8 +419,10 @@ export class StudioOperations {
       const { provider, semanticType } = await this.registry.resolve(source, type); const remote = semanticType === "fanqie" || semanticType === "web";
       if (remote && ((input.from === undefined) !== (input.to === undefined))) throw new SourceInputError("Remote chapter ranges require both from and to");
       if (input.acquisition === "bulk-download" && (!remote || !supportsBulk(provider))) throw new SourceValidationError("The selected source does not support full-manuscript downloads");
-      let inspection = await this.registry.inspect(provider, source, { semanticType, from: input.from, to: input.to, chapter: input.chapter, splitChapters: input.splitChapters, allowGaps: input.allowGaps, acquisition: input.acquisition });
-      if (remote && context?.story && inspection.warnings.some((warning) => warning.code === "unavailable_chapter")) inspection = await this.applyConfiguredFallbacks(context.story, inspection, input.from, input.to);
+      let inspection = await this.registry.inspect(provider, source, { ...progressOptions, semanticType, from: input.from, to: input.to, chapter: input.chapter, splitChapters: input.splitChapters, allowGaps: input.allowGaps, acquisition: input.acquisition });
+      if (remote && context?.story && inspection.warnings.some((warning) => warning.code === "unavailable_chapter")) inspection = await this.applyConfiguredFallbacks(context.story, inspection, input.from, input.to, progressOptions);
+      progressOptions.signal?.throwIfAborted();
+      progressOptions.onProgress?.({ phase: "preview" });
       const previousRaw = context ? await readJsonIfExists<SourceManifest>(storyPaths(this.root, context.story, 1).sourceManifest) : undefined;
       const previous = previousRaw ? sourceManifestSchema.safeParse(previousRaw) : undefined;
       if (context?.additive && previousRaw && !previous?.success) throw new SourceConflictError(`Cannot safely update '${context.story}' because its source manifest is invalid`);
@@ -385,7 +440,7 @@ export class StudioOperations {
     } catch (error) { if (temporaryDirectory) await rm(temporaryDirectory, { recursive: true, force: true }); throw error; }
   }
 
-  async importInspection(slug: string, inspectionId: string, allowGaps = false, overwriteExisting = false) {
+  async importInspection(slug: string, inspectionId: string, allowGaps = false, overwriteExisting = true) {
     slugSchema.parse(slug); const record = this.inspections.get(inspectionId); if (!record) throw new Error("Inspection expired or was not found");
     try { validateImportable(record.inspection.chapters, record.inspection.warnings, allowGaps); }
     catch (error) { if (error instanceof SourceOperationError) throw error; throw new SourceValidationError(error instanceof Error ? error.message : String(error), { cause: error }); }
@@ -400,7 +455,7 @@ export class StudioOperations {
     await recordActivity(this.root, slug, "source.imported", `Imported ${result.added.length} new and updated ${result.modified.length} chapters`); invalidateCatalogCache(this.root, slug); await invalidateChapterStatusDerivedReads(this.root, slug); await invalidateStoryBibleDerivedReads(this.root, slug); return result;
   }
 
-  private async applyConfiguredFallbacks(slug: string, primary: SourceInspection, from?: number, to?: number): Promise<SourceInspection> {
+  private async applyConfiguredFallbacks(slug: string, primary: SourceInspection, from?: number, to?: number, progressOptions: Pick<import("../../src/source/types.js").SourceInspectOptions, "onProgress" | "signal"> = {}): Promise<SourceInspection> {
     const story = await loadStory(storyPaths(this.root, slug, 1).storyConfig);
     const inferred = story.source.url ? this.registry.novelProviderIdForUrl(story.source.url) : undefined;
     const configured: Array<{ provider: NovelProviderId; bookId: string; url: string }> = story.sources.length
@@ -421,11 +476,13 @@ export class StudioOperations {
     const chapters = [...primary.chapters]; const directory = new Map((primary.directory ?? []).map((item) => [item.chapter, item]));
     for (const candidate of candidates) {
       if (!requested.size) break;
+      progressOptions.signal?.throwIfAborted();
+      progressOptions.onProgress?.({ phase: "fallback", provider: candidate.provider });
       try {
-        const { provider } = await this.registry.resolve(candidate.url); const catalog = await this.registry.inspect(provider, candidate.url);
+        const { provider } = await this.registry.resolve(candidate.url); const catalog = await this.registry.inspect(provider, candidate.url, progressOptions);
         const available = (catalog.directory ?? []).filter((item) => requested.has(item.chapter)).map((item) => item.chapter);
         if (!available.length) { for (const chapter of requested) attempts.push({ provider: candidate.provider, chapter, status: "INVALID", reason: "Chapter is absent from this provider's catalog" }); continue; }
-        const fallback = await this.registry.inspect(provider, candidate.url, { chapters: available });
+        const fallback = await this.registry.inspect(provider, candidate.url, { ...progressOptions, chapters: available });
         for (const warning of fallback.warnings.filter((item) => item.code === "unavailable_chapter")) {
           const chapter = fallback.directory?.find((item) => item.sourceId === warning.sourceId)?.chapter;
           if (chapter) attempts.push({ provider: candidate.provider, chapter, status: validationStatusFromMessage(warning.message), reason: warning.message });
@@ -437,6 +494,7 @@ export class StudioOperations {
           attempts.push({ provider: candidate.provider, chapter: item.ref.chapter, status: validation?.status ?? "COMPLETE", reason: "Accepted as the first complete configured fallback", extractedCharacters: validation?.evidence?.extractedCharacters, expectedCharacters: validation?.evidence?.expectedCharacters });
         }
       } catch (error) {
+        progressOptions.signal?.throwIfAborted();
         for (const chapter of requested) attempts.push({ provider: candidate.provider, chapter, status: /challenge|captcha|interstitial|browser-verification/i.test(String(error)) ? "CHALLENGE_REQUIRED" : /blocked|access denied/i.test(String(error)) ? "BLOCKED" : "INVALID", reason: error instanceof Error ? error.message : String(error) });
       }
     }

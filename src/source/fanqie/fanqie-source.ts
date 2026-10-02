@@ -37,8 +37,8 @@ export class FanqieSource implements StorySourceProvider, NovelSourceProvider {
         url: typeof ref.metadata?.url === "string" ? ref.metadata.url : `https://fanqienovel.com/reader/${chapterId}` };
     });
   }
-  async getChapter(ref: NovelChapterRef): Promise<FetchedNovelChapter> {
-    const html = await this.http.getText(ref.url);
+  async getChapter(ref: NovelChapterRef, options: SourceInspectOptions = {}): Promise<FetchedNovelChapter> {
+    const html = await this.http.getText(ref.url, options);
     try {
       const parsed = parseFanqieChapter(html); return { ...ref, rawHtml: html, text: parsed.text, contentContainerFound: true, extractedTitle: parsed.title, acquisitionTransport: "html", retrievedAt: new Date().toISOString() };
     } catch (error) {
@@ -50,9 +50,11 @@ export class FanqieSource implements StorySourceProvider, NovelSourceProvider {
   validateChapter(chapter: FetchedNovelChapter) { return validateWebChapter(chapter); }
 
   async inspect(sourcePath: string, options: SourceInspectOptions = {}): Promise<SourceInspection> {
+    options.signal?.throwIfAborted();
+    options.onProgress?.({ phase: "metadata", provider: this.id });
     const parsed = parseFanqieUrl(sourcePath); let bookId = parsed.id;
-    if (parsed.kind === "chapter") bookId = bookIdFromChapterPage(await this.http.getText(parsed.url, { refresh: options.refresh }));
-    const sourceUrl = fanqieBookUrl(bookId); const book = parseFanqieBook(await this.http.getText(sourceUrl, { refresh: options.refresh }), sourceUrl, bookId);
+    if (parsed.kind === "chapter") bookId = bookIdFromChapterPage(await this.http.getText(parsed.url, { refresh: options.refresh, signal: options.signal }));
+    const sourceUrl = fanqieBookUrl(bookId); const book = parseFanqieBook(await this.http.getText(sourceUrl, { refresh: options.refresh, signal: options.signal }), sourceUrl, bookId);
     if (options.from && options.to && options.from > options.to) throw new SourceValidationError("--from cannot be greater than --to");
     let requested = options.chapters ? new Set(options.chapters) : undefined; let selected;
     if (!requested && (options.from !== undefined || options.to !== undefined)) {
@@ -68,17 +70,23 @@ export class FanqieSource implements StorySourceProvider, NovelSourceProvider {
     }
     const chapters: RawChapter[] = [];
     const warnings: SourceWarning[] = book.chapterCount !== book.directory.length ? [{ code: "unavailable_chapter", message: `Fanqie reports ${book.chapterCount} chapters but exposes ${book.directory.length}` }] : [];
-    for (const ref of selected) {
+    for (const [index, ref] of selected.entries()) {
+      options.signal?.throwIfAborted();
+      const progress = { phase: "chapters" as const, provider: this.id, chapter: ref.chapter, title: ref.originalTitle, current: index + 1, total: selected.length };
+      options.onProgress?.({ ...progress, completed: index });
       try {
         const novelRef: NovelChapterRef = { provider: this.id, bookId, chapterId: ref.sourceId, chapter: ref.chapter, title: ref.originalTitle, url: String(ref.metadata.url) };
-        const fetched = await this.getChapter(novelRef); const validation = this.validateChapter(fetched);
+        const fetched = await this.getChapter(novelRef, options); const validation = this.validateChapter(fetched);
         if (validation.status !== "COMPLETE") {
           warnings.push({ code: "unavailable_chapter", sourceId: ref.sourceId, message: validationMessage(ref.chapter, validation.status, validation.evidence.extractedCharacters, validation.evidence.expectedCharacters, validation.evidence.reasons) });
           continue;
         }
         chapters.push({ ref: { ...ref, originalTitle: fetched.extractedTitle ?? ref.originalTitle, metadata: { ...ref.metadata, ...chapterProvenance(fetched, validation) } }, text: fetched.text });
       } catch (error) {
+        options.signal?.throwIfAborted();
         warnings.push({ code: "unavailable_chapter", sourceId: ref.sourceId, message: `Chapter ${ref.chapter} · Fanqie · INVALID: ${error instanceof Error ? error.message : String(error)}` });
+      } finally {
+        if (!options.signal?.aborted) options.onProgress?.({ ...progress, completed: index + 1 });
       }
     }
     const now = new Date().toISOString(); const metadata = { provider: this.id, title: book.title, author: book.author, description: book.description,

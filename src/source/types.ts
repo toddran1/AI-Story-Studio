@@ -45,7 +45,21 @@ export type SourceInspection = {
   adapterVersion?: string;
 };
 
+export const sourceInspectionProgressSchema = z.object({
+  phase: z.enum(["preparing", "metadata", "directory", "chapters", "fallback", "preview"]),
+  provider: z.string().optional(),
+  chapter: z.number().int().positive().optional(),
+  title: z.string().optional(),
+  current: z.number().int().nonnegative().optional(),
+  completed: z.number().int().nonnegative().optional(),
+  total: z.number().int().nonnegative().optional(),
+  pagesChecked: z.number().int().nonnegative().optional(),
+});
+export type SourceInspectionProgress = z.infer<typeof sourceInspectionProgressSchema>;
+
 export type SourceInspectOptions = {
+  onProgress?: (progress: SourceInspectionProgress) => void;
+  signal?: AbortSignal;
   splitChapters?: boolean;
   chapter?: number;
   allowGaps?: boolean;

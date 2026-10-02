@@ -47,7 +47,7 @@ async function main() {
 
 type Args = { source?: string; story?: string; type?: SourceType; chapter?: number; from?: number; to?: number; probe?: number; splitChapters: boolean; allowGaps: boolean; overwriteExisting: boolean; acquisition?: "html" | "bulk-download" };
 function parseArgs(values: string[]): Args {
-  const args: Args = { splitChapters: false, allowGaps: false, overwriteExisting: false };
+  const args: Args = { splitChapters: false, allowGaps: false, overwriteExisting: true };
   for (let index = 0; index < values.length; index++) {
     const key = values[index]!;
     if (key === "--split-chapters") { args.splitChapters = true; continue; }

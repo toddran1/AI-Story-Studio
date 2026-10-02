@@ -1,3 +1,4 @@
+import { streamSourceInspection } from "./source-inspection-stream.js";
 import { randomUUID } from "node:crypto";
 import { getStoryBible } from "./catalog.js";
 import { loadStory } from "../../src/config/load-config.js";
@@ -684,21 +685,38 @@ export function createApiHandler(operations: StudioOperations) {
         return send(response, 200, { story: overview.story, effectiveRouting: overview.effectiveRouting });
       }
       const novelSourcesMatch = /^\/api\/stories\/([a-z0-9-]+)\/sources$/.exec(url.pathname);
+      if (novelSourcesMatch && request.method === "POST") return send(response, 200, { story: await operations.attachNovelSource(novelSourcesMatch[1]!, await jsonBody(request)) });
       if (novelSourcesMatch && request.method === "PUT") return send(response, 200, { story: await operations.updateNovelSourcePriorities(novelSourcesMatch[1]!, await jsonBody(request)) });
       const metadataTranslationJobMatch = /^\/api\/stories\/([a-z0-9-]+)\/jobs\/metadata-translation$/.exec(url.pathname);
       if (metadataTranslationJobMatch && request.method === "POST") return send(response, 202, operations.startMetadataTranslation(metadataTranslationJobMatch[1]!));
 
+      if (url.pathname === "/api/source-verification/open" && request.method === "POST") return send(response, 200, await operations.openSourceVerification(await jsonBody(request)));
+      if (url.pathname === "/api/source-verification/complete" && request.method === "POST") return send(response, 200, await operations.completeSourceVerification());
+      if (url.pathname === "/api/source-verification/cancel" && request.method === "POST") return send(response, 200, await operations.cancelSourceVerification());
       const inspectMatch = /^\/api\/stories\/([a-z0-9-]+)\/source\/inspect$/.exec(url.pathname);
       if (inspectMatch && request.method === "POST") {
         const updateContext = inspectMatch[1] === "new" ? undefined : { story: inspectMatch[1]!, additive: true };
         const contentType = request.headers["content-type"] ?? "";
-        if (contentType.includes("application/json")) { const raw = await jsonBody(request, 50_000_000); const parsedDirectory = directoryInspectSchema.safeParse(raw); return send(response, 200, await operations.inspectSource(parsedDirectory.success ? parsedDirectory.data : sourceInspectJsonSchema.parse(raw), updateContext)); }
-        const file = await body(request); const filename = request.headers["x-file-name"];
-        return send(response, 200, await operations.inspectSource({ file, filename: typeof filename === "string" ? decodeURIComponent(filename) : undefined,
-          type: optionalString(url.searchParams.get("type")) as never, chapter: optionalInteger(url.searchParams.get("chapter")), splitChapters: url.searchParams.get("split") === "true", allowGaps: url.searchParams.get("allowGaps") === "true" }, updateContext));
+        let input: Parameters<StudioOperations["inspectSource"]>[0];
+        if (contentType.includes("application/json")) {
+          const raw = await jsonBody(request, 50_000_000); const parsedDirectory = directoryInspectSchema.safeParse(raw);
+          input = parsedDirectory.success ? parsedDirectory.data : sourceInspectJsonSchema.parse(raw);
+        } else {
+          const file = await body(request); const filename = request.headers["x-file-name"];
+          input = { file, filename: typeof filename === "string" ? decodeURIComponent(filename) : undefined,
+            type: optionalString(url.searchParams.get("type")) as never, chapter: optionalInteger(url.searchParams.get("chapter")), splitChapters: url.searchParams.get("split") === "true", allowGaps: url.searchParams.get("allowGaps") === "true" };
+        }
+        if (String(request.headers.accept ?? "").includes("text/event-stream")) {
+          return streamSourceInspection(response, (options) => operations.inspectSource(input, updateContext, options), (error) => ({
+            error: error instanceof Error ? error.message : "Source inspection failed", status: statusFor(error),
+            ...(error && typeof error === "object" && "code" in error && typeof (error as { code?: unknown }).code === "string" ? { code: (error as { code: string }).code } : {}),
+            diagnostic: publicJob(createErrorDiagnostic(error), operations.root), validation: validationIssues(error),
+          }));
+        }
+        return send(response, 200, await operations.inspectSource(input, updateContext));
       }
       const importMatch = /^\/api\/stories\/([a-z0-9-]+)\/source\/import$/.exec(url.pathname);
-      if (importMatch && request.method === "POST") { const input = z.object({ inspectionId: z.string().uuid(), allowGaps: z.boolean().default(false), overwriteExisting: z.boolean().default(false) }).parse(await jsonBody(request)); return send(response, 200, await operations.importInspection(importMatch[1]!, input.inspectionId, input.allowGaps, input.overwriteExisting)); }
+      if (importMatch && request.method === "POST") { const input = z.object({ inspectionId: z.string().uuid(), allowGaps: z.boolean().default(false), overwriteExisting: z.boolean().default(true) }).parse(await jsonBody(request)); return send(response, 200, await operations.importInspection(importMatch[1]!, input.inspectionId, input.allowGaps, input.overwriteExisting)); }
       const activeJobMatch = /^\/api\/stories\/([a-z0-9-]+)\/jobs\/active$/.exec(url.pathname);
       if (activeJobMatch && request.method === "GET") {
         const job = operations.getActiveStoryJob(activeJobMatch[1]!);

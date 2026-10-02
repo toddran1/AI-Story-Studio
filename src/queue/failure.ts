@@ -1,3 +1,5 @@
+import { WebHttpError, WebSourceAccessError } from "../source/web/http-client.js";
+import { ProviderCooldownError } from "../source/provider-catalog.js";
 import { ConfigurationError, QualityGateError } from "../pipeline/errors.js";
 import { FailureCategory } from "./types.js";
 
@@ -8,8 +10,17 @@ export function classifyQueueFailure(error: unknown): ClassifiedFailure {
   const status = values.map((value) => numeric(value.status ?? value.statusCode)).find((value) => value !== undefined);
   const retryAfterMs = values.map(retryAfter).find((value) => value !== undefined);
   const provider = values.map((v) => typeof v.provider === "string" ? v.provider : undefined).find(Boolean) ?? providerFrom(message);
+  const cooldown = values.find((value) => value instanceof ProviderCooldownError) as ProviderCooldownError | undefined;
+  if (cooldown) return { category: "rate_limit", retryable: true, retryAfterMs: Math.max(0, Date.parse(cooldown.cooldownUntil) - Date.now()), message, provider,
+    recommendedAction: "Wait until the source cooldown ends, then retry inspection manually. This pause clears automatically; it does not resolve the website's browser challenge." };
   if (values.some((value) => value instanceof QualityGateError) || /quality gate|qa fail|continuity|invalid narration|model response/i.test(message))
     return { category: "content_qa", retryable: false, message, recommendedAction: "Review the chapter output, correct the content, then retry the affected stage.", provider };
+  const sourceAccess = values.some((value) => value instanceof WebSourceAccessError || (value instanceof WebHttpError && (value.status === 401 || value.status === 403)))
+    || values.some((value) => /CHALLENGE_REQUIRED|blocked by.*(?:challenge|interstitial)|browser.verification interstitial/iu.test(value.message));
+  if (sourceAccess) return {
+    category: "permanent", retryable: false, message, provider,
+    recommendedAction: "The novel website is blocking automated access or requires browser verification. Wait before retrying, or use another enabled source. Opening it in a browser may confirm access, but does not authorize the studio's HTTP session. LLM and TTS API keys do not resolve this source block.",
+  };
   if (status === 401 || status === 403 || /authentication|invalid_api_key|unauthorized|forbidden/i.test(message))
     return { category: "configuration", retryable: false, message, recommendedAction: "Check provider credentials in Studio Settings or .env.", provider };
   if (status === 429 || /rate.?limit|too many requests|quota temporarily|insufficient_quota/i.test(message))
@@ -33,4 +44,4 @@ export function retryDelayMs(attempt: number, retryAfterMs?: number, random = Ma
 function errorChain(error: unknown) { const result: Array<Error & Record<string, unknown>> = []; let value = error; for (let depth = 0; value && depth < 8; depth++) { if (value instanceof Error) result.push(value as Error & Record<string, unknown>); value = typeof value === "object" ? (value as { cause?: unknown }).cause : undefined; } return result; }
 function numeric(value: unknown) { const number = typeof value === "number" ? value : typeof value === "string" ? Number(value) : NaN; return Number.isInteger(number) ? number : undefined; }
 function retryAfter(value: Error & Record<string, unknown>) { const headers = value.headers as Record<string, unknown> | undefined; const raw = headers?.["retry-after"] ?? headers?.["Retry-After"] ?? value.retryAfter; if (raw !== undefined) { const seconds = Number(raw); if (Number.isFinite(seconds)) return Math.max(0, seconds * 1000); const date = Date.parse(String(raw)); if (Number.isFinite(date)) return Math.max(0, date - Date.now()); } const match=value.message.match(/(?:please\s+)?retry\s+in\s+([0-9]+(?:\.[0-9]+)?)\s*(ms|milliseconds?|s|seconds?)/i); if(!match)return undefined;const amount=Number(match[1]);return Math.max(0,Math.ceil(amount*(/^m/i.test(match[2]!)?1:1000))); }
-function providerFrom(message: string) { if (/fish/i.test(message)) return "fish"; if (/kimi|moonshot/i.test(message)) return "kimi"; if (/gemini|google/i.test(message)) return "gemini"; if (/openai/i.test(message)) return "openai"; if (/image/i.test(message)) return "image"; return undefined; }
+function providerFrom(message: string) { if (/wfxs/iu.test(message)) return "wfxs"; if (/fish/i.test(message)) return "fish"; if (/kimi|moonshot/i.test(message)) return "kimi"; if (/gemini|google/i.test(message)) return "gemini"; if (/openai/i.test(message)) return "openai"; if (/image/i.test(message)) return "image"; return undefined; }

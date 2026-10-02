@@ -4,7 +4,11 @@ export class ApiError extends Error { constructor(message: string, public readon
 export function formatDiagnostic(diagnostic: ErrorDiagnostic) { return `${diagnostic.summary}\nNext: ${diagnostic.recommendedAction}\nReference: ${diagnostic.id}`; }
 export function formatApiError(message: string, diagnostic?: ErrorDiagnostic, validation?: ApiValidationIssue[]) {
   const fields = validation?.length ? `Please correct:\n${validation.map((issue) => `• ${issue.path}: ${issue.message}`).join("\n")}` : undefined;
-  return [message, fields, diagnostic ? formatDiagnostic(diagnostic) : undefined].filter(Boolean).join("\n");
+  const details = diagnostic ? diagnostic.summary === message ? `Next: ${diagnostic.recommendedAction}\nReference: ${diagnostic.id}` : formatDiagnostic(diagnostic) : undefined;
+  const formatted = [message, fields, details].filter(Boolean).join("\n");
+  return diagnostic?.code === "SOURCE_COOLDOWN" || /Novel provider .*cooling down/iu.test(message)
+    ? formatted.replace(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z/gu, (value) => new Date(value).toLocaleString(undefined, { hour: "numeric", minute: "2-digit", second: "2-digit", timeZoneName: "short" }))
+    : formatted;
 }
 
 export async function api<T>(path: string, options?: RequestInit): Promise<T> {
@@ -28,6 +32,10 @@ function parseValidationIssues(value: unknown): ApiValidationIssue[] | undefined
 export function post<T>(path: string, body: unknown) { return api<T>(path, { method: "POST", body: JSON.stringify(body) }); }
 export function put<T>(path: string, body: unknown) { return api<T>(path, { method: "PUT", body: JSON.stringify(body) }); }
 export function del<T>(path: string) { return api<T>(path, { method: "DELETE", body: JSON.stringify({}) }); }
+
+export function openSourceVerification(url: string) { return post<{ status: "open" }>(`/source-verification/open`, { url }); }
+export function completeSourceVerification() { return post<{ status: "verified"; host: string }>(`/source-verification/complete`, {}); }
+export function cancelSourceVerification() { return post<{ status: "cancelled" }>(`/source-verification/cancel`, {}); }
 
 /** Dry-run impact preview for a Story Bible entity action (no provider calls server-side). */
 export type EntityImpact = {

@@ -21,6 +21,11 @@ export type ImportResult = {
 
 export async function importSource(root: string, story: string, inspection: SourceInspection, finalize?: () => Promise<void>, options: { overwriteExisting?: boolean } = {}): Promise<ImportResult> {
   if (!inspection.chapters.length) throw new SourceValidationError("Source import contains no materialized chapters");
+  const blockingWarnings = inspection.warnings.filter((warning) => ["duplicate_chapter_number", "empty_section", "invalid_filename", "unavailable_chapter"].includes(warning.code));
+  if (blockingWarnings.length) throw new SourceValidationError(blockingWarnings.map((warning) => warning.message).join("; "));
+  for (const chapter of inspection.chapters) {
+    if (!chapter.text.trim()) throw new SourceValidationError(`Chapter ${chapter.ref.chapter} is empty`);
+  }
   const paths = storyPaths(root, story, inspection.chapters[0]?.ref.chapter ?? 1);
   await recoverInterruptedImport(paths.story, paths.source);
   let previous: SourceManifest | undefined;
@@ -82,8 +87,7 @@ export async function importSource(root: string, story: string, inspection: Sour
     });
     await atomicWriteJson(join(stage, "source.json"), manifest);
     const changes = await compareChapters(paths.source, parsedPrevious?.success ? parsedPrevious.data : undefined, manifest);
-    // Interactive callers opt in before replacing a chapter that may have
-    // expensive downstream work. Programmatic migrations retain compatibility.
+    // Callers can explicitly prohibit replacement; validated imports replace by default.
     if (changes.modified.length && options.overwriteExisting === false) {
       throw new SourceConflictError(`Incoming source would replace existing Chapter${changes.modified.length === 1 ? "" : "s"} ${changes.modified.join(", ")}. Review the update and explicitly confirm replacement before importing.`);
     }

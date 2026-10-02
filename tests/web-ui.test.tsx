@@ -1597,6 +1597,22 @@ describe("web UI", () => {
       expect(html).toContain("Regenerate Translation");
     });
 
+    it("offers a full-chapter copy control on Original, Translation, and Narration tabs", () => {
+      for (const tab of ["original", "translation", "narration"]) {
+        const html = renderToStaticMarkup(
+          <ChapterPage
+            slug="demo-story"
+            chapter={2}
+            initialData={mockChapterDetail}
+            initialTab={tab}
+            onJob={() => undefined}
+          />
+        );
+        expect(html).toContain('aria-label="Copy all ');
+        expect(html).toContain(">Copy text</button>");
+      }
+    });
+
     it("preserves active ?tab= parameter when clicking Previous or Next chapter navigation", () => {
       const navigated: string[] = [];
       const mockNavigate = (url: string) => {

@@ -61,6 +61,8 @@ export type NovelSearchResult = {
 };
 
 export type NovelBook = NovelSearchResult & {
+  directoryWarnings?: import("./types.js").SourceWarning[];
+  directoryMetadata?: Record<string, unknown>;
   status?: string;
   language?: string;
   metadata?: Record<string, unknown>;
@@ -115,9 +117,9 @@ export interface NovelSourceProvider {
   readonly descriptor?: NovelProviderDescriptor;
   supportsUrl(input: string): boolean;
   search(query: string, limit?: number): Promise<NovelSearchResult[]>;
-  getBook(input: string): Promise<NovelBook>;
-  getChapterList(book: NovelBook): Promise<NovelChapterRef[]>;
-  getChapter(chapter: NovelChapterRef): Promise<FetchedNovelChapter>;
+  getBook(input: string, options?: import("./types.js").SourceInspectOptions): Promise<NovelBook>;
+  getChapterList(book: NovelBook, options?: import("./types.js").SourceInspectOptions): Promise<NovelChapterRef[]>;
+  getChapter(chapter: NovelChapterRef, options?: import("./types.js").SourceInspectOptions): Promise<FetchedNovelChapter>;
   validateChapter(chapter: FetchedNovelChapter): ChapterValidation;
   getBulkDownloads?(book: NovelBook): Promise<NovelDownloadReference[]>;
   fetchBulkDownload?(reference: NovelDownloadReference): Promise<NovelDownloadPayload>;

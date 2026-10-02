@@ -805,11 +805,11 @@ export function ChapterPage({
         </div>
         {saved && <p className="save-note">{saved}</p>}
       </>}
-      {tab === "original" && <Manuscript title="Original source" text={data.original} />}
+      {tab === "original" && <Manuscript title="Original source" text={data.original} onCopyText />}
       {(tab === "translation" || tab === "narration") && <>
         {data.metadata?.stages?.[tab]?.staleReason && <ArtifactStatusNotice status="stale" reason={`This ${tab} is stale: ${data.metadata.stages[tab].staleReason}. It remains visible and editable, but downstream artifacts will not treat it as current until it is regenerated or marked current.`} />}
         <div className="text-workspace">
-          <div className="edit-warning"><b>Manual edit</b><span>Saving marks downstream artifacts stale. Paid stages will not run until you start production.</span></div>
+          <div className="text-workspace-toolbar"><div className="edit-warning"><b>Manual edit</b><span>Saving marks downstream artifacts stale. Paid stages will not run until you start production.</span></div><CopyTextButton text={draft} description={`${pretty(tab)} chapter text`} /></div>
           <textarea value={draft} onChange={(event) => setDraft(event.target.value)} aria-label={`Edit ${tab}`} />
           {tab === "narration" && data.spokenText && data.spokenText !== data.narration && (
             <details className="spoken-text-preview">
@@ -4622,7 +4622,24 @@ function ModelEditor({ label, value, onChange }: { label: string; value: Model; 
   return <div className="model-editor">{label ? <label>{label}</label> : null}<select value={value.provider} onChange={(e) => onChange({ ...value, provider: e.target.value as Model["provider"] })}><option value="openai">OpenAI</option><option value="gemini">Gemini</option><option value="kimi">Kimi</option></select><input aria-label={`${label || "Model"} model ID`} list={value.provider === "openai" ? modelListId : undefined} value={value.model} onChange={(e) => onChange({ ...value, model: e.target.value })} />{value.provider === "openai" && <datalist id={modelListId}>{OPENAI_TEXT_MODELS.map((model) => <option key={model} value={model} />)}</datalist>}</div>;
 }
 function PreviewResult({ choice, result, onChoose }: { choice: "a" | "b"; result: any; onChoose: () => void }) { const qa = result[choice === "a" ? "qaA" : "qaB"]; return <article className="preview-result"><div className="preview-result-head"><span className="option-letter">{choice.toUpperCase()}</span><Status status={qa.status} label={`${Math.round(qa.score * 100)} score`} /></div><Manuscript title="Translation" text={result[choice === "a" ? "translationA" : "translationB"]} compact /><Manuscript title="Narration" text={result[choice === "a" ? "narrationA" : "narrationB"]} compact />{result[choice === "a" ? "audioA" : "audioB"] && <AudioDeck src={`/api/stories/${result.manifest.story}/previews/${result.manifest.id}/audio-${choice}`} title={`Option ${choice.toUpperCase()} sample`} />}<button className="button primary" onClick={onChoose}>Use option {choice.toUpperCase()}</button></article>; }
-function Manuscript({ title, text, compact }: { title: string; text?: string; compact?: boolean }) { return <article className={`manuscript ${compact ? "compact" : ""}`}><header className="manuscript-header"><span>{title}</span><small className="mono">{text?.split(/\s+/).filter(Boolean).length ?? 0} words</small></header><div>{text ? text.split(/\n\n+/).map((paragraph, index) => <p key={index}>{paragraph}</p>) : <p className="empty-line">This stage has not produced text yet.</p>}</div></article>; }
+function Manuscript({ title, text, compact, onCopyText = false }: { title: string; text?: string; compact?: boolean; onCopyText?: boolean }) { return <article className={`manuscript ${compact ? "compact" : ""}`}><header className="manuscript-header"><span>{title}</span><div className="manuscript-header-actions">{onCopyText && <CopyTextButton text={text ?? ""} description="Original chapter text" />}<small className="mono">{text?.split(/\s+/).filter(Boolean).length ?? 0} words</small></div></header><div>{text ? text.split(/\n\n+/).map((paragraph, index) => <p key={index}>{paragraph}</p>) : <p className="empty-line">This stage has not produced text yet.</p>}</div></article>; }
+function CopyTextButton({ text, description }: { text: string; description: string }) {
+  const [copied, setCopied] = useState(false);
+  const [error, setError] = useState("");
+  useEffect(() => { setCopied(false); setError(""); }, [text]);
+  const copy = async () => {
+    if (!text.trim()) return;
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(true);
+      setError("");
+      window.setTimeout(() => setCopied(false), 1600);
+    } catch {
+      setError("Clipboard unavailable");
+    }
+  };
+  return <span className="copy-text-control"><button type="button" className="button" disabled={!text.trim()} aria-label={`Copy all ${description}`} title={`Copy all ${description}`} onClick={() => void copy()}>{copied ? "Copied" : "Copy text"}</button>{error && <small role="status">{error}</small>}</span>;
+}
 function CompareTextEditor({ title, value, savedValue, saving, onChange, onSave }: { title: string; value: string; savedValue?: string; saving: boolean; onChange: (value: string) => void; onSave: () => void }) {
   const changed = value !== (savedValue ?? "");
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
