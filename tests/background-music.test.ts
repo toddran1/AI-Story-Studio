@@ -61,9 +61,9 @@ describe("background music library and exports", () => {
     expect(await resolveExportMusic(root, story, { mode: "none" }, {}, tools)).toBeUndefined();
     await expect(resolveExportMusic(root, story, { mode: "story_default" }, {}, tools)).rejects.toThrow("no default");
     const direct = await resolveExportMusic(root, story, { mode: "track", trackId: track.id }, {}, tools);
-    expect(direct?.gainDb).toBe(-22); expect(direct?.ducking.enabled).toBe(true);
+    expect(direct?.gainDb).toBe(-14); expect(direct?.ducking.enabled).toBe(true);
     const storyPreset = await resolveExportMusic(root, { ...story, backgroundMusic: { ...story.backgroundMusic, level: "present", fadeInSeconds: 4 } }, { mode: "track", trackId: track.id }, {}, tools);
-    expect(storyPreset?.gainDb).toBe(-15); expect(storyPreset?.fadeInSeconds).toBe(4);
+    expect(storyPreset?.gainDb).toBe(-6); expect(storyPreset?.fadeInSeconds).toBe(4);
     const withDefault = { ...story, backgroundMusic: { ...story.backgroundMusic, defaultTrackId: track.id } };
     const custom = await resolveExportMusic(root, withDefault, { mode: "story_default" }, { level: "custom", customGainDb: -30, ducking: { enabled: false } }, tools);
     expect(custom?.gainDb).toBe(-30); expect(custom?.ducking.enabled).toBe(false);
@@ -72,6 +72,22 @@ describe("background music library and exports", () => {
     expect(buildBackgroundMusicVideoArgs("clean.mp4", "mix.mp4", 12, direct!).join(" ")).toContain("-c:v copy");
     await deleteMusicTrack(root, track.id);
     await expect(resolveExportMusic(root, withDefault, { mode: "story_default" }, {}, tools)).rejects.toThrow("no longer available");
+  });
+
+  it("keeps a quiet music track audible under narration with the default preset and ducking", async () => {
+    try { await runCommand("ffmpeg", ["-version"], 5_000); } catch { return; }
+    const { root, source, story } = await fixture();
+    const paths = storyPaths(root, story.slug, 1); await mkdir(paths.chapterDir, { recursive: true });
+    await runCommand("ffmpeg", ["-v", "error", "-f", "lavfi", "-i", "sine=frequency=1000:duration=4", "-af", "volume=2", "-c:a", "libmp3lame", "-y", paths.audio]);
+    await runCommand("ffmpeg", ["-v", "error", "-f", "lavfi", "-i", "sine=frequency=220:duration=4", "-af", "volume=0.1", "-c:a", "libmp3lame", "-y", source]);
+    const track = await importMusicTrack(root, source, "quiet.mp3");
+    const result = await exportChapterWithMusic({ root, story, chapter: 1, kind: "audio", music: { mode: "track", trackId: track.id }, musicOverrides: { fadeInSeconds: 0, fadeOutSeconds: 0 } });
+    // Isolate the music frequency to measure actual contribution, not merely
+    // confirm that a music input appears in the FFmpeg command.
+    const measured = await runCommand("ffmpeg", ["-hide_banner", "-i", result.output, "-af", "bandpass=f=220:width_type=h:w=20,volumedetect", "-f", "null", "-"]);
+    const level = Number(/mean_volume: (-?[\d.]+) dB/.exec(measured.stderr)?.[1]);
+    expect(Number.isFinite(level)).toBe(true);
+    expect(level).toBeGreaterThan(-38);
   });
 
   it("mixes separate chapter audio and video variants while preserving clean masters", async () => {

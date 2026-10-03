@@ -53,8 +53,8 @@ export class FishAudioProvider implements TTSProvider {
     } = {},
   ) {
     this.inputNormalizationVersion = speechOptions.tskRendering === "direction"
-      ? "fish-speech-normalization-v16-leading-heh-tsk-direction"
-      : "fish-speech-normalization-v16-leading-heh";
+      ? "fish-speech-normalization-v18-laughing-chuckle-tsk-direction"
+      : "fish-speech-normalization-v18-laughing-chuckle";
   }
 
   resolveReferenceId(referenceId?: string): string | undefined {
@@ -65,7 +65,7 @@ export class FishAudioProvider implements TTSProvider {
    * unknown models fall back to canonical short spoken forms. No guessed tags. */
   vocalizationStrategy(model?: string): VocalizationRenderStrategy {
     if (!isFishS2Model(model)) return { kind: "safe_normalize" };
-    return { kind: "native_tags", tags: { laugh: "[laugh]", chuckle: "[laugh]", throat_clear: "[cough]", sigh: "[sigh]", gasp: "[gasp]" } };
+    return { kind: "native_tags", tags: { laugh: "[laughing]", chuckle: "[chuckle]", throat_clear: "[cough]", sigh: "[sigh]", gasp: "[gasp]" } };
   }
 
   async validateConfiguration(): Promise<void> { if (!this.apiKey) throw new ConfigurationError("Missing required fish credential (FISH_AUDIO_API_KEY). Add it to .env."); }

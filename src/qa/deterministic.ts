@@ -134,6 +134,7 @@ function speechReadinessDetections(story: Story, narration: string): FreshQaDete
   const covered = new Set(normalized.transformations.map((transformation) => transformation.written));
   const flagged = new Map<string, string>();
   for (const { kind, pattern } of SPEECH_TOKEN_PATTERNS) {
+    if (kind === "abbreviation" && story.qaPolicy.disabledRules.includes("ttsAbbreviations")) continue;
     for (const match of narration.matchAll(pattern)) {
       const written = match[0];
       // Covered tokens are already rewritten for speech: never flag them.

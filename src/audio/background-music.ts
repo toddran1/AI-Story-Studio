@@ -5,7 +5,7 @@ import { renderMusicBed } from "../music/render-bed.js";
 import { fileFingerprint } from "../utils/file-fingerprint.js";
 import { fingerprint } from "../utils/hash.js";
 
-export const BACKGROUND_MUSIC_PROCESSOR_VERSION = "background-music-v3";
+export const BACKGROUND_MUSIC_PROCESSOR_VERSION = "background-music-v4";
 export function backgroundMusicFingerprint(music: ResolvedExportMusic) {
   return { version: BACKGROUND_MUSIC_PROCESSOR_VERSION, mode: music.mode, trackId: music.track.id, trackFingerprint: music.track.fingerprint, bed: music.bed ? { id: music.bed.id, revision: music.bed.fingerprint, tracks: music.bed.tracks.map((item) => [item.track.id, item.track.fingerprint]), playbackMode: music.bed.playbackMode, crossfadeSeconds: music.bed.crossfadeSeconds } : undefined,
     gainDb: music.gainDb, ducking: music.ducking, fadeInSeconds: music.fadeInSeconds, fadeOutSeconds: music.fadeOutSeconds, loopMode: music.loopMode };
@@ -19,9 +19,9 @@ export function buildBackgroundMusicFilter(duration: number, music: ResolvedExpo
   const fadeIn = Math.min(music.fadeInSeconds, duration / 2); const fadeOut = Math.min(music.fadeOutSeconds, duration / 2);
   const voice = "[0:a]aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo";
   const voiceFilter = music.ducking.enabled ? `${voice},asplit=2[voice][key]` : `${voice}[voice]`;
-  const fade = `[1:a]aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo,volume=${music.gainDb}dB${fadeIn > 0 ? `,afade=t=in:st=0:d=${fadeIn}` : ""}${fadeOut > 0 ? `,afade=t=out:st=${Math.max(0, duration - fadeOut)}:d=${fadeOut}` : ""}[bed]`;
+  const fade = `[1:a]aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo,loudnorm=I=-16:TP=-2:LRA=11,volume=${music.gainDb}dB${fadeIn > 0 ? `,afade=t=in:st=0:d=${fadeIn}` : ""}${fadeOut > 0 ? `,afade=t=out:st=${Math.max(0, duration - fadeOut)}:d=${fadeOut}` : ""}[bed]`;
   const strengths = { gentle: { ratio: 2, threshold: .05 }, normal: { ratio: 3, threshold: .035 }, strong: { ratio: 5, threshold: .025 } };
-  const ducked = music.ducking.enabled ? `[bed][key]sidechaincompress=threshold=${strengths[music.ducking.strength].threshold}:ratio=${strengths[music.ducking.strength].ratio}:attack=250:release=1200[music]` : "[bed]anull[music]";
+  const ducked = music.ducking.enabled ? `[bed][key]sidechaincompress=threshold=${strengths[music.ducking.strength].threshold}:ratio=${strengths[music.ducking.strength].ratio}:attack=250:release=1200:mix=0.5[music]` : "[bed]anull[music]";
   return `${voiceFilter};${fade};${ducked};[voice][music]amix=inputs=2:duration=first:normalize=0,alimiter=limit=0.89[out]`;
 }
 export function buildBackgroundMusicAudioArgs(input: string, output: string, format: "mp3" | "m4b", duration: number, music: ResolvedExportMusic) {

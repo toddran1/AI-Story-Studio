@@ -3,7 +3,7 @@ import { api, post, type Job, type StorySummary } from "./api.js";
 import { useMusicExportPreferences } from "./useMusicExportPreferences.js";
 import { BackgroundMusicControls } from "./BackgroundMusicControls.js";
 
-export function SummaryMusicExports({ slug, summary, onJob, onPrepare, disabled = false }: { slug: string; summary: StorySummary; onJob?: (job: Job) => void; onPrepare?: (kind: "audio" | "video") => void; disabled?: boolean }) {
+export function SummaryMusicExports({ slug, summary, onJob, onPrepare, kind: visibleKind, disabled = false }: { slug: string; summary: StorySummary; onJob?: (job: Job) => void; onPrepare?: (kind: "audio" | "video") => void; kind?: "audio" | "video"; disabled?: boolean }) {
   const storageKey = `summary-music:${slug}:${summary.id}`;
   const { music, setMusic, overrides, setOverrides } = useMusicExportPreferences(storageKey);
   const [job, setJob] = useState<Job>();
@@ -51,10 +51,10 @@ export function SummaryMusicExports({ slug, summary, onJob, onPrepare, disabled 
     }
   }, [job, base]);
   const busy = disabled || starting || Boolean(job && ["queued", "running"].includes(job.status));
-  return <section className="summary-media-editor"><h3>Summary music exports</h3><p>Create a listening or video edition with background music. Clean summary audio and video remain unchanged.</p>
+  return <section className="summary-media-editor"><h3>Summary music exports</h3><p>Choose background music, preview the mix, then export your edition.</p>
     <BackgroundMusicControls slug={slug} summaryId={summary.id} selection={music} onSelectionChange={setMusic} overrides={overrides} onOverridesChange={setOverrides} />
-    <div className="summary-visual-actions">{(["audio", "video"] as const).map((kind) => <span key={kind}><button className="button" disabled={busy || !summary[kind]?.outputFingerprint} onClick={() => void run(kind)}>Export summary {kind === "audio" ? "MP3" : "MP4"}</button>{downloads[kind] && <a className="button" download href={downloads[kind]}>Download {kind === "audio" ? "MP3" : "MP4"} edition</a>}{(!summary[kind]?.outputFingerprint || summary[kind]?.status === "stale" || summary[kind]?.status === "failed") && <p>{summary[kind]?.outputFingerprint ? "This edition uses older or failed inputs. You can export the retained media or update it first." : `Generate summary ${kind} before exporting.`}{onPrepare && <button className="button" disabled={busy} onClick={() => onPrepare(kind)}>{kind === "audio" ? (summary.audio?.outputFingerprint ? "Update audio" : "Generate audio") : "Open video setup"}</button>}</p>}</span>)}</div>
-    {editions.length > 0 && <details><summary>Saved music editions</summary>{editions.map((edition) => <p key={`${edition.kind}-${edition.edition}`}><a className="button" download href={edition.url}>{edition.kind.toUpperCase()} · {edition.musicTitle}</a> <small>{new Date(edition.createdAt).toLocaleString()}</small></p>)}</details>}
+    <div className="summary-visual-actions">{(visibleKind ? [visibleKind] : ["audio", "video"] as const).map((kind) => <span key={kind}><button className="button" disabled={busy || !summary[kind]?.outputFingerprint} onClick={() => void run(kind)}>Export summary {kind === "audio" ? "MP3" : "MP4"}</button>{downloads[kind] && <a className="button" download href={downloads[kind]}>Download {kind === "audio" ? "MP3" : "MP4"} edition</a>}{(!summary[kind]?.outputFingerprint || summary[kind]?.status === "stale" || summary[kind]?.status === "failed") && <p>{summary[kind]?.outputFingerprint ? "This edition uses older or failed inputs. You can export the retained media or update it first." : `Generate summary ${kind} before exporting.`}{onPrepare && <button className="button" disabled={busy} onClick={() => onPrepare(kind)}>{kind === "audio" ? (summary.audio?.outputFingerprint ? "Update audio" : "Generate audio") : "Open video setup"}</button>}</p>}</span>)}</div>
+    {editions.length > 0 && <details><summary>Saved music editions</summary>{editions.filter((edition) => !visibleKind || edition.kind === visibleKind).map((edition) => <p key={`${edition.kind}-${edition.edition}`}><a className="button" download href={edition.url}>{edition.kind.toUpperCase()} · {edition.musicTitle}</a> <small>{new Date(edition.createdAt).toLocaleString()}</small></p>)}</details>}
     {(starting || Boolean(job && ["queued", "running"].includes(job.status))) && <p role="status">Building summary music export…</p>}{error && <p role="alert">{error}</p>}
   </section>;
 }

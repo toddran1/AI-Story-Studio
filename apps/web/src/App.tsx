@@ -4290,14 +4290,14 @@ export function SettingsPage({ slug, onJob, initialStory, initialEffectiveRoutin
             <i aria-hidden="true" />
           </label>;
         })}
-        {(() => {
-          const enabled = !story.qaPolicy?.disabledRules.includes("duplicateParagraph");
-          return <label className={`qa-check-toggle ${enabled ? "active" : ""}`}>
-            <span className="qa-check-name">Repeated paragraphs</span><span className="qa-check-state">{enabled ? "On" : "Off"}</span>
-            <input type="checkbox" checked={enabled} onChange={(event) => setStory({ ...story, qaPolicy: { ...story.qaPolicy, disabledCategories: story.qaPolicy?.disabledCategories ?? [], disabledRules: event.target.checked ? (story.qaPolicy?.disabledRules ?? []).filter((value) => value !== "duplicateParagraph") : [...(story.qaPolicy?.disabledRules ?? []), "duplicateParagraph"] } })} />
+        {([["duplicateParagraph", "Repeated paragraphs"], ["ttsAbbreviations", "TTS abbreviation warnings"]] as const).map(([rule, label]) => {
+          const enabled = !story.qaPolicy?.disabledRules.includes(rule);
+          return <label className={`qa-check-toggle ${enabled ? "active" : ""}`} key={rule}>
+            <span className="qa-check-name">{label}</span><span className="qa-check-state">{enabled ? "On" : "Off"}</span>
+            <input type="checkbox" checked={enabled} onChange={(event) => setStory({ ...story, qaPolicy: { ...story.qaPolicy, disabledCategories: story.qaPolicy?.disabledCategories ?? [], disabledRules: event.target.checked ? (story.qaPolicy?.disabledRules ?? []).filter((value) => value !== rule) : [...(story.qaPolicy?.disabledRules ?? []), rule] } })} />
             <i aria-hidden="true" />
           </label>;
-        })()}
+        })}
       </div>
       <div className="settings-group video-settings"><h3>Video</h3>
         <div className="video-presentation-settings"><h4>Video presentation</h4><p className="field-note">Visual effects use the saved scene timing. Audio and subtitles keep their original timing.</p>

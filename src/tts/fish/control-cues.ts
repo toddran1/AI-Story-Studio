@@ -1,7 +1,7 @@
 export const FISH_S2_MODELS = new Set(["s2-pro", "s2.1-pro", "s2.1-pro-free"]);
 
 export const FISH_S2_CONTROL_CUES = [
-  "whisper", "whispering", "laugh", "laughing", "clears throat", "cough", "emphasis", "sigh", "gasp", "pause", "long-break", "inhale", "exhale",
+  "whisper", "whispering", "laugh", "laughing", "chuckle", "clears throat", "cough", "emphasis", "sigh", "gasp", "pause", "long-break", "inhale", "exhale",
   "happy", "sad", "angry", "excited", "calm", "nervous", "confident", "surprised", "scared", "worried", "frustrated",
   "empathetic", "mysterious", "determined", "soft", "shouting", "breathless",
 ] as const;
@@ -21,6 +21,7 @@ export function disambiguateFishS2Brackets(text: string, model?: string): string
   if (!isFishS2Model(model)) return text;
   return text.replace(/\[([^\[\]\r\n]{1,240})\]/g, (_match, content: string) => {
     const spoken = content.trim();
-    return cueSet.has(spoken.toLowerCase()) ? `[${spoken.toLowerCase()}]` : spoken;
+    const cue = spoken.toLowerCase() === "laugh" ? "laughing" : spoken.toLowerCase();
+    return cueSet.has(cue) ? `[${cue}]` : spoken;
   });
 }

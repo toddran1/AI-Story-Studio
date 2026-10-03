@@ -28,6 +28,26 @@ describe("QA result", () => {
     ] }));
     expect(uncertain.issues[0]?.severity).toBe("warn");
   });
+  it("keeps translation-only chapter-title defects at warning severity", () => {
+    const result = normalizeQaResult(promoteConfirmedMaterialIssues({
+      status: "fail", score: 0.7, checks: { ...checks, completeness: "fail" },
+      issues: [{ category: "completeness", severity: "fail", message: "The fault lies in the TRANSLATION: it omits the source chapter title.", evidence: "TRANSLATION begins without the chapter title. NARRATION also omits it intentionally." }],
+    }));
+    expect(result.issues[0]?.severity).toBe("warn");
+    expect(result.checks.completeness).toBe("warn");
+    expect(result.status).toBe("warn");
+
+    const withMaterialOmission = normalizeQaResult(promoteConfirmedMaterialIssues({
+      status: "fail", score: 0.4, checks: { ...checks, completeness: "fail" },
+      issues: [
+        { category: "completeness", severity: "fail", message: "The fault lies in the TRANSLATION: it omits the source chapter title.", evidence: "The translation omits the source chapter title." },
+        { category: "completeness", severity: "fail", message: "The translation omits a major event.", evidence: "A complete event is missing." },
+      ],
+    }));
+    expect(withMaterialOmission.issues.map((issue) => issue.severity)).toEqual(["warn", "fail"]);
+    expect(withMaterialOmission.checks.completeness).toBe("fail");
+    expect(withMaterialOmission.status).toBe("fail");
+  });
   it("retains dismissed evidence while removing it from the active decision", () => {
     const result = dismissQaIssues({ status: "warn", score: 0.86, issues: [
       { category: "dialogue", severity: "warn", message: "A threat is softened", evidence: "The intent remains intact." },
@@ -134,7 +154,7 @@ describe("QA authorized narration naming", () => {
   });
 
   it("records the bumped prompt version", () => {
-    expect(QA_PROMPT_VERSION).toBe("11");
+    expect(QA_PROMPT_VERSION).toBe("12");
   });
 
   it("documents the output contract, severity rubric, and repair-routing phrasing", () => {

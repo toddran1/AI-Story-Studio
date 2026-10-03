@@ -10,6 +10,10 @@ export function qaFindingEnabled(policy: Story["qaPolicy"], item: { category: Fr
     const additionalDefect = /\b(?:omit(?:ted|s|ting)?|missing|skip(?:ped|s|ping)?|drop(?:ped|s|ping)?|lost|alter(?:ed|s)?|change(?:d|s)?\s+(?:the\s+)?meaning|incomplete)\b/i.test(item.message);
     if (repetition && !additionalDefect) return false;
   }
+  if (policy.disabledRules.includes("ttsAbbreviations") && item.category === "narrationFidelity") {
+    if (item.ruleKey?.startsWith("narrationFidelity:speech:abbreviation:")) return false;
+    if (/Narration contains the abbreviation .*which speech normalization does not rewrite; the TTS engine may read it unnaturally\./u.test(item.message)) return false;
+  }
   return true;
 }
 
@@ -25,8 +29,9 @@ export function storedQaFindingEnabled(policy: Story["qaPolicy"], finding: QaFin
 export function qaPolicyPrompt(story: Story): string {
   const disabled = story.qaPolicy.disabledCategories;
   const duplicate = story.qaPolicy.disabledRules.includes("duplicateParagraph");
-  if (!disabled.length && !duplicate) return "";
-  return `STORY QA POLICY: Do not report findings in these disabled categories: ${disabled.join(", ") || "none"}.${duplicate ? " Repeated paragraphs are expected in this story; do not flag duplicate paragraphs solely for repetition." : ""} Continue checking all other issues normally.`;
+  const abbreviations = story.qaPolicy.disabledRules.includes("ttsAbbreviations");
+  if (!disabled.length && !duplicate && !abbreviations) return "";
+  return `STORY QA POLICY: Do not report findings in these disabled categories: ${disabled.join(", ") || "none"}.${duplicate ? " Repeated paragraphs are expected in this story; do not flag duplicate paragraphs solely for repetition." : ""}${abbreviations ? " The configured TTS engine handles abbreviations; do not flag abbreviations solely for possible TTS pronunciation. Continue checking incorrect or changed abbreviation meanings." : ""} Continue checking all other issues normally.`;
 }
 
 /** Keep legacy QA fingerprints for stories whose checks are all enabled. */

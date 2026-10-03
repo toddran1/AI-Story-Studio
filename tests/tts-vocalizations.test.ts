@@ -10,7 +10,7 @@ describe("Fish vocalization strategy", () => {
 
   it.each(["s2-pro", "s2.1-pro", "s2.1-pro-free"])("uses verified native tags for %s", (model) => {
     const strategy = provider.vocalizationStrategy(model);
-    expect(strategy).toEqual({ kind: "native_tags", tags: { laugh: "[laugh]", chuckle: "[laugh]", throat_clear: "[cough]", sigh: "[sigh]", gasp: "[gasp]" } });
+    expect(strategy).toEqual({ kind: "native_tags", tags: { laugh: "[laughing]", chuckle: "[chuckle]", throat_clear: "[cough]", sigh: "[sigh]", gasp: "[gasp]" } });
   });
 
   it.each(["s1", "s1-mini", "unknown-model", undefined])("falls back to safe_normalize for %s", (model) => {
@@ -58,18 +58,33 @@ describe("Fish vocalization strategy", () => {
   });
 
   it("maps a performed laugh to the approved cue but leaves a literal mention intact", () => {
-    expect(normalizeFishSpeechText("“Hehe, I guessed it, didn’t I?”", "s2-pro")).toContain("[laugh] I guessed it");
-    expect(normalizeFishSpeechText("Haha, I knew it.", "s2-pro")).toBe("[laugh] I knew it.");
-    expect(normalizeFishSpeechText("“Heh heh heh... Don’t worry.”", "s2-pro")).toBe("“[laugh] Don’t worry.”");
+    expect(normalizeFishSpeechText("“Hehe, I guessed it, didn’t I?”", "s2-pro")).toContain("[laughing] I guessed it");
+    expect(normalizeFishSpeechText("Haha, I knew it.", "s2-pro")).toBe("[laughing] I knew it.");
+    expect(normalizeFishSpeechText("“Heh heh heh... Don’t worry.”", "s2-pro")).toBe("“[laughing] Don’t worry.”");
     expect(normalizeFishSpeechText("She typed “hehe” into the chat.", "s2-pro")).toContain("“hehe”");
     const original = "“Ahem, ahem, ahem… You’re right.”";
     expect(normalizeFishSpeechText(original, "s2-pro")).toContain("[cough] You’re right");
     expect(original).toContain("Ahem, ahem, ahem");
   });
 
+  it("uses explicit laughter for the reported Hahahaha line and legacy laugh cues", () => {
+    for (const model of ["s2-pro", "s2.1-pro", "s2.1-pro-free"]) {
+      expect(normalizeFishSpeechText("“Hahahaha… Mr. Sterling, sayonara!”", model)).toBe("“[laughing] Mister Sterling, sayonara!”");
+      expect(normalizeFishSpeechText("[laugh] [laughing] Goodbye!", model)).toBe("[laughing] Goodbye!");
+    }
+  });
+
+  it("sends the reported single Heh reaction as a chuckle, never a cough", () => {
+    const text = "“Heh… Wait, are you saying you called me here just to tell me where Asher is?”";
+    for (const model of ["s2-pro", "s2.1-pro", "s2.1-pro-free"]) {
+      expect(normalizeFishSpeechText(text, model)).toBe("“[chuckle] Wait, are you saying you called me here just to tell me where Asher is?”");
+      expect(disambiguateFishS2Brackets("[chuckle] Wait.", model)).toBe("[chuckle] Wait.");
+    }
+  });
+
   it("renders a leading single heh as a supported cue without an open ellipsis", () => {
     const narration = "Zhou Ao looked serious and spoke earnestly, showing no sign of letting his guard down.\n\n“Heh... then you’d better do your best!”\n\nGhost Sakura said with a smile.";
-    expect(normalizeFishSpeechText(narration, "s2.1-pro")).toBe("Zhou Ao looked serious and spoke earnestly, showing no sign of letting his guard down.\n\n“[laugh] then you’d better do your best!”\n\nGhost Sakura said with a smile.");
+    expect(normalizeFishSpeechText(narration, "s2.1-pro")).toBe("Zhou Ao looked serious and spoke earnestly, showing no sign of letting his guard down.\n\n“[chuckle] then you’d better do your best!”\n\nGhost Sakura said with a smile.");
     expect(normalizeFishSpeechText("She wrote “Heh...” in the margin.", "s2.1-pro")).toContain("“Heh...”");
   });
 });
@@ -88,9 +103,9 @@ describe("vocalization rendering coexists with pronunciation hints (M20)", () =>
   it("native_tags strategy: tag and phonetic hint coexist in the synthesis string", () => {
     const strategy = new FishAudioProvider().vocalizationStrategy("s2.1-pro");
     const spoken = normalizeSpeechText(narration, "en-US", {}, strategy).text;
-    expect(spoken).toBe("[laugh] Mo Xie, you're finished!");
+    expect(spoken).toBe("[laughing] Mo Xie, you're finished!");
     const final = adaptPronunciationText(spoken, resolvePronunciations(spoken, [moXie]), { phoneticText: true });
-    expect(final).toBe("[laugh] Moh Shieh, you're finished!");
+    expect(final).toBe("[laughing] Moh Shieh, you're finished!");
     expect(disambiguateFishS2Brackets(final, "s2.1-pro")).toBe(final);
   });
 

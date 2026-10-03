@@ -9,6 +9,28 @@ import { buildQaState } from "../src/qa/review.js";
 import { testStory } from "./helpers.js";
 
 describe("per-story QA policy", () => {
+  it("disables only TTS abbreviation warnings and retires prior findings on recheck", async () => {
+    const root = await mkdtemp(join(tmpdir(), "qa-abbreviations-"));
+    const story = testStory();
+    const input = { root, story, chapter: 1, source: "源文", translation: "OK, EXP gained.", narration: "OK, EXP gained." };
+    const enabled = await runDeterministicQaChecks(input);
+    const abbreviations = enabled.detections.filter(item => item.ruleKey?.startsWith("narrationFidelity:speech:abbreviation:"));
+    expect(abbreviations.length).toBeGreaterThan(0);
+    const policy = { disabledCategories: [], disabledRules: ["ttsAbbreviations" as const] };
+    const scoped = { ...story, qaPolicy: policy };
+    expect(storySchema.parse(scoped).qaPolicy).toEqual(policy);
+    const disabled = await runDeterministicQaChecks({ ...input, story: scoped });
+    expect(disabled.detections.some(item => item.ruleKey?.startsWith("narrationFidelity:speech:abbreviation:"))).toBe(false);
+    expect(filterQaDetectionsForStory(scoped, [
+      ...abbreviations,
+      { category: "narrationFidelity" as const, message: "Narration changed the meaning of EXP" },
+      { category: "narrationFidelity" as const, message: "Uncovered time", ruleKey: "narrationFidelity:speech:time:12:00" },
+    ])).toHaveLength(2);
+    const first = buildQaState(undefined, abbreviations, { chapter: 1, translation: input.translation, narration: input.narration });
+    const second = buildQaState(first.state, [], { chapter: 1, translation: input.translation, narration: input.narration, qaPolicy: policy, dependencyFingerprint: "abbreviations-disabled", evaluatedContent: `${input.translation}\n\n${input.narration}` });
+    expect(second.state.findings.every(item => item.status === "obsolete")).toBe(true);
+    expect(qaFingerprintConfig(scoped)).not.toEqual(qaFingerprintConfig(story));
+  });
   it("defaults to every category and rule enabled for older stories", () => {
     const story = testStory();
     const { qaPolicy: _policy, ...legacy } = story;

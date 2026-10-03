@@ -58,8 +58,13 @@ export async function validateChapterQuality(
  * choices and ordinary tone differences remain review warnings. */
 export function promoteConfirmedMaterialIssues(value: unknown): unknown {
   const parsed = generatedQaResultSchema.parse(value);
+  const downgradedTitleCategories = new Set<string>();
   const issues = parsed.issues.map((issue) => {
     const description = `${issue.message} ${issue.evidence}`;
+    const translationChapterTitleDefect = issue.category === "completeness"
+      && /\bchapter title\b/i.test(issue.message)
+      && /\btranslation\b/i.test(issue.message)
+      && /\b(?:omit(?:s|ted)?|miss(?:es|ing)|mistranslat\w*|inaccurat\w*|incorrect\w*)\b/i.test(issue.message);
     const wrongAuthorizedName = issue.category === "names"
       && /\bnarration\b/i.test(description)
       && /\b(?:retains?|uses?)\s+(?:the\s+)?canonical\s+names?\b/i.test(description)
@@ -69,9 +74,20 @@ export function promoteConfirmedMaterialIssues(value: unknown): unknown {
       && /\bnarration\b/i.test(description)
       && /\badds?\s+(?:an?\s+)?insult\b/i.test(description)
       && /\babsent\s+from\b/i.test(description);
+    if (translationChapterTitleDefect && issue.severity === "fail") {
+      downgradedTitleCategories.add(issue.category);
+      return { ...issue, severity: "warn" as const };
+    }
     return wrongAuthorizedName || addedInsult ? { ...issue, severity: "fail" as const } : issue;
   });
   const checks = { ...parsed.checks };
   for (const issue of issues) if (issue.severity === "fail") checks[issue.category] = "fail";
-  return { ...parsed, issues, checks };
+  for (const category of downgradedTitleCategories) {
+    if (!issues.some((issue) => issue.category === category && issue.severity === "fail")) {
+      checks[category as keyof typeof checks] = "warn";
+    }
+  }
+  const hasRemainingFailure = Object.values(checks).includes("fail") || issues.some((issue) => issue.severity === "fail");
+  const status = downgradedTitleCategories.size > 0 && parsed.status === "fail" && !hasRemainingFailure ? "warn" : parsed.status;
+  return { ...parsed, issues, checks, status };
 }

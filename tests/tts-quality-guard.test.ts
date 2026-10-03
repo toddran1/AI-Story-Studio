@@ -753,7 +753,7 @@ describe("tts reliability and provenance hardening", () => {
       // Contains speaker tags from dialogue casting
       expect(chunk).toContain("<|speaker:");
       // Contains control cue disambiguation
-      expect(chunk).toContain("[laugh]");
+      expect(chunk).toContain("[laughing]");
     });
 
     it("synthesizes exactChunk without re-splitting, re-casting, or re-normalizing, preserving maxCharsPerRequest", async () => {

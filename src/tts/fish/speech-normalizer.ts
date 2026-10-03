@@ -107,7 +107,7 @@ export function normalizeFishSpeechText(text: string, model?: string, options: {
   const withoutMarkup = renderFishVocalizations(disambiguateFishS2Brackets(stripFishMarkdownEmphasis(stripEmojiForSpeech(stripMarkdownForSpeech(structured))), model), model, options)
     // A performed reaction can be tagged more than once by earlier preparation.
     // Repeated adjacent laugh tags describe one reaction, not separate sounds.
-    .replace(/\[laugh\](?:[ \t]*\[laugh\])+/giu, "[laugh]")
+    .replace(/\[laughing\](?:[ \t]*\[laughing\])+/giu, "[laughing]")
     .replace(/(?<![\p{L}\p{N}])(EXP|XP|HP|MP)\s*\/\s*(\d{1,6})?(?![\p{L}\p{N}])/giu, (_match, label: string, number?: string) =>
       number ? `${label.toUpperCase()}: ${speakInteger(Number(number))}` : label.toUpperCase());
   const normalizedValues = withoutMarkup
@@ -158,8 +158,8 @@ export function renderFishVocalizations(text: string, model?: string, options: {
     if (/\b(?:word|text|transcript|term|wrote|typed|spelled|literal(?:ly)?)\b[^.!?\n]{0,35}$/iu.test(before)) continue;
     const openingReaction = /(?:^|[.!?…\n“"‘']\s*)$/u.test(before) && /[,!?.…]/u.test(item.sourceText);
     const replacement = item.vocalization === "throat_clear" ? "[cough]"
-      : item.vocalization === "laugh" && item.confidence >= .8 && openingReaction ? "[laugh]"
-      : item.vocalization === "chuckle" && /^heh(?:\.{3,}|…+|[!,])$/iu.test(item.sourceText) && openingReaction ? "[laugh]"
+      : item.vocalization === "laugh" && item.confidence >= .8 && openingReaction ? "[laughing]"
+      : item.vocalization === "chuckle" && /^heh(?:\.{3,}|…+|[!,])$/iu.test(item.sourceText) && openingReaction ? "[chuckle]"
       : item.vocalization === "scoff" && /^tsk\b/iu.test(item.sourceText) && options.tskRendering === "direction" ? "[clicks tongue disapprovingly]"
       : undefined;
     if (replacement) result = result.slice(0, item.start) + replacement + result.slice(item.end);

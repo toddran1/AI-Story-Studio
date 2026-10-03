@@ -37,4 +37,4 @@ export type ResolvedExportMusic = {
   ducking: { enabled: boolean; strength: "gentle" | "normal" | "strong" };
   fadeInSeconds: number; fadeOutSeconds: number; loopMode: "continuous" | "restart_chapter";
 };
-export const MUSIC_PRESET_GAIN_DB = { very_soft: -26, subtle: -22, balanced: -18, present: -15 } as const;
+export const MUSIC_PRESET_GAIN_DB = { very_soft: -18, subtle: -14, balanced: -10, present: -6 } as const;
