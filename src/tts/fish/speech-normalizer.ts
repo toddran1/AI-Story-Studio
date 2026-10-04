@@ -1,3 +1,5 @@
+import { stripSpeechMarkdownEmphasis as stripFishMarkdownEmphasis } from "../markdown-emphasis.js";
+export { stripSpeechMarkdownEmphasis as stripFishMarkdownEmphasis } from "../markdown-emphasis.js";
 import { disambiguateFishS2Brackets, isFishS2Model } from "./control-cues.js";
 import { normalizeStructuredSpeechBlock, normalizeSystemMetadataText, speakInteger, stripStandaloneEllipsisLines } from "../speech-normalization.js";
 import { scanVocalizations } from "../vocalizations.js";
@@ -102,7 +104,13 @@ function replaceAll(text: string, replacements: ReadonlyArray<readonly [RegExp, 
  * fictional terminology are not silently changed.
  */
 export function normalizeFishSpeechText(text: string, model?: string, options: { tskRendering?: "preserve" | "direction" } = {}): string {
-  const structured = normalizeFishLeadingHesitations(stripMusicCuesForSpeech(stripStandaloneEllipsisLines(text)), model).replace(/【[^【】\n]{1,500}】/gu, normalizeStructuredSpeechBlock)
+  // Only item panels with a recognized rarity and metadata colon qualify;
+  // ordinary prose parentheses and deliberate delivery cues remain untouched.
+  const itemPanels = text.replace(/\[[^\[\]\r\n]{1,500}\]/gu, (block) =>
+    /\((?:common|uncommon|rare|epic|legendary|mythic|unique|normal)\)\s*:/iu.test(block)
+      ? normalizeStructuredSpeechBlock(block).replace(/\s*:\s*/gu, ". ").replace(/,\s*(?=Special Effect\b)/giu, ". ")
+      : block);
+  const structured = normalizeFishLeadingHesitations(stripMusicCuesForSpeech(stripStandaloneEllipsisLines(itemPanels)), model).replace(/【[^【】\n]{1,500}】/gu, normalizeStructuredSpeechBlock)
     .replace(/(?<![\p{L}\p{N}])([A-Z][\p{L}\p{N} -]{1,80})\s+\((Passive|Active)\)\s+\((Level [^()\n]{1,30}|Rank [^()\n]{1,30})\)/gu, normalizeSystemMetadataText);
   const withoutMarkup = renderFishVocalizations(disambiguateFishS2Brackets(stripFishMarkdownEmphasis(stripEmojiForSpeech(stripMarkdownForSpeech(structured))), model), model, options)
     // A performed reaction can be tagged more than once by earlier preparation.
@@ -165,15 +173,4 @@ export function renderFishVocalizations(text: string, model?: string, options: {
     if (replacement) result = result.slice(0, item.start) + replacement + result.slice(item.end);
   }
   return result;
-}
-
-/** Removes paired Markdown emphasis without consuming literal multiplication. */
-export function stripFishMarkdownEmphasis(text: string): string {
-  let normalized = text;
-  let previous: string | undefined;
-  do {
-    previous = normalized;
-    normalized = normalized.replace(/(^|[^\p{L}\p{N}_])\*{1,3}(?=\S)([^*\n]*?\S)\*{1,3}(?=$|[^\p{L}\p{N}_])/gmu, "$1$2");
-  } while (normalized !== previous);
-  return normalized;
 }

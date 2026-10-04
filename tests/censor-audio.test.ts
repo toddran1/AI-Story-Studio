@@ -7,6 +7,16 @@ import { TTSRequest } from "../src/tts/types.js";
 const request: TTSRequest = { text: "This shit is fucking crazy.", model: "test", bleepStrongProfanity: true, speed: 1, format: "mp3", sampleRate: 44100, bitrate: 128, normalize: true, maxCharsPerRequest: 500 };
 
 describe("censor audio", () => {
+  it("removes paired emphasis before bleep splitting without consuming multiplication", () => {
+    const source = "*What the absolute fuck? If you want to die, don’t drag me down with you!*";
+    expect(planCensoredSpeech(source)).toEqual([
+      { kind: "speech", text: "What the absolute" },
+      expect.objectContaining({ kind: "censor", original: "fuck" }),
+      { kind: "speech", text: "If you want to die, don’t drag me down with you!" },
+    ]);
+    expect(planCensoredSpeech("2 * 2" )).toEqual([{ kind: "speech", text: "2 * 2" }]);
+  });
+
   it("keeps ordinary text unchanged when censoring is disabled", async () => {
     const calls: TTSRequest[] = []; const provider = fakeProvider(calls); const service = new FfmpegCensorAudioService() as CensorAudioService;
     // The disabled path never needs FFmpeg and remains provider agnostic.

@@ -64,7 +64,7 @@ describe("Fish TTS", () => {
     await provider.synthesize({ text: "**Important:** *whisper this.* [sad] 2 * 2", model: "s2.1-pro", speed: 1, format: "mp3", sampleRate: 44100, bitrate: 128, normalize: true, maxCharsPerRequest: 500 });
     const body = JSON.parse(String((fetcher.mock.calls[0]?.[1] as RequestInit).body));
     expect(body.text).toBe("Important: whisper this. [sad] 2 * 2");
-    expect(provider.inputNormalizationVersion).toBe("fish-speech-normalization-v18-laughing-chuckle");
+    expect(provider.inputNormalizationVersion).toBe("fish-speech-normalization-v19-item-panels");
   });
 
   it("does not turn profanity into the literal word bleep inside Fish", async () => {
@@ -145,6 +145,12 @@ describe("Fish TTS", () => {
     await provider.synthesize({ text: "Hello", model: "s2.1-pro", qualityGuard: true, providerQualityGuard: true, speed: 1, format: "mp3", sampleRate: 44100, bitrate: 128, normalize: true, maxCharsPerRequest: 500 });
     body = JSON.parse(String((fetcher.mock.calls[3]?.[1] as RequestInit).body));
     expect(body.features).toEqual(["quality-guard"]);
+  });
+
+  it("speaks bracketed item rarity and stats as sentences without altering prose parentheses", () => {
+    const text = "[Qilin Bow (Common): Agility +10, Special Effect: Can shoot flame-infused arrows with immense power]";
+    expect(normalizeFishSpeechText(text, "s2.1-pro")).toBe("Qilin Bow. Common. Agility plus ten. Special Effect. Can shoot flame-infused arrows with immense power.");
+    expect(normalizeFishSpeechText("He held the bow (a common weapon).", "s2.1-pro")).toBe("He held the bow (a common weapon).");
   });
 
   it("keeps approved S2 cues but makes bracketed story notifications ordinary speech", async () => {

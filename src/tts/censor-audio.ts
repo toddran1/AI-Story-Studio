@@ -1,3 +1,4 @@
+import { stripSpeechMarkdownEmphasis } from "./markdown-emphasis.js";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -10,7 +11,7 @@ import { summarizeQuality } from "./quality-guard.js";
 
 import { z } from "zod";
 
-export const CENSOR_AUDIO_VERSION = "censor-tone-v3-quoted-leading-bleep";
+export const CENSOR_AUDIO_VERSION = "censor-tone-v4-emphasis-before-split";
 export const CENSOR_BLEEP_MARKER = "[CENSOR_BLEEP]" as const;
 export const censorToneConfig = {
   frequencyHz: 1000,
@@ -47,6 +48,7 @@ export type CensorAssembly = TTSResult & {
 const strongWord = /(?<![\p{L}\p{N}_])(?:motherfuck(?:ers?|ing|ed|s)?|fuck(?:ers?|ing|ed|s)?|bitch(?:es|ing|y|s)?|bullshit(?:ting|ted|s)?|shitheads?|shitting|shitty|shits?|cunts?)(?![\p{L}\p{N}_])/giu;
 
 export function planCensoredSpeech(text: string): CensorSegment[] {
+  text = stripSpeechMarkdownEmphasis(text);
   const segments: CensorSegment[] = [];
   let cursor = 0;
   let quoteAfterCensor = "";
