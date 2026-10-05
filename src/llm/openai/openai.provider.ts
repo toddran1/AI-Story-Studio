@@ -5,7 +5,13 @@ import { LLMProvider } from "../provider.js";
 import { LLMRequest, StructuredLLMRequest } from "../types.js";
 import { ConfigurationError, ProviderError } from "../../pipeline/errors.js";
 
+export function openAiRequestInput(request: LLMRequest) {
+  if (!request.images?.length) return request.input;
+  return [{ role: "user" as const, content: [{ type: "input_text" as const, text: request.input }, ...request.images.map(image => ({ type: "input_image" as const, image_url: `data:${image.mimeType};base64,${image.data.toString("base64")}`, detail: "auto" as const }))] }];
+}
+
 export class OpenAIProvider implements LLMProvider {
+  readonly supportsImageInputs = true;
   readonly name = "openai" as const;
   private readonly client: OpenAI;
   constructor(private readonly apiKey?: string, timeoutMs = 120_000) {
@@ -24,7 +30,7 @@ export class OpenAIProvider implements LLMProvider {
       const response = await this.client.responses.create({
         model: request.model,
         instructions: request.instructions,
-        input: request.input,
+        input: openAiRequestInput(request),
         store: false,
       });
       if (!response.output_text?.trim()) {
@@ -57,7 +63,7 @@ export class OpenAIProvider implements LLMProvider {
       const response = await this.client.responses.create({
         model: request.model,
         instructions: request.instructions,
-        input: request.input,
+        input: openAiRequestInput(request),
         store: false,
         text: { format },
       });

@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { fingerprint } from "../utils/hash.js";
-import { sceneImportanceSchema, type Scene } from "./types.js";
+import { sceneCreatureGroupSchema, sceneImportanceSchema, type Scene } from "./types.js";
 import { sceneEditableState } from "./editable-state.js";
 
 export const sceneRegenerationModeSchema = z.enum(["image_prompt", "full_visual_direction"]);
@@ -11,6 +11,7 @@ export const sceneVisualSnapshotSchema = z.object({
   entityIds: z.array(z.string().trim().min(1)).max(100),
   location: z.string().max(300).optional(),
   importance: sceneImportanceSchema,
+  creatureGroups: z.array(sceneCreatureGroupSchema).max(30).optional(),
 }).strict();
 export const sceneRegenerationProposalSchema = z.object({
   sceneId: z.string().regex(/^scene-\d{3}$/),
@@ -26,6 +27,7 @@ export type SceneRegenerationProposal = z.infer<typeof sceneRegenerationProposal
 export function sceneVisualSnapshot(scene: Scene) {
   return sceneVisualSnapshotSchema.parse({
     summary: scene.summary, visualPrompt: scene.visualPrompt, characters: scene.characters,
+    ...(scene.creatureGroups?.length ? { creatureGroups: scene.creatureGroups } : {}),
     entityIds: scene.entityIds ?? [], location: scene.location, importance: scene.importance,
   });
 }

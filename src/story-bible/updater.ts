@@ -94,6 +94,7 @@ export function mergeStoryBible(
     const entity = canonical.entities.find((candidate) => candidate.id === resolution.entity.id);
     if (!entity) continue;
     if (observation.field.split(".")[0] !== entity.type && !(observation.field.startsWith("creature.") && entity.type === "concept")) continue;
+    if (entity.visualIdentityKind === "template" && observation.persistence === "changed") continue;
     mergeEntityVisualEvidence(entity, observation, chapter);
     if (observation.persistence === "changed") addTimeline(canonical.timeline, entity.id, chapter, "appearance", `${entity.canonicalName}: ${observation.field} changed to ${observation.value}`, undefined, undefined, observation.confidence);
   }
@@ -258,6 +259,7 @@ function mergeCanonicalHistory(existing: StoryBible, update: StoryBibleUpdate, c
         const entity = ensure(raw.canonicalEnglishName, type, raw.originalName, raw.description, raw.aliases ?? [], raw.status ?? "unknown", raw.confidence);
         if (!entity) continue;
         entity.sourceBucket ??= category;
+        if (category === "creatures" && raw.visualIdentityKind) entity.visualIdentityKind ??= raw.visualIdentityKind;
         addTimeline(timeline, entity.id, chapter, "appearance", `${entity.canonicalName} appears`, undefined, undefined, raw.confidence);
         continue;
       }
@@ -329,6 +331,7 @@ function mergeCanonicalHistory(existing: StoryBible, update: StoryBibleUpdate, c
       const entity = ensure(raw.canonicalEnglishName, type, raw.originalName, raw.description, raw.aliases ?? [], raw.status ?? "unknown", raw.confidence);
       if (!entity) continue;
       entity.sourceBucket ??= category;
+        if (category === "creatures" && raw.visualIdentityKind) entity.visualIdentityKind ??= raw.visualIdentityKind;
       addTimeline(timeline, entity.id, chapter, "appearance", `${entity.canonicalName} appears`, undefined, undefined, raw.confidence);
     }
   }

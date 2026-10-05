@@ -198,6 +198,26 @@ describe("summary visual production M23 parity", () => {
     await rm(root, { recursive: true, force: true });
   });
 
+  it("preserves the approved summary image and metadata on successful and failed replacements", async () => {
+    generatedBuffer = NATIVE_1536x1024;
+    const initial = await visuals.artwork("demo-story", id);
+    if ("dryRun" in initial) throw new Error("Expected saved artwork");
+    const scene = initial.scenePlan!.scenes[0]!;
+    await visuals.reviewArtworkVersion("demo-story", id, scene.id, scene.artwork.versions[0]!.id);
+    const approved = (await summaries.get("demo-story", id)).scenePlan!.scenes[0]!.artwork;
+    const paths = visuals.paths("demo-story", id); const bytes = await readFile(paths.image(scene.id));
+    generatedBuffer = NATIVE_2752x1536;
+    await visuals.artwork("demo-story", id, { scenes: [scene.id], force: true });
+    let saved = (await summaries.get("demo-story", id)).scenePlan!.scenes[0]!.artwork;
+    expect(saved).toMatchObject({ status: "complete", review: "approved", approvedVersionId: approved.approvedVersionId, imageFingerprint: approved.imageFingerprint, fingerprint: approved.fingerprint });
+    expect(saved.versions).toHaveLength(2); expect(saved.versions[1]!.review).toBe("unreviewed");
+    expect(await readFile(paths.image(scene.id))).toEqual(bytes);
+    images.generate.mockRejectedValueOnce(new Error("Fake image failure"));
+    await expect(visuals.artwork("demo-story", id, { scenes: [scene.id], force: true })).rejects.toThrow("Fake image failure");
+    saved = (await summaries.get("demo-story", id)).scenePlan!.scenes[0]!.artwork;
+    expect(saved).toMatchObject({ status: "complete", review: "approved", approvedVersionId: approved.approvedVersionId, imageFingerprint: approved.imageFingerprint });
+    expect(await readFile(paths.image(scene.id))).toEqual(bytes);
+  });
   it("sources below target: preserves original, invokes AI upscaler, creates derivative and syncs canonical", async () => {
     generatedBuffer = NATIVE_1536x1024;
     const result = await visuals.artwork("demo-story", id);

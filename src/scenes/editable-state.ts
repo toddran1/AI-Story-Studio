@@ -7,6 +7,7 @@ export function sceneEditableState(scene: Scene) {
     startSeconds: scene.startSeconds,
     endSeconds: scene.endSeconds,
     characters: scene.characters,
+    ...(scene.creatureGroups?.length ? { creatureGroups: scene.creatureGroups } : {}),
     entityIds: scene.entityIds ?? [],
     location: scene.location,
     visualPrompt: scene.visualPrompt,

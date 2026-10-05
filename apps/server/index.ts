@@ -20,6 +20,7 @@ const queue = repository ? new ProductionQueueService(root, env, repository, usa
 const worker = queue ? new ProductionWorker(repository!, queue, { workerId: `web-${process.pid}-${randomUUID()}`, pollMs: env.QUEUE_POLL_MS, leaseMs: env.QUEUE_LEASE_MS, providerSpacingMs: env.PROVIDER_MIN_SPACING_MS }) : undefined;
 const operations = new StudioOperations(root, env, undefined, { queue, usage }); const api = createApiHandler(operations);
 await operations.jobs.restoreDurable(operations.summaryJobsDirectory());
+await operations.jobs.restoreDurable(operations.visualJobsDirectory());
 if (worker) await worker.start(); else logger.warn({ event: "queue.disabled", message: "DATABASE_URL is not configured; production web jobs use the legacy in-memory runner" });
 const development = process.argv.includes("--dev");
 const vite = development ? await import("vite").then(({ createServer }) => createServer({ server: { host, middlewareMode: true, ws: { host, port: 24678 } }, appType: "spa" })) : undefined;

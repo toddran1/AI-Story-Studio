@@ -1,3 +1,4 @@
+import { prepareCreatureForms } from "../visual-canon/creature-forms.js";
 import { writeArtworkOutputManifest } from "../artwork/output-index-revision.js";
 import { readFile } from "node:fs/promises";
 import { resolveMasteredAudio } from "../audio/chapter-audio.js";
@@ -56,12 +57,14 @@ export async function planStoredScenes(options: { root: string; story: Story; ch
     const scenes = normalizeSceneTiming(result.value.scenes.map((scene) => ({
       ...scene,
       location: scene.location ?? undefined,
+      creatureGroups: scene.creatureGroups ?? undefined,
       visualChanges: normalizeVisualContinuityChange(scene.visualChanges),
       entityIds: resolveVisualEntities(scene.characters, fullBible.canonicalEntities).map((e) => e.id),
     })), audioDurationSeconds, options.story.scenes);
     const previousById = new Map(cached?.success ? cached.data.scenes.map((scene) => [scene.id, scene]) : []);
     for (const scene of scenes) { const previous = previousById.get(scene.id); if (!previous) continue; scene.videoTreatment = previous.videoTreatment; if (fingerprint(sceneArtworkContentState(previous)) === fingerprint(sceneArtworkContentState(scene))) scene.artwork = previous.artwork; }
-    validateSceneCoverage(scenes, audioDurationSeconds, options.story.scenes); const now = new Date().toISOString(); const manifest = sceneManifestSchema.parse({ version: 1, chapter: options.chapter, durationSeconds: audioDurationSeconds, planningFingerprint: inputFingerprint, planner: { provider: config.provider, model: config.model, promptVersion: SCENE_PLANNER_PROMPT_VERSION }, manualRevision: 0, manuallyEdited: false, createdAt: cached?.success ? cached.data.createdAt : now, updatedAt: now, scenes });
+    validateSceneCoverage(scenes, audioDurationSeconds, options.story.scenes);
+    await prepareCreatureForms(options.root, options.story.slug, fullBible, scenes, options.chapter); const now = new Date().toISOString(); const manifest = sceneManifestSchema.parse({ version: 1, chapter: options.chapter, durationSeconds: audioDurationSeconds, planningFingerprint: inputFingerprint, planner: { provider: config.provider, model: config.model, promptVersion: SCENE_PLANNER_PROMPT_VERSION }, manualRevision: 0, manuallyEdited: false, createdAt: cached?.success ? cached.data.createdAt : now, updatedAt: now, scenes });
     await writeArtworkOutputManifest(options.root, options.story.slug, options.chapter, manifest); const outputFingerprint = await fileFingerprint(paths.scenesManifest); chapter.stages.scenePlanning = { ...chapter.stages.scenePlanning, status: "complete", outputFingerprint, completedAt: now, durationMs: Date.now() - started, usage: result.usage }; chapter.scenes = { total: scenes.length, generated: scenes.filter((scene) => scene.artwork.status === "complete").length, approved: scenes.filter((scene) => scene.artwork.review === "approved").length }; chapter.stages.artwork = { status: "pending" }; chapter.stages.video = { status: "pending" }; chapter.video = undefined; await persistChapter(paths.chapterMeta, chapter); await persistChapterVisualContinuity({ root: options.root, slug: options.story.slug, chapter: options.chapter, manifest }); return { manifest, reused: false, warnings };
   } catch (error) {
     const errMessage = error instanceof Error ? error.message : String(error);
@@ -120,6 +123,8 @@ export async function updateStoredSceneManifest(options: { root: string; story: 
   }
   if (active.some((scene) => !scene.summary || !scene.visualPrompt)) throw new SceneError("Fill in the scene beat and image prompt before enabling a scene");
   const retimed = retimeScenesToDuration(active, manifest.durationSeconds, options.story.scenes);
+  await prepareCreatureForms(options.root, options.story.slug, await rebuildStoryBibleBeforeChapter(options.root, options.story.slug, options.chapter+1), scenes, options.chapter);
+
   const byId = new Map(retimed.map((scene) => [scene.id, scene]));
   const nextSceneNumber = Math.max(manifest.nextSceneNumber ?? 1, ...incoming.map((scene) => Number(scene.id.slice(6)) + 1));
   const updated = sceneManifestSchema.parse({ ...manifest, scenes: scenes.map((scene) => byId.get(scene.id) ?? scene), nextSceneNumber, manuallyEdited: true, manualRevision: manifest.manualRevision + 1, updatedAt: new Date().toISOString() }); await writeArtworkOutputManifest(options.root, options.story.slug, options.chapter, updated); await invalidateAfterSceneEdit(options.root, options.story.slug, options.chapter, paths.chapterMeta, updated); await persistChapterVisualContinuity({ root: options.root, slug: options.story.slug, chapter: options.chapter, manifest: updated }); return updated;
@@ -142,7 +147,7 @@ export async function updateStoredScene(options: { root: string; story: Story; c
     summary: input.summary, startSeconds: input.startSeconds, endSeconds: input.endSeconds,
     characters: input.characters, entityIds: previous.entityIds ?? [], location: input.location, visualPrompt: input.visualPrompt,
     importance: input.importance, disabled: input.disabled, direction: input.direction,
-    overrides: input.overrides, visualChanges: input.visualChanges,
+    overrides: input.overrides, visualChanges: input.visualChanges, creatureGroups: input.creatureGroups,
     videoTreatment: input.videoTreatment,
   });
   const scenes = manifest.scenes.map((item, position) => position === index ? replacement : item);
@@ -166,7 +171,7 @@ export async function previewStoredSceneRegeneration(options: { root: string; st
   const current = sceneVisualSnapshot(scene);
   const visualDirectionContext = JSON.stringify({
     storyArtDirection: artDirection,
-    direction: scene.direction, overrides: scene.overrides, visualChanges: scene.visualChanges, continuityState,
+    direction: scene.direction, overrides: scene.overrides, creatureGroups: scene.creatureGroups, visualChanges: scene.visualChanges, continuityState,
   });
   let proposed: typeof current;
   if (mode === "image_prompt") {
@@ -186,7 +191,7 @@ export async function previewStoredSceneRegeneration(options: { root: string; st
     });
     if (planned.value.scenes.length !== 1) throw new SceneError("Individual scene regeneration must return exactly one scene");
     const next = planned.value.scenes[0]!;
-    proposed = sceneVisualSnapshotSchema.parse({ summary: next.summary, visualPrompt: next.visualPrompt, characters: next.characters,
+    proposed = sceneVisualSnapshotSchema.parse({ creatureGroups: current.creatureGroups ?? next.creatureGroups ?? undefined, summary: next.summary, visualPrompt: next.visualPrompt, characters: next.characters,
       entityIds: resolveVisualEntities(next.characters, bible.canonicalEntities).map((entity) => entity.id), location: next.location ?? undefined, importance: next.importance });
   }
   return sceneRegenerationProposalSchema.parse({ sceneId: scene.id, mode, sourceFingerprint: sceneProposalSourceFingerprint(scene, continuityState), current, proposed, provider: config.provider, model: config.model });

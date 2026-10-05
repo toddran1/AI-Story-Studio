@@ -53,6 +53,7 @@ export function hasActivePronunciation(pronunciation: EntityPronunciation | unde
 }
 
 const namedEntity = z.object({
+  visualIdentityKind: z.enum(["individual", "template"]).optional(),
   canonicalEnglishName: z.string().min(1).max(300), originalName: z.string().max(300).default(""), description: z.string().max(10_000).default(""),
   firstSeenChapter: z.number().int().positive(), lastSeenChapter: z.number().int().positive(),
   status: z.string().max(500).optional(), notes: z.string().max(10_000).optional(), confidence: z.number().min(0).max(1).optional(),
@@ -104,6 +105,7 @@ export const storyBibleUpdateSchema = z.object({
 
 export const canonicalEntitySchema = z.object({
   id: z.string().regex(/^ent_[a-f0-9]{24}$/), type: entityTypeSchema, canonicalName: z.string().min(1).max(300), aliases: z.array(z.string().min(1).max(300)).max(100).default([]), originalName: z.string().max(300).default(""), description: z.string().max(10_000).default(""),
+  visualIdentityKind: z.enum(["individual", "template"]).optional(),
   sourceBucket: z.enum(["characters", "locations", "factions", "abilities", "items", "creatures", "classes", "ranks", "systemTerms"]).optional(),
   preferredNarrationName: z.string().trim().min(1).max(300).optional(), aliasNarrationRules: z.array(aliasNarrationRuleSchema).max(100).default([]),
   localizedNaming: localizedNamingSchema.optional(),

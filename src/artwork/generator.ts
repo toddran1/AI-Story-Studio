@@ -1,5 +1,5 @@
 import { writeArtworkOutputManifest } from "./output-index-revision.js";
-import { readFile } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
 import { Chapter, chapterSchema } from "../domain/chapter.js";
 import { Story } from "../domain/story.js";
 import { ArtworkError, ConfigurationError } from "../pipeline/errors.js";
@@ -205,6 +205,7 @@ export async function generateStoredArtwork(options: {
       artDirection: activePreset,
       visualProfiles,
       visualContinuity: continuityText,
+      allowUnprofiledEntityIds: options.allowUnprofiledEntityIds,
       chapter: options.chapter,
     });
     const loadedReferences = await loadSceneReferenceImages(options.root, options.story, resolved, sceneContinuity?.referenceDecision, options.chapter);
@@ -330,7 +331,8 @@ export async function generateStoredArtwork(options: {
 
   for (let index = 0; index < candidates.length; index++) {
     const item = candidates[index]!;
-    item.scene.artwork = {
+    const retainedArtwork = item.scene.artwork.status === "complete" && item.scene.artwork.approvedVersionId ? structuredClone(item.scene.artwork) : undefined;
+    item.scene.artwork = retainedArtwork ? { ...item.scene.artwork, error: undefined } : {
       ...item.scene.artwork,
       status: "running",
       provider: options.provider.name,
@@ -447,9 +449,9 @@ export async function generateStoredArtwork(options: {
       });
     } catch (error) {
       item.scene.artwork = {
-        ...item.scene.artwork,
-        status: "failed",
-        review: "needs-regeneration",
+        ...(retainedArtwork ?? item.scene.artwork),
+        status: retainedArtwork?.status ?? "failed",
+        review: retainedArtwork?.review ?? "needs-regeneration",
         error: error instanceof Error ? error.message : String(error),
       };
       await writeArtworkOutputManifest(options.root, options.story.slug, options.chapter, manifest);
@@ -756,7 +758,7 @@ export type VisualProfileReferencePayload = {
 
 /** Shared, approved-only Visual Profile reference loader. Summary artwork uses
  * the same reference eligibility and byte limits as chapter artwork. */
-export async function loadApprovedVisualProfileReferences(root: string, story: Story, resolved: ResolvedSceneVisualPrompt): Promise<VisualProfileReferencePayload> {
+export async function loadApprovedVisualProfileReferences(root: string, story: Story, resolved: ResolvedSceneVisualPrompt, options: { imageInputsSupported?: boolean } = {}): Promise<VisualProfileReferencePayload> {
   const byEntity: Array<Array<{ reference: VisualReferenceImage; entityName: string }>> = [];
   for (const entity of resolved.resolvedEntities) {
     if (!entity.hasApprovedProfile || !entity.useVisualProfile) continue;
@@ -770,7 +772,7 @@ export async function loadApprovedVisualProfileReferences(root: string, story: S
   for (let index = 0; index < maxRefs; index++) for (const refs of byEntity) if (refs[index]) wanted.push(refs[index]!);
   const available = wanted.length;
   if (!available) return { images: [], available: 0, mode: "none", loadedEntityIds: [], loadedReferenceIds: [], referenceFingerprints: [] };
-  if (!providerSupportsReferenceImages(story.artwork.provider, story.artwork.model)) return { images: [], available, mode: "text-only", loadedEntityIds: [], loadedReferenceIds: [], referenceFingerprints: [] };
+  if (!(options.imageInputsSupported ?? providerSupportsReferenceImages(story.artwork.provider, story.artwork.model))) return { images: [], available, mode: "text-only", loadedEntityIds: [], loadedReferenceIds: [], referenceFingerprints: [] };
   const images: ImageReferenceImage[] = [];
   const mixedCast = resolved.resolvedEntities.filter((entity) => entity.type === "character").length > 1
     && resolved.resolvedEntities.some((entity) => entity.type === "character" && entity.groundingMode !== "approved_profile")
@@ -789,6 +791,8 @@ export async function loadApprovedVisualProfileReferences(root: string, story: S
     const hint = /\.([a-zA-Z0-9]+)$/.exec(ref.imagePath)?.[1];
     const file = await findVisualReferenceFile(root, story.slug, ref.entityId, ref.id, hint);
     if (!file) continue;
+    const size = (await stat(file.path)).size;
+    if (!size || size > MAX_REFERENCE_IMAGE_BYTES || totalBytes + size > MAX_REFERENCE_TOTAL_BYTES) continue;
     const data = await readFile(file.path);
     if (!data.length || data.length > MAX_REFERENCE_IMAGE_BYTES || totalBytes + data.length > MAX_REFERENCE_TOTAL_BYTES) continue;
     totalBytes += data.length;

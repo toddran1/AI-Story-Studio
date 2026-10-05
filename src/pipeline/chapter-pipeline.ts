@@ -1,3 +1,4 @@
+import { syncAppearanceChanges } from "../visual-canon/appearance-changes.js";
 import { mkdir, readFile, readdir, rm, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -449,6 +450,7 @@ export class ChapterPipeline {
       bible = mergeStoryBible(bible, update, options.chapter);
       const cumulative = await rebuildStoryBibleBeforeChapter(options.root, options.story.slug, Number.MAX_SAFE_INTEGER, { chapterOverride: { chapter: options.chapter, update } });
       await atomicWriteJson(paths.bible, cumulative);
+      await syncAppearanceChanges(options.root, options.story.slug, cumulative);
     };
     const bibleResult = await runStage("storyBible", bibleFp, paths.bibleUpdate, {
       provider: bibleConfig.provider, model: bibleConfig.model, promptVersion: STORY_BIBLE_PROMPT_VERSION,

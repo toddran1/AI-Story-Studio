@@ -174,7 +174,7 @@ describe("scene planning", () => {
   it("documents per-scene fields, the importance rubric, and subtitle timing usage", () => {
     // Bumped to v3: the planner schema gained visualChanges and the
     // instructions gained the PREVIOUS VISUAL CONTINUITY contract.
-    expect(SCENE_PLANNER_PROMPT_VERSION).toBe("scene-planner-v3");
+    expect(SCENE_PLANNER_PROMPT_VERSION).toBe("scene-planner-v4-creature-groups");
     expect(scenePlannerInstructions).toMatch(/summary.*characters.*location/s);
     expect(scenePlannerInstructions).toMatch(/major for a pivotal set-piece.*standard for a normal story beat.*transition for connective/s);
     expect(scenePlannerInstructions).toMatch(/OPTIONAL SUBTITLE TIMING is provided, use it/i);

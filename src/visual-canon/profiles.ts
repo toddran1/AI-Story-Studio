@@ -1,5 +1,6 @@
+import { prepareReferenceSheetIdentity, IDENTITY_TRANSFORMATION_INSTRUCTION } from "./reference-identity.js";
 import { effectiveVisualProfile } from "./resolver.js";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readFile, rm } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { z } from "zod";
@@ -11,7 +12,7 @@ import {
   visualProfileSchema,
   visualReferenceImageSchema,
 } from "../domain/visual-profile.js";
-import { canonicalEntitySchema } from "../domain/story-bible.js";
+import { canonicalEntitySchema, type CanonicalEntity } from "../domain/story-bible.js";
 import { requireCanonicalStoryBibleEntity } from "../story-bible/canonical.js";
 import { resolveEntityVisualEvidence } from "../story-bible/visual-evidence.js";
 import { readVisualField, resolveVisualEntityType, validVisualField } from "./fields.js";
@@ -139,6 +140,8 @@ export async function updateVisualProfile(
       item: patch.item,
       variants: patch.variants ?? [],
       appearanceEras: patch.appearanceEras ?? [],
+      creatureIdentity: patch.creatureIdentity ?? entity.visualIdentityKind,
+      creatureForms: patch.creatureForms ?? [],
       references: patch.references ?? [],
       fieldProvenance: patch.fieldProvenance ?? {},
       revision: 1,
@@ -168,6 +171,8 @@ export async function approveVisualReference(
   entityId: string,
   refId: string,
   primary = false,
+  creatureFormId?: string,
+  appearanceEraId?: string,
 ): Promise<VisualEntityProfile> {
   canonicalEntitySchema.shape.id.parse(entityId);
   if (!/^[a-zA-Z0-9_-]+$/.test(refId)) throw new Error("Invalid reference image ID");
@@ -176,9 +181,29 @@ export async function approveVisualReference(
   if (!profile) throw new Error(`Visual profile for entity '${entityId}' was not found`);
   const reference = profile.references.find((item) => item.id === refId);
   if (!reference) throw new Error(`Visual reference '${refId}' was not found`);
-  const referenceScope = profile.appearanceEras?.find((era) => era.referenceIds.includes(refId))?.id;
+  if (creatureFormId && appearanceEraId) throw new Error("Select a form or an era, not both");
+  if (appearanceEraId) {
+    const era = profile.appearanceEras?.find(item => item.id === appearanceEraId);
+    if (!era || !era.referenceIds.includes(refId)) throw new Error("Reference is not assigned to the selected appearance era");
+    if (era.detectedChange?.needsReview) throw new Error("Review changed source evidence before approving this era");
+    if (profile.conflicts?.some(conflict => conflict.status === "needs_review")) throw new Error("Resolve Visual Profile conflicts before approval");
+    const next = profile.appearanceEras?.filter(item => item.id !== era.id && item.status === "approved" && item.startChapter > era.startChapter).sort((a,b) => a.startChapter-b.startChapter)[0];
+    if (next) era.endChapter = Math.min(era.endChapter ?? Infinity, next.startChapter-1);
+    if (era.detectedChange) for (const earlier of profile.appearanceEras ?? []) if (earlier.id !== era.id && earlier.status === "approved" && earlier.startChapter < era.startChapter && (earlier.endChapter === undefined || earlier.endChapter >= era.startChapter)) earlier.endChapter = era.startChapter-1;
+    era.status = "approved"; profile.status = "approved"; profile.approvedAt ??= new Date().toISOString();
+  }
+  if (creatureFormId) {
+    const form = profile.creatureForms?.find(item => item.id === creatureFormId);
+    if (!form || !form.referenceIds.includes(refId)) throw new Error("Reference is not assigned to the selected creature form");
+    if (profile.conflicts?.some(conflict => conflict.status === "needs_review")) throw new Error("Resolve Visual Profile conflicts before approval");
+    if (form.detectedSource?.needsReview) throw new Error("Review changed source evidence before approving this form");
+    form.status = "approved";
+    profile.status = "approved";
+    profile.approvedAt ??= new Date().toISOString();
+  }
+  const referenceScope = profile.appearanceEras?.find((era) => era.referenceIds.includes(refId))?.id ?? profile.creatureForms?.find(form => form.referenceIds.includes(refId))?.id;
   for (const item of profile.references) {
-    const itemScope = profile.appearanceEras?.find((era) => era.referenceIds.includes(item.id))?.id;
+    const itemScope = profile.appearanceEras?.find((era) => era.referenceIds.includes(item.id))?.id ?? profile.creatureForms?.find(form => form.referenceIds.includes(item.id))?.id;
     if (primary && item.id !== refId && item.role === "primary_reference" && itemScope === referenceScope) item.role = "general_reference";
   }
   reference.approved = true;
@@ -226,6 +251,7 @@ export async function deleteVisualReferenceImage(
 
   profile.references.splice(refIndex, 1);
   profile.appearanceEras = profile.appearanceEras?.map((era) => ({ ...era, referenceIds: era.referenceIds.filter((id) => id !== refId) }));
+  profile.creatureForms = profile.creatureForms?.map(form => ({ ...form, referenceIds: form.referenceIds.filter(id => id !== refId) }));
   profile.revision += 1;
   profile.updatedAt = new Date().toISOString();
   await saveVisualProfiles(root, slug, profiles);
@@ -261,6 +287,7 @@ export async function addVisualReferenceImage(
     provenance?: Record<string, unknown>;
     replacesReferenceId?: string;
     appearanceEraId?: string;
+    creatureFormId?: string;
   },
 ): Promise<{ profile: VisualEntityProfile; reference: VisualReferenceImage }> {
   await requireCanonicalStoryBibleEntity(root, slug, entityId);
@@ -299,6 +326,11 @@ export async function addVisualReferenceImage(
       if (!era) throw new Error("Appearance era was not found");
       era.referenceIds.push(refId);
     }
+    if (options.creatureFormId) {
+      const form = profile.creatureForms?.find(item => item.id === options.creatureFormId);
+      if (!form) throw new Error("Creature form was not found");
+      form.referenceIds.push(refId);
+    }
     profile.references.push(reference);
     profile.updatedAt = new Date().toISOString();
     profile.revision += 1;
@@ -330,12 +362,16 @@ export async function generateStyleSheet(
     role?: VisualRole;
     presetId?: string;
     appearanceEraId?: string;
+    creatureFormId?: string;
   } = {},
 ): Promise<{ profile: VisualEntityProfile; reference: VisualReferenceImage }> {
   const entity = await requireCanonicalStoryBibleEntity(root, slug, entityId);
   const savedProfile = await getVisualProfile(root, slug, entityId);
   if (!savedProfile) throw new Error(`Visual profile for entity '${entityId}' was not found`);
-  const era = options.appearanceEraId ? savedProfile.appearanceEras?.find(item => item.id === options.appearanceEraId) : undefined;
+  if (options.creatureFormId && options.appearanceEraId) throw new Error("Select a creature form or an appearance era, not both");
+  const form = options.creatureFormId ? savedProfile.creatureForms?.find(item => item.id === options.creatureFormId) : undefined;
+  if (options.creatureFormId && !form) throw new Error("Creature form was not found");
+  const era = form ? { ...form, startChapter: 1 } : options.appearanceEraId ? savedProfile.appearanceEras?.find(item => item.id === options.appearanceEraId) : undefined;
   if (options.appearanceEraId && !era) throw new Error("Appearance era was not found");
   if (era && !era.appearance.trim() && !era.visualPrompt.trim() && !Object.values(era.character ?? era.creature ?? {}).some(value => typeof value === "string" && value.trim())) throw new Error("Describe this era's appearance before generating its reference sheet");
   const profile = effectiveVisualProfile(savedProfile, era);
@@ -358,6 +394,7 @@ export async function generateStyleSheet(
   // Layer 2: persistent entity visual canon (never scene-specific state).
   const character = profile.visualType === "character" ? profile.character : undefined;
   const entityDetails: string[] = [
+    `ENTITY: ${entity.canonicalName} (${profile.visualType})`,
     profile.visualPrompt ? `SUBJECT VISUAL PROMPT: ${profile.visualPrompt}` : "",
     profile.appearance ? `GENERAL APPEARANCE: ${profile.appearance}` : "",
     character?.apparentAge ? `APPARENT AGE: ${character.apparentAge}` : "",
@@ -386,7 +423,9 @@ export async function generateStyleSheet(
     profile.location?.colorPalette ? `COLOR PALETTE: ${profile.location.colorPalette}` : "",
     profile.location?.recurringLandmarks ? `LANDMARKS: ${profile.location.recurringLandmarks}` : "",
   ].filter(Boolean);
-  if (profile.status !== "approved") {
+  if (profile.creature) entityDetails.push(`CREATURE TRAITS: ${JSON.stringify(profile.creature)}`);
+  if (profile.item) entityDetails.push(`ITEM TRAITS: ${JSON.stringify(profile.item)}`);
+  if (profile.status !== "approved" && !era) {
     const evidence = resolveEntityVisualEvidence(entity, Number.MAX_SAFE_INTEGER);
     const sourceFacts = Object.entries(evidence.values).filter(([path]) => validVisualField(profile.visualType, path) && !readVisualField(profile, path)).map(([path, item]) => `${path}: ${item.value}`);
     if (sourceFacts.length) entityDetails.push(`SOURCE-BACKED STORY BIBLE VISUAL FACTS (unapproved draft guidance): ${sourceFacts.join("; ")}`);
@@ -411,12 +450,13 @@ export async function generateStyleSheet(
 
   const paletteGuidance = "COLOR AND CHARACTER: Where appearance details are unspecified, use a distinctive, story-appropriate mix of colors, materials, and small identifying accents. Avoid automatically making clothing all black or giving every person black hair and dark brown eyes. Preserve every established profile trait, approved reference detail, source fact, and story art-direction choice; do not recolor known features for variety.";
 
-  const sheetPrompt = options.promptOverride ?? [
+  const identity = await prepareReferenceSheetIdentity(root, slug, savedProfile, story, provider, options);
+  const sheetPrompt = [options.promptOverride ?? [
     artDirectionParts.join("\n"),
     entityDetails.join("\n"),
     paletteGuidance,
     referenceRequirements.join("\n"),
-  ].filter(Boolean).join("\n\n");
+  ].filter(Boolean).join("\n\n"), identity.images.length ? IDENTITY_TRANSFORMATION_INSTRUCTION : ""].filter(Boolean).join("\n\n");
 
   // Combined negative prompt
   const negativePromptParts = [
@@ -461,6 +501,7 @@ export async function generateStyleSheet(
     quality: story.artwork.quality,
     size: story.artwork.size,
     outputFormat: story.artwork.outputFormat,
+    referenceImages: identity.images.length ? identity.images : undefined,
   });
 
   const ext = "png";
@@ -474,9 +515,17 @@ export async function generateStyleSheet(
     source: "style_sheet",
     // Generated references require review before they become visual canon.
     approved: false,
-    appearanceEraId: era?.id,
+    appearanceEraId: form ? undefined : era?.id,
+    creatureFormId: form?.id,
     provenance: {
-      appearanceEraId: era?.id,
+      imageFingerprint: createHash("sha256").update(result.data).digest("hex"),
+      identityMode: identity.mode,
+      identityReason: identity.reason,
+      identityReferenceIds: identity.images.map(image => image.referenceId),
+      identityReferenceFingerprints: identity.fingerprints,
+      targetFingerprint: referenceSheetTargetFingerprint(savedProfile, story, activePreset, options, identity.fingerprints, entity),
+      appearanceEraId: form ? undefined : era?.id,
+      creatureFormId: form?.id,
       provider: provider.name,
       model: story.artwork.model,
       generatedAt: new Date().toISOString(),
@@ -492,6 +541,14 @@ export async function generateStyleSheet(
     // through review. Approval can then atomically make this the active one.
     replacesReferenceId: primaryReference?.id,
   });
+}
+
+/** Fingerprint the design intent, not unapproved candidates or unrelated revisions. */
+export function referenceSheetTargetFingerprint(profile: VisualEntityProfile, story: Story, direction: unknown, scope: { appearanceEraId?: string; creatureFormId?: string; promptOverride?: string }, identityFingerprints: string[] = [], entity?: CanonicalEntity) {
+  const form = profile.creatureForms?.find(item => item.id === scope.creatureFormId);
+  const era = scope.appearanceEraId ? profile.appearanceEras?.find(item => item.id === scope.appearanceEraId) : form ? { ...form, startChapter: 1 } : undefined;
+  const effective = effectiveVisualProfile(profile, era);
+  return fingerprint({ entityId: profile.entityId, entityName: entity?.canonicalName, visualType: profile.visualType, sourceEvidence: profile.status !== "approved" && !era ? entity?.visualEvidence : undefined, scope: { appearanceEraId: scope.appearanceEraId, creatureFormId: scope.creatureFormId, promptOverride: scope.promptOverride }, appearance: effective.appearance, visualPrompt: effective.visualPrompt, negativePrompt: effective.negativePrompt, character: effective.character, creature: effective.creature, location: effective.location, item: effective.item, direction, artwork: story.artwork, identityFingerprints });
 }
 
 export interface PreparedVisualCanonMerge {
@@ -590,6 +647,12 @@ export async function prepareVisualCanonMerge(
     ...era,
     referenceIds: era.referenceIds.map((id) => migratedRefIds.get(`${source.entityId}:${id}`) ?? id),
   }));
+  const migratedForms = (source: VisualEntityProfile) => (source.creatureForms ?? []).map(form => ({ ...form, referenceIds: form.referenceIds.map(id => migratedRefIds.get(`${source.entityId}:${id}`) ?? id) }));
+  const appendForms = (existing: NonNullable<VisualEntityProfile["creatureForms"]>, incoming: NonNullable<VisualEntityProfile["creatureForms"]>) => {
+    const merged = [...existing];
+    for (const form of incoming) merged.push({ ...form, id: merged.some(item => item.id === form.id) ? randomUUID() : form.id, status: merged.some(item => item.state === form.state && item.status === "approved") ? "draft" : form.status });
+    return merged;
+  };
   const appendEras = (existing: NonNullable<VisualEntityProfile["appearanceEras"]>, incoming: NonNullable<VisualEntityProfile["appearanceEras"]>) => {
     const merged = [...existing];
     for (const era of incoming) {
@@ -628,6 +691,7 @@ export async function prepareVisualCanonMerge(
       const combinedNegative = [primary.negativePrompt, ...remainingSources.map((s) => s.negativePrompt).filter(Boolean)].filter(Boolean).join(", ");
       const combinedVariants = [...primary.variants];
       let combinedEras = migratedEras(primary);
+      let combinedForms = migratedForms(primary);
       for (const src of remainingSources) {
         for (const v of src.variants) {
           if (!combinedVariants.some((existing) => existing.name.toLowerCase() === v.name.toLowerCase())) {
@@ -635,6 +699,7 @@ export async function prepareVisualCanonMerge(
           }
         }
         combinedEras = appendEras(combinedEras, migratedEras(src));
+        combinedForms = appendForms(combinedForms, migratedForms(src));
       }
 
       preparedProfiles[targetEntityId] = visualProfileSchema.parse({
@@ -645,6 +710,7 @@ export async function prepareVisualCanonMerge(
         negativePrompt: combinedNegative,
         variants: combinedVariants,
         appearanceEras: combinedEras,
+        creatureForms: combinedForms,
         references: migratedRefs,
         revision: primary.revision + 1,
         updatedAt: now,
@@ -677,6 +743,7 @@ export async function prepareVisualCanonMerge(
           }
         }
         preparedTarget.appearanceEras = appendEras(preparedTarget.appearanceEras ?? [], migratedEras(src));
+        preparedTarget.creatureForms = appendForms(preparedTarget.creatureForms ?? [], migratedForms(src));
         delete preparedProfiles[src.entityId];
       }
 

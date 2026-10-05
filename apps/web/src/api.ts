@@ -230,6 +230,7 @@ export type VisualVariant = {
 export type VisualAppearanceEra = {
   id: string;
   name: string;
+  creatureState?: "living" | "dead" | "zombie" | "skeleton" | "undead" | "other";
   startChapter: number;
   endChapter?: number;
   status: "draft" | "approved";
@@ -239,7 +240,11 @@ export type VisualAppearanceEra = {
   character?: CharacterVisualDetails;
   creature?: CreatureVisualDetails;
   referenceIds: string[];
+  detectedChange?: { evidenceIds: string[]; confidence: number; excerpts: string[]; sourceFingerprint?: string; needsReview?: boolean };
 };
+
+export type CreatureForm = Omit<VisualAppearanceEra, "startChapter" | "endChapter"> & { state: "living" | "dead" | "zombie" | "skeleton" | "undead" | "other"; sourceExcerpts?: string[]; detectedSource?: { scope: string; fingerprint: string; needsReview: boolean } };
+export type SceneCreatureGroup = { id: string; entity: string; label: string; state: CreatureForm["state"]; count?: number | null; formId?: string | null; appearance: string; excerpt: string };
 
 export type VisualEntityProfile = {
   id: string;
@@ -255,7 +260,10 @@ export type VisualEntityProfile = {
   creature?: CreatureVisualDetails;
   item?: ItemVisualDetails;
   variants: VisualVariant[];
+  creatureIdentity?: "individual" | "template";
+  creatureForms?: CreatureForm[];
   appearanceEras?: VisualAppearanceEra[];
+  dismissedAppearanceEraIds?: string[];
   references: VisualReferenceImage[];
   fieldProvenance?: Record<string, VisualFieldProvenance>;
   conflicts?: VisualProfileConflict[];
@@ -481,6 +489,7 @@ export type Scene = {
   imageUrl?: string;
   versionUrls?: Record<string, string>;
   entityIds?: string[];
+  creatureGroups?: SceneCreatureGroup[];
   resolvedCharacters?: ResolvedSceneCharacter[];
   direction?: SceneDirection;
   overrides?: SceneOverrides;
@@ -598,8 +607,8 @@ export async function uploadVisualReference(slug: string, entityId: string, payl
   return post<{ profile: VisualEntityProfile; reference: VisualReferenceImage }>(`/stories/${encodeURIComponent(slug)}/visual-profiles/${encodeURIComponent(entityId)}/references`, payload);
 }
 
-export async function generateStyleSheet(slug: string, entityId: string, appearanceEraId?: string): Promise<{ styleSheetUrl: string; profile: VisualEntityProfile }> {
-  return post<{ styleSheetUrl: string; profile: VisualEntityProfile }>(`/stories/${encodeURIComponent(slug)}/visual-profiles/${encodeURIComponent(entityId)}/style-sheet`, { appearanceEraId });
+export async function generateStyleSheet(slug: string, entityId: string, appearanceEraId?: string, creatureFormId?: string): Promise<{ styleSheetUrl: string; profile: VisualEntityProfile }> {
+  return post<{ styleSheetUrl: string; profile: VisualEntityProfile }>(`/stories/${encodeURIComponent(slug)}/visual-profiles/${encodeURIComponent(entityId)}/style-sheet`, { appearanceEraId, creatureFormId });
 }
 
 export async function inspectVisualProfile(slug: string, entityId: string): Promise<{ profile: VisualEntityProfile; eligibleFields: string[]; protectedFields: string[]; fields: VisualProfileFieldState[]; conflicts: VisualProfileConflict[]; coreComplete: number; coreTotal: number; context: { explicitVisualFacts: Record<string, string>; storyBibleVisualEvidence?: { values: Record<string, { value: string; chapter: number; confidence: number; source: string }>; conflicts: Record<string, Array<{ value: string; chapter: number }>> } } }> {
@@ -611,8 +620,8 @@ export async function proposeVisualProfile(slug: string, entityId: string, input
 export async function applyVisualProfileProposal(slug: string, entityId: string, proposal: VisualProfileProposal, selectedFields: string[]): Promise<VisualEntityProfile> {
   return put(`/stories/${encodeURIComponent(slug)}/visual-profiles/${encodeURIComponent(entityId)}/proposal`, { proposal, selectedFields });
 }
-export async function approveVisualReference(slug: string, entityId: string, refId: string, primary = false): Promise<VisualEntityProfile> {
-  return post(`/stories/${encodeURIComponent(slug)}/visual-profiles/${encodeURIComponent(entityId)}/references/${encodeURIComponent(refId)}/approve`, { primary });
+export async function approveVisualReference(slug: string, entityId: string, refId: string, primary = false, creatureFormId?: string, appearanceEraId?: string): Promise<VisualEntityProfile> {
+  return post(`/stories/${encodeURIComponent(slug)}/visual-profiles/${encodeURIComponent(entityId)}/references/${encodeURIComponent(refId)}/approve`, { primary, creatureFormId, appearanceEraId });
 }
 export async function deleteVisualReference(slug: string, entityId: string, refId: string): Promise<{ profile: VisualEntityProfile; deleted: boolean; cleanupWarnings?: string[] }> {
   return del(`/stories/${encodeURIComponent(slug)}/visual-profiles/${encodeURIComponent(entityId)}/references/${encodeURIComponent(refId)}`);

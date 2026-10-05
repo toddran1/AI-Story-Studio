@@ -10,7 +10,7 @@ import { readJsonIfExists } from "../../src/storage/story-files.js";
 import { failedResultDiagnostics, saveJobError } from "./job-error-history.js";
 
 export type JobStatus = "queued" | "running" | "completed" | "failed" | "paused";
-export type Job = { id: string; type: "batch" | "stageExecution" | "preview" | "voicePreview" | "metadataTranslation" | "entityLocalizationSuggestions" | "pronunciation" | "qaRepair" | "qaRecheck" | "summary" | "audio" | "audiobook" | "chapterMusicExport" | "summaryMusicExport" | "alignment" | "subtitles" | "video" | "videoExport" | "scenes" | "artwork" | "production" | "ttsQualityVerify" | "ttsSegmentRegenerate"; story: string; status: JobStatus; createdAt: string; updatedAt: string; payload?: unknown; progress?: unknown; result?: unknown; error?: string; diagnostic?: ErrorDiagnostic };
+export type Job = { id: string; type: "visualWorkflow" | "batch" | "stageExecution" | "preview" | "voicePreview" | "metadataTranslation" | "entityLocalizationSuggestions" | "pronunciation" | "qaRepair" | "qaRecheck" | "summary" | "audio" | "audiobook" | "chapterMusicExport" | "summaryMusicExport" | "alignment" | "subtitles" | "video" | "videoExport" | "scenes" | "artwork" | "production" | "ttsQualityVerify" | "ttsSegmentRegenerate"; story: string; status: JobStatus; createdAt: string; updatedAt: string; payload?: unknown; progress?: unknown; result?: unknown; error?: string; diagnostic?: ErrorDiagnostic };
 type JobControl = { update(progress: unknown): void; setPause(handler: () => void): void };
 
 export class JobConflictError extends Error {}
@@ -21,6 +21,7 @@ export class JobManager {
   private readonly jobs = new Map<string, Job>();
   private readonly events = new Map<string, EventEmitter>();
   private readonly activeStories = new Map<string, string>();
+  private readonly pendingVisualPauses = new Set<string>();
   private readonly pauseHandlers = new Map<string, () => void>();
   private readonly durablePaths = new Map<string, string>();
   private readonly durableWrites = new Map<string, Promise<void>>();
@@ -34,23 +35,23 @@ export class JobManager {
   /** Persist non-chapter jobs without putting story content into the production
    * queue. Interrupted work is paused on startup, never silently replayed/paid. */
   async restoreDurable(directory: string) {
-    const schema = z.object({ id: z.string().uuid(), type: z.literal("summary"), story: z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/), status: z.enum(["queued", "running", "completed", "failed", "paused"]), createdAt: z.string().datetime(), updatedAt: z.string().datetime(), payload: z.unknown().optional(), progress: z.unknown().optional(), result: z.unknown().optional(), error: z.string().optional() });
+    const schema = z.object({ id: z.string().uuid(), type: z.enum(["summary", "visualWorkflow"]), story: z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/), status: z.enum(["queued", "running", "completed", "failed", "paused"]), createdAt: z.string().datetime(), updatedAt: z.string().datetime(), payload: z.unknown().optional(), progress: z.unknown().optional(), result: z.unknown().optional(), error: z.string().optional() });
     for (const name of await readdir(directory).catch((error: NodeJS.ErrnoException) => { if (error.code === "ENOENT") return []; throw error; })) {
       if (!/^[a-f0-9-]{36}\.json$/.test(name)) continue;
-      const path = join(directory, name), parsed = schema.safeParse(await readJsonIfExists(path).catch((error) => { logger.warn({ error, path }, "Ignoring unreadable summary job record"); return undefined; }));
+      const path = join(directory, name), parsed = schema.safeParse(await readJsonIfExists(path).catch((error) => { logger.warn({ error, path }, "Ignoring unreadable durable job record"); return undefined; }));
       if (!parsed.success || `${parsed.data.id}.json` !== name) continue;
       const job: Job = parsed.data;
-      if (job.status === "running" || job.status === "queued") { job.status = "paused"; job.error = "Interrupted by a server restart. Run the summary action again to resume from completed artifacts."; await atomicWriteJson(path, job); }
+      if (job.status === "running" || job.status === "queued") { job.status = "paused"; job.error = "Interrupted by a server restart. Retry the action to resume from completed artifacts."; await atomicWriteJson(path, job); }
       this.jobs.set(job.id, job); this.durablePaths.set(job.id, path);
     }
     this.prune();
     await this.flushDurable();
   }
 
-  async createDurable(directory: string, story: string, runner: (control: JobControl) => Promise<unknown>, payload?: unknown) {
+  async createDurable(directory: string, story: string, runner: (control: JobControl) => Promise<unknown>, payload?: unknown, type: "summary" | "visualWorkflow" = "summary") {
     this.prune();
     const active = this.activeStories.get(story); if (active) throw new JobConflictError(`Story '${story}' already has active job ${active}`);
-    const now = new Date().toISOString(), job: Job = { id: randomUUID(), type: "summary", story, status: "queued", createdAt: now, updatedAt: now, payload };
+    const now = new Date().toISOString(), job: Job = { id: randomUUID(), type, story, status: "queued", createdAt: now, updatedAt: now, payload };
     const path = join(directory, `${job.id}.json`);
     // Reserve the story before awaiting IO, preventing concurrent submission races.
     this.activeStories.set(story, job.id);
@@ -88,7 +89,7 @@ export class JobManager {
     const emitter = this.events.get(id); if (!emitter) return () => undefined;
     emitter.on("update", listener); return () => emitter.off("update", listener);
   }
-  pause(id: string): boolean { const handler = this.pauseHandlers.get(id); if (!handler) return false; handler(); return true; }
+  pause(id: string): boolean { const handler = this.pauseHandlers.get(id); if (!handler) { const job = this.jobs.get(id); if (job?.type === "visualWorkflow" && ["queued", "running"].includes(job.status)) { this.pendingVisualPauses.add(id); return true; } return false; } handler(); return true; }
   pauseAll(): void { for (const handler of this.pauseHandlers.values()) handler(); }
   async flushDurable(): Promise<void> {
     const failures: unknown[] = [];
@@ -118,7 +119,7 @@ export class JobManager {
     try {
       const result = await runner({
         update: (progress) => this.set(job, { progress }),
-        setPause: (handler) => this.pauseHandlers.set(job.id, handler),
+        setPause: (handler) => { this.pauseHandlers.set(job.id, handler); if (this.pendingVisualPauses.delete(job.id)) handler(); },
       });
       const resultStatus = typeof result === "object" && result !== null && "status" in result ? (result as { status?: unknown; stopReason?: unknown }).status : undefined;
       if (resultStatus === "paused") this.set(job, { status: "paused", result });
@@ -139,7 +140,7 @@ export class JobManager {
       }
     } catch (error) { const diagnostic = createErrorDiagnostic(error); logFailure(job, diagnostic); await this.recordFailure(job, diagnostic); this.set(job, { status: "failed", error: diagnostic.summary, diagnostic }); }
     finally {
-      this.pauseHandlers.delete(job.id); if (this.activeStories.get(job.story) === job.id) this.activeStories.delete(job.story);
+      this.pauseHandlers.delete(job.id); this.pendingVisualPauses.delete(job.id); if (this.activeStories.get(job.story) === job.id) this.activeStories.delete(job.story);
       this.events.delete(job.id); this.prune();
     }
   }

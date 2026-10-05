@@ -1,3 +1,5 @@
+import { resolveVisualEntities } from "./identity.js";
+import { resolveVisualEntityType } from "../visual-canon/fields.js";
 import { StageModelConfig, providerHasCapability } from "../domain/provider.js";
 import { StoryBible } from "../domain/story-bible.js";
 import { LLMProvider } from "../llm/provider.js";
@@ -40,6 +42,17 @@ export async function planVisualScenes(provider: LLMProvider, config: StageModel
     instructions: scenePlannerInstructions + (summary ? "\nPlan only the events in the final recap narration, not every event in its source chapters. Use semantic visual beats first; the target scene count is pacing guidance, not permission to omit the ending. Localized full/short names refer to the same canonical entity in the identity map. Use that entity's supported visual traits. Supporting canonical context must never expand or rewrite the narration. For each summary scene provide zero-based narrationStartWord (inclusive) and narrationEndWord (exclusive) using the supplied narration word array. Cover every word exactly once in chronological order." : "") + (input.visualDirectionContext ? "\nRespect the supplied saved visual-direction settings and manual overrides as editorial constraints. Do not contradict or erase them; generated visual beats and prompts should work within them." : ""),
     input: `${input.sourceLabel}\nAUDIO DURATION: ${input.durationSeconds.toFixed(3)} seconds\nTARGET SCENE COUNT: approximately ${input.targetSceneCount}\nSCENE DURATION GUIDANCE: ${input.settings.minimumDurationSeconds}-${input.settings.maximumDurationSeconds} seconds\n\nCANONICAL STORY BIBLE:\n${JSON.stringify(input.bible, null, 2)}${context}${input.visualDirectionContext ? `\n\nSAVED VISUAL DIRECTION (editorial constraints):\n${input.visualDirectionContext}` : ""}${input.visualContinuity ? `\n\nPREVIOUS VISUAL CONTINUITY (inherited temporary state — current narration is authoritative):\n${input.visualContinuity}` : ""}${summary ? `\nNARRATION WORDS (zero-indexed):\n${JSON.stringify(tokenizeNarration(input.narration))}` : ""}\n\nOPTIONAL SUBTITLE TIMING:\n${input.subtitles ?? "Unavailable"}\n\nFINAL NARRATION:\n${input.narration}`,
     schemaName: summary ? "summary_scene_plan" : "chapter_scene_plan", schema: summary ? summaryPlannedScenesSchema : plannedScenesSchema });
-  return summary ? withRetry(generate, retryConfigSchema.parse({})) : generate();
+  const result = await (summary ? withRetry(generate, retryConfigSchema.parse({})) : generate());
+  const normalizedNarration = input.narration.replace(/\s+/g, " ").toLocaleLowerCase();
+  for (const scene of result.value.scenes) {
+    if (!scene.creatureGroups) continue;
+    const ids = new Set<string>();
+    scene.creatureGroups = scene.creatureGroups.filter(group => {
+      const entity = resolveVisualEntities([group.entity], input.bible.canonicalEntities)[0];
+      if (!entity || resolveVisualEntityType(entity) !== "creature" || !group.excerpt.trim() || !normalizedNarration.includes(group.excerpt.replace(/\s+/g, " ").toLocaleLowerCase()) || ids.has(group.id)) return false;
+      ids.add(group.id); return true;
+    });
+  }
+  return result;
 }
 export { SCENE_PLANNER_PROMPT_VERSION };

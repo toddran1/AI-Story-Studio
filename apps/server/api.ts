@@ -442,6 +442,18 @@ export function createApiHandler(operations: StudioOperations) {
       if (scenesChapterMatch && request.method === "GET") return send(response, 200, await getScenesChapter(operations.root, scenesChapterMatch[1]!, chapterParam(scenesChapterMatch[2]!)));
       const scenesDashboardMatch = /^\/api\/stories\/([a-z0-9-]+)\/scenes$/.exec(url.pathname);
       if (scenesDashboardMatch && request.method === "GET") return send(response, 200, await getScenesDashboard(operations.root, scenesDashboardMatch[1]!, optionalInteger(url.searchParams.get("chapter"))));
+      const regenerationPlanMatch = /^\/api\/stories\/([a-z0-9-]+)\/visual-workflow\/regeneration\/(plan|start)$/.exec(url.pathname);
+      if (regenerationPlanMatch && request.method === "POST") return send(response, regenerationPlanMatch[2] === "start" ? 202 : 200, await (regenerationPlanMatch[2] === "start" ? operations.startVisualRegeneration(regenerationPlanMatch[1]!, await jsonBody(request)) : operations.planVisualRegeneration(regenerationPlanMatch[1]!, await jsonBody(request))));
+      const visualCheckMatch = /^\/api\/stories\/([a-z0-9-]+)\/visual-workflow\/check\/(inspect|start)$/.exec(url.pathname);
+      if (visualCheckMatch && request.method === "POST") return send(response, visualCheckMatch[2] === "start" ? 202 : 200, await (visualCheckMatch[2] === "start" ? operations.startArtworkVisualCheck(visualCheckMatch[1]!, await jsonBody(request)) : operations.getArtworkVisualCheck(visualCheckMatch[1]!, await jsonBody(request))));
+      const referencePlanMatch = /^\/api\/stories\/([a-z0-9-]+)\/visual-workflow\/references\/(plan|start)$/.exec(url.pathname);
+      if (referencePlanMatch && request.method === "POST") return send(response, referencePlanMatch[2] === "start" ? 202 : 200, await (referencePlanMatch[2] === "start" ? operations.startVisualReferences(referencePlanMatch[1]!, await jsonBody(request)) : operations.planVisualReferences(referencePlanMatch[1]!, await jsonBody(request))));
+      const workflowMatch = /^\/api\/stories\/([a-z0-9-]+)\/visual-workflow$/.exec(url.pathname);
+      if (workflowMatch && request.method === "GET") return send(response, 200, await operations.visualWorkflow(workflowMatch[1]!));
+      const visualPreviewMatch = /^\/api\/stories\/([a-z0-9-]+)\/visual-workflow\/preview$/.exec(url.pathname);
+      if (visualPreviewMatch && request.method === "POST") return send(response, 200, await operations.previewSceneVisuals(visualPreviewMatch[1]!, await jsonBody(request)));
+      const visualImpactMatch = /^\/api\/stories\/([a-z0-9-]+)\/visual-profiles\/(ent_[a-f0-9]{24})\/impact$/.exec(url.pathname);
+      if (visualImpactMatch && request.method === "GET") return send(response, 200, await operations.visualImpact(visualImpactMatch[1]!, visualImpactMatch[2]!));
       const visualProfilesMatch = /^\/api\/stories\/([a-z0-9-]+)\/visual-profiles$/.exec(url.pathname);
       if (visualProfilesMatch && request.method === "GET") {
         return send(response, 200, await operations.getVisualProfiles(visualProfilesMatch[1]!));
@@ -504,7 +516,7 @@ export function createApiHandler(operations: StudioOperations) {
       }
       const visualProfileStyleSheetMatch = /^\/api\/stories\/([a-z0-9-]+)\/visual-profiles\/(ent_[a-f0-9]{24})\/style-sheet$/.exec(url.pathname);
       if (visualProfileStyleSheetMatch && request.method === "POST") {
-        const bodyData = z.object({ promptOverride: z.string().max(10000).optional(), role: visualRoleSchema.optional(), presetId: z.string().min(1).max(200).optional(), appearanceEraId: z.string().min(1).max(200).optional() }).parse(await jsonBody(request));
+        const bodyData = z.object({ promptOverride: z.string().max(10000).optional(), role: visualRoleSchema.optional(), presetId: z.string().min(1).max(200).optional(), appearanceEraId: z.string().min(1).max(200).optional(), creatureFormId: z.string().min(1).max(200).optional() }).parse(await jsonBody(request));
         return send(response, 200, await operations.generateStyleSheet(visualProfileStyleSheetMatch[1]!, visualProfileStyleSheetMatch[2]!, bodyData));
       }
       const artDirectionMatch = /^\/api\/stories\/([a-z0-9-]+)\/art-direction$/.exec(url.pathname);

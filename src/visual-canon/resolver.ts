@@ -1,8 +1,9 @@
+import { matchingIndividualCreatureEra } from "./creature-look.js";
 import { CanonicalEntity, StoryBible } from "../domain/story-bible.js";
 import { Story } from "../domain/story.js";
 import { ArtDirectionPreset } from "../domain/art-direction.js";
 import { VisualAppearanceEra, VisualEntityProfile, VisualReferenceImage } from "../domain/visual-profile.js";
-import { Scene, SceneDirection, SceneOverrides, sceneDirectionSchema, sceneOverridesSchema } from "../scenes/types.js";
+import { Scene, SceneDirection, SceneOverrides, SceneCreatureGroup, sceneDirectionSchema, sceneOverridesSchema } from "../scenes/types.js";
 import { resolveVisualEntities } from "../scenes/identity.js";
 import { fingerprint } from "../utils/hash.js";
 import { artworkCompositionGuidance, resolveArtworkAspectRatio } from "../artwork/composition.js";
@@ -89,7 +90,7 @@ export function resolveApprovedAppearanceEra(profile: VisualEntityProfile, chapt
 
 export function effectiveVisualProfile(profile: VisualEntityProfile, era: VisualAppearanceEra | undefined): VisualEntityProfile {
   if (!era) {
-    const assigned = new Set(profile.appearanceEras?.filter((item) => item.status === "approved").flatMap((item) => item.referenceIds) ?? []);
+    const assigned = new Set([...(profile.appearanceEras?.flatMap((item) => item.referenceIds) ?? []), ...(profile.creatureForms?.flatMap(form => form.referenceIds) ?? [])]);
     return { ...profile, references: profile.references.filter((reference) => !assigned.has(reference.id)) };
   }
   const referenceIds = new Set(era.referenceIds);
@@ -122,6 +123,11 @@ export function resolveVisuallyRelevantCanonicalEntities(scene: Scene, bible: St
   }
   for (const entity of resolveVisualEntities(scene.characters, bible.canonicalEntities)) {
     if (["character", "creature"].includes(resolveVisualEntityType(entity))) matchedEntities.set(entity.id, entity);
+  }
+  for (const group of scene.creatureGroups ?? []) {
+    const entity = resolveVisualEntities([group.entity], bible.canonicalEntities)[0];
+    if (!entity || resolveVisualEntityType(entity) !== "creature") throw new Error(`Creature group '${group.label}' does not resolve to a canonical creature: ${group.entity}`);
+    matchedEntities.set(entity.id, entity);
   }
   if (scene.location) {
     const normalizedLocation = scene.location.trim().toLowerCase();
@@ -182,6 +188,7 @@ export function resolveVisualCanonPrompt(options: {
   visualProfiles: Record<string, VisualEntityProfile>;
   visualContinuity?: string;
   chapter?: number;
+  allowUnprofiledEntityIds?: readonly string[];
 }): ResolvedSceneVisualPrompt {
   const { scene, story, bible, artDirection, visualProfiles, visualContinuity } = options;
 
@@ -198,15 +205,26 @@ export function resolveVisualCanonPrompt(options: {
   const entityCanonLines: string[] = [];
   const entityNegativePrompts: string[] = [];
 
-  for (const entity of matchedEntities) {
+  const bindings: Array<{ entity: CanonicalEntity; group?: SceneCreatureGroup }> = matchedEntities.flatMap(entity => {
+    const groups = (scene.creatureGroups ?? []).filter(group => resolveVisualEntities([group.entity], [entity]).length > 0);
+    return groups.length ? groups.map(group => ({ entity, group })) : [{ entity }];
+  });
+  for (const { entity, group } of bindings) {
     const entityId = entity.id;
-    const savedProfile = visualProfiles[entityId];
+    const useVisualProfile = shouldUseVisualProfileForEntity(scene, entity);
+    const enforceForms = useVisualProfile && entity.visualProfilePolicy?.mode !== "skip" && !options.allowUnprofiledEntityIds?.includes(entityId);
+    const savedProfile = enforceForms ? visualProfiles[entityId] : undefined;
+    const individualEra = group ? matchingIndividualCreatureEra(savedProfile, entity, group, overrides.appearanceChapter ?? options.chapter, overrides.appearanceEraOverrides?.[entityId] ?? overrides.appearanceEraOverrides?.[entity.canonicalName]) : undefined;
+    const groupLabel = group ? `${group.count ?? ((savedProfile?.creatureIdentity ?? entity.visualIdentityKind) === "individual" ? 1 : "Unspecified number of")} ${group.label} [group ${group.id}; state ${group.state}]` : entity.canonicalName;
+    const forms = savedProfile?.creatureForms?.filter(form => form.status === "approved" && form.state === group?.state) ?? [];
+    const selectedForm = group && !individualEra ? group.formId ? forms.find(form => form.id === group.formId) : forms.length === 1 ? forms[0] : undefined : undefined;
+    if (enforceForms && group && !individualEra && !group.formId && forms.length > 1) throw new Error(`Creature group '${group.label}' has several approved ${group.state} forms. Select a form ID before generating artwork.`);
+    if (enforceForms && group?.formId && !selectedForm) throw new Error(`Creature group '${group.label}' requires an approved ${group.state} form matching '${group.formId}'. Review the creature forms before generating artwork.`);
     const eraOverride = overrides.appearanceEraOverrides?.[entityId] ?? overrides.appearanceEraOverrides?.[entity.canonicalName];
     const pinnedEra = savedProfile?.appearanceEras?.find((era) => era.id === eraOverride && era.status === "approved");
     const effectiveChapter = overrides.appearanceChapter ?? options.chapter;
-    const appearanceEra = pinnedEra ?? (savedProfile && effectiveChapter ? resolveApprovedAppearanceEra(savedProfile, effectiveChapter) : undefined);
-    const profile = savedProfile ? effectiveVisualProfile(savedProfile, appearanceEra) : undefined;
-    const useVisualProfile = shouldUseVisualProfileForEntity(scene, entity);
+    const appearanceEra = individualEra ?? (group || (savedProfile?.creatureIdentity ?? entity.visualIdentityKind) === "template" ? undefined : pinnedEra ?? (savedProfile && effectiveChapter ? resolveApprovedAppearanceEra(savedProfile, effectiveChapter) : undefined));
+    const profile = savedProfile ? selectedForm ? effectiveVisualProfile(savedProfile, { ...selectedForm, startChapter: 1 }) : group && !individualEra && group.state !== "living" ? undefined : effectiveVisualProfile(savedProfile, appearanceEra) : undefined;
     const isApproved = useVisualProfile && profile?.status === "approved";
 
     if (isApproved && profile) {
@@ -214,10 +232,11 @@ export function resolveVisualCanonPrompt(options: {
         entityNegativePrompts.push(profile.negativePrompt.trim());
       }
       // Calculate individual entity fingerprint (only for approved profiles)
-      entityVisualFingerprints[entityId] = fingerprint({
+      entityVisualFingerprints[group ? `${entityId}:${group.id}` : entityId] = fingerprint({
         id: profile.id,
         entityId: profile.entityId,
         appearanceEraId: appearanceEra?.id,
+        creatureFormId: selectedForm?.id, creatureGroup: group,
         appearance: profile.appearance,
         visualPrompt: profile.visualPrompt,
         character: profile.character,
@@ -320,7 +339,7 @@ export function resolveVisualCanonPrompt(options: {
       const description = traits.join(". ");
       resolvedEntities.push({
         entityId,
-        name: entity.canonicalName,
+        name: groupLabel,
         type: entity.type,
         hasApprovedProfile: true,
         profileRevision: profile.revision,
@@ -334,14 +353,14 @@ export function resolveVisualCanonPrompt(options: {
         groundingMode: "approved_profile",
       });
 
-      entityCanonLines.push(`CANONICAL ${entity.type.toUpperCase()} [${entity.canonicalName}]: ${description}`);
+      entityCanonLines.push(`CANONICAL ${entity.type.toUpperCase()} [${groupLabel}]: ${description}${group ? `\nSCENE GROUP STATE: ${group.state}. ${group.appearance} Apply these references only to this group; keep other groups distinct.` : ""}`);
     } else {
       // Fallback to Story Bible canonical description
       const namePrefix = entity.originalName ? `${entity.canonicalName} (${entity.originalName})` : entity.canonicalName;
-      const visualDescription = entity.type === "character" ? fallbackArtworkDescription(entity.description ?? "") : entity.description;
+      const visualDescription = group ? `${groupLabel}: ${group.appearance || group.state}. No approved form reference is available. Use only this group's narrated state; do not copy another group's living or undead appearance.` : entity.type === "character" ? fallbackArtworkDescription(entity.description ?? "") : entity.description;
       const evidence = resolveEntityVisualEvidence(entity, overrides.appearanceChapter ?? options.chapter ?? Number.MAX_SAFE_INTEGER);
-      const persistent = Object.entries(evidence.values).filter(([, item]) => item.persistence === "persistent");
-      const changing = Object.entries(evidence.values).filter(([, item]) => item.persistence === "changed");
+      const persistent = group ? [] : Object.entries(evidence.values).filter(([, item]) => item.persistence === "persistent");
+      const changing = group || (savedProfile?.creatureIdentity ?? entity.visualIdentityKind) === "template" ? [] : Object.entries(evidence.values).filter(([, item]) => item.persistence === "changed");
       const draft = profile && profile.status !== "approved" ? profile : undefined;
       const manual = Object.entries(draft?.fieldProvenance ?? {}).flatMap(([path, provenance]) => {
         if (!provenance.locked && provenance.source !== "manual_override" && provenance.source !== "user_edit") return [];
@@ -360,7 +379,7 @@ export function resolveVisualCanonPrompt(options: {
       const desc = `${namePrefix}${visualDescription ? `: ${visualDescription}` : ""}${fallbackContext ? `\n${fallbackContext}` : ""}`;
       resolvedEntities.push({
         entityId,
-        name: entity.canonicalName,
+        name: groupLabel,
         type: entity.type,
         hasApprovedProfile: false,
         description: desc,

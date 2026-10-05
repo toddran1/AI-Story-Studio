@@ -154,6 +154,7 @@ export type VisualVariant = z.infer<typeof visualVariantSchema>;
 export const visualAppearanceEraSchema = z.object({
   id: z.string().min(1),
   name: z.string().trim().min(1).max(200),
+  creatureState: z.enum(["living", "dead", "zombie", "skeleton", "undead", "other"]).optional(),
   startChapter: z.number().int().positive(),
   endChapter: z.number().int().positive().optional(),
   status: visualProfileStatusSchema.default("draft"),
@@ -163,8 +164,13 @@ export const visualAppearanceEraSchema = z.object({
   character: characterVisualDetailsSchema.optional(),
   creature: creatureVisualDetailsSchema.optional(),
   referenceIds: z.array(z.string().min(1)).default([]),
+  detectedChange: z.object({ evidenceIds: z.array(z.string().min(1)), confidence: z.number().min(0).max(1), excerpts: z.array(z.string().max(500)), sourceFingerprint: z.string().optional(), needsReview: z.boolean().optional() }).optional(),
 }).refine((era) => era.endChapter === undefined || era.endChapter >= era.startChapter, { message: "End chapter must be at or after start chapter" });
 export type VisualAppearanceEra = z.infer<typeof visualAppearanceEraSchema>;
+
+const { startChapter: _eraStart, endChapter: _eraEnd, ...creatureFormFields } = visualAppearanceEraSchema.shape;
+export const creatureFormSchema = z.object(creatureFormFields).extend({ state: z.enum(["living", "dead", "zombie", "skeleton", "undead", "other"]), sourceExcerpts: z.array(z.string().max(500)).optional(), detectedSource: z.object({ scope: z.string().max(300), fingerprint: z.string(), needsReview: z.boolean().default(false) }).optional() });
+export type CreatureForm = z.infer<typeof creatureFormSchema>;
 
 export const visualProfileSchema = z.object({
   id: z.string().min(1),
@@ -187,7 +193,10 @@ export const visualProfileSchema = z.object({
    * resolving one is an editorial decision, never a silent overwrite. */
   conflicts: z.array(visualProfileConflictSchema).optional(),
   variants: z.array(visualVariantSchema).default([]),
+  creatureIdentity: z.enum(["individual", "template"]).optional(),
+  creatureForms: z.array(creatureFormSchema).max(30).optional(),
   appearanceEras: z.array(visualAppearanceEraSchema).optional(),
+  dismissedAppearanceEraIds: z.array(z.string().min(1)).optional(),
   references: z.array(visualReferenceImageSchema).default([]),
   revision: z.number().int().nonnegative().default(1),
   createdAt: z.string().datetime(),
@@ -197,6 +206,10 @@ export const visualProfileSchema = z.object({
   if (profile.appearanceEras?.length && !["character", "creature"].includes(profile.visualType)) {
     context.addIssue({ code: "custom", path: ["appearanceEras"], message: "Appearance eras apply to characters and creatures only" });
   }
+  if (profile.creatureForms?.length && profile.visualType !== "creature") context.addIssue({ code: "custom", path: ["creatureForms"], message: "Creature forms require a creature profile" });
+  for (const form of profile.creatureForms ?? []) if (form.status === "approved" && !form.appearance.trim() && !form.visualPrompt.trim() && !Object.values(form.creature ?? {}).some(value => typeof value === "string" && value.trim())) context.addIssue({ code: "custom", path: ["creatureForms"], message: `Approved creature form ${form.name} needs visual details` });
+  const formIds = profile.creatureForms?.map(form => form.id) ?? [];
+  if (new Set(formIds).size !== formIds.length) context.addIssue({ code: "custom", path: ["creatureForms"], message: "Creature form IDs must be unique" });
   const approved = (profile.appearanceEras ?? []).filter((era) => era.status === "approved").sort((a, b) => a.startChapter - b.startChapter);
   for (const era of approved) {
     const details = { ...era.character, ...era.creature };

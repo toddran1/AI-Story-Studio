@@ -1,9 +1,20 @@
+import { visualRegenerationInputSchema, visualSceneSelectionSchema, visualSceneKey } from "../../src/visual-canon/regeneration-selection.js";
+import { pricingFor, calculateCost } from "../../src/cost/pricing.js";
+import { analyzeArtworkVisuals, artworkVisualCheckTargetSchema, readVisualCheckImage, visualCheckTargetFingerprint, visualCheckSchema } from "../../src/artwork/visual-check.js";
+import { summaryMediaPaths } from "../../src/summaries/media.js";
+import { sceneVersionImagePath, sceneImagePath } from "../../src/storage/paths.js";
+import { planReferenceBatch, runReferenceBatch, referenceBatchInputSchema } from "../../src/visual-canon/reference-batch.js";
+import { resolveSummarySceneArtDirection } from "../../src/summaries/art-direction.js";
+import { loadApprovedVisualProfileReferences } from "../../src/artwork/generator.js";
+import { visualWorkflowCatalog, visualSceneImpact } from "../../src/visual-canon/workflow.js";
+import { resolveVisualCanonPrompt } from "../../src/visual-canon/resolver.js";
+import { syncAppearanceChanges } from "../../src/visual-canon/appearance-changes.js";
 import { loadPronunciationEntities, enrichStoryPronunciations, clearPronunciationAttempt, dismissPronunciationSuggestion, inspectPronunciationImpact, invalidatePronunciationChange, loadPronunciationSuggestions } from "../../src/story-bible/pronunciation.js";
 import { pronunciationProvider, pronunciationFingerprint, resolvePronunciations } from "../../src/tts/pronunciation.js";
 import { randomUUID } from "node:crypto";
 import { censorToneConfig } from "../../src/tts/censor-audio.js";
 import { normalizeSpeechForProvider } from "../../src/tts/speech-normalization.js";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
 import { z } from "zod";
 import { BatchRunner, ChapterProcessor, ProgressEvent } from "../../src/batch/batch-runner.js";
@@ -52,7 +63,7 @@ import { exportChapterWithMusic } from "../../src/music/chapter-export.js";
 import { resolveExportMusic } from "../../src/music/resolver.js";
 import { LLMProvider } from "../../src/llm/provider.js";
 import { applyStoredSceneRegeneration, planStoredScenes, previewStoredSceneRegeneration, updateStoredScene, updateStoredSceneManifest } from "../../src/scenes/manifest.js";
-import { SceneManifest, sceneManifestSchema } from "../../src/scenes/types.js";
+import { SceneManifest, sceneManifestSchema, sceneSchema } from "../../src/scenes/types.js";
 import { persistChapterVisualContinuity, removeVisualContinuityOverride, upsertVisualContinuityOverride, visualContinuityOverrideEntrySchema } from "../../src/visual-canon/continuity.js";
 import { generateStoredArtwork, reviewStoredArtwork, reviewStoredArtworkVersion, reupscaleStoredArtwork } from "../../src/artwork/generator.js";
 import { invalidateArtworkOutputIndex } from "../../src/artwork/output-index-revision.js";
@@ -79,7 +90,7 @@ import {
   rollbackPreparedVisualCanonDemote,
 } from "../../src/visual-canon/profiles.js";
 import { applyVisualProfileProposal, MAX_VISUAL_PROFILE_FIELD_COUNT, proposeMissingVisualDetails, resolveVisualProfileConflict, synchronizeVisualProfileConflicts, visualProfileProposalSchema } from "../../src/visual-canon/completion.js";
-import { loadStoryArtDirection, saveStoryArtDirection, createPreset, updatePreset, deletePreset, duplicatePreset, setDefaultPreset } from "../../src/visual-canon/art-direction.js";
+import { loadStoryArtDirection, resolveActiveArtDirection, saveStoryArtDirection, createPreset, updatePreset, deletePreset, duplicatePreset, setDefaultPreset } from "../../src/visual-canon/art-direction.js";
 import { visualProfileSchema } from "../../src/domain/visual-profile.js";
 import { storyArtDirectionSchema, artDirectionPresetEditSchema, createArtDirectionPresetSchema } from "../../src/domain/art-direction.js";
 import { artworkReviewSchema } from "../../src/scenes/types.js";
@@ -2086,16 +2097,168 @@ export class StudioOperations {
     });
   }
 
+  async planVisualRegeneration(slug: string, raw: unknown) {
+    slugSchema.parse(slug); const input = visualRegenerationInputSchema.parse(raw);
+    const available = await this.visualImpact(slug, input.entityId); const seen = new Set<string>();
+    const entries = input.selection.flatMap(item => {
+      const key = visualSceneKey(item); if (seen.has(key)) return []; seen.add(key);
+      const found = available.find(row => row && visualSceneKey(row) === key);
+      if (!found) throw new Error(`Selected scene ${item.sceneId} no longer uses this entity. Inspect affected scenes again.`);
+      return [{ ...item, key, label: `${found.source} · ${found.sceneId}`, blockedReason: found.disabled ? "Scene is disabled." : found.protected && !input.includeProtected ? "Approved or manually edited artwork is protected." : undefined, protected: found.protected }];
+    }).sort((a,b) => (a.chapter ?? Infinity) - (b.chapter ?? Infinity));
+    const [story, profiles, bible] = await Promise.all([loadStory(storyPaths(this.root, slug, 1).storyConfig), loadVisualProfiles(this.root, slug), getStoryBible(this.root, slug)]);
+    const sceneFingerprints: string[] = [];
+    for (const entry of entries) {
+      if (entry.chapter) { const manifest = sceneManifestSchema.parse(await readJsonIfExists(storyPaths(this.root, slug, entry.chapter).scenesManifest)); sceneFingerprints.push(fingerprint(manifest.scenes.find(scene => scene.id === entry.sceneId))); }
+      else { const summary = await new SummaryService(this.root, this.llm).get(slug, entry.summaryId!); sceneFingerprints.push(fingerprint({ scene: summary.scenePlan?.scenes.find(scene => scene.id === entry.sceneId), direction: summary.artDirectionOverride })); }
+    }
+    const direction = await loadStoryArtDirection(this.root, slug);
+    const imageCount = entries.filter(entry => !entry.blockedReason).length;
+    return { entries, imageCount, estimatedCostUsd: calculateCost(pricingFor(story.artwork.provider, story.artwork.model, story.artwork), { imageCount }), costNote: "Output image estimate; reference input, provider retries and optional checks may add cost.", fingerprint: fingerprint({ input, entries, profiles, bible, artwork: story.artwork, sceneFingerprints, direction }), provider: story.artwork.provider, model: story.artwork.model };
+  }
+  async startVisualRegeneration(slug: string, raw: unknown) {
+    slugSchema.parse(slug); const input = visualRegenerationInputSchema.extend({ planFingerprint: z.string().min(1) }).parse(raw);
+    return this.jobs.createDurable(this.visualJobsDirectory(), slug, control => withStoryLock(this.root, slug, "selective visual regeneration", async () => {
+      const plan = await this.planVisualRegeneration(slug, { entityId: input.entityId, selection: input.selection, includeProtected: input.includeProtected });
+      if (plan.fingerprint !== input.planFingerprint) throw new Error("Visual inputs changed after preview. Inspect the regeneration plan again.");
+      const story = await loadStory(storyPaths(this.root, slug, 1).storyConfig); let stopped = false; control.setPause(() => { stopped = true; });
+      const outcomes: Array<{ key: string; status: "generated" | "failed"; error?: string }> = [];
+      for (let index = 0; index < plan.entries.length; index++) {
+        if (stopped) { await invalidateChapterStatusDerivedReads(this.root, slug); return { status: "paused", outcomes }; }
+        const entry = plan.entries[index]!;
+        control.update({ stage: "artwork", index: index + 1, total: plan.entries.length, label: entry.label, outcomes: [...outcomes] });
+        if (entry.blockedReason) { outcomes.push({ key: entry.key, status: "failed", error: entry.blockedReason }); continue; }
+        try {
+          await withUsageScope<unknown>({ story: slug, chapter: entry.chapter, stage: "artwork" }, () => entry.chapter
+            ? generateStoredArtwork({ root: this.root, story, chapter: entry.chapter, provider: resolveImageProvider(this.image, story), sceneId: entry.sceneId, force: true })
+            : this.summaryVisuals().artwork(slug, entry.summaryId!, { scenes: [entry.sceneId], force: true }));
+          outcomes.push({ key: entry.key, status: "generated" });
+        } catch (error) { outcomes.push({ key: entry.key, status: "failed", error: error instanceof Error ? error.message : String(error) }); }
+        control.update({ stage: "artwork", index: index + 1, total: plan.entries.length, label: entry.label, outcomes: [...outcomes] });
+      }
+      await invalidateChapterStatusDerivedReads(this.root, slug);
+      return { status: outcomes.some(outcome => outcome.status === "failed") ? "completed_with_errors" : "completed", outcomes };
+    }), { ...input, operation: "regeneration" }, "visualWorkflow");
+  }
+
+  private async artworkCheckInputs(slug: string, raw: unknown) {
+    const input = artworkVisualCheckTargetSchema.parse(raw);
+    const summary = input.summaryId ? await new SummaryService(this.root, this.llm).get(slug, input.summaryId) : undefined;
+    const rawManifest = input.chapter ? await readJsonIfExists(storyPaths(this.root, slug, input.chapter).scenesManifest) : undefined;
+    const manifest = rawManifest ? sceneManifestSchema.parse(rawManifest) : summary?.scenePlan;
+    const scene = manifest?.scenes.find(item => item.id === input.sceneId); if (!scene) throw new Error("Artwork scene was not found.");
+    const version = input.versionId ? scene.artwork.versions.find(item => item.id === input.versionId) : scene.artwork.versions.find(item => item.id === scene.artwork.approvedVersionId) ?? scene.artwork.versions.at(-1);
+    if (input.versionId && !version) throw new Error("Artwork version was not found.");
+    const imagePath = input.chapter ? version ? sceneVersionImagePath(this.root, slug, input.chapter, input.sceneId, version.versionNumber) : sceneImagePath(this.root, slug, input.chapter, input.sceneId)
+      : join(summaryMediaPaths(this.root, slug, input.summaryId!).directory, "artwork", `${input.sceneId}${version ? `-v${version.versionNumber}` : ""}.png`);
+    const target = await readVisualCheckImage(imagePath);
+    const preview = await this.previewSceneVisuals(slug, { scene, chapter: input.chapter, summaryId: input.summaryId });
+    const story = await loadStory(storyPaths(this.root, slug, 1).storyConfig);
+    // Unlike generation, image analysis may consume identity references even
+    // when the artwork model itself generates from text only.
+    const references = await loadApprovedVisualProfileReferences(this.root, story, preview, { imageInputsSupported: true });
+    const selected = []; let bytes = target.image.data.length;
+    for (const image of references.images) { if (selected.length >= 3 || bytes + image.data.length > 24 * 1024 * 1024) continue; bytes += image.data.length; selected.push(image); }
+    const expected = JSON.stringify({ expectedDesign: preview.resolvedEntities.map(entity => ({ entityId: entity.entityId, name: entity.name, description: entity.description, visualPrompt: entity.visualPrompt })), scene: { summary: scene.summary, prompt: scene.visualPrompt, creatureGroups: scene.creatureGroups, direction: scene.direction, overrides: scene.overrides }, referenceLabels: selected.map((image,index) => ({ image: index+2, entity: image.entityName, referenceId: image.referenceId })) }).slice(0,64_000);
+    const refFingerprints = selected.map(image => references.referenceFingerprints[references.images.indexOf(image)]!);
+    const targetFingerprint = visualCheckTargetFingerprint(expected, refFingerprints, story.pipeline.qa);
+    return { input, story, checkPath: `${imagePath}.visual-check.json`, imageFingerprint: target.fingerprint, targetFingerprint, expected, images: [target.image, ...selected.map(image => ({ data: image.data, mimeType: image.mimeType as "image/png" | "image/jpeg" | "image/webp" }))] };
+  }
+  async getArtworkVisualCheck(slug: string, raw: unknown) {
+    slugSchema.parse(slug); const context = await this.artworkCheckInputs(slug, raw);
+    const stored = await readJsonIfExists(context.checkPath);
+    if (!stored) return { check: null, stale: false, provider: context.story.pipeline.qa.provider, model: context.story.pipeline.qa.model };
+    const check = visualCheckSchema.parse(stored);
+    return { check, stale: check.imageFingerprint !== context.imageFingerprint || check.targetFingerprint !== context.targetFingerprint, provider: context.story.pipeline.qa.provider, model: context.story.pipeline.qa.model };
+  }
+  async startArtworkVisualCheck(slug: string, raw: unknown) {
+    slugSchema.parse(slug);
+    const input = z.object({ target: artworkVisualCheckTargetSchema, force: z.boolean().default(false) }).strict().parse(raw);
+    return this.jobs.createDurable(this.visualJobsDirectory(), slug, control => withStoryLock(this.root, slug, "advisory artwork check", async () => {
+      let stopped = false; control.setPause(() => { stopped = true; });
+      control.update({ stage: "visual-check", index: 1, total: 1, label: "Comparing artwork against scene and approved designs" });
+      const context = await this.artworkCheckInputs(slug, input.target);
+      const stored = await readJsonIfExists(context.checkPath); const previous = stored ? visualCheckSchema.parse(stored) : undefined;
+      if (!input.force && previous?.imageFingerprint === context.imageFingerprint && previous.targetFingerprint === context.targetFingerprint) return { check: previous, reused: true };
+      if (stopped) return { status: "paused" };
+      const check = await withUsageScope({ story: slug, chapter: context.input.chapter, stage: "visual-check" }, () => analyzeArtworkVisuals({ provider: this.llm.forStage(context.story.pipeline.qa), model: context.story.pipeline.qa, expected: context.expected, images: context.images, imageFingerprint: context.imageFingerprint, targetFingerprint: context.targetFingerprint }));
+      await atomicWriteJson(context.checkPath, check); return { status: stopped ? "paused" : "completed", check, reused: false };
+    }), { ...input, operation: "visual-check" }, "visualWorkflow");
+  }
+
+  visualJobsDirectory() { return join(this.root, ".data", "visual-jobs"); }
+  async planVisualReferences(slug: string, raw: unknown) {
+    slugSchema.parse(slug); const story = await loadStory(storyPaths(this.root, slug, 1).storyConfig);
+    return planReferenceBatch(this.root, story, resolveImageProvider(this.image, story), raw);
+  }
+  async startVisualReferences(slug: string, raw: unknown) {
+    slugSchema.parse(slug);
+    const input = referenceBatchInputSchema.extend({ planFingerprint: z.string().min(1) }).parse(raw);
+    return this.jobs.createDurable(this.visualJobsDirectory(), slug, control => withStoryLock(this.root, slug, "batch visual references", async () => {
+      const story = await loadStory(storyPaths(this.root, slug, 1).storyConfig); const provider = resolveImageProvider(this.image, story);
+      const plan = await planReferenceBatch(this.root, story, provider, { selection: input.selection, force: input.force });
+      if (plan.fingerprint !== input.planFingerprint) throw new Error("Visual designs changed after preview. Inspect the generation plan again.");
+      let stopped = false; control.setPause(() => { stopped = true; });
+      const result = await runReferenceBatch(this.root, story, provider, plan, control.update, () => stopped);
+      await invalidateStoryBibleDerivedReads(this.root, slug); return result;
+    }), { ...input, operation: "references" }, "visualWorkflow");
+  }
+
+  async visualWorkflow(slug: string) {
+    slugSchema.parse(slug);
+    const [bible, profiles] = await Promise.all([getStoryBible(this.root, slug), loadVisualProfiles(this.root, slug)]);
+    return visualWorkflowCatalog(bible, profiles);
+  }
+
+  async previewSceneVisuals(slug: string, raw: unknown) {
+    slugSchema.parse(slug);
+    const input = z.object({ scene: sceneSchema, chapter: z.number().int().positive().optional(), summaryId: summaryIdSchema.optional() }).strict().parse(raw);
+    const [bible, profiles, story, direction] = await Promise.all([getStoryBible(this.root, slug), loadVisualProfiles(this.root, slug), loadStory(storyPaths(this.root, slug, 1).storyConfig), loadStoryArtDirection(this.root, slug)]);
+    const summary = input.summaryId ? await new SummaryService(this.root, this.llm).get(slug, input.summaryId) : undefined;
+    const summaryDirection = summary ? resolveSummarySceneArtDirection(direction, summary.artDirectionOverride, input.scene) : undefined;
+    const scene = summaryDirection?.source === "disabled" ? sceneSchema.parse({ ...input.scene, direction: { ...input.scene.direction, useStoryArtDirection: false } }) : input.scene;
+    const resolved = resolveVisualCanonPrompt({ scene, chapter: summary ? Math.max(...summary.chapters) : input.chapter, bible, story, visualProfiles: profiles, artDirection: summaryDirection?.preset ?? resolveActiveArtDirection(direction, input.scene.overrides?.artDirectionPresetId) });
+    const references = await loadApprovedVisualProfileReferences(this.root, story, resolved);
+    return { ...resolved, references: { mode: references.mode, available: references.available, loadedReferenceIds: references.loadedReferenceIds, loadedReferences: references.images.map(image => ({ entityId: image.entityId, referenceId: image.referenceId })) } };
+  }
+
+  async visualImpact(slug: string, entityId: string) {
+    slugSchema.parse(slug); canonicalEntitySchema.shape.id.parse(entityId);
+    const bible = await getStoryBible(this.root, slug);
+    const result: Array<ReturnType<typeof visualSceneImpact> & { chapter?: number; summaryId?: string; source: string }> = [];
+    const directory = join(storyPaths(this.root, slug, 1).story, "chapters");
+    for (const name of await readdir(directory).catch((error: NodeJS.ErrnoException) => error.code === "ENOENT" ? [] : Promise.reject(error))) {
+      if (!/^\d+$/.test(name) || Number(name) < 1) continue;
+      const raw = await readJsonIfExists(join(directory, name, "scenes.json"));
+      if (!raw) continue;
+      const manifest = sceneManifestSchema.parse(raw);
+      for (const scene of manifest.scenes) {
+        const impact = visualSceneImpact(scene, bible, entityId);
+        if (impact) result.push({ ...impact, chapter: Number(name), source: `Chapter ${Number(name)}` });
+      }
+    }
+    for (const summary of await this.listSummaries(slug)) for (const scene of summary.scenePlan?.scenes ?? []) {
+      const impact = visualSceneImpact(scene, bible, entityId);
+      if (impact) result.push({ ...impact, summaryId: summary.id, source: summary.title });
+    }
+    return result;
+  }
+
   async getVisualProfiles(slug: string) {
     slugSchema.parse(slug);
-    const profiles = await loadVisualProfiles(this.root, slug);
-    return Object.values(profiles);
+    return withStoryLock(this.root, slug, "prepare detected appearance eras", async () => {
+      await syncAppearanceChanges(this.root, slug, await getStoryBible(this.root, slug));
+      return Object.values(await loadVisualProfiles(this.root, slug));
+    });
   }
 
   async getVisualProfile(slug: string, entityId: string) {
     slugSchema.parse(slug);
     canonicalEntitySchema.shape.id.parse(entityId);
-    return loadVisualProfileEntity(this.root, slug, entityId);
+    return withStoryLock(this.root, slug, "prepare detected appearance eras", async () => {
+      await syncAppearanceChanges(this.root, slug, await getStoryBible(this.root, slug));
+      return loadVisualProfileEntity(this.root, slug, entityId);
+    });
   }
 
   async updateVisualProfile(slug: string, entityId: string, input: unknown) {
@@ -2109,6 +2272,16 @@ export class StudioOperations {
       }
       const rawProfile = (typeof input === "object" && input !== null && "profile" in input) ? (input as any).profile : input;
       const parsed = visualProfileSchema.parse({ ...rawProfile, entityId });
+      const previous = await loadVisualProfileEntity(this.root, slug, entityId);
+      for (const era of parsed.appearanceEras ?? []) {
+        const prior = previous?.appearanceEras?.find(item => item.id === era.id);
+        if (prior?.detectedChange?.needsReview && era.detectedChange && !era.detectedChange.needsReview) {
+          // A human may retain the design even when its source has been removed.
+          // Convert that choice to editorial canon rather than continually reflag it.
+          delete era.detectedChange;
+        }
+      }
+      for (const form of parsed.creatureForms ?? []) if (previous?.creatureForms?.find(item => item.id === form.id)?.detectedSource?.needsReview && form.detectedSource && !form.detectedSource.needsReview) delete form.detectedSource;
       const updated = await updateVisualProfile(this.root, slug, entityId, parsed);
       await invalidateStoryBibleDerivedReads(this.root, slug);
       // An approved profile supersedes an earlier opt-out. Keep the policy
@@ -2160,7 +2333,7 @@ export class StudioOperations {
     return withUsageScope({ story: slug, chapter, stage: "storyBible" }, () => extractChapterVisualObservations(this.llm.forStage(config), config, chapter, narration, bible));
   }
 
-  async generateStyleSheet(slug: string, entityId: string, options?: { promptOverride?: string; role?: any; presetId?: string; appearanceEraId?: string }) {
+  async generateStyleSheet(slug: string, entityId: string, options?: { promptOverride?: string; role?: any; presetId?: string; appearanceEraId?: string; creatureFormId?: string }) {
     slugSchema.parse(slug);
     canonicalEntitySchema.shape.id.parse(entityId);
     return withStoryLock(this.root, slug, "generate style sheet", async () => {
@@ -2205,9 +2378,9 @@ export class StudioOperations {
   async approveVisualReference(slug: string, entityId: string, refId: string, input: unknown) {
     slugSchema.parse(slug);
     canonicalEntitySchema.shape.id.parse(entityId);
-    const parsed = z.object({ primary: z.boolean().optional() }).strict().parse(input ?? {});
+    const parsed = z.object({ primary: z.boolean().optional(), creatureFormId: z.string().min(1).max(200).optional(), appearanceEraId: z.string().min(1).max(200).optional() }).strict().parse(input ?? {});
     return withStoryLock(this.root, slug, "approve visual reference", async () => {
-      const result = await approveVisualReference(this.root, slug, entityId, refId, parsed.primary);
+      const result = await approveVisualReference(this.root, slug, entityId, refId, parsed.primary, parsed.creatureFormId, parsed.appearanceEraId);
       await invalidateStoryBibleDerivedReads(this.root, slug);
       return result;
     });

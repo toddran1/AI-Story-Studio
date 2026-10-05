@@ -189,6 +189,14 @@ export const resolvedSceneCharacterSchema = z.object({
 });
 export type ResolvedSceneCharacter = z.infer<typeof resolvedSceneCharacterSchema>;
 
+export const sceneCreatureGroupSchema = z.object({
+  id: z.string().trim().min(1).max(100), entity: z.string().trim().min(1).max(300),
+  label: z.string().trim().min(1).max(300), state: z.enum(["living", "dead", "zombie", "skeleton", "undead", "other"]),
+  count: z.number().int().min(1).max(10000).nullish(), formId: z.string().trim().min(1).max(200).nullish(),
+  appearance: z.string().trim().max(2000).default(""), excerpt: z.string().trim().max(500).default(""),
+});
+export type SceneCreatureGroup = z.infer<typeof sceneCreatureGroupSchema>;
+
 export const sceneSchema = z.object({
   id: z.string().regex(/^scene-\d{3}$/), summary: z.string().trim().max(1000),
   startSeconds: z.number().min(0), endSeconds: z.number().positive(),
@@ -197,6 +205,7 @@ export const sceneSchema = z.object({
   narrationText: z.string().max(1000000).optional(),
   narrationStartWord: z.number().int().nonnegative().optional(), narrationEndWord: z.number().int().positive().optional(),
   entityIds: z.array(z.string().trim().min(1)).max(100).optional().default([]),
+  creatureGroups: z.array(sceneCreatureGroupSchema).max(30).optional(),
   resolvedCharacters: z.array(resolvedSceneCharacterSchema).optional(),
   visualType: z.enum(["image", "video"]).optional(),
   disabled: z.boolean().optional(),
@@ -204,7 +213,7 @@ export const sceneSchema = z.object({
   overrides: sceneOverridesSchema.optional(),
   visualChanges: visualContinuityChangeSchema.optional(),
   videoTreatment: sceneVideoTreatmentSchema.optional(),
-}).refine((value) => value.endSeconds > value.startSeconds, { message: "Scene end must be after its start" });
+}).refine((value) => value.endSeconds > value.startSeconds, { message: "Scene end must be after its start" }).refine(value => new Set(value.creatureGroups?.map(group => group.id)).size === (value.creatureGroups?.length ?? 0), { message: "Creature group IDs must be unique within a scene" });
 
 export const productionSceneManifestSchema = z.object({
   version: z.literal(1), durationSeconds: z.number().positive(),
@@ -228,6 +237,7 @@ export const plannedSceneSchema = z.object({
   summary: z.string().trim().min(1).max(1000), startSeconds: z.number().min(0), endSeconds: z.number().positive(),
   characters: z.array(z.string().trim().min(1)).max(20).default([]), location: z.string().trim().max(300).nullish(),
   visualPrompt: z.string().trim().min(1).max(8000), importance: sceneImportanceSchema.default("standard"),
+  creatureGroups: z.array(sceneCreatureGroupSchema).max(30).nullish(),
   visualChanges: visualContinuityChangeInputSchema.nullish(),
 });
 export const plannedScenesSchema = z.object({ scenes: z.array(plannedSceneSchema).min(1).max(100) });

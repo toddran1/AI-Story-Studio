@@ -1,3 +1,4 @@
+import { prepareCreatureForms } from "../visual-canon/creature-forms.js";
 import { invalidateSummaryReads } from "./read-revision.js";
 import { randomUUID } from "node:crypto";
 import { readFile, rename, rm } from "node:fs/promises";
@@ -12,7 +13,7 @@ import { fingerprint } from "../utils/hash.js";
 import { productionSceneFingerprint, sceneContentFingerprint } from "../scenes/manifest.js";
 import { retimeScenesToDuration } from "../scenes/production.js";
 import { resolveSceneVisualEntity } from "../scenes/identity.js";
-import { sceneSchema, sceneDirectionSchema, sceneOverridesSchema, sceneVideoTreatmentSchema, artworkReviewSchema, type Scene, type ArtworkVersion } from "../scenes/types.js";
+import { sceneCreatureGroupSchema, sceneSchema, sceneDirectionSchema, sceneOverridesSchema, sceneVideoTreatmentSchema, artworkReviewSchema, type Scene, type ArtworkVersion } from "../scenes/types.js";
 import { bindNarrationSpans, timeNarrationScenes } from "../scenes/narration-spans.js";
 import {
   generateSceneImage,
@@ -85,6 +86,7 @@ export const summarySingleSceneEditSchema = z.object({ scene: z.object({
   characters: z.array(z.string().trim().min(1)).max(20), entityIds: z.array(z.string().trim().min(1)).max(100),
   location: z.string().trim().max(300).optional(), startSeconds: z.number().min(0), endSeconds: z.number().positive(),
   disabled: z.boolean().optional(), importance: z.enum(["transition", "standard", "major"]),
+  creatureGroups: z.array(sceneCreatureGroupSchema).max(30).optional(),
   direction: sceneDirectionSchema.optional(), overrides: sceneOverridesSchema.optional(), videoTreatment: sceneVideoTreatmentSchema.optional(),
 }).strict() }).strict();
 export type SummaryVisualProgress = (event: {
@@ -210,12 +212,12 @@ export class SummaryVisualService {
     const resolved = resolveVisualContinuity({ scenes: continuityScenes, manualOverrides });
     return new Map(resolved.perScene.map((entry) => [entry.sceneId, { text: renderSceneContinuity(entry), decision: entry.referenceDecision, resolved: entry }]));
   }
-  private async imageInput(slug: string, id: string, scene: Scene, visualContinuity?: string, continuityDecision?: VisualContinuityReferenceDecision, summaryDirection?: StorySummary["artDirectionOverride"], chapter?: number, loadedContext?: Awaited<ReturnType<SummaryVisualService["context"]>>) {
+  private async imageInput(slug: string, id: string, scene: Scene, visualContinuity?: string, continuityDecision?: VisualContinuityReferenceDecision, summaryDirection?: StorySummary["artDirectionOverride"], chapter?: number, loadedContext?: Awaited<ReturnType<SummaryVisualService["context"]>>, allowUnprofiledEntityIds?: readonly string[]) {
     const context = loadedContext ?? await this.context(slug);
     const effectiveDirection = resolveSummarySceneArtDirection(context.artDirection, summaryDirection, scene);
     const effectiveScene = effectiveDirection.source === "disabled" ? { ...scene, direction: { ...sceneDirectionSchema.parse(scene.direction ?? {}), useStoryArtDirection: false } } : scene;
     const artDirection = effectiveDirection.preset;
-    const resolved = resolveVisualCanonPrompt({ scene: effectiveScene, story: context.story, bible: context.bible, artDirection, visualProfiles: context.visualProfiles, visualContinuity, chapter });
+    const resolved = resolveVisualCanonPrompt({ scene: effectiveScene, story: context.story, bible: context.bible, artDirection, visualProfiles: context.visualProfiles, visualContinuity, chapter, allowUnprofiledEntityIds });
     const references = await loadApprovedVisualProfileReferences(this.root, context.story, resolved);
     const continuityReference = { kind: continuityDecision?.kind ?? "none", used: false, reason: continuityDecision?.reason } as { kind: string; used: boolean; reason?: string; sourceSceneId?: string; versionId?: string; versionNumber?: number; imageFingerprint?: string };
     if (continuityDecision?.used && continuityDecision.sourceSceneId && continuityDecision.versionNumber) {
@@ -435,6 +437,8 @@ export class SummaryVisualService {
     if (keepTiming) validateSceneCoverage(summary.scenePlan.scenes.filter((scene) => !scene.disabled), duration);
     const timed = keepTiming ? { scenes: summary.scenePlan.scenes.filter((scene) => !scene.disabled), timingMethod: preserveAlignedTiming ? summary.scenePlan.timingMethod ?? "estimated" as const : "estimated" as const } : timeNarrationScenes(summary.scenePlan.scenes, duration, summary.alignment?.mode === "aligned" ? summary.alignment.words : undefined);
     const byId = new Map(timed.scenes.map((scene) => [scene.id, scene])); summary.scenePlan.scenes = summary.scenePlan.scenes.map((scene) => byId.get(scene.id) ?? scene); summary.scenePlan.durationSeconds = timed.scenes.at(-1)!.endSeconds;
+    const formContext = await this.context(slug);
+    await prepareCreatureForms(this.root, slug, formContext.bible, summary.scenePlan.scenes, Math.max(...summary.chapters), `summary:${summary.id}`);
     summary.scenePlan.manuallyEdited = true; summary.scenePlan.manualRevision++; summary.scenePlan.timingMethod = timed.timingMethod;
     summary.scenePlan.nextSceneNumber = Math.max(summary.scenePlan.nextSceneNumber ?? 1, ...summary.scenePlan.scenes.map((scene) => Number(scene.id.slice(6)) + 1));
     if (summary.scenePacing?.pacing === "custom" && summary.scenePacing.sceneCount !== undefined)
@@ -451,6 +455,7 @@ export class SummaryVisualService {
     const replacement = sceneSchema.parse({ ...previous, ...input.scene, videoTreatment: input.scene.videoTreatment, id: previous.id, artwork: previous.artwork,
       narrationText: previous.narrationText, narrationStartWord: previous.narrationStartWord, narrationEndWord: previous.narrationEndWord });
     const editable = (scene: Scene) => ({ summary: scene.summary, visualPrompt: scene.visualPrompt, characters: scene.characters,
+      ...(scene.creatureGroups?.length ? { creatureGroups: scene.creatureGroups } : {}),
       entityIds: scene.entityIds, location: scene.location, startSeconds: scene.startSeconds, endSeconds: scene.endSeconds,
       disabled: scene.disabled, importance: scene.importance, direction: scene.direction, overrides: scene.overrides, videoTreatment: scene.videoTreatment });
     if (fingerprint(editable(previous)) === fingerprint(editable(replacement))) return this.get(slug, id);
@@ -473,7 +478,7 @@ export class SummaryVisualService {
     if (summarySceneProposalSourceFingerprint(scene) !== proposal.sourceFingerprint) throw new SummarySceneProposalConflictError("This scene changed since the proposal was generated. Generate a new proposal before applying it.");
     const proposed = proposal.mode === "image_prompt" ? { visualPrompt: proposal.proposed.visualPrompt } : proposal.proposed;
     return this.updateScene(slug, id, sceneId, { scene: {
-      summary: scene.summary, characters: scene.characters, entityIds: scene.entityIds ?? [],
+      summary: scene.summary, characters: scene.characters, entityIds: scene.entityIds ?? [], creatureGroups: scene.creatureGroups,
       location: scene.location, startSeconds: scene.startSeconds, endSeconds: scene.endSeconds,
       disabled: scene.disabled, importance: scene.importance, direction: scene.direction, overrides: scene.overrides,
       videoTreatment: scene.videoTreatment,
@@ -532,7 +537,7 @@ export class SummaryVisualService {
     const planItems: PlanItem[] = [];
 
     for (const scene of selected) {
-      const visual = continuity.get(scene.id); const input = await this.imageInput(slug, id, scene, visual?.text, visual?.decision, summary.artDirectionOverride, Math.max(...summary.chapters), context);
+      const visual = continuity.get(scene.id); const input = await this.imageInput(slug, id, scene, visual?.text, visual?.decision, summary.artDirectionOverride, Math.max(...summary.chapters), context, options.allowUnprofiledEntityIds);
       const backing = backingArtworkVersion(scene);
       let intactOriginal = false;
       if (backing) {
@@ -576,7 +581,7 @@ export class SummaryVisualService {
       root: this.root,
       slug,
       context,
-      candidates: planItems.filter((item) => item.needsGeneration).map((item) => ({ id: item.scene.id, scene: item.scene })),
+      candidates: planItems.filter((item) => item.needsGeneration).map((item) => ({ id: item.scene.id, scene: item.scene, chapter: Math.max(...summary.chapters) })),
       allowUnprofiledEntityIds: options.allowUnprofiledEntityIds,
     });
     if (!preflight.ready && !options.dryRun) {
@@ -658,7 +663,8 @@ export class SummaryVisualService {
 
         progress?.({ type: "summary.artwork.started", scene: scene.id, index: index + 1, total: planItems.length });
         await input.provider.validateConfiguration();
-        scene.artwork = { ...scene.artwork, status: "running", error: undefined };
+        const retainedArtwork = scene.artwork.status === "complete" && scene.artwork.approvedVersionId ? structuredClone(scene.artwork) : undefined;
+        scene.artwork = { ...scene.artwork, status: retainedArtwork ? "complete" : "running", error: undefined };
         await this.save(slug, summary);
 
         try {
@@ -723,7 +729,7 @@ export class SummaryVisualService {
           });
 
           scene.artwork.versions = [...(scene.artwork.versions ?? []), newVersion];
-          scene.artwork = {
+          scene.artwork = retainedArtwork ? { ...retainedArtwork, versions: scene.artwork.versions, error: undefined } : {
             ...scene.artwork,
             status: "complete",
             review: "unreviewed",
@@ -739,7 +745,7 @@ export class SummaryVisualService {
             versions: scene.artwork.versions,
           };
 
-          await syncCanonicalSceneImageForPaths({
+          if (!retainedArtwork) await syncCanonicalSceneImageForPaths({
             story: input.story,
             scene,
             originalPath,
@@ -747,7 +753,7 @@ export class SummaryVisualService {
             standardImagePath: standardPath,
           });
         } catch (error) {
-          scene.artwork = { ...scene.artwork, status: "failed", error: error instanceof Error ? error.message : String(error) };
+          scene.artwork = { ...(retainedArtwork ?? scene.artwork), status: retainedArtwork?.status ?? "failed", error: error instanceof Error ? error.message : String(error) };
           throw error;
         }
 

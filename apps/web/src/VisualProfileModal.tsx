@@ -1,3 +1,5 @@
+import { VisualImpactPanel } from "./VisualImpactPanel.js";
+import { VisualCreatureForms } from "./VisualCreatureForms.js";
 import React, { useState, useEffect, useRef } from "react";
 import { VisualAppearanceEras } from "./VisualAppearanceEras.js";
 import {
@@ -154,7 +156,7 @@ export function VisualProfileModal({
   const [referenceZoom, setReferenceZoom] = useState(1);
   const [visualProfilePolicy, setVisualProfilePolicy] = useState<"prompt" | "skip">("prompt");
   const [error, setError] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<"appearance" | "details" | "eras" | "references">("appearance");
+  const [activeTab, setActiveTab] = useState<"appearance" | "details" | "eras" | "forms" | "references">("appearance");
   const [uploadRole, setUploadRole] = useState<VisualRole>("general_reference");
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -169,6 +171,8 @@ export function VisualProfileModal({
         if (active) {
           loadedProfile.current = res;
           setProfile(res);
+          if (res.creatureForms?.some(form => form.status === "draft")) setActiveTab("forms");
+          else if (res.appearanceEras?.some(era => era.detectedChange && era.status === "draft")) setActiveTab("eras");
           inspectVisualProfile(slug, entityId).then(setCompleteness).catch(() => undefined);
           setLoading(false);
         }
@@ -321,6 +325,24 @@ export function VisualProfileModal({
     }
   };
 
+  const handleGenerateFormSheet = async (formId: string) => {
+    if (!profile) return;
+    setGeneratingSheet(true); setError(null);
+    try {
+      const saved = await updateVisualProfile(slug, entityId, profile); loadedProfile.current = saved; setProfile(saved); onUpdated?.(saved);
+      const result = await generateStyleSheet(slug, entityId, undefined, formId); loadedProfile.current = result.profile; setProfile(result.profile); onUpdated?.(result.profile);
+    } catch (err) { setError(err instanceof Error ? err.message : String(err)); } finally { setGeneratingSheet(false); }
+  };
+  const handleApproveFormSheet = async (formId: string, refId: string) => {
+    if (!profile) return;
+    setSaving(true); setError(null);
+    try {
+      await updateVisualProfile(slug, entityId, profile);
+      const updated = await approveVisualReference(slug, entityId, refId, true, formId);
+      loadedProfile.current = updated; setProfile(updated); onUpdated?.(updated);
+    } catch (err) { setError(err instanceof Error ? err.message : String(err)); } finally { setSaving(false); }
+  };
+
   const handleGenerateEraSheet = async (eraId: string) => {
     if (!profile) return;
     setGeneratingSheet(true); setError(null);
@@ -337,8 +359,7 @@ export function VisualProfileModal({
     setSaving(true); setError(null);
     try {
       await updateVisualProfile(slug, entityId, profile);
-      const approved = await approveVisualReference(slug, entityId, refId, true);
-      const updated = await updateVisualProfile(slug, entityId, { ...approved, appearanceEras: approved.appearanceEras?.map(era => era.id === eraId ? { ...era, status: "approved" as const } : era) });
+      const updated = await approveVisualReference(slug, entityId, refId, true, undefined, eraId);
       loadedProfile.current = updated; setProfile(updated); onUpdated?.(updated);
     } catch (err) { setError(err instanceof Error ? err.message : String(err)); }
     finally { setSaving(false); }
@@ -504,6 +525,7 @@ export function VisualProfileModal({
             {Boolean(Object.keys(completeness?.context?.storyBibleVisualEvidence?.values ?? {}).length) && <small>Story Bible visual evidence available</small>}
             {Boolean(Object.keys(completeness?.context?.storyBibleVisualEvidence?.conflicts ?? {}).length) && <small>Story Bible visual facts conflict; review source chapters</small>}
           </div>
+          <VisualImpactPanel key={`${slug}:${entityId}`} slug={slug} entityId={entityId} />
           <div className="visual-profile-header-actions"><button type="button" className="btn btn-outline" onClick={() => void reloadSavedProfile()}>Reload saved profile</button><button className="btn-close" aria-label="Close Visual Profile" onClick={onClose}>✕</button></div>
         </div>
 
@@ -529,6 +551,7 @@ export function VisualProfileModal({
           >
             Appearance eras ({profile.appearanceEras?.length ?? 0})
           </button>
+          {profile.visualType === "creature" && <button className={`tab-btn ${activeTab === "forms" ? "active" : ""}`} onClick={() => setActiveTab("forms")}>Creature forms ({profile.creatureForms?.length ?? 0})</button>}
           <button
             className={`tab-btn ${activeTab === "references" ? "active" : ""}`}
             onClick={() => setActiveTab("references")}
@@ -538,8 +561,9 @@ export function VisualProfileModal({
         </div>
 
         <div className="modal-body">
+          {activeTab === "forms" && <VisualCreatureForms profile={profile} busy={saving || generatingSheet} onChange={(next) => { if (!saving && !generatingSheet) setProfile(next); }} onGenerate={handleGenerateFormSheet} onApprove={handleApproveFormSheet} referenceUrl={referenceUrl} />}
           {activeTab === "eras" && <VisualAppearanceEras profile={profile} onChange={(next) => { if (!saving && !generatingSheet) setProfile(next); }} busy={saving || generatingSheet} onGenerate={handleGenerateEraSheet} onApprove={handleApproveEraSheet} referenceUrl={referenceUrl} />}
-              {proposal && activeTab !== "references" && activeTab !== "eras" && (
+              {proposal && activeTab !== "references" && activeTab !== "eras" && activeTab !== "forms" && (
                 <details className="visual-proposal-panel" open={proposalExpanded} onToggle={(event) => setProposalExpanded(event.currentTarget.open)}>
                   <summary>AI visual proposal · {selectedProposalFields.length} selected</summary>
                   {proposal.rationale && <p className="hint-text">{proposal.rationale}</p>}

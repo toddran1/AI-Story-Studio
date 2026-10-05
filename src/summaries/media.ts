@@ -1,3 +1,4 @@
+import { prepareCreatureForms } from "../visual-canon/creature-forms.js";
 import { randomUUID } from "node:crypto";
 import { mkdir, rename, rm, stat } from "node:fs/promises";
 import { dirname, join } from "node:path";
@@ -163,7 +164,7 @@ export class SummaryMediaService {
     const estimate = estimateScenePacing(summary.narration.text, pacing, measuredDuration);
     const identities = input.context.canonicalEntities.map((entity) => ({ entityId: entity.id, canonicalName: entity.canonicalName,
       originalName: entity.originalName, narrationNames: [entity.localizedNaming?.fullName, entity.localizedNaming?.shortName, entity.preferredNarrationName].filter((value): value is string => Boolean(value)) }));
-    const inputFingerprint = fingerprint({ version: "summary-scenes-v1", narration: summary.narration.text, context: input.context,
+    const inputFingerprint = fingerprint({ version: "summary-scenes-v2-creature-groups", narration: summary.narration.text, context: input.context,
       identities, estimate, pacing, config: input.story.pipeline.scenePlanner, settings: input.story.scenes });
     if (!force && summary.scenes?.status === "current" && summary.scenes.inputFingerprint === inputFingerprint && summary.scenePlan) return summary;
     if (!force && summary.scenePlan?.manuallyEdited) throw new Error("Manual scenes require explicit regeneration to replace them");
@@ -179,12 +180,13 @@ export class SummaryMediaService {
       const now = new Date().toISOString();
       summary.scenePlan = { version: 1, sourceType: "summary", sourceId: id, sourceChapters: summary.chapters,
         durationSeconds: estimate.durationSeconds, timingMethod: "estimated", planningFingerprint: inputFingerprint,
-        planner: { provider: config.provider, model: config.model, promptVersion: "summary-scenes-v1" },
+        planner: { provider: config.provider, model: config.model, promptVersion: "scene-planner-v4-creature-groups" },
         manualRevision: 0, manuallyEdited: false, createdAt: summary.scenePlan?.createdAt ?? now, updatedAt: now,
-        scenes: bindNarrationSpans(normalizeProductionSceneTiming(planned.value.scenes.map((s) => ({ ...s, location: s.location ?? undefined, visualChanges: normalizeVisualContinuityChange(s.visualChanges) })), estimate.durationSeconds), summary.narration.text).map((scene) => ({ ...scene,
+        scenes: bindNarrationSpans(normalizeProductionSceneTiming(planned.value.scenes.map((s) => ({ ...s, location: s.location ?? undefined, creatureGroups: s.creatureGroups ?? undefined, visualChanges: normalizeVisualContinuityChange(s.visualChanges) })), estimate.durationSeconds), summary.narration.text).map((scene) => ({ ...scene,
           visualType: "image", entityIds: resolveVisualEntities(scene.characters, input.context.canonicalEntities).map((entity) => entity.id) })) };
       // Retain image provenance atomically with the new plan. A restart between
       // planning and artwork must never discard protected/approved image metadata.
+      await prepareCreatureForms(this.root, slug, input.context, summary.scenePlan.scenes, Math.max(...summary.chapters), `summary:${summary.id}`);
       for (const scene of summary.scenePlan.scenes) {
         const before = previousScenePlan?.scenes.find((item) => item.id === scene.id);
         if (before) scene.artwork = before.artwork;
@@ -208,7 +210,7 @@ export class SummaryMediaService {
     const provider = this.llms.forStage(config);
     const storyArtDirection = await loadStoryArtDirection(this.root, slug);
     const effectiveDirection = resolveSummarySceneArtDirection(storyArtDirection, summary.artDirectionOverride, scene);
-    const visualDirectionContext = JSON.stringify({ source: effectiveDirection.source, preset: effectiveDirection.source === "disabled" ? undefined : effectiveDirection.preset, missingPresetId: effectiveDirection.missingPresetId, direction: scene.direction, overrides: scene.overrides });
+    const visualDirectionContext = JSON.stringify({ source: effectiveDirection.source, preset: effectiveDirection.source === "disabled" ? undefined : effectiveDirection.preset, missingPresetId: effectiveDirection.missingPresetId, direction: scene.direction, overrides: scene.overrides, creatureGroups: scene.creatureGroups });
     const current = summarySceneVisualSnapshot(scene);
     let proposed: typeof current;
     if (mode === "image_prompt") {
@@ -230,7 +232,7 @@ export class SummaryMediaService {
         namingIdentities: input.context.canonicalEntities.map((entity) => ({ entityId: entity.id, canonicalName: entity.canonicalName, originalName: entity.originalName, narrationNames: [entity.localizedNaming?.fullName, entity.localizedNaming?.shortName, entity.preferredNarrationName].filter((value): value is string => Boolean(value)) })) });
       if (planned.value.scenes.length !== 1) throw new Error("Individual scene regeneration must return exactly one scene");
       const next = planned.value.scenes[0]!;
-      proposed = summarySceneVisualSnapshotSchema.parse({ summary: next.summary, visualPrompt: next.visualPrompt,
+      proposed = summarySceneVisualSnapshotSchema.parse({ creatureGroups: current.creatureGroups ?? next.creatureGroups ?? undefined, summary: next.summary, visualPrompt: next.visualPrompt,
         characters: next.characters, entityIds: resolveVisualEntities(next.characters, input.context.canonicalEntities).map((entity) => entity.id),
         location: next.location ?? undefined, importance: next.importance });
     }

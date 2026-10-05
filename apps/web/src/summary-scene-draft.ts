@@ -3,6 +3,7 @@ import type { Scene } from "../../../src/scenes/types.js";
 export function sceneEditableValues(scene: Scene) {
   return {
     summary: scene.summary, visualPrompt: scene.visualPrompt, characters: scene.characters,
+    ...(scene.creatureGroups?.length ? { creatureGroups: scene.creatureGroups } : {}),
     entityIds: scene.entityIds ?? [], location: scene.location, startSeconds: scene.startSeconds,
     endSeconds: scene.endSeconds, disabled: scene.disabled, importance: scene.importance,
     direction: scene.direction, overrides: scene.overrides, visualChanges: scene.visualChanges, videoTreatment: scene.videoTreatment,

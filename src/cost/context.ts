@@ -27,6 +27,7 @@ async function persist(sink: UsageSink, data: Omit<ProviderUsageRecord, "id" | "
 
 export class TrackedLLMProvider implements LLMProvider {
   readonly name; constructor(private readonly inner: LLMProvider, private readonly sink: UsageSink) { this.name = inner.name; }
+  get supportsImageInputs() { return this.inner.supportsImageInputs; }
   validateConfiguration() { return this.inner.validateConfiguration(); }
   generateText(request: LLMRequest) { return this.run("llm_text", request, () => this.inner.generateText(request)); }
   generateStructured<T>(request: StructuredLLMRequest<T>) { return this.run("llm_structured", request, () => this.inner.generateStructured(request)); }

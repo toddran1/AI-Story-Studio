@@ -15,6 +15,7 @@ export class KimiProvider implements LLMProvider {
   async validateConfiguration(): Promise<void> { if (!this.apiKey) throw new ConfigurationError("Missing required kimi credential (KIMI_API_KEY). Add it to .env."); }
 
   async generateText(request: LLMRequest) {
+    if (request.images?.length) throw new ConfigurationError("This Kimi adapter does not support image inputs. Choose an image-capable QA provider for visual checks.");
     await this.validateConfiguration();
     try {
       const response = await this.client.chat.completions.create({
@@ -31,6 +32,7 @@ export class KimiProvider implements LLMProvider {
   }
 
   async generateStructured<T>(request: StructuredLLMRequest<T>) {
+    if (request.images?.length) throw new ConfigurationError("This Kimi adapter does not support image inputs. Choose an image-capable QA provider for visual checks.");
     await this.validateConfiguration();
     try {
       const response = await this.client.chat.completions.create({

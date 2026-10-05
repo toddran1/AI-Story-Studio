@@ -230,3 +230,24 @@
 .source-inspection-modal progress { display: block; width: 100%; height: 12px; margin: 20px 0 10px; accent-color: var(--accent, #9182e6); }
 .source-inspection-completion { display: flex; justify-content: space-between; gap: 16px; font-size: 13px; font-variant-numeric: tabular-nums; }
 .source-inspection-modal .intake-error { color: #ffb3ad; max-height: 35vh; overflow: auto; white-space: pre-wrap; }
+
+.visual-review-queue,
+.scene-creature-groups,
+.visual-workflow-panel {
+  margin: 16px 0;
+  padding: 16px;
+  border: 1px solid var(--border, #30303a);
+  border-radius: 8px;
+  background: var(--panel, #141419);
+}
+.visual-review-queue summary,
+.scene-creature-groups summary { cursor: pointer; font-weight: 600; }
+.visual-review-queue > div,
+.scene-creature-groups fieldset { margin-top: 14px; padding: 12px; border: 1px solid var(--border, #30303a); border-radius: 6px; }
+.visual-review-queue label { display: inline-flex; flex-direction: column; gap: 8px; padding: 12px; max-width: 220px; }
+.visual-review-queue img,
+.scene-creature-groups img { object-fit: contain; border-radius: 4px; }
+.scene-creature-groups label { display: grid; gap: 6px; margin: 10px 0; }
+.scene-creature-groups input,
+.scene-creature-groups select,
+.scene-creature-groups textarea { width: 100%; }
