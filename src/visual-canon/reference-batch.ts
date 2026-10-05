@@ -1,8 +1,9 @@
+import { characterDesignContext } from "./character-design.js";
 import { createHash } from "node:crypto";
 import { readFile, stat } from "node:fs/promises";
 import { findVisualReferenceFile } from "./assets.js";
 import { MAX_REFERENCE_IMAGE_BYTES } from "../artwork/providers.js";
-import { requireCanonicalStoryBibleEntity } from "../story-bible/canonical.js";
+import { requireCanonicalStoryBibleEntity, loadStoryBibleWithCanonicalOverlay } from "../story-bible/canonical.js";
 import { z } from "zod";
 import type { Story } from "../domain/story.js";
 import type { ImageProvider } from "../artwork/provider.js";
@@ -22,6 +23,7 @@ export type ReferenceBatchPlan = { entries: ReferenceBatchEntry[]; fingerprint: 
 
 export async function planReferenceBatch(root: string, story: Story, provider: ImageProvider, raw: unknown): Promise<ReferenceBatchPlan> {
   const input = referenceBatchInputSchema.parse(raw); const profiles = await loadVisualProfiles(root, story.slug);
+  const bible = await loadStoryBibleWithCanonicalOverlay(root, story.slug);
   const direction = resolveActiveArtDirection(await loadStoryArtDirection(root, story.slug));
   const entries: ReferenceBatchEntry[] = []; const seen = new Set<string>();
   for (const item of input.selection) {
@@ -36,7 +38,7 @@ export async function planReferenceBatch(root: string, story: Story, provider: I
     else if (item.kind === "era" && profile.appearanceEras?.find(era => era.id === item.scopeId)?.detectedChange?.needsReview || item.kind === "form" && profile?.creatureForms?.find(form => form.id === item.scopeId)?.detectedSource?.needsReview) blockedReason = "Review changed source evidence first.";
     else if (item.kind === "profile" ? !canApproveVisualProfile(profile) : !design.appearance.trim() && !design.visualPrompt.trim() && !Object.values(design.character ?? design.creature ?? {}).some(value => typeof value === "string" && value.trim())) blockedReason = "Describe this visual design first.";
     const identity = profile && !blockedReason ? await prepareReferenceSheetIdentity(root, story.slug, profile, story, provider, scope) : undefined;
-    const targetFingerprint = profile && identity ? referenceSheetTargetFingerprint(profile, story, direction, scope, identity.fingerprints, entity) : undefined;
+    const targetFingerprint = profile && identity ? referenceSheetTargetFingerprint(profile, story, direction, scope, identity.fingerprints, entity, profile.visualType === "character" ? characterDesignContext(bible, profiles, item.entityId) : []) : undefined;
     const assigned = new Set([...(profile?.appearanceEras ?? []).flatMap(era => era.referenceIds), ...(profile?.creatureForms ?? []).flatMap(form => form.referenceIds)]);
     const ids = item.kind === "era" ? profile?.appearanceEras?.find(era => era.id === item.scopeId)?.referenceIds : item.kind === "form" ? profile?.creatureForms?.find(form => form.id === item.scopeId)?.referenceIds : profile?.references.filter(ref => !assigned.has(ref.id)).map(ref => ref.id);
     const refs = profile?.references.filter(ref => ids?.includes(ref.id)) ?? [];

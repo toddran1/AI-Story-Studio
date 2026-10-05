@@ -90,7 +90,7 @@ export function FigureSettings({ gender, figure, onChange }: { gender?: string; 
 type DetailSection = "character" | "location" | "creature" | "item";
 const additionalDetailFields = {
   character: [
-    ["faceShape", "Face Shape"], ["facialHair", "Facial Hair"],
+    ["faceShape", "Face Structure / Features"], ["facialHair", "Facial Hair"],
     ["scars", "Scars"], ["tattoos", "Tattoos"],
     ["shoes", "Shoes"], ["accessories", "Accessories"],
     ["equipment", "Equipment"], ["additionalAppearanceNotes", "Additional Appearance Notes"],
@@ -125,7 +125,7 @@ function AdditionalDetailFields({ section, profile, onChange }: {
         {multiline
           ? <textarea id={`visual-profile-${path}`} rows={2} value={details?.[key] ?? ""}
               onChange={(event) => onChange({ ...profile, [section]: { ...profile[section], [key]: event.target.value } })} />
-          : <input id={`visual-profile-${path}`} type="text" value={details?.[key] ?? ""}
+          : <input id={`visual-profile-${path}`} type="text" placeholder={key === "faceShape" ? "Face proportions, jaw/chin, cheekbones, brow/eyes, nose and mouth" : undefined} value={details?.[key] ?? ""}
               onChange={(event) => onChange({ ...profile, [section]: { ...profile[section], [key]: event.target.value } })} />}
       </div>;
     })}
@@ -766,6 +766,7 @@ export function VisualProfileModal({
                       <label>Hairstyle</label>
                       <input
                         type="text"
+                        placeholder="Length, texture, volume, part, fringe, sides/nape and how it is worn"
                         value={profile.character?.hairstyle || ""}
                         onChange={(e) =>
                           setProfile({

@@ -1,3 +1,4 @@
+import { CHARACTER_DESIGN_GUIDANCE, CHARACTER_DESIGN_VERSION, characterDesignContext } from "./character-design.js";
 import { prepareReferenceSheetIdentity, IDENTITY_TRANSFORMATION_INSTRUCTION } from "./reference-identity.js";
 import { effectiveVisualProfile } from "./resolver.js";
 import { createHash, randomUUID } from "node:crypto";
@@ -13,7 +14,7 @@ import {
   visualReferenceImageSchema,
 } from "../domain/visual-profile.js";
 import { canonicalEntitySchema, type CanonicalEntity } from "../domain/story-bible.js";
-import { requireCanonicalStoryBibleEntity } from "../story-bible/canonical.js";
+import { requireCanonicalStoryBibleEntity, loadStoryBibleWithCanonicalOverlay } from "../story-bible/canonical.js";
 import { resolveEntityVisualEvidence } from "../story-bible/visual-evidence.js";
 import { readVisualField, resolveVisualEntityType, validVisualField } from "./fields.js";
 import { Story } from "../domain/story.js";
@@ -450,13 +451,14 @@ export async function generateStyleSheet(
 
   const paletteGuidance = "COLOR AND CHARACTER: Where appearance details are unspecified, use a distinctive, story-appropriate mix of colors, materials, and small identifying accents. Avoid automatically making clothing all black or giving every person black hair and dark brown eyes. Preserve every established profile trait, approved reference detail, source fact, and story art-direction choice; do not recolor known features for variety.";
 
+  const castDesigns = profile.visualType === "character" ? characterDesignContext(await loadStoryBibleWithCanonicalOverlay(root, slug), await loadVisualProfiles(root, slug), entityId) : [];
   const identity = await prepareReferenceSheetIdentity(root, slug, savedProfile, story, provider, options);
   const sheetPrompt = [options.promptOverride ?? [
     artDirectionParts.join("\n"),
     entityDetails.join("\n"),
     paletteGuidance,
     referenceRequirements.join("\n"),
-  ].filter(Boolean).join("\n\n"), identity.images.length ? IDENTITY_TRANSFORMATION_INSTRUCTION : ""].filter(Boolean).join("\n\n");
+  ].filter(Boolean).join("\n\n"), profile.visualType === "character" ? CHARACTER_DESIGN_GUIDANCE + "\nOTHER CAST DESIGNS (comparison only): " + JSON.stringify(castDesigns) : "", identity.images.length ? IDENTITY_TRANSFORMATION_INSTRUCTION : ""].filter(Boolean).join("\n\n");
 
   // Combined negative prompt
   const negativePromptParts = [
@@ -523,7 +525,7 @@ export async function generateStyleSheet(
       identityReason: identity.reason,
       identityReferenceIds: identity.images.map(image => image.referenceId),
       identityReferenceFingerprints: identity.fingerprints,
-      targetFingerprint: referenceSheetTargetFingerprint(savedProfile, story, activePreset, options, identity.fingerprints, entity),
+      targetFingerprint: referenceSheetTargetFingerprint(savedProfile, story, activePreset, options, identity.fingerprints, entity, castDesigns),
       appearanceEraId: form ? undefined : era?.id,
       creatureFormId: form?.id,
       provider: provider.name,
@@ -544,11 +546,11 @@ export async function generateStyleSheet(
 }
 
 /** Fingerprint the design intent, not unapproved candidates or unrelated revisions. */
-export function referenceSheetTargetFingerprint(profile: VisualEntityProfile, story: Story, direction: unknown, scope: { appearanceEraId?: string; creatureFormId?: string; promptOverride?: string }, identityFingerprints: string[] = [], entity?: CanonicalEntity) {
+export function referenceSheetTargetFingerprint(profile: VisualEntityProfile, story: Story, direction: unknown, scope: { appearanceEraId?: string; creatureFormId?: string; promptOverride?: string }, identityFingerprints: string[] = [], entity?: CanonicalEntity, castDesigns: unknown[] = []) {
   const form = profile.creatureForms?.find(item => item.id === scope.creatureFormId);
   const era = scope.appearanceEraId ? profile.appearanceEras?.find(item => item.id === scope.appearanceEraId) : form ? { ...form, startChapter: 1 } : undefined;
   const effective = effectiveVisualProfile(profile, era);
-  return fingerprint({ entityId: profile.entityId, entityName: entity?.canonicalName, visualType: profile.visualType, sourceEvidence: profile.status !== "approved" && !era ? entity?.visualEvidence : undefined, scope: { appearanceEraId: scope.appearanceEraId, creatureFormId: scope.creatureFormId, promptOverride: scope.promptOverride }, appearance: effective.appearance, visualPrompt: effective.visualPrompt, negativePrompt: effective.negativePrompt, character: effective.character, creature: effective.creature, location: effective.location, item: effective.item, direction, artwork: story.artwork, identityFingerprints });
+  return fingerprint({ characterDesignVersion: profile.visualType === "character" ? CHARACTER_DESIGN_VERSION : undefined, castDesigns: profile.visualType === "character" ? castDesigns : undefined, entityId: profile.entityId, entityName: entity?.canonicalName, visualType: profile.visualType, sourceEvidence: profile.status !== "approved" && !era ? entity?.visualEvidence : undefined, scope: { appearanceEraId: scope.appearanceEraId, creatureFormId: scope.creatureFormId, promptOverride: scope.promptOverride }, appearance: effective.appearance, visualPrompt: effective.visualPrompt, negativePrompt: effective.negativePrompt, character: effective.character, creature: effective.creature, location: effective.location, item: effective.item, direction, artwork: story.artwork, identityFingerprints });
 }
 
 export interface PreparedVisualCanonMerge {

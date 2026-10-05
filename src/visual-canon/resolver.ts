@@ -1,3 +1,4 @@
+import { FALLBACK_CHARACTER_DESIGN_GUIDANCE, MATURE_FALLBACK_FEMALE_GUIDANCE } from "./character-design.js";
 import { matchingIndividualCreatureEra } from "./creature-look.js";
 import { CanonicalEntity, StoryBible } from "../domain/story-bible.js";
 import { Story } from "../domain/story.js";
@@ -80,9 +81,9 @@ export const SCENE_STATE_PRIORITY_INSTRUCTION =
   "SCENE-STATE PRIORITY: Preserve Story Bible identity and approved Visual Profile traits such as face, age, build, hair, eyes, and permanent distinguishing features. Treat profile attire, footwear, accessories, weapons, and equipment as defaults only. Current visual continuity, the current scene, scene direction, and explicit scene overrides take precedence for temporary clothing, injuries, blood, dirt, damage, equipment, pose, expression, and environmental effects. Do not infer a change from an omitted detail.";
 
 // export const MATURE_ARTWORK_STYLING =
-//   "MATURE CHARACTER STYLING: Female characters have a seductive, alluring look with curvaceous figures, full busts and shapely hips. Keep it tasteful — alluring and elegant, never explicit or nude. Depict blood, injuries, and battle violence when the scene calls for it.";
+//   "MATURE CHARACTER STYLING: Clearly adult female characters have a seductive, alluring look with curvaceous figures, full busts and shapely hips. Keep it tasteful — alluring and elegant, never explicit or nude. Depict blood, injuries, and battle violence when the scene calls for it.";
 export const MATURE_ARTWORK_STYLING =
-  "MATURE CHARACTER STYLING: Female characters have a seductive, alluring look with curvaceous figures, full busts and shapely hips. Keep it tasteful — alluring and elegant. Depict blood, injuries, and battle violence when the scene calls for it.";
+  "MATURE CHARACTER STYLING: Clearly adult female characters have a seductive, alluring look with curvaceous figures, full busts and shapely hips. Preserve established figure choices; For unspecified-age women with no youth cues, use an adult 21+ rendering default; never apply this styling to minors or characters with child or adolescent cues. Keep it tasteful — alluring and elegant. Keep subjects clothed and non-explicit. Depict blood, injuries, and battle violence when the scene calls for it.";
 
 export function resolveApprovedAppearanceEra(profile: VisualEntityProfile, chapter: number): VisualAppearanceEra | undefined {
   return profile.appearanceEras?.find((era) => era.status === "approved" && era.startChapter <= chapter && (era.endChapter === undefined || chapter <= era.endChapter));
@@ -261,7 +262,7 @@ export function resolveVisualCanonPrompt(options: {
         const isFemale = c.gender?.trim().toLowerCase() === "female";
         const figureTrait = story.artwork.adultContent && isFemale
           ? c.figure === "larger" ? "Figure: exaggerated very curvaceous with an especially full bust, hips, and big round butt that pokes out from a side angle view. Breast size should be a minimum of a DDD cup or F cup."
-          : c.figure === "normal" ? "Figure: curvaceous with a full bust, hips, and big round butt. Breast size should be a minimum of a DD cup or E cup"
+          : c.figure === "normal" ? "Figure: curvaceous with a full bust, hips, and big round butt. Breast size should be a minimum of a DD cup or E cup."
           : undefined
           : undefined;
         const details = [
@@ -369,7 +370,9 @@ export function resolveVisualCanonPrompt(options: {
       });
       const protectedPaths = new Set(manual.map((line) => line.split(":", 1)[0]));
       const lines = (items: typeof persistent) => items.filter(([path]) => !protectedPaths.has(path)).map(([path, item]) => `${path}: ${item.value} (source chapter ${item.chapter})`);
+      const editorialFigure = entity.type === "character" ? visualProfiles[entityId]?.character?.figure : undefined;
       const fallbackContext = [
+        editorialFigure ? `EDITORIAL BODY CHOICE: ${editorialFigure}. Preserve this user-selected figure; do not replace it with the generic mature default.` : "",
         manual.length ? `MANUAL VISUAL DECISIONS: ${manual.join("; ")}` : "",
         persistent.length ? `PERSISTENT IDENTITY: ${lines(persistent).join("; ")}` : "",
         changing.length ? `CURRENT CHAPTER VISUAL STATE: ${lines(changing).join("; ")}` : "",
@@ -408,7 +411,8 @@ export function resolveVisualCanonPrompt(options: {
   ].filter(Boolean).join(" | ");
 
   if (styleHeader) promptParts.push(`STORY ART DIRECTION: ${styleHeader}`);
-  if (story.artwork.adultContent) promptParts.push(MATURE_ARTWORK_STYLING);
+  if (story.artwork.adultContent) promptParts.push(MATURE_ARTWORK_STYLING, MATURE_FALLBACK_FEMALE_GUIDANCE);
+  promptParts.push(FALLBACK_CHARACTER_DESIGN_GUIDANCE);
 
   // Layer 2: Entity Visual Canon
   if (entityCanonLines.length > 0) {
