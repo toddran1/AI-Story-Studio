@@ -260,8 +260,8 @@ export function resolveVisualCanonPrompt(options: {
         const c = profile.character;
         const isFemale = c.gender?.trim().toLowerCase() === "female";
         const figureTrait = story.artwork.adultContent && isFemale
-          ? c.figure === "larger" ? "Figure: very curvaceous with an especially full bust, hips, and big round butt. Breast size should be a minimum of a DD cup."
-          : c.figure === "normal" ? "Figure: curvaceous with a full bust, hips, and big round butt"
+          ? c.figure === "larger" ? "Figure: exaggerated very curvaceous with an especially full bust, hips, and big round butt that pokes out from a side angle view. Breast size should be a minimum of a DDD cup or F cup."
+          : c.figure === "normal" ? "Figure: curvaceous with a full bust, hips, and big round butt. Breast size should be a minimum of a DD cup or E cup"
           : undefined
           : undefined;
         const details = [
