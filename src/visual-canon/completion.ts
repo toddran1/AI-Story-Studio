@@ -123,10 +123,11 @@ export async function proposeMissingVisualDetails(root: string, slug: string, bi
     model: config.model,
     schemaName: "visual_profile_completion",
     schema: visualProfileProposalResponseSchema,
-    instructions: (inspection.profile.visualType === "character" ? CHARACTER_DESIGN_GUIDANCE + "\n\n" : "") + "Design only the requested persistent visual details for this one entity. When requested, also propose appearance (a cohesive readable appearance description), visualPrompt (an image-generation prompt consistent with the persistent traits and approved references), and negativePrompt (concise visual exclusions). Keep these consistent with the specific traits proposed in the same response. Source evidence, Story Bible facts, manual/locked fields, and approved primary references are authoritative. Never overwrite or contradict them. When a visual trait is genuinely open, choose a distinctive, story-appropriate palette and silhouette; do not habitually default to all-black clothing, black hair, or dark brown eyes. Use color and small identifying details with restraint and variety, while preserving any established colors, traits, culture, and art direction. Do not use temporary injuries, scene action, current weather, one-off emotions, or short-lived clothing as persistent identity. Use role, relationships, culture, powers, occupation, equipment, faction, history, and entity-relevant summaries only when they support a durable visual suggestion. AI output is a proposal, not story canon. Return only the requested visual fields. For character.apparentAge return only a nonnegative whole number of years as digits, without units, ranges, or descriptions. For character.gender return exactly male or female. If uncertain, omit the field. Never propose character.figure — it is a user-controlled setting, not an AI-generated detail. For each proposed field, return an item in values where 'field' is exactly one of the requested field paths and 'value' is the proposed persistent visual description. Do not return unrequested fields, do not rename field paths, and do not return nested profile objects.",
+    instructions: (inspection.profile.visualType === "character" ? CHARACTER_DESIGN_GUIDANCE + "\n\n" : "") + "Design only the requested persistent visual details for this one entity. When requested, also propose appearance (a cohesive readable appearance description), visualPrompt (an image-generation prompt consistent with the persistent traits and approved references), and negativePrompt (concise visual exclusions). Keep these consistent with the specific traits proposed in the same response. Source evidence, Story Bible facts, manual/locked fields, and approved primary references are authoritative. Never overwrite or contradict them. When a visual trait is genuinely open, choose a distinctive, story-appropriate palette and silhouette; do not habitually default to all-black clothing, black hair, or dark brown eyes. Use color and small identifying details with restraint and variety, while preserving any established colors, traits, culture, and art direction. Do not use temporary injuries, scene action, current weather, one-off emotions, or short-lived clothing as persistent identity. Use role, relationships, culture, powers, occupation, equipment, faction, history, and entity-relevant summaries only when they support a durable visual suggestion. AI output is a proposal, not story canon. Return only the requested visual fields. Keep character.faceShape and character.hairstyle each within 2000 characters; describe them concisely rather than writing a character biography. For character.apparentAge return only a nonnegative whole number of years as digits, without units, ranges, or descriptions. For character.gender return exactly male or female. If uncertain, omit the field. Never propose character.figure — it is a user-controlled setting, not an AI-generated detail. For each proposed field, return an item in values where 'field' is exactly one of the requested field paths and 'value' is the proposed persistent visual description. Do not return unrequested fields, do not rename field paths, and do not return nested profile objects.",
     input: JSON.stringify({ ...inspection.context, requestedFields: eligibleFields, mode: options.regenerate ? "explicit_selected_regeneration" : "fill_missing_only" }, null, 2)
   });
   const values: Record<string, string> = {};
+  const rejected: string[] = [];
   const rawValues = Array.isArray(result.value?.values) ? result.value.values : [];
   for (const item of rawValues) {
     if (!item || typeof item !== "object") continue;
@@ -136,13 +137,18 @@ export async function proposeMissingVisualDetails(root: string, slug: string, bi
     if (!eligibleFields.includes(field)) continue;
     if (field in values) continue;
     const normalized = normalizeVisualProposalValue(field, value);
-    if (normalized !== undefined) values[field] = normalized;
+    if (normalized !== undefined) {
+      const candidate = structuredClone(inspection.profile);
+      writeVisualField(candidate, field, normalized);
+      if (visualProfileSchema.safeParse(candidate).success) values[field] = normalized;
+      else rejected.push(field);
+    }
   }
   return {
     entityId,
     visualType: inspection.profile.visualType,
     values,
-    rationale: result.value.rationale ?? "",
+    rationale: [rejected.length ? `Not included because they exceed field limits or fail validation: ${rejected.join(", ")}. Request a shorter description for those fields.` : "", result.value.rationale ?? ""].filter(Boolean).join("\n").slice(0, 2_000),
     eligibleFields,
     protectedFields: inspection.protectedFields,
     contextFingerprint: inspection.contextFingerprint,

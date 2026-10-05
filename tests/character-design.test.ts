@@ -20,26 +20,44 @@ describe("distinct character designs", () => {
   it("compares cast faces and hairstyles in proposals and sheets while protecting known traits", async () => {
     const root = await mkdtemp(join(tmpdir(), "character-design-"));
     try {
-      const story = testStory(); story.artwork.outputResolution = "native";
+      const story = testStory(); story.artwork.outputResolution = "native"; story.artwork.adultContent = true;
       const bible = { ...emptyStoryBible(), canonicalEntities: [entity(id,"Haitao"), entity(otherId,"Xiaoming")] };
       const p = profile(id); p.character = { hairColor: "black" }; p.fieldProvenance = { "character.hairColor": { source: "manual_override", locked: true } };
       const other = profile(otherId); other.status = "approved"; other.character = { faceShape: "Narrow oval, small chin", hairstyle: "Short tousled curls, forward fringe" };
       await atomicWriteJson(storyPaths(root, story.slug, 1).bible, bible);
       await saveVisualProfiles(root, story.slug, { [id]: p, [otherId]: other });
+      const detailedFace = "Broad rectangular jaw, wide cheekbones, deep-set eyes, straight nose. " + "Distinct brow, nose and mouth proportions. ".repeat(15);
+      const detailedHair = "Long straight hair tied low, swept-back crown, exposed forehead. " + "Smooth crown, loose nape strands and a deep side part. ".repeat(10);
       let request: any;
-      const llm = { name: "openai", generateStructured: async (input: any) => { request = input; return { value: { values: [{ field: "character.faceShape", value: "Broad rectangular jaw, wide cheekbones, deep-set eyes, straight nose" }, { field: "character.hairstyle", value: "Long straight hair tied low, swept-back crown, exposed forehead" }, { field: "character.hairColor", value: "red" }], rationale: "Distinct silhouette" } }; } } as LLMProvider;
+      const llm = { name: "openai", generateStructured: async (input: any) => { request = input; return { value: { values: [{ field: "character.faceShape", value: detailedFace }, { field: "character.hairstyle", value: detailedHair }, { field: "character.hairColor", value: "red" }, { field: "character.height", value: "x".repeat(150) }], rationale: "x".repeat(2000) } }; } } as LLMProvider;
       const proposal = await proposeMissingVisualDetails(root, story.slug, bible, id, llm, story.pipeline.qa);
       expect(request.instructions).toContain("nose bridge/tip"); expect(request.instructions).toContain("short tousled/spiky");
       expect(JSON.parse(request.input).castDesigns[0]).toMatchObject({ name: "Xiaoming", hairStyle: other.character.hairstyle });
       expect(proposal.values["character.hairColor"]).toBeUndefined();
-      await applyVisualProfileProposal(root, story.slug, bible, proposal, Object.keys(proposal.values));
-      const images = { name: "openai", version: "fake", validateConfiguration: async () => {}, generate: async (input: any) => { request = input; return { data: pngWithDims(1,1), mimeType: "image/png" as const }; } };
+      expect(proposal.values["character.height"]).toBeUndefined();
+      expect(proposal.rationale).toContain("character.height");
+      expect(proposal.rationale.length).toBeLessThanOrEqual(2000);
+      const applied = await applyVisualProfileProposal(root, story.slug, bible, proposal, Object.keys(proposal.values));
+      expect(applied.character?.faceShape).toBe(detailedFace.trim());
+      expect(applied.character?.hairstyle).toBe(detailedHair.trim());
+      applied.character = { ...applied.character, gender: "female", apparentAge: "29", figure: "larger", build: "Compact, lean and visibly athletic" };
+      applied.appearance = "Detailed identity. ".repeat(450).trim();
+      await saveVisualProfiles(root, story.slug, { [id]: applied, [otherId]: other });
+      let imageCalls = 0;
+      const images = { name: "openai", version: "fake", validateConfiguration: async () => {}, generate: async (input: any) => { imageCalls++; request = input; return { data: pngWithDims(1,1), mimeType: "image/png" as const }; } };
       const plan = await planReferenceBatch(root, story, images, { selection: [{ entityId: id, kind: "profile" }] });
       const result = await generateStyleSheet(root, story.slug, id, images, story);
+      expect(request.prompt).toContain("REQUIRED EDITORIAL FIGURE — larger");
+      expect(request.prompt).toContain("DDD cup or F cup");
+      expect(request.prompt).toContain("Lean, compact, petite or athletic");
+      expect(request.prompt.length).toBeGreaterThan(10_000);
+      expect(result.reference.prompt).toBe(request.prompt);
       expect(request.prompt).toContain("Broad rectangular jaw"); expect(request.prompt).toContain("Long straight hair tied low");
       expect(request.prompt).toContain("OTHER CAST DESIGNS"); expect(request.prompt).toContain("Xiaoming");
       expect(result.reference.provenance?.targetFingerprint).toBe(plan.entries[0]?.targetFingerprint);
       expect(result.reference.approved).toBe(false);
+      await expect(generateStyleSheet(root, story.slug, id, images, story, { promptOverride: "x".repeat(128_001) })).rejects.toThrow();
+      expect(imageCalls).toBe(1);
       expect((await planReferenceBatch(root, story, images, { selection: [{ entityId: id, kind: "profile" }] })).imageCount).toBe(0);
     } finally { await rm(root, { recursive: true, force: true }); }
   });

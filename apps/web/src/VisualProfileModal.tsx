@@ -119,7 +119,7 @@ function AdditionalDetailFields({ section, profile, onChange }: {
   return <div className="form-grid-2col">
     {additionalDetailFields[section].map(([key, label]) => {
       const path = `${section}.${key}`;
-      const multiline = ["additionalAppearanceNotes", "environmentDescription", "recurringLandmarks", "distinguishingFeatures", "accessories", "equipment", "ornamentation"].includes(key);
+      const multiline = ["faceShape", "additionalAppearanceNotes", "environmentDescription", "recurringLandmarks", "distinguishingFeatures", "accessories", "equipment", "ornamentation"].includes(key);
       return <div key={path} className="form-row">
         <label htmlFor={`visual-profile-${path}`}>{label}</label>
         {multiline
@@ -366,11 +366,14 @@ export function VisualProfileModal({
   };
 
   const handleGenerateStyleSheet = async () => {
+    if (!profile) return;
     setGeneratingSheet(true);
     setError(null);
     try {
+      const saved = await updateVisualProfile(slug, entityId, profile);
+      loadedProfile.current = saved; setProfile(saved); onUpdated?.(saved);
       const res = await generateStyleSheet(slug, entityId);
-      setProfile(res.profile);
+      loadedProfile.current = res.profile; setProfile(res.profile);
       onUpdated?.(res.profile);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);

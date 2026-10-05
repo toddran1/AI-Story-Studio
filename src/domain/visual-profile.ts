@@ -22,6 +22,8 @@ export type VisualReferenceSource = z.infer<typeof visualReferenceSourceSchema>;
 export const visualReferenceExtensionSchema = z.enum(["png", "jpg", "jpeg", "webp"]);
 export type VisualReferenceExtension = z.infer<typeof visualReferenceExtensionSchema>;
 
+/** Assembled prompts include canon, art direction and bounded cast context. */
+export const MAX_VISUAL_REFERENCE_PROMPT_CHARS = 128_000;
 export const visualReferenceImageSchema = z.object({
   id: z.string().min(1),
   entityId: z.string().regex(/^ent_[a-f0-9]{24}$/),
@@ -30,7 +32,7 @@ export const visualReferenceImageSchema = z.object({
   createdAt: z.string().datetime(),
   source: visualReferenceSourceSchema.default("uploaded"),
   approved: z.boolean().default(false),
-  prompt: z.string().max(10_000).optional(),
+  prompt: z.string().max(MAX_VISUAL_REFERENCE_PROMPT_CHARS).optional(),
   provenance: z.record(z.string(), z.unknown()).optional(),
   /** A candidate may supersede a previous primary reference without deleting
    * it. This gives visual review an auditable reference lineage. */
@@ -84,10 +86,10 @@ export const characterVisualDetailsSchema = z.object({
   height: z.string().trim().max(100).optional(),
   build: z.string().trim().max(200).optional(),
   skinTone: z.string().trim().max(200).optional(),
-  faceShape: z.string().trim().max(200).optional(),
+  faceShape: z.string().trim().max(2000).optional(),
   eyeColor: z.string().trim().max(200).optional(),
   hairColor: z.string().trim().max(200).optional(),
-  hairstyle: z.string().trim().max(300).optional(),
+  hairstyle: z.string().trim().max(2000).optional(),
   facialHair: z.string().trim().max(300).optional(),
   distinguishingFeatures: z.string().trim().max(1000).optional(),
   scars: z.string().trim().max(500).optional(),

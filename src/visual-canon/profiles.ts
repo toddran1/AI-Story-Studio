@@ -1,3 +1,4 @@
+import { referenceFigureRequirement } from "./figure-guidance.js";
 import { CHARACTER_DESIGN_GUIDANCE, CHARACTER_DESIGN_VERSION, characterDesignContext } from "./character-design.js";
 import { prepareReferenceSheetIdentity, IDENTITY_TRANSFORMATION_INSTRUCTION } from "./reference-identity.js";
 import { effectiveVisualProfile } from "./resolver.js";
@@ -291,6 +292,9 @@ export async function addVisualReferenceImage(
     creatureFormId?: string;
   },
 ): Promise<{ profile: VisualEntityProfile; reference: VisualReferenceImage }> {
+  visualReferenceImageSchema.shape.prompt.parse(options.prompt);
+  visualReferenceImageSchema.shape.role.parse(options.role);
+  visualReferenceImageSchema.shape.source.parse(options.source);
   await requireCanonicalStoryBibleEntity(root, slug, entityId);
   const fileBytes = options.data ?? options.buffer;
   if (!fileBytes) throw new Error("Image data buffer is required");
@@ -458,7 +462,7 @@ export async function generateStyleSheet(
     entityDetails.join("\n"),
     paletteGuidance,
     referenceRequirements.join("\n"),
-  ].filter(Boolean).join("\n\n"), profile.visualType === "character" ? CHARACTER_DESIGN_GUIDANCE + "\nOTHER CAST DESIGNS (comparison only): " + JSON.stringify(castDesigns) : "", identity.images.length ? IDENTITY_TRANSFORMATION_INSTRUCTION : ""].filter(Boolean).join("\n\n");
+  ].filter(Boolean).join("\n\n"), profile.visualType === "character" ? CHARACTER_DESIGN_GUIDANCE + "\nOTHER CAST DESIGNS (comparison only): " + JSON.stringify(castDesigns) : "", identity.images.length ? IDENTITY_TRANSFORMATION_INSTRUCTION : "", referenceFigureRequirement(character, story.artwork.adultContent)].filter(Boolean).join("\n\n");
 
   // Combined negative prompt
   const negativePromptParts = [
@@ -494,6 +498,9 @@ export async function generateStyleSheet(
     negativePrompt: combinedNegativePrompt,
   });
 
+  // Validate durable metadata before incurring image-provider usage.
+  visualReferenceImageSchema.shape.prompt.parse(sheetPrompt);
+  visualReferenceImageSchema.shape.role.parse(options.role);
   await provider.validateConfiguration();
   const result = await provider.generate({
     model: story.artwork.model,

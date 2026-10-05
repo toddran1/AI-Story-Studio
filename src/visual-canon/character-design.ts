@@ -2,7 +2,7 @@ import type { StoryBible } from "../domain/story-bible.js";
 import type { VisualEntityProfile } from "../domain/visual-profile.js";
 import { resolveVisualEntityType } from "./fields.js";
 
-export const CHARACTER_DESIGN_VERSION = "distinct-character-design-v1";
+export const CHARACTER_DESIGN_VERSION = "distinct-character-design-v2";
 export const CHARACTER_DESIGN_GUIDANCE = `CHARACTER DESIGN DIFFERENTIATION: Preserve source facts, established traits, manual choices and approved identity images. For genuinely unspecified features, design a recognizable individual whose face and hair silhouette differ from the other cast designs. Color changes or clothing alone do not establish a different identity.
 FACE: Describe concrete geometry: face width/length, jaw and chin, cheekbones, brow and eye shape/spacing, nose bridge/tip, and mouth proportions. Choose a coherent combination; vary soft, broad, narrow, rounded, long and angular structures as appropriate. Avoid defaulting every man to the same young, smooth, narrow-chinned handsome protagonist or every woman to the same delicate oval face. Preserve known age and cultural context; do not infer ethnicity from personality or moral role. Distinctiveness does not require scars, disfigurement or exaggerated anatomy.
 HAIR: Specify length at crown, sides and nape, texture (straight, wavy, curly or coiled), density/volume, part or hairline, fringe versus exposed forehead, and how it is worn. Explore close crops, buzz cuts, swept-back hair, side parts, longer tied hair, braids, asymmetric cuts, bobs, curls and other setting-appropriate silhouettes across all genders. Do not repeatedly use short tousled/spiky hair with the same forward fringe for men, or long flowing hair for all women. Respect known hair length, texture, style and cultural/period constraints. Balding, facial hair and creative styling are options only where appropriate and unspecified.
@@ -10,12 +10,15 @@ Keep face and hair choices stable across every view of this one person. Compare 
 
 /** A bounded cast comparison, without plot history or unrelated profile data. */
 export function characterDesignContext(bible: StoryBible, profiles: Record<string, VisualEntityProfile>, entityId: string) {
-  return bible.canonicalEntities.filter(entity => entity.id !== entityId && resolveVisualEntityType(entity) === "character" && profiles[entity.id])
+  const designs = bible.canonicalEntities.filter(entity => entity.id !== entityId && resolveVisualEntityType(entity) === "character" && profiles[entity.id])
     .sort((a,b) => Number(profiles[b.id]!.status === "approved") - Number(profiles[a.id]!.status === "approved") || a.id.localeCompare(b.id))
     .slice(0, 24).map(entity => {
       const profile = profiles[entity.id]!; const c = profile.character;
       return { entityId: entity.id, name: entity.canonicalName, status: profile.status, age: c?.apparentAge, gender: c?.gender, face: c?.faceShape?.slice(0,600), hairStyle: c?.hairstyle?.slice(0,600), hairColor: c?.hairColor?.slice(0,100), facialHair: c?.facialHair?.slice(0,200), distinguishingFeatures: c?.distinguishingFeatures?.slice(0,300), appearance: !c?.faceShape || !c?.hairstyle ? profile.appearance.slice(0,600) : undefined };
     });
+  const bounded: typeof designs = []; let chars = 2;
+  for (const design of designs) { const size = JSON.stringify(design).length + 1; if (chars + size > 32_000) break; bounded.push(design); chars += size; }
+  return bounded;
 }
 
 export const FALLBACK_CHARACTER_DESIGN_GUIDANCE = `GENERIC AND FALLBACK CHARACTER VARIETY: For characters without an approved design, including unnamed people and background crowds, vary unspecified face proportions, jaw/chin, cheekbones, brows, eye shape, nose and mouth, plus hair length, texture, volume, part, hairline and fringe. Use distinct, coherent, setting-appropriate combinations rather than repeating the same face or short tousled hairstyle for every man or the same face and long hair for every woman. Vary adults' apparent ages and builds only where the story leaves them open. Hair color or clothing alone is not enough. Preserve explicit age, gender, appearance, source facts, scene state and approved/reference identities. Keep each person's chosen features consistent within the image; never clone another cast member's reference face onto generic people. These are image-level choices, not new permanent story facts.`;
