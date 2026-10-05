@@ -64,7 +64,7 @@ describe("Fish TTS", () => {
     await provider.synthesize({ text: "**Important:** *whisper this.* [sad] 2 * 2", model: "s2.1-pro", speed: 1, format: "mp3", sampleRate: 44100, bitrate: 128, normalize: true, maxCharsPerRequest: 500 });
     const body = JSON.parse(String((fetcher.mock.calls[0]?.[1] as RequestInit).body));
     expect(body.text).toBe("Important: whisper this. [sad] 2 * 2");
-    expect(provider.inputNormalizationVersion).toBe("fish-speech-normalization-v19-item-panels");
+    expect(provider.inputNormalizationVersion).toBe("fish-speech-normalization-v23-laughter-cues");
   });
 
   it("does not turn profanity into the literal word bleep inside Fish", async () => {
@@ -151,6 +151,30 @@ describe("Fish TTS", () => {
     const text = "[Qilin Bow (Common): Agility +10, Special Effect: Can shoot flame-infused arrows with immense power]";
     expect(normalizeFishSpeechText(text, "s2.1-pro")).toBe("Qilin Bow. Common. Agility plus ten. Special Effect. Can shoot flame-infused arrows with immense power.");
     expect(normalizeFishSpeechText("He held the bow (a common weapon).", "s2.1-pro")).toBe("He held the bow (a common weapon).");
+  });
+
+  it("sends native cues for standalone and dialogue laughter in the reported passage", async () => {
+    const posted: string[] = [];
+    const fetcher = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      posted.push(JSON.parse(String(init?.body)).text);
+      return new Response(new Uint8Array([1]), { headers: { "content-type": "audio/mpeg" } });
+    });
+    const text = "While the whole area remained silent, a soul-stirring ringtone suddenly rang out.\n\n“Hahaha...”\n\n“Hahaha! Whose phone is that?!”";
+    await new FishAudioProvider("test-key", fetcher as typeof fetch).synthesize({ text, model: "s2.1-pro", speed: 1, format: "mp3", sampleRate: 44100, bitrate: 128, normalize: true, maxCharsPerRequest: 500 });
+    expect(posted.join(" ")).toContain("“[laughing]”");
+    expect(posted.join(" ")).toContain("“[laughing] Whose phone is that?!”");
+    expect(posted.join(" ")).not.toMatch(/\[cough\]/);
+  });
+
+  it("sends inventory multiplication symbols as the word times", async () => {
+    const input = "[Upgrade Stone × 5]\n[Quality Stone × 4]\n[Explosive Stone × 6]\n[Enhancement Stone × 3]\n[Flash Stone × 1]\n[God Fragment × 2]\n[Barrier Stone × 1]";
+    const expected = "Upgrade Stone times 5\nQuality Stone times 4\nExplosive Stone times 6\nEnhancement Stone times 3\nFlash Stone times 1\nGod Fragment times 2\nBarrier Stone times 1";
+    const posted: string[] = [];
+    const fetcher = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => { posted.push(JSON.parse(String(init?.body)).text); return new Response(new Uint8Array([1]), { headers: { "content-type": "audio/mpeg" } }); });
+    await new FishAudioProvider("test-key", fetcher as typeof fetch).synthesize({ text: input, model: "s2.1-pro", speed: 1, format: "mp3", sampleRate: 44100, bitrate: 128, normalize: true, maxCharsPerRequest: 500 });
+    expect(posted.join("\n")).toBe(expected);
+    expect(normalizeFishSpeechText("2×3", "s2-pro")).toBe("2 times 3");
+    expect(normalizeFishSpeechText("Max owns six stones.", "s2-pro")).toBe("Max owns six stones.");
   });
 
   it("keeps approved S2 cues but makes bracketed story notifications ordinary speech", async () => {

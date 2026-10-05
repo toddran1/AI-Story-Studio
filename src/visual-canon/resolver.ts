@@ -87,7 +87,7 @@ export function resolveApprovedAppearanceEra(profile: VisualEntityProfile, chapt
   return profile.appearanceEras?.find((era) => era.status === "approved" && era.startChapter <= chapter && (era.endChapter === undefined || chapter <= era.endChapter));
 }
 
-function effectiveVisualProfile(profile: VisualEntityProfile, era: VisualAppearanceEra | undefined): VisualEntityProfile {
+export function effectiveVisualProfile(profile: VisualEntityProfile, era: VisualAppearanceEra | undefined): VisualEntityProfile {
   if (!era) {
     const assigned = new Set(profile.appearanceEras?.filter((item) => item.status === "approved").flatMap((item) => item.referenceIds) ?? []);
     return { ...profile, references: profile.references.filter((reference) => !assigned.has(reference.id)) };

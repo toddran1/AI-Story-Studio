@@ -1,3 +1,4 @@
+import { visualRoleSchema } from "../../src/domain/visual-profile.js";
 import { streamSourceInspection } from "./source-inspection-stream.js";
 import { randomUUID } from "node:crypto";
 import { getStoryBible } from "./catalog.js";
@@ -503,7 +504,7 @@ export function createApiHandler(operations: StudioOperations) {
       }
       const visualProfileStyleSheetMatch = /^\/api\/stories\/([a-z0-9-]+)\/visual-profiles\/(ent_[a-f0-9]{24})\/style-sheet$/.exec(url.pathname);
       if (visualProfileStyleSheetMatch && request.method === "POST") {
-        const bodyData = (await jsonBody(request).catch(() => ({}))) as any;
+        const bodyData = z.object({ promptOverride: z.string().max(10000).optional(), role: visualRoleSchema.optional(), presetId: z.string().min(1).max(200).optional(), appearanceEraId: z.string().min(1).max(200).optional() }).parse(await jsonBody(request));
         return send(response, 200, await operations.generateStyleSheet(visualProfileStyleSheetMatch[1]!, visualProfileStyleSheetMatch[2]!, bodyData));
       }
       const artDirectionMatch = /^\/api\/stories\/([a-z0-9-]+)\/art-direction$/.exec(url.pathname);

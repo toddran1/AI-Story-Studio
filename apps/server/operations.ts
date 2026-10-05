@@ -2160,7 +2160,7 @@ export class StudioOperations {
     return withUsageScope({ story: slug, chapter, stage: "storyBible" }, () => extractChapterVisualObservations(this.llm.forStage(config), config, chapter, narration, bible));
   }
 
-  async generateStyleSheet(slug: string, entityId: string, options?: { promptOverride?: string; role?: any; presetId?: string }) {
+  async generateStyleSheet(slug: string, entityId: string, options?: { promptOverride?: string; role?: any; presetId?: string; appearanceEraId?: string }) {
     slugSchema.parse(slug);
     canonicalEntitySchema.shape.id.parse(entityId);
     return withStoryLock(this.root, slug, "generate style sheet", async () => {

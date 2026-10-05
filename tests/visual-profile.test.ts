@@ -282,6 +282,26 @@ describe("Visual Entity Profiles", () => {
     expect(prompt).toContain("distinctive, story-appropriate mix of colors");
     expect(prompt).toContain("Preserve every established profile trait");
   });
+  it("generates a draft era sheet from its changed appearance, links it automatically, and keeps the base references", async () => {
+    await updateVisualProfile(root, slug, entityId, {
+      appearance: "Living young man with olive skin", character: { hairColor: "raven black" },
+      appearanceEras: [{ id: "undead", name: "Undead skeleton", startChapter: 400, status: "draft", appearance: "An exposed ivory skeleton with green eye sockets", visualPrompt: "Bone body, no flesh or hair", negativePrompt: "skin, flesh, hair", referenceIds: [] }],
+    });
+    const base = await addVisualReferenceImage(root, slug, entityId, { data: Buffer.from("living"), approved: true, role: "primary_reference" });
+    let prompt = "";
+    const provider = { name: "fake", validateConfiguration: async () => {}, generate: vi.fn(async (input: { prompt: string }) => { prompt = input.prompt; return { data: Buffer.from("skeleton"), mimeType: "image/png" }; }) };
+    const story: any = { slug, artwork: { model: "fake", quality: "high", size: "1024x1024", outputFormat: "png" } };
+    const generated = await generateStyleSheet(root, slug, entityId, provider as any, story, { appearanceEraId: "undead" });
+    expect(prompt).toContain("exposed ivory skeleton");expect(prompt).not.toContain("olive skin");expect(prompt).not.toContain("raven black");
+    expect(generated.reference.approved).toBe(false);expect(generated.reference.provenance?.appearanceEraId).toBe("undead");
+    expect(generated.reference.replacesReferenceId).toBeUndefined();
+    expect(generated.profile.appearanceEras?.[0]).toMatchObject({ status: "draft", referenceIds: [generated.reference.id] });
+    const approved = await approveVisualReference(root, slug, entityId, generated.reference.id, true);
+    expect(approved.references.find(ref => ref.id === base.reference.id)?.role).toBe("primary_reference");
+    expect(approved.appearance).toBe("Living young man with olive skin");
+    await expect(generateStyleSheet(root, slug, entityId, provider as any, story, { appearanceEraId: "missing" })).rejects.toThrow("Appearance era was not found");
+    expect(provider.generate).toHaveBeenCalledTimes(1);
+  });
 
   it("proposes only missing visual details and persists only selected acceptance", async () => {
     const bible = {

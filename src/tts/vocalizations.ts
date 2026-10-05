@@ -48,6 +48,7 @@ const lexicon: LexemeEntry[] = [
   { pattern: "he(?:he)+(?:[, \\t]+he(?:he)+)+", vocalization: "laugh", confidence: .85, spoken: fixed("hehehe") },
   { pattern: "he(?:he)+", vocalization: "laugh", confidence: .85, spoken: fixed("hehehe") },
   { pattern: "heh(?:[, \\t]+heh)+", vocalization: "laugh", confidence: .85, spoken: fixed("hehehe") },
+  { pattern: "ha", vocalization: "chuckle", confidence: .7, spoken: fixed("ha") },
   { pattern: "heh", vocalization: "chuckle", confidence: .7, spoken: fixed("heh") },
   { pattern: "ahem(?:[, \\t]+ahem)*", vocalization: "throat_clear", confidence: .9, spoken: fixed("ahem") },
   { pattern: "hmp[hf]", vocalization: "scoff", confidence: .85, spoken: fixed("hmph") },

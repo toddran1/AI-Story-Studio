@@ -1,3 +1,4 @@
+import { effectiveVisualProfile } from "./resolver.js";
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rm } from "node:fs/promises";
 import { dirname, join } from "node:path";
@@ -259,6 +260,7 @@ export async function addVisualReferenceImage(
     approved?: boolean;
     provenance?: Record<string, unknown>;
     replacesReferenceId?: string;
+    appearanceEraId?: string;
   },
 ): Promise<{ profile: VisualEntityProfile; reference: VisualReferenceImage }> {
   await requireCanonicalStoryBibleEntity(root, slug, entityId);
@@ -292,6 +294,11 @@ export async function addVisualReferenceImage(
       replacesReferenceId: options.replacesReferenceId,
     });
 
+    if (options.appearanceEraId) {
+      const era = profile.appearanceEras?.find(item => item.id === options.appearanceEraId);
+      if (!era) throw new Error("Appearance era was not found");
+      era.referenceIds.push(refId);
+    }
     profile.references.push(reference);
     profile.updatedAt = new Date().toISOString();
     profile.revision += 1;
@@ -322,11 +329,16 @@ export async function generateStyleSheet(
     promptOverride?: string;
     role?: VisualRole;
     presetId?: string;
+    appearanceEraId?: string;
   } = {},
 ): Promise<{ profile: VisualEntityProfile; reference: VisualReferenceImage }> {
   const entity = await requireCanonicalStoryBibleEntity(root, slug, entityId);
-  const profile = await getVisualProfile(root, slug, entityId);
-  if (!profile) throw new Error(`Visual profile for entity '${entityId}' was not found`);
+  const savedProfile = await getVisualProfile(root, slug, entityId);
+  if (!savedProfile) throw new Error(`Visual profile for entity '${entityId}' was not found`);
+  const era = options.appearanceEraId ? savedProfile.appearanceEras?.find(item => item.id === options.appearanceEraId) : undefined;
+  if (options.appearanceEraId && !era) throw new Error("Appearance era was not found");
+  if (era && !era.appearance.trim() && !era.visualPrompt.trim() && !Object.values(era.character ?? era.creature ?? {}).some(value => typeof value === "string" && value.trim())) throw new Error("Describe this era's appearance before generating its reference sheet");
+  const profile = effectiveVisualProfile(savedProfile, era);
   if (imageProviderNameSchema.safeParse(provider.name).success) assertImageModelCompatible(provider.name, story.artwork.model);
 
   const artDirectionDoc = await loadStoryArtDirection(root, slug);
@@ -462,7 +474,9 @@ export async function generateStyleSheet(
     source: "style_sheet",
     // Generated references require review before they become visual canon.
     approved: false,
+    appearanceEraId: era?.id,
     provenance: {
+      appearanceEraId: era?.id,
       provider: provider.name,
       model: story.artwork.model,
       generatedAt: new Date().toISOString(),

@@ -598,8 +598,8 @@ export async function uploadVisualReference(slug: string, entityId: string, payl
   return post<{ profile: VisualEntityProfile; reference: VisualReferenceImage }>(`/stories/${encodeURIComponent(slug)}/visual-profiles/${encodeURIComponent(entityId)}/references`, payload);
 }
 
-export async function generateStyleSheet(slug: string, entityId: string): Promise<{ styleSheetUrl: string; profile: VisualEntityProfile }> {
-  return post<{ styleSheetUrl: string; profile: VisualEntityProfile }>(`/stories/${encodeURIComponent(slug)}/visual-profiles/${encodeURIComponent(entityId)}/style-sheet`, {});
+export async function generateStyleSheet(slug: string, entityId: string, appearanceEraId?: string): Promise<{ styleSheetUrl: string; profile: VisualEntityProfile }> {
+  return post<{ styleSheetUrl: string; profile: VisualEntityProfile }>(`/stories/${encodeURIComponent(slug)}/visual-profiles/${encodeURIComponent(entityId)}/style-sheet`, { appearanceEraId });
 }
 
 export async function inspectVisualProfile(slug: string, entityId: string): Promise<{ profile: VisualEntityProfile; eligibleFields: string[]; protectedFields: string[]; fields: VisualProfileFieldState[]; conflicts: VisualProfileConflict[]; coreComplete: number; coreTotal: number; context: { explicitVisualFacts: Record<string, string>; storyBibleVisualEvidence?: { values: Record<string, { value: string; chapter: number; confidence: number; source: string }>; conflicts: Record<string, Array<{ value: string; chapter: number }>> } } }> {

@@ -57,6 +57,12 @@ describe("Fish vocalization strategy", () => {
     expect(normalizeFishSpeechText("Actually… it’s possible.", "s1")).toBe("Actually… it’s possible.");
   });
 
+  it.each([["Ha...", "[chuckle]"], ["Haha...", "[laughing]"], ["Hahaha...", "[laughing]"], ["Hahahaha!", "[laughing]"], ["Haha haha!", "[laughing]"]])("renders the native laughter cue for %s", (input, expected) => {
+    expect(normalizeFishSpeechText(input, "s2.1-pro")).toBe(expected);
+    const strategy = new FishAudioProvider().vocalizationStrategy("s2.1-pro");
+    expect(normalizeFishSpeechText(normalizeSpeechText(input, "en-US", {}, strategy).text, "s2.1-pro")).toBe(expected);
+  });
+
   it("maps a performed laugh to the approved cue but leaves a literal mention intact", () => {
     expect(normalizeFishSpeechText("“Hehe, I guessed it, didn’t I?”", "s2-pro")).toContain("[laughing] I guessed it");
     expect(normalizeFishSpeechText("Haha, I knew it.", "s2-pro")).toBe("[laughing] I knew it.");

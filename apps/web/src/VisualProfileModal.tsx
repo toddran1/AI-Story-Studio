@@ -321,6 +321,29 @@ export function VisualProfileModal({
     }
   };
 
+  const handleGenerateEraSheet = async (eraId: string) => {
+    if (!profile) return;
+    setGeneratingSheet(true); setError(null);
+    try {
+      const saved = await updateVisualProfile(slug, entityId, profile);
+      loadedProfile.current = saved; setProfile(saved); onUpdated?.(saved);
+      const result = await generateStyleSheet(slug, entityId, eraId);
+      loadedProfile.current = result.profile; setProfile(result.profile); onUpdated?.(result.profile);
+    } catch (err) { setError(err instanceof Error ? err.message : String(err)); }
+    finally { setGeneratingSheet(false); }
+  };
+  const handleApproveEraSheet = async (eraId: string, refId: string) => {
+    if (!profile) return;
+    setSaving(true); setError(null);
+    try {
+      await updateVisualProfile(slug, entityId, profile);
+      const approved = await approveVisualReference(slug, entityId, refId, true);
+      const updated = await updateVisualProfile(slug, entityId, { ...approved, appearanceEras: approved.appearanceEras?.map(era => era.id === eraId ? { ...era, status: "approved" as const } : era) });
+      loadedProfile.current = updated; setProfile(updated); onUpdated?.(updated);
+    } catch (err) { setError(err instanceof Error ? err.message : String(err)); }
+    finally { setSaving(false); }
+  };
+
   const handleGenerateStyleSheet = async () => {
     setGeneratingSheet(true);
     setError(null);
@@ -515,7 +538,7 @@ export function VisualProfileModal({
         </div>
 
         <div className="modal-body">
-          {activeTab === "eras" && <VisualAppearanceEras profile={profile} onChange={setProfile} />}
+          {activeTab === "eras" && <VisualAppearanceEras profile={profile} onChange={(next) => { if (!saving && !generatingSheet) setProfile(next); }} busy={saving || generatingSheet} onGenerate={handleGenerateEraSheet} onApprove={handleApproveEraSheet} referenceUrl={referenceUrl} />}
               {proposal && activeTab !== "references" && activeTab !== "eras" && (
                 <details className="visual-proposal-panel" open={proposalExpanded} onToggle={(event) => setProposalExpanded(event.currentTarget.open)}>
                   <summary>AI visual proposal · {selectedProposalFields.length} selected</summary>
@@ -1166,7 +1189,7 @@ export function VisualProfileModal({
           <button
             type="button"
             className="btn btn-primary"
-            disabled={saving}
+            disabled={saving || generatingSheet}
             onClick={() => handleSave()}
           >
             {saving ? "Saving..." : "Save Visual Profile"}
