@@ -749,7 +749,7 @@ describe("tts reliability and provenance hardening", () => {
       // Contains pronunciation replacement
       expect(chunk).toContain("Mah-rah");
       // Contains unit replacement
-      expect(chunk).toContain("100 degrees Fahrenheit");
+      expect(chunk).toContain("one hundred degrees Fahrenheit");
       // Contains speaker tags from dialogue casting
       expect(chunk).toContain("<|speaker:");
       // Contains control cue disambiguation

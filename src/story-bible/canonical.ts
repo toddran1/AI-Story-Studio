@@ -259,12 +259,19 @@ export async function applyCanonicalOverlay(root: string, slug: string, input: S
   const remap = new Map(
     [...resolveMergeMap(overlay.merges.filter((item) => !item.undoneAt))].filter(([, target]) => available.has(target)),
   );
+  const laterMergeAliases = new Map<string, string[]>();
   for (const [sourceId, targetId] of remap) {
     const target = bible.canonicalEntities.find((item) => item.id === targetId);
     const source = bible.canonicalEntities.find((item) => item.id === sourceId);
     if (!target || !source || source.id === target.id) continue;
     const mergeKind = overlay.merges.find((merge) => !merge.undoneAt && merge.sourceEntityIds.includes(sourceId))?.kind ?? "standard";
     const narrationNames = new Set([target.preferredNarrationName, target.localizedNaming?.fullName, target.localizedNaming?.shortName, ...target.aliasNarrationRules.filter((rule) => rule.behavior === "custom").map((rule) => rule.replacement)].map(normalizeEntityName).filter(Boolean));
+    const targetOverride = overlay.overrides[targetId];
+    const sourceMerge = overlay.merges.find((merge) => !merge.undoneAt && merge.sourceEntityIds.includes(sourceId));
+    if (targetOverride?.aliases !== undefined && sourceMerge && sourceMerge.createdAt > targetOverride.updatedAt) {
+      const incoming = [source.canonicalName, ...source.aliases].filter((alias) => mergeKind !== "narration_rendering_duplicate" || !narrationNames.has(normalizeEntityName(alias)));
+      laterMergeAliases.set(targetId, [...(laterMergeAliases.get(targetId) ?? []), ...incoming]);
+    }
     target.aliases = unique([...target.aliases, ...(mergeKind === "narration_rendering_duplicate" && narrationNames.has(normalizeEntityName(source.canonicalName)) ? [] : [source.canonicalName]), ...source.aliases.filter((alias) => mergeKind !== "narration_rendering_duplicate" || !narrationNames.has(normalizeEntityName(alias)))]);
     target.description = mergeText(target.description, source.description);
     target.notes = mergeText(target.notes, source.notes);
@@ -280,6 +287,15 @@ export async function applyCanonicalOverlay(root: string, slug: string, input: S
     target.visualEvidenceDecisions = uniqueObjects([...(target.visualEvidenceDecisions ?? []), ...(source.visualEvidenceDecisions ?? [])]);
     target.mergedFromIds = unique([...target.mergedFromIds, source.id, ...source.mergedFromIds]);
     target.origin = "manual";
+  }
+  // Merges retain history, but must not resurrect aliases removed by an editor.
+  // Only merges made after that edit may contribute additional aliases.
+  for (const entity of bible.canonicalEntities) {
+    const override = overlay.overrides[entity.id];
+    if (override?.aliases === undefined) continue;
+    entity.aliases = effectiveEntityIdentity(entity, { aliases: [...override.aliases, ...(laterMergeAliases.get(entity.id) ?? [])] }).aliases;
+    const aliases = new Set(entity.aliases.map(normalizeEntityName));
+    entity.aliasNarrationRules = entity.aliasNarrationRules.filter((rule) => aliases.has(normalizeEntityName(rule.alias)));
   }
   bible.canonicalEntities = bible.canonicalEntities.filter((item) => !remap.has(item.id));
   for (const relation of bible.canonicalRelationships) {
@@ -348,7 +364,7 @@ export function previewCanonicalEntityUpdate(entity: CanonicalEntity, patch: unk
   return applyOverride(structuredClone(entity), resolveCanonicalEntityPatch(entity, patch));
 }
 
-export async function updateCanonicalEntity(root: string, slug: string, base: StoryBible, id: string, patch: unknown) { const effective = await applyCanonicalOverlay(root, slug, base); const entity = effective.bible.canonicalEntities.find((item) => item.id === id); if (!entity) throw new Error("Canonical entity was not found"); const input = resolveCanonicalEntityPatch(entity, patch); const paths = storyPaths(root, slug, 1); const overlay = canonicalOverlaySchema.parse((await readJsonIfExists(paths.bibleCanonicalManual)) ?? { version: 1, overrides: {}, merges: [] }); const value = { ...overlay.overrides[id], ...input, updatedAt: new Date().toISOString() }; overlay.overrides[id] = { ...value, snapshot: applyOverride(structuredClone(entity), value) }; await atomicWriteJson(paths.bibleCanonicalManual, overlay); return applyCanonicalOverlay(root, slug, base); }
+export async function updateCanonicalEntity(root: string, slug: string, base: StoryBible, id: string, patch: unknown) { const effective = await applyCanonicalOverlay(root, slug, base); const entity = effective.bible.canonicalEntities.find((item) => item.id === id); if (!entity) throw new Error("Canonical entity was not found"); const input = resolveCanonicalEntityPatch(entity, patch); const paths = storyPaths(root, slug, 1); const overlay = canonicalOverlaySchema.parse((await readJsonIfExists(paths.bibleCanonicalManual)) ?? { version: 1, overrides: {}, merges: [] }); const value = { ...overlay.overrides[id], ...input, updatedAt: nextOverlayTimestamp(overlay) }; overlay.overrides[id] = { ...value, snapshot: applyOverride(structuredClone(entity), value) }; await atomicWriteJson(paths.bibleCanonicalManual, overlay); return applyCanonicalOverlay(root, slug, base); }
 export async function mergeCanonicalEntities(root: string, slug: string, base: StoryBible, targetEntityId: string, sourceEntityIds: string[], reason: string, options: { kind?: "standard" | "narration_rendering_duplicate" } = {}) {
   const ids = unique(sourceEntityIds).filter((id) => id !== targetEntityId);
   const known = new Set(base.canonicalEntities.map((item) => item.id));
@@ -366,7 +382,7 @@ export async function mergeCanonicalEntities(root: string, slug: string, base: S
       if (target.type !== source.type || (target.originalName && source.originalName && normalizeEntityName(target.originalName) !== normalizeEntityName(source.originalName)) || effective.bible.canonicalRelationships.some((relation) => [target.id, source.id].includes(relation.sourceEntityId) && [target.id, source.id].includes(relation.targetEntityId))) throw new Error("Narration duplicate has conflicting identity evidence; review it before merging");
     }
   }
-  const merge = manualMergeSchema.parse({ id: randomUUID(), targetEntityId, sourceEntityIds: ids, reason, kind: options.kind, createdAt: new Date().toISOString() });
+  const merge = manualMergeSchema.parse({ id: randomUUID(), targetEntityId, sourceEntityIds: ids, reason, kind: options.kind, createdAt: nextOverlayTimestamp(overlay) });
   resolveMergeMap([...overlay.merges.filter((item) => !item.undoneAt), merge]);
   overlay.merges.push(merge);
   await atomicWriteJson(paths.bibleCanonicalManual, overlay);
@@ -411,6 +427,13 @@ export function namingMappingConflict(target: CanonicalEntity, source: Canonical
     const current = targetRules.get(normalizeEntityName(rule.alias));
     return current && JSON.stringify(current) !== JSON.stringify(rule);
   });
+}
+
+// Preserve edit/merge ordering even when consecutive writes share a millisecond.
+function nextOverlayTimestamp(overlay: CanonicalOverlay): string {
+  const previous = [...Object.values(overlay.overrides).map((value) => value.updatedAt), ...overlay.merges.map((merge) => merge.createdAt)]
+    .map(Date.parse).filter(Number.isFinite);
+  return new Date(Math.max(Date.now(), ...previous.map((time) => time + 1))).toISOString();
 }
 
 function applyOverride(entity: CanonicalEntity, value: Partial<z.infer<typeof overrideSchema>>) {

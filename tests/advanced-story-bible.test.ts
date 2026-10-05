@@ -34,6 +34,28 @@ describe("advanced Story Bible continuity", () => {
     await undoCanonicalMerge(root, "demo-story", bible, merged.merge.id); const restored = await applyCanonicalOverlay(root, "demo-story", bible); expect(restored.bible.canonicalEntities.map((item) => item.id)).toEqual(expect.arrayContaining([su!.id, doctor!.id]));
   });
 
+  it("keeps removed merged aliases and their narration rules removed after reload and rebuild", async () => {
+    const root = await mkdtemp(join(tmpdir(), "canonical-alias-removal-"));
+    const base = mergeStoryBible(emptyStoryBible(), update(1, { characters: [named("Feixue", 1, { aliases: ["Little Xue"] }), named("Luo Xiaoxue", 1, { aliases: ["Lucine", "girl"] }), named("Snow Maiden", 1)] }), 1);
+    const [target, source] = base.canonicalEntities;
+    source!.aliasNarrationRules = [{ alias: "Lucine", behavior: "custom", replacement: "Lucine Luo" }];
+    await mergeCanonicalEntities(root, "demo-story", base, target!.id, [source!.id], "Same character");
+    const edited = await updateCanonicalEntity(root, "demo-story", base, target!.id, { aliases: ["Little Xue"], aliasNarrationRules: [] });
+    expect(edited.bible.canonicalEntities[0]!.aliases).toEqual(["Little Xue"]);
+    for (const input of [base, edited.bible, emptyStoryBible()]) {
+      const reloaded = (await applyCanonicalOverlay(root, "demo-story", input)).bible.canonicalEntities.find((entity) => entity.id === target!.id)!;
+      expect(reloaded.aliases).toEqual(["Little Xue"]);
+      expect(reloaded.aliasNarrationRules).toEqual([]);
+    }
+    await updateCanonicalEntity(root, "demo-story", base, target!.id, { aliases: [] });
+    expect((await applyCanonicalOverlay(root, "demo-story", base)).bible.canonicalEntities[0]!.aliases).toEqual([]);
+    const third = base.canonicalEntities.find((entity) => entity.canonicalName === "Snow Maiden")!;
+    const later = await mergeCanonicalEntities(root, "demo-story", base, target!.id, [third.id], "Another identity");
+    expect(later.bible.canonicalEntities.find((entity) => entity.id === target!.id)!.aliases).toEqual(["Snow Maiden"]);
+    const undone = await undoCanonicalMerge(root, "demo-story", base, later.merge.id);
+    expect(undone.bible.canonicalEntities.find((entity) => entity.id === target!.id)!.aliases).toEqual([]);
+  });
+
   it("keeps a protected canonical record visible when a partial rebuild omits its automatic entity", async () => {
     const root = await mkdtemp(join(tmpdir(), "canonical-bible-orphan-"));
     const complete = mergeStoryBible(emptyStoryBible(), update(4, { characters: [named("Su Qiang", 4, { originalName: "苏强" })] }), 4);

@@ -2,7 +2,7 @@ import { fingerprint } from "../utils/hash.js";
 import { scanVocalizations, type VocalizationRenderStrategy } from "./vocalizations.js";
 import type { TTSProvider } from "./provider.js";
 
-export const SPEECH_NORMALIZATION_VERSION = "speech-normalization-v5";
+export const SPEECH_NORMALIZATION_VERSION = "speech-normalization-v6-grouped-panel-numbers";
 export type SpeechNormalizationMode = "automatic" | "enabled" | "disabled";
 export type TimeSpeechMode = "natural_12h" | "natural_24h" | "preserve";
 export type VocalizationMode = "automatic" | "preserve" | "disabled";
@@ -86,7 +86,10 @@ export function normalizeStructuredSpeechBlock(written: string): string {
     .replace(/(?<![\p{L}\p{N}])(EXP|XP|HP|MP)\s*\/\s*(\d{1,6})(?![\p{L}\p{N}])/giu,
       (_match, label: string, number: string) => `${label.toUpperCase()}: ${speakInteger(Number(number))}`)
     .replace(/(?<![\p{L}\p{N}])(EXP|XP|HP|MP)\s*\/\s*(?=\.|$)/giu, "$1")
-    .replace(/(?<![\p{L}\p{N}])\d{1,6}(?![\p{L}\p{N}])/gu, (number) => speakInteger(Number(number)))
+    .replace(/(?<![\p{L}\p{N}_.,])(?:\d{1,3}(?:,\d{3})+|\d{1,9})(?![\p{L}\p{N}_]|[.,]\d)/gu, (number) => {
+      const value = Number(number.replaceAll(",", ""));
+      return Number.isSafeInteger(value) && value <= 999_999_999 ? speakInteger(value) : number;
+    })
     .replace(/\s*\.\s*/gu, ". ")
     .trim().replace(/[\s.]+$/u, "") + ".";
 }

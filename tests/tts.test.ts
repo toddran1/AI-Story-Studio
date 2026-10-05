@@ -2,9 +2,37 @@ import { describe, expect, it, vi } from "vitest";
 import { FishAudioProvider, normalizeFishReferenceId, normalizeFishSpeechText } from "../src/tts/fish/fish-audio.provider.js";
 import { castQuotedDialogue, prepareFishMultiSpeakerChunks } from "../src/tts/fish/dialogue-casting.js";
 import { splitForTTS, splitOpeningSentenceForTTSRepair } from "../src/tts/split-text.js";
+import { normalizeSpeechText } from "../src/tts/speech-normalization.js";
 import { TTSRequest } from "../src/tts/types.js";
 
 describe("Fish TTS", () => {
+  it.each([
+    ["5,000 EXP", "five thousand E X P"],
+    ["5000 EXP", "five thousand E X P"],
+    ["100 gold", "one hundred gold"],
+    ["100°F", "one hundred degrees Fahrenheit"],
+    ["200 coins", "two hundred coins"],
+    ["10,000 points", "ten thousand points"],
+    ["1,005 points", "one thousand five points"],
+    ["1,000,000 points", "one million points"],
+    ["500.25, 12:000, ID5000, 00123X, 1,000,00", "500.25, 12:000, ID5000, 00123X, 1,000,00"],
+  ])("speaks whole quantities without misreading zeroes: %s", (input, expected) => {
+    expect(normalizeFishSpeechText(input, "s2.1-pro")).toBe(expected);
+  });
+
+  it.each(["5,000", "5000", "10,000", "100", "1,005"])("keeps panel quantity %s intact through both normalization paths", (number) => {
+    const expected = normalizeFishSpeechText(`${number} EXP`, "s2.1-pro");
+    const panel = `【Congratulations! You gained ${number} EXP.】`;
+    expect(normalizeFishSpeechText(panel, "s2.1-pro")).toContain(`gained ${expected}.`);
+    const prepared = normalizeSpeechText(panel, "en-US").text;
+    expect(normalizeFishSpeechText(prepared, "s2.1-pro")).toContain(`gained ${expected}.`);
+  });
+
+  it("normalizes the reported Dark Knight reward", () => {
+    expect(normalizeFishSpeechText("Congratulations! You have successfully killed a Level 10 Dark Knight and gained 5,000 EXP.】", "s2.1-pro"))
+      .toContain("gained five thousand E X P.");
+  });
+
   it("splits on natural boundaries", () => {
     const chunks = splitForTTS(`${"First sentence. ".repeat(40)}\n\n${"Second paragraph. ".repeat(40)}`, 500);
     expect(chunks.length).toBeGreaterThan(1);
@@ -64,7 +92,7 @@ describe("Fish TTS", () => {
     await provider.synthesize({ text: "**Important:** *whisper this.* [sad] 2 * 2", model: "s2.1-pro", speed: 1, format: "mp3", sampleRate: 44100, bitrate: 128, normalize: true, maxCharsPerRequest: 500 });
     const body = JSON.parse(String((fetcher.mock.calls[0]?.[1] as RequestInit).body));
     expect(body.text).toBe("Important: whisper this. [sad] 2 * 2");
-    expect(provider.inputNormalizationVersion).toBe("fish-speech-normalization-v23-laughter-cues");
+    expect(provider.inputNormalizationVersion).toBe("fish-speech-normalization-v25-grouped-panel-numbers");
   });
 
   it("does not turn profanity into the literal word bleep inside Fish", async () => {

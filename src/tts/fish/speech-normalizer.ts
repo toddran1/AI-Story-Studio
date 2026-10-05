@@ -143,7 +143,17 @@ export function normalizeFishSpeechText(text: string, model?: string, options: {
     .replace(/\+/g, " plus ")
     .replace(/=/g, " equals ");
 
-  return replaceAll(replaceAll(replaceAll(normalizedValues, TITLE_REPLACEMENTS), INITIALISM_REPLACEMENTS), UNIT_REPLACEMENTS)
+  // Spell out whole-number quantities so trailing zeroes and thousands commas
+  // are not interpreted as separate digits. Leave decimals, times and IDs intact.
+  const expandedValues = replaceAll(replaceAll(replaceAll(normalizedValues, TITLE_REPLACEMENTS), INITIALISM_REPLACEMENTS), UNIT_REPLACEMENTS);
+  const spokenValues = expandedValues.replace(
+    /(?<![\p{L}\p{N}_.,:/-])(?:\d{1,3}(?:,\d{3})+|\d{3,})(?![\p{L}\p{N}_]|[.,:/-]\d)/gu,
+    (written) => {
+      const value = Number(written.replaceAll(",", ""));
+      return Number.isSafeInteger(value) && value <= 999_999_999 ? speakInteger(value) : written;
+    },
+  );
+  return spokenValues
     .replace(/\b((?:[A-Z]\.){2,})\.(?=\s|$)/g, "$1")
     .replace(/[ \t]+/g, " ")
     .replace(/[ \t]+\n/g, "\n")
