@@ -11,7 +11,7 @@ import { boundedMinorReferenceEvidence } from "./minor-reference-evidence.js";
 import { effectiveEntityIdentity } from "./entity-identity.js";
 
 const overrideSchema = z.object({ canonicalName: z.string().trim().min(1).max(300).optional(), type: canonicalEntitySchema.shape.type.optional(), aliases: z.array(z.string().trim().min(1).max(300)).max(100).optional(), canonicalNameLocked: z.boolean().optional(), notes: z.string().max(10_000).optional(), status: z.string().max(500).optional(), preferredNarrationName: z.string().trim().min(1).max(300).nullable().optional(), aliasNarrationRules: canonicalEntitySchema.shape.aliasNarrationRules.optional(), localizedNaming: localizedNamingSchema.nullable().optional(), pronunciation: canonicalEntitySchema.shape.pronunciation.unwrap().nullable().optional(), visualProfilePolicy: canonicalEntitySchema.shape.visualProfilePolicy.optional(), snapshot: canonicalEntitySchema.optional(), updatedAt: z.string() });
-const manualMergeSchema = z.object({ id: z.string().uuid(), targetEntityId: z.string(), sourceEntityIds: z.array(z.string()).min(1), reason: z.string().min(1), kind: z.enum(["standard", "narration_rendering_duplicate"]).default("standard"), createdAt: z.string(), undoneAt: z.string().optional() });
+const manualMergeSchema = z.object({ id: z.string().uuid(), targetEntityId: z.string(), sourceEntityIds: z.array(z.string()).min(1), targetName: z.string().optional(), sourceNames: z.array(z.string()).optional(), reason: z.string().min(1), kind: z.enum(["standard", "narration_rendering_duplicate"]).default("standard"), createdAt: z.string(), undoneAt: z.string().optional() });
 export const manualDemotionSchema = z.object({
   entityId: z.string(),
   name: z.string(),
@@ -39,6 +39,7 @@ export const canonicalOverlaySchema = z.object({
   version: z.literal(1),
   overrides: z.record(z.string(), overrideSchema).default({}),
   merges: z.array(manualMergeSchema).default([]),
+  rejectedMergePairs: z.array(z.array(canonicalEntitySchema.shape.id).length(2)).default([]),
   demotions: z.array(manualDemotionSchema).default([]),
   promotions: z.array(manualPromotionSchema).default([]),
   suppressions: z.array(suppressionSchema).default([]),
@@ -309,6 +310,7 @@ export async function applyCanonicalOverlay(root: string, slug: string, input: S
   bible.canonicalRelationships = deduplicateRelationships(bible.canonicalRelationships);
   bible.entityTimeline = uniqueObjects(bible.entityTimeline);
   bible.merges = overlay.merges;
+  bible.rejectedMergePairs = overlay.rejectedMergePairs;
   for (const entity of bible.canonicalEntities) if (!entity.visualEvidenceDecisions?.length && overlay.visualEvidenceDecisions[entity.id]?.length) entity.visualEvidenceDecisions = overlay.visualEvidenceDecisions[entity.id];
   const canonicalNames = new Set(
     bible.canonicalEntities.flatMap((e) => [e.canonicalName, e.originalName, ...e.aliases].map(normalizeEntityName)).filter(Boolean)
@@ -382,7 +384,7 @@ export async function mergeCanonicalEntities(root: string, slug: string, base: S
       if (target.type !== source.type || (target.originalName && source.originalName && normalizeEntityName(target.originalName) !== normalizeEntityName(source.originalName)) || effective.bible.canonicalRelationships.some((relation) => [target.id, source.id].includes(relation.sourceEntityId) && [target.id, source.id].includes(relation.targetEntityId))) throw new Error("Narration duplicate has conflicting identity evidence; review it before merging");
     }
   }
-  const merge = manualMergeSchema.parse({ id: randomUUID(), targetEntityId, sourceEntityIds: ids, reason, kind: options.kind, createdAt: nextOverlayTimestamp(overlay) });
+  const merge = manualMergeSchema.parse({ id: randomUUID(), targetEntityId, sourceEntityIds: ids, targetName: target?.canonicalName, sourceNames: ids.map(id => effective.bible.canonicalEntities.find(entity => entity.id === id)?.canonicalName ?? id), reason, kind: options.kind, createdAt: nextOverlayTimestamp(overlay) });
   resolveMergeMap([...overlay.merges.filter((item) => !item.undoneAt), merge]);
   overlay.merges.push(merge);
   await atomicWriteJson(paths.bibleCanonicalManual, overlay);

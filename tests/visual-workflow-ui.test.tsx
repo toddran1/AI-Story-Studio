@@ -56,3 +56,29 @@ it("makes unscoped candidate sheets reviewable in the base-reference queue", asy
   const call = calls.find(call => call.url.endsWith("/approve"));
   expect(JSON.parse(call!.body!)).toEqual({ primary: true });
 });
+
+it("makes a selected sheet actionable beside its preview and opens the full-size artifact", async () => {
+  const calls: Array<{ url: string; body?: string }> = [];
+  vi.stubGlobal("fetch", vi.fn(async (url, init) => { calls.push({ url: String(url), body: init?.body }); return json(String(url).endsWith("/approve") ? catalog[0]!.profile : catalog); }));
+  await act(async () => root.render(<VisualReviewQueue slug="local-review" onReview={() => undefined} />));
+  const button = [...host.querySelectorAll("button")].find(button => button.textContent === "Approve sheet and design")!;
+  expect(button.disabled).toBe(true);
+  expect(host.querySelector("a")?.getAttribute("target")).toBe("_blank");
+  await act(async () => (host.querySelector('input[type="radio"]') as HTMLInputElement).click());
+  expect(button.disabled).toBe(false);
+  expect(host.querySelector(".visual-review-sheet.is-selected")).not.toBeNull();
+  await act(async () => button.click());
+  expect(JSON.parse(calls.find(call => call.url.endsWith("/approve"))!.body!)).toMatchObject({ creatureFormId: "zombie" });
+});
+it("clears a selection when refreshed evidence requires review", async () => {
+  let stale = false;
+  vi.stubGlobal("fetch", vi.fn(async () => { const data = structuredClone(catalog); if (stale) (data[0]!.tasks[0] as any).stale = true; return json(data); }));
+  await act(async () => root.render(<VisualReviewQueue slug="stale-review" onReview={() => undefined} />));
+  await act(async () => (host.querySelector('input[type="radio"]') as HTMLInputElement).click());
+  stale = true;
+  await act(async () => [...host.querySelectorAll("button")].find(button => button.textContent === "Refresh review queue")!.click());
+  const radio = host.querySelector('input[type="radio"]') as HTMLInputElement;
+  expect(radio.checked).toBe(false);
+  expect(radio.disabled).toBe(true);
+  expect([...host.querySelectorAll("button")].find(button => button.textContent === "Approve sheet and design")!.disabled).toBe(true);
+});

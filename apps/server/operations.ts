@@ -109,7 +109,7 @@ import { alignmentConfig, createAlignmentEngine } from "../../src/alignment/conf
 import { AlignmentEngine } from "../../src/alignment/types.js";
 import { alignStoredChapter } from "../../src/alignment/chapter-alignment.js";
 import { discardManualSubtitles, saveManualSubtitles } from "../../src/subtitles/chapter-subtitles.js";
-import { backfillCanonicalSnapshots, decideVisualEvidence, mergeCanonicalEntities, namingMappingConflict, previewCanonicalEntityUpdate, restoreCanonicalEntity, suppressCanonicalEntity, undoCanonicalMerge, updateCanonicalEntity } from "../../src/story-bible/canonical.js";
+import { canonicalOverlaySchema, backfillCanonicalSnapshots, decideVisualEvidence, mergeCanonicalEntities, namingMappingConflict, previewCanonicalEntityUpdate, restoreCanonicalEntity, suppressCanonicalEntity, undoCanonicalMerge, updateCanonicalEntity } from "../../src/story-bible/canonical.js";
 import { analyzeStoryBible, applyCleanupRecommendations, demoteCanonicalEntity, promoteMinorReference, restorePreDemoteStoryBible, snapshotPreDemoteStoryBible, updateMinorReference } from "../../src/story-bible/granularity.js";
 import { continuityFindingSchema, resolveContinuityFinding } from "../../src/story-bible/continuity.js";
 import { appendEntityAudit, type EntityAuditInput } from "../../src/story-bible/entity-audit.js";
@@ -1565,6 +1565,22 @@ export class StudioOperations {
       return { status: "restored", entity: result.bible.canonicalEntities.find((item) => item.id === entityId) };
     });
   }
+  async rejectCanonicalMerge(slug: string, raw: unknown) {
+    slugSchema.parse(slug);
+    const { entityIds } = z.object({ entityIds: z.array(canonicalEntitySchema.shape.id).length(2) }).strict().parse(raw);
+    if (entityIds[0] === entityIds[1]) throw new Error("Choose two distinct entities");
+    return withStoryLock(this.root, slug, "keep entities separate", async () => {
+      const bible = await getStoryBible(this.root, slug);
+      if (entityIds.some(id => !bible.canonicalEntities.some(entity => entity.id === id))) throw new Error("Both entities must still exist");
+      const path = storyPaths(this.root, slug, 1).bibleCanonicalManual;
+      const overlay = canonicalOverlaySchema.parse((await readJsonIfExists(path)) ?? { version: 1 });
+      if (!overlay.rejectedMergePairs.some(pair => pair.every(id => entityIds.includes(id)))) overlay.rejectedMergePairs.push([...entityIds].sort());
+      await atomicWriteJson(path, overlay);
+      invalidateCatalogCache(this.root, slug); await invalidateStoryBibleDerivedReads(this.root, slug);
+      return { keptSeparate: true };
+    });
+  }
+
   async resolveContinuity(slug: string, id: string, raw: unknown) {
     slugSchema.parse(slug); const input = z.object({ resolution: z.enum(["accepted_new", "kept_existing", "intentional", "corrected", "merged", "dismissed"]), note: z.string().trim().max(2000).optional() }).strict().parse(raw);
     return withStoryLock(this.root, slug, "continuity resolution", async () => {

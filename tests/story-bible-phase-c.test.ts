@@ -253,6 +253,8 @@ describe("entity audit log", () => {
     await seedBible(paths, [target, source, demotable]);
     const operations = new StudioOperations(root, env);
     const merged = await operations.mergeCanonicalEntities(story.slug, { targetEntityId: target.id, sourceEntityIds: [source.id], reason: "Same person" });
+    expect((await getCanonicalEntityDetail(root, story.slug, target.id)).merges[0]).toMatchObject({ targetName: "Su Ming", sourceNames: ["Ming"] });
+    expect(merged.merge).toMatchObject({ targetName: "Su Ming", sourceNames: ["Ming"] });
     await operations.undoCanonicalMerge(story.slug, merged.merge.id);
     await operations.suppressCanonicalEntity(story.slug, source.id, { reason: "Noise" });
     await operations.restoreCanonicalEntity(story.slug, source.id);
@@ -303,4 +305,20 @@ describe("entity audit log", () => {
     expect(entries[0]!.after).toMatchObject({ notes: "n5004" });
     expect(entries.at(-1)!.after).toMatchObject({ notes: "n5" });
   });
+});
+
+it("remembers denied merges across reads while allowing an explicit manual merge", async () => {
+  const { root, story, paths } = await storyFixture();
+  const a = entity("aa", { canonicalName: "Feixue", aliases: ["Bell Girl"] });
+  const b = entity("bb", { canonicalName: "Bell Girl" });
+  await seedBible(paths, [a, b]);
+  const operations = new StudioOperations(root, env);
+  try {
+    await operations.rejectCanonicalMerge(story.slug, { entityIds: [a.id, b.id] });
+    expect((await getCanonicalEntityDetail(root, story.slug, a.id)).duplicateSuggestions).toHaveLength(0);
+    await seedBible(paths, [a, b]);
+    expect((await getCanonicalEntityDetail(root, story.slug, b.id)).duplicateSuggestions).toHaveLength(0);
+    await operations.mergeCanonicalEntities(story.slug, { targetEntityId: a.id, sourceEntityIds: [b.id], reason: "Explicit manual merge" });
+    expect((await getStoryBible(root, story.slug)).canonicalEntities).toHaveLength(1);
+  } finally { await operations.close(); }
 });

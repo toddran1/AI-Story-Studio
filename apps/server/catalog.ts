@@ -298,7 +298,8 @@ async function loadBibleReviewContext(root: string, slug: string) {
   const bible = await getStoryBible(root, slug);
   const reviewRaw = await readJsonIfExists(storyPaths(root, slug, 1).continuityReview);
   const review = reviewRaw ? continuityReviewSchema.safeParse(reviewRaw) : undefined;
-  const findings = review?.success ? review.data.findings : [];
+  const activeIds = new Set(bible.canonicalEntities.map((item) => item.id));
+  const findings = review?.success ? review.data.findings.filter((item) => item.entityIds.some((id) => activeIds.has(id)) && !(item.type === "identity_alias_ambiguity" && item.entityIds.length === 2 && bible.rejectedMergePairs.some(pair => pair.every(id => item.entityIds.includes(id))))) : [];
   const openCounts = new Map<string, number>();
   for (const finding of findings.filter((item) => item.status === "open")) for (const id of finding.entityIds) openCounts.set(id, (openCounts.get(id) ?? 0) + 1);
   const duplicateSuggestions = findDuplicateSuggestions(bible.canonicalEntities, { bible });
@@ -312,7 +313,7 @@ async function loadBibleReviewContext(root: string, slug: string) {
   const [visualProfiles, pronunciationSuggestions] = await Promise.all([loadVisualProfiles(root, slug), loadPronunciationSuggestions(root, slug)]);
   // Deterministic exact-name collisions: distinct from fuzzy duplicate
   // suggestions above and never fed into merge automation.
-  const namingCollisions = findNamingCollisions(bible.canonicalEntities);
+  const namingCollisions = findNamingCollisions(bible.canonicalEntities).filter(item => !(item.entities.length === 2 && bible.rejectedMergePairs.some(pair => pair.every(id => item.entities.some(entity => entity.id === id)))));
   const overlayRaw = await readJsonIfExists(storyPaths(root, slug, 1).bibleCanonicalManual);
   const parsedOverlay = overlayRaw ? canonicalOverlaySchema.safeParse(overlayRaw) : undefined;
   const readinessOf = (entity: CanonicalEntity) => entityReadiness(entity, {
@@ -432,6 +433,32 @@ export async function getCanonicalEntityDetail(root: string, slug: string, id: s
   const bible = context.bible;
   const entity = bible.canonicalEntities.find((item) => item.id === id);
   if (!entity) throw new Error("Canonical entity was not found");
+  const baseBible = await getStoryBible(root, slug, { includeCanonicalOverlay: false });
+  const mergeNames = new Map(baseBible.canonicalEntities.map((item) => [item.id, item.canonicalName]));
+  for (const [entityId, override] of Object.entries(context.overlay?.overrides ?? {})) {
+    if (override.canonicalName || override.snapshot?.canonicalName) mergeNames.set(entityId, override.canonicalName ?? override.snapshot!.canonicalName);
+  }
+  for (const current of bible.canonicalEntities) mergeNames.set(current.id, current.canonicalName);
+  for (const merge of bible.merges) {
+    if (merge.targetName && !mergeNames.has(merge.targetEntityId)) mergeNames.set(merge.targetEntityId, merge.targetName);
+    merge.sourceEntityIds.forEach((sourceId, index) => { if (merge.sourceNames?.[index] && !mergeNames.has(sourceId)) mergeNames.set(sourceId, merge.sourceNames[index]!); });
+  }
+  const missingMergeIds = new Set(bible.merges.filter(merge => merge.targetEntityId === id || merge.sourceEntityIds.includes(id)).flatMap(merge => [merge.targetEntityId, ...merge.sourceEntityIds]).filter(entityId => !mergeNames.has(entityId)));
+  if (missingMergeIds.size) {
+    // Regeneration can remove merged sources from the base. Chapter extraction
+    // artifacts retain their original identities; recover labels without rewriting canon.
+    const chapters = await getChapterStatusReadModel(root, slug);
+    for (const chapter of [...chapters].sort((a, b) => b.chapter - a.chapter)) {
+      const raw = await readJsonIfExists<{ canonicalEntities?: unknown[] }>(storyPaths(root, slug, chapter.chapter).bibleUpdate);
+      for (const candidate of raw?.canonicalEntities ?? []) {
+        const parsed = canonicalEntitySchema.safeParse(candidate);
+        if (parsed.success && missingMergeIds.has(parsed.data.id)) {
+          mergeNames.set(parsed.data.id, parsed.data.canonicalName); missingMergeIds.delete(parsed.data.id);
+        }
+      }
+      if (!missingMergeIds.size) break;
+    }
+  }
   const related = bible.canonicalRelationships.filter((item) => item.sourceEntityId === id || item.targetEntityId === id);
   const relatedIds = new Set(related.flatMap((item) => [item.sourceEntityId, item.targetEntityId]));
   const names = Object.fromEntries(bible.canonicalEntities.filter((item) => relatedIds.has(item.id)).map((item) => [item.id, item.canonicalName]));
@@ -446,7 +473,7 @@ export async function getCanonicalEntityDetail(root: string, slug: string, id: s
     relatedNames: names,
     relatedReferences,
     issues: context.findings.filter((item) => item.entityIds.includes(id)),
-    merges: bible.merges.filter((item) => item.targetEntityId === id || item.sourceEntityIds.includes(id)),
+    merges: bible.merges.filter((item) => item.targetEntityId === id || item.sourceEntityIds.includes(id)).map(item => ({ ...item, targetName: mergeNames.get(item.targetEntityId) ?? "Name unavailable in saved history", sourceNames: item.sourceEntityIds.map(sourceId => mergeNames.get(sourceId) ?? "Name unavailable in saved history") })),
     duplicateSuggestions,
     namingCollisions: context.namingCollisions.filter((item) => item.entities.some((candidate) => candidate.id === id)),
     visualProfileExists: Boolean(context.visualProfiles[id]),
@@ -882,7 +909,7 @@ async function continuityReadContext(root: string, slug: string) {
     const parsed = raw ? continuityReviewSchema.parse(raw) : continuityReviewSchema.parse({ version: 1, analyzedThroughChapter: 0, inputFingerprint: "none", updatedAt: new Date(0).toISOString(), findings: [] });
     const bible = await getStoryBible(root, slug);
     const activeIds = new Set(bible.canonicalEntities.map((item) => item.id));
-    const findings = parsed.findings.filter((item) => item.entityIds.every((id) => activeIds.has(id)));
+    const findings = parsed.findings.filter((item) => item.entityIds.some((id) => activeIds.has(id)) && !(item.type === "identity_alias_ambiguity" && item.entityIds.length === 2 && bible.rejectedMergePairs.some(pair => pair.every(id => item.entityIds.includes(id)))));
     const names = new Map(bible.canonicalEntities.map((item) => [item.id, item.canonicalName]));
     const needsReanalysis = parsed.inputFingerprint !== fingerprint({ version: 1, entities: bible.canonicalEntities, timeline: bible.entityTimeline, relationships: bible.canonicalRelationships });
     const counts = { open: findings.filter((item) => item.status === "open").length, resolved: findings.filter((item) => item.status !== "open").length, dismissed: findings.filter((item) => item.status === "dismissed").length };
@@ -903,7 +930,7 @@ export async function getContinuityPage(root: string, slug: string, options: { s
   const pageSize = Math.min(100, Math.max(1, Math.floor(options.pageSize)));
   const total = filtered.length; const pages = Math.max(1, Math.ceil(total / pageSize)); const page = Math.min(Math.max(1, Math.floor(options.page)), pages);
   const items = filtered.slice((page - 1) * pageSize, page * pageSize);
-  const names = Object.fromEntries([...new Set(items.flatMap((item) => item.entityIds))].map((id) => [id, context.names.get(id) ?? id]));
+  const names = Object.fromEntries([...new Set([...items.flatMap((item) => item.entityIds), ...(options.entity ? [options.entity] : [])])].map((id) => [id, context.names.get(id) ?? id]));
   logger.debug({ event: "continuity.page", story: slug, page, pageSize, total, durationMs: Date.now() - startedAt });
   return { items, page, pageSize, pages, total, counts: context.counts, analyzedThroughChapter: context.parsed.analyzedThroughChapter, needsReanalysis: context.needsReanalysis, names };
 }

@@ -30,7 +30,7 @@ export async function applyManualBibleOverlay(root: string, slug: string, base: 
     entries.push(...mutations.filter((item) => item.action === "upsert" && item.value).map((item) => ({ id: item.id, category, key: item.key, value: item.value!, manual: true })));
   }
   const parsed = storyBibleSchema.parse(result); const canonical = options.includeCanonical === false ? { bible: parsed } : await applyCanonicalOverlay(root, slug, parsed);
-  return { bible: canonical.bible, entries, canonicalEntities: canonical.bible.canonicalEntities, canonicalRelationships: canonical.bible.canonicalRelationships, timeline: canonical.bible.entityTimeline, merges: canonical.bible.merges, duplicateSuggestions: findDuplicateSuggestions(canonical.bible.canonicalEntities) };
+  return { bible: canonical.bible, entries, canonicalEntities: canonical.bible.canonicalEntities, canonicalRelationships: canonical.bible.canonicalRelationships, timeline: canonical.bible.entityTimeline, merges: canonical.bible.merges, duplicateSuggestions: findDuplicateSuggestions(canonical.bible.canonicalEntities, { bible: canonical.bible }) };
 }
 
 export async function addManualBibleEntry(root: string, slug: string, base: StoryBible, category: BibleCategory, value: Record<string, unknown>, replacementKey?: string) {

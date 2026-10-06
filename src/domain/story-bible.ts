@@ -125,7 +125,7 @@ export const canonicalRelationshipSchema = z.object({
   id: z.string().regex(/^rel_[a-f0-9]{24}$/), sourceEntityId: z.string(), targetEntityId: z.string(), type: z.string().min(1).max(300), startChapter: z.number().int().positive(), endChapter: z.number().int().positive().optional(), state: z.enum(["current", "historical"]).default("current"), confidence: z.number().min(0).max(1).optional(), provenance: z.array(provenanceSchema).default([]), locked: z.boolean().default(false), origin: factOriginSchema.default("automatic"),
 });
 export type CanonicalRelationship = z.infer<typeof canonicalRelationshipSchema>;
-export const mergeRecordSchema = z.object({ id: z.string().uuid(), targetEntityId: z.string(), sourceEntityIds: z.array(z.string()).min(1), reason: z.string(), kind: z.enum(["standard", "narration_rendering_duplicate"]).default("standard"), createdAt: z.string(), undoneAt: z.string().optional() });
+export const mergeRecordSchema = z.object({ id: z.string().uuid(), targetEntityId: z.string(), sourceEntityIds: z.array(z.string()).min(1), targetName: z.string().optional(), sourceNames: z.array(z.string()).optional(), reason: z.string(), kind: z.enum(["standard", "narration_rendering_duplicate"]).default("standard"), createdAt: z.string(), undoneAt: z.string().optional() });
 
 export const persistenceDispositionSchema = z.enum(["canonical", "minor_reference", "merge_existing", "needs_review"]);
 export type PersistenceDisposition = z.infer<typeof persistenceDispositionSchema>;
@@ -179,7 +179,7 @@ export const storyBibleSchema = storyBibleUpdateSchema.extend({
   classes: z.array(namedEntity).default([]), ranks: z.array(namedEntity).default([]), items: z.array(namedEntity).default([]), creatures: z.array(namedEntity).default([]), systemTerms: z.array(namedEntity).default([]),
   relationships: z.array(relationship).default([]), translationTerms: z.array(translationTerm).default([]),
   version: z.number().int().nonnegative().default(0), chapterSummaries: z.record(z.string(), z.string()).default({}), canonicalEntities: z.array(canonicalEntitySchema).default([]),
-  canonicalRelationships: z.array(canonicalRelationshipSchema).default([]), entityTimeline: z.array(timelineEventSchema).default([]), merges: z.array(mergeRecordSchema).default([]),
+  canonicalRelationships: z.array(canonicalRelationshipSchema).default([]), entityTimeline: z.array(timelineEventSchema).default([]), merges: z.array(mergeRecordSchema).default([]), rejectedMergePairs: z.array(z.array(canonicalEntitySchema.shape.id).length(2)).default([]),
   minorReferences: z.array(minorEntityReferenceSchema).default([]), granularityAudits: z.array(granularityAuditSchema).default([]),
 }).omit({ chapterSummary: true, timelineEvents: true, visualObservations: true });
 

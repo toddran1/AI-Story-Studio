@@ -678,6 +678,8 @@ export function createApiHandler(operations: StudioOperations) {
       if (bibleRefPromoteMatch && request.method === "POST") return send(response, 200, await operations.promoteMinorReference(bibleRefPromoteMatch[1]!, bibleRefPromoteMatch[2]!, await jsonBody(request)));
       const bibleRefMatch = /^\/api\/stories\/([a-z0-9-]+)\/story-bible\/references\/([a-z0-9-_]+)$/.exec(url.pathname);
       if (bibleRefMatch && request.method === "PUT") return send(response, 200, await operations.updateMinorReference(bibleRefMatch[1]!, bibleRefMatch[2]!, await jsonBody(request)));
+      const rejectMergeMatch = /^\/api\/stories\/([a-z0-9-]+)\/story-bible\/merges\/reject$/.exec(url.pathname);
+      if (rejectMergeMatch && request.method === "POST") return send(response, 200, await operations.rejectCanonicalMerge(rejectMergeMatch[1]!, await jsonBody(request)));
       const bibleMergeMatch = /^\/api\/stories\/([a-z0-9-]+)\/story-bible\/merges$/.exec(url.pathname);
       if (bibleMergeMatch && request.method === "POST") return send(response, 201, await operations.mergeCanonicalEntities(bibleMergeMatch[1]!, await jsonBody(request)));
       const bibleMergeUndoMatch = /^\/api\/stories\/([a-z0-9-]+)\/story-bible\/merges\/([a-f0-9-]{36})\/undo$/.exec(url.pathname);

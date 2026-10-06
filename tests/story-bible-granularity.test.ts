@@ -1422,7 +1422,7 @@ describe("Story Bible Entity Granularity & Intelligent Cleanup", () => {
         ],
       });
 
-      const updated = mergeStoryBible(bible, ch2Update, 2, overlay);
+      const updated = mergeStoryBible(bible, ch2Update, 2, { ...overlay, rejectedMergePairs: [] });
 
       // Must NOT recreate Demoted Hall of Shadows as canonical!
       expect(updated.canonicalEntities.some((e) => e.canonicalName === "Demoted Hall of Shadows")).toBe(false);

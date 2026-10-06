@@ -224,3 +224,19 @@ describe("story bible review API routes", () => {
     await operations.close();
   });
 });
+
+it("keeps findings involving a current entity and a retired identity visible from its issue badge", async () => {
+  const { root, story, paths } = await storyFixture();
+  const current = entity("fa", { canonicalName: "Feixue" });
+  const retired = entity("fb");
+  await seedBible(paths, [current]);
+  await atomicWriteJson(paths.continuityReview, continuityReviewSchema.parse({ version: 1, analyzedThroughChapter: 3, inputFingerprint: "old", updatedAt: new Date(0).toISOString(), findings: [finding("fa", [current.id, retired.id], "open"), finding("fb", [retired.id], "open")] }));
+  const page = await getContinuityPage(root, story.slug, { status: "open", entity: current.id, page: 1, pageSize: 25 });
+  expect(page.total).toBe(1);
+  expect(page.items[0]!.entityIds).toContain(retired.id);
+  expect(page.names[current.id]).toBe("Feixue");
+  expect((await getContinuitySummary(root, story.slug)).counts.open).toBe(1);
+  expect((await getStoryBibleHealth(root, story.slug)).issues.continuityOpen).toBe(1);
+  const empty = await getContinuityPage(root, story.slug, { status: "dismissed", entity: current.id, page: 1, pageSize: 25 });
+  expect(empty.names[current.id]).toBe("Feixue");
+});

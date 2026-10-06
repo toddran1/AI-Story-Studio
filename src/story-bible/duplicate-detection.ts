@@ -573,7 +573,7 @@ export function findDuplicateSuggestions(
     });
   }
 
-  return output.sort((a, b) => b.confidence - a.confidence);
+  return output.filter(item => !context?.bible?.rejectedMergePairs.some(pair => pair.every(id => item.entityIds.includes(id)))).sort((a, b) => b.confidence - a.confidence);
 }
 
 function unique(values: string[]) {
