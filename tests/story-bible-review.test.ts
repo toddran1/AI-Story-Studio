@@ -240,3 +240,11 @@ it("keeps findings involving a current entity and a retired identity visible fro
   const empty = await getContinuityPage(root, story.slug, { status: "dismissed", entity: current.id, page: 1, pageSize: 25 });
   expect(empty.names[current.id]).toBe("Feixue");
 });
+
+it("counts only open continuity findings in entity issue badges", async () => {
+  const { root, story, paths } = await storyFixture(); const a = entity("ac");
+  await seedBible(paths, [a]);
+  await atomicWriteJson(paths.continuityReview, continuityReviewSchema.parse({ version: 1, analyzedThroughChapter: 3, inputFingerprint: "old", updatedAt: new Date(0).toISOString(), findings: [finding("ad", [a.id], "dismissed"), finding("ae", [a.id], "kept_existing")] }));
+  expect((await getCanonicalEntityDetail(root, story.slug, a.id)).issues).toHaveLength(0);
+  expect((await getContinuityPage(root, story.slug, { status: "open", entity: a.id, page: 1, pageSize: 25 })).total).toBe(0);
+});

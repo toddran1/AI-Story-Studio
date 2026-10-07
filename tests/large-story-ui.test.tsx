@@ -123,6 +123,7 @@ describe("large story pages", () => {
     vi.stubGlobal("fetch", vi.fn(async (url: string) => { calls.push(url);
       if (url.endsWith("/audio/summary")) return json({ settings: { loudnessTarget: -17, truePeak: -1.5 }, counts: { total: 30, mastered: 0, current: 0, stale: 0 }, minChapter: 1, maxChapter: 30, totalDurationSeconds: 0, exports: [] });
       if (url.includes("/audio/chapters")) return json({ items: [{ chapter: 1, title: "Opening chapter", status: "complete", audioAvailable: true, audioStale: false, durationSeconds: 42 }], page: Number(new URL(url, location.href).searchParams.get("page")), pages: 2, total: 30 });
+      if (url.endsWith("/video/summaries")) return json([{ id: "sum_12345678-1234-1234-1234-123456789abc", title: "Opening recap", durationSeconds: 5 }]);
       if (url.endsWith("/video/summary")) return json({ settings: { width: 1920, height: 1080, fps: 30, introDurationSeconds: 3, quality: 20, backgroundMode: "gradient", subtitleMode: "burn" }, subtitleSettings: {}, background: { coverAvailable: false, effectiveMode: "fallback" }, counts: { total: 30, mastered: 0, subtitles: 0, videos: 0 }, minChapter: 1, maxChapter: 30, exports: [] });
       if (url.includes("/video/chapters")) return json({ items: [], page: Number(new URL(url, location.href).searchParams.get("page")), pages: 2, total: 30 });
       return json({});
@@ -147,6 +148,12 @@ describe("large story pages", () => {
     expect(calls.some((url) => url.endsWith("/video/summary"))).toBe(true);
     expect(calls.some((url) => url.includes("/video/chapters?page=1&pageSize=25"))).toBe(true);
     expect(container!.querySelector<HTMLSelectElement>(".video-console select")?.value).toBe("none");
+    const select = container!.querySelector<HTMLSelectElement>('.video-summary-columns select')!;
+    await act(async () => { select.value = "sum_12345678-1234-1234-1234-123456789abc"; select.dispatchEvent(new Event("change", { bubbles: true })); });
+    expect(container!.querySelector('.video-summary-columns ol')?.textContent).toContain("Opening recap");
+    expect(container!.querySelector('.video-summary-inserts summary')?.textContent).toContain("1 selected");
+    await act(async () => (container!.querySelector('.video-summary-columns li button:last-child') as HTMLButtonElement).click());
+    expect(container!.querySelector('.video-summary-inserts summary')?.textContent).toContain("0 selected");
   });
 
   it("does not request artwork outputs until that group is opened", async () => {

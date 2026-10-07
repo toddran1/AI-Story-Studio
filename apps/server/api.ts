@@ -1,3 +1,4 @@
+import { listSummaryVideos } from "../../src/video/video-export.js";
 import { visualRoleSchema } from "../../src/domain/visual-profile.js";
 import { streamSourceInspection } from "./source-inspection-stream.js";
 import { randomUUID } from "node:crypto";
@@ -604,7 +605,9 @@ export function createApiHandler(operations: StudioOperations) {
         const downloadName = rangeMediaDownloadName(exportMatch[1]!, from, to, format);
         return sendFile(request, response, exportPaths(operations.root, exportMatch[1]!, from, to, format, edition).output, format === "m4b" ? "audio/mp4" : "audio/mpeg", { downloadName: edition ? downloadName.replace(`.${format}`, `-${edition}.${format}`) : downloadName });
       }
-      const videoExportMatch = /^\/api\/stories\/([a-z0-9-]+)\/video-exports\/(\d+)-(\d+)(?:-(bg-[a-f0-9]{12}))?\.mp4$/.exec(url.pathname);
+      const summaryVideoOptionsMatch = /^\/api\/stories\/([a-z0-9-]+)\/video\/summaries$/.exec(url.pathname);
+      if (summaryVideoOptionsMatch && request.method === "GET") return send(response, 200, await listSummaryVideos(operations.root, summaryVideoOptionsMatch[1]!));
+      const videoExportMatch = /^\/api\/stories\/([a-z0-9-]+)\/video-exports\/(\d+)-(\d+)(?:-((?:bg|sum)-[a-f0-9]{12}))?\.mp4$/.exec(url.pathname);
       if (videoExportMatch && request.method === "GET") {
         const from = chapterParam(videoExportMatch[2]!); const to = chapterParam(videoExportMatch[3]!);
         if (to < from) throw new HttpError("Invalid video export range", 400);

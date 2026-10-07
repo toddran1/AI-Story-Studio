@@ -1,3 +1,6 @@
+import { summaryPath } from "../src/summaries/service.js";
+import { summarySchema } from "../src/summaries/types.js";
+import { fileFingerprint } from "../src/utils/file-fingerprint.js";
 import { mkdtemp, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -9,7 +12,7 @@ import { toVtt } from "../src/subtitles/vtt.js";
 import { FfmpegVideoTools } from "../src/video/ffmpeg-video.js";
 import { renderStoredChapterVideo, videoFingerprint } from "../src/video/chapter-video.js";
 import { buildVideoArgs, validateChapterVideo, VideoProcessor } from "../src/video/renderer.js";
-import { assembleVideoExport, buildVideoExportArgs, VideoExportProcessor } from "../src/video/video-export.js";
+import { assembleVideoExport, buildVideoExportArgs, listSummaryVideos, VideoExportProcessor } from "../src/video/video-export.js";
 import { AudioProbe } from "../src/audio/ffmpeg.js";
 import { chapterSchema } from "../src/domain/chapter.js";
 import { atomicWrite, atomicWriteJson } from "../src/storage/atomic-write.js";
@@ -51,4 +54,33 @@ describe("chapter video", () => {
 describe("combined video export", () => {
   it("preserves numeric chapter ordering and caches unchanged exports", async () => { const { root, story } = await fixture([2, 1]); const renderer = new FakeVideo(); for (const chapter of [2, 1]) { await generateStoredSubtitles({ root, story, chapter }); await renderStoredChapterVideo({ root, story, chapter, processor: renderer }); } const processor = new FakeVideoExport(); const first = await assembleVideoExport({ root, story, from: 1, to: 2, processor }); const second = await assembleVideoExport({ root, story, from: 1, to: 2, processor }); expect(first.reused).toBe(false); expect(second.reused).toBe(true); expect(processor.order).toEqual([1, 2]); expect(processor.calls).toBe(1); const command = buildVideoExportArgs("chapters.ffconcat", "book.mp4", "chapters.ffmeta").join(" "); expect(command).toContain("map_chapters"); expect(command).not.toContain("filter_complex"); });
   it("rejects a combined export with the wrong codecs or container", async () => { const { root, story } = await fixture(); const renderer = new FakeVideo(); await generateStoredSubtitles({ root, story, chapter: 1 }); await renderStoredChapterVideo({ root, story, chapter: 1, processor: renderer }); const invalid: VideoExportProcessor = { version: "invalid-export", assemble: async (_chapters, output) => { await atomicWrite(output, Buffer.from("invalid")); return { durationSeconds: 13, videoCodec: "vp9", audioCodec: "opus", width: 1920, height: 1080, container: "webm" }; } }; await expect(assembleVideoExport({ root, story, from: 1, to: 1, processor: invalid })).rejects.toThrow("H.264/AAC MP4"); });
+});
+
+
+describe("summary video inserts", () => {
+  it("orders recap and closing clips, preserves chapter metadata and invalidates changed clips", async () => {
+    const { root, story } = await fixture();
+    await generateStoredSubtitles({ root, story, chapter: 1 });
+    await renderStoredChapterVideo({ root, story, chapter: 1, processor: new FakeVideo() });
+    const id = "sum_12345678-1234-1234-1234-123456789abc";
+    const path = summaryPath(root, story.slug, id), videoPath = join(path.slice(0, -5), "video.mp4");
+    await atomicWrite(videoPath, "summary clip");
+    const now = new Date().toISOString();
+    const record = summarySchema.parse({ id, storyId: story.slug, title: "Opening recap", chapters: [1], summaryType: "brief", sourceMode: "translated", targetLength: { words: 100 }, text: "Recap", status: "complete", origin: "manual", createdAt: now, updatedAt: now, provenance: { model: { provider: "openai", model: "fake" }, promptVersion: "test", chapterSources: [], levels: [] }, video: { status: "current", inputFingerprint: "input", outputFingerprint: await fileFingerprint(videoPath), durationSeconds: 5 } });
+    await atomicWriteJson(path, record);
+    expect(await listSummaryVideos(root, story.slug)).toEqual([{ id, title: record.title, durationSeconds: 5 }]);
+    let calls = 0; let titles: string[] = [];
+    const processor: VideoExportProcessor = { version: "summary-test", assemble: async (clips, output) => { calls++; titles = clips.map((clip) => clip.title); await atomicWrite(output, `edition-${calls}`); return { durationSeconds: clips.reduce((sum, clip) => sum + clip.durationSeconds, 0), width: 1920, height: 1080, videoCodec: "h264", audioCodec: "aac", container: "mp4" }; } };
+    const options = { root, story, from: 1, to: 1, processor, summaries: { beginning: [id], ending: [id] } };
+    const first = await assembleVideoExport(options);
+    expect(titles).toEqual(["Opening recap", "Title 1", "Opening recap"]);
+    expect(first.manifest.chapters).toHaveLength(1); expect(first.manifest.summaries.map((clip) => clip.placement)).toEqual(["beginning", "ending"]);
+    expect(first.manifest.edition).toMatch(/^sum-/);
+    expect((await assembleVideoExport(options)).reused).toBe(true);
+    await atomicWrite(videoPath, "changed summary");
+    await expect(assembleVideoExport(options)).rejects.toThrow("needs a current video");
+    expect(await listSummaryVideos(root, story.slug)).toEqual([]);
+    await atomicWriteJson(path, { ...record, video: { ...record.video, outputFingerprint: await fileFingerprint(videoPath) } });
+    expect((await assembleVideoExport(options)).reused).toBe(false); expect(calls).toBe(2);
+  });
 });

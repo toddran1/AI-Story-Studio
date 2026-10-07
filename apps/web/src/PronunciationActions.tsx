@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { api, post, type Job } from "./api.js";
 import type { EntityPronunciation } from "../../../src/domain/story-bible.js";
 
-export function PronunciationActions({ slug, id, locked, hasAutomatic = false, onEnriched }: { slug: string; id: string; locked: boolean; hasAutomatic?: boolean; onEnriched: (p: EntityPronunciation | undefined) => void }) {
+export function PronunciationActions({ slug, id, locked, protectionReason = "locked", hasAutomatic = false, onEnriched }: { slug: string; id: string; locked: boolean; protectionReason?: "locked" | "manual"; hasAutomatic?: boolean; onEnriched: (p: EntityPronunciation | undefined) => void }) {
   const [busy, setBusy] = useState(false), [error, setError] = useState(""), [audio, setAudio] = useState<string>();
   const token = useRef(0), timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   useEffect(() => { token.current++; setBusy(false); setError(""); setAudio(undefined); return () => { token.current++; clearTimeout(timer.current); }; }, [slug, id]);
@@ -22,5 +22,5 @@ export function PronunciationActions({ slug, id, locked, hasAutomatic = false, o
       }; void poll();
     } catch (e) { if (current === token.current) { setError(String(e)); setBusy(false); } }
   };
-  return <div className="pronunciation-tools"><button type="button" disabled={busy || locked} onClick={() => void run(false)}>{locked ? "Pronunciation locked" : hasAutomatic ? "✨ Regenerate AI pronunciation" : "✨ Generate pronunciation with AI"}</button><button type="button" disabled={busy} onClick={() => void run(true)}>▶ Test pronunciation</button><small>AI uses source-novel evidence. Save field changes before testing; manual and locked records are never overwritten.</small>{busy && <p role="status">Working on pronunciation…</p>}{error && <p role="alert">{error}</p>}{audio && <audio controls src={audio} />}</div>;
+  return <div className="pronunciation-tools">{locked ? <div className="pronunciation-protection" role="note"><strong>{protectionReason === "manual" ? "Manual pronunciation protected" : "Pronunciation locked"}</strong><p>{protectionReason === "manual" ? "Your manually set spoken form is protected from AI replacement. You can edit it in Custom spoken form above, then save the record." : "AI generation is disabled while Lock pronunciation is checked. Uncheck it above and save to change the lock. Manual spoken forms remain protected."}</p><span>Save changes before testing the spoken form.</span></div> : <button type="button" disabled={busy} onClick={() => void run(false)}>{hasAutomatic ? "✨ Regenerate AI pronunciation" : "✨ Generate pronunciation with AI"}</button>}<button type="button" disabled={busy} onClick={() => void run(true)}>▶ Test pronunciation</button><small>AI uses source-novel evidence. Save field changes before testing; manual and locked records are never overwritten.</small>{busy && <p role="status">Working on pronunciation…</p>}{error && <p role="alert">{error}</p>}{audio && <audio controls src={audio} />}</div>;
 }

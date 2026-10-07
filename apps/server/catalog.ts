@@ -21,7 +21,7 @@ import { loadStoryArtDirection } from "../../src/visual-canon/art-direction.js";
 import { rebuildStoryBibleBeforeChapter, computeStaleExtractionChapters } from "../../src/story-bible/rebuild.js";
 import { resolveEntityVisualEvidence } from "../../src/story-bible/visual-evidence.js";
 import { exportManifestSchema } from "../../src/audio/audiobook.js";
-import { videoExportManifestSchema } from "../../src/video/video-export.js";
+import { selectSummaryVideo, videoExportManifestSchema } from "../../src/video/video-export.js";
 import { chapterMusicExportManifestSchema, chapterMusicExportPath } from "../../src/music/chapter-export.js";
 import { SceneManifest, artworkSettingsSchema, sceneManifestSchema, sceneSettingsSchema } from "../../src/scenes/types.js";
 import { sceneContentFingerprint, sceneEditFingerprint } from "../../src/scenes/manifest.js";
@@ -472,7 +472,7 @@ export async function getCanonicalEntityDetail(root: string, slug: string, id: s
     relationships: related,
     relatedNames: names,
     relatedReferences,
-    issues: context.findings.filter((item) => item.entityIds.includes(id)),
+    issues: context.findings.filter((item) => item.status === "open" && item.entityIds.includes(id)),
     merges: bible.merges.filter((item) => item.targetEntityId === id || item.sourceEntityIds.includes(id)).map(item => ({ ...item, targetName: mergeNames.get(item.targetEntityId) ?? "Name unavailable in saved history", sourceNames: item.sourceEntityIds.map(sourceId => mergeNames.get(sourceId) ?? "Name unavailable in saved history") })),
     duplicateSuggestions,
     namingCollisions: context.namingCollisions.filter((item) => item.entities.some((candidate) => candidate.id === id)),
@@ -1250,7 +1250,7 @@ export async function getVideoSummary(root: string, slug: string) {
   slugSchema.parse(slug); const story = await loadStory(storyPaths(root, slug, 1).storyConfig); const chapters = await getChapterStatusReadModel(root, slug); const storyRoot = storyPaths(root, slug, 1).story;
   const cover = (await Promise.all(["cover.jpg", "cover.jpeg", "cover.png"].map(async (name) => await exists(join(storyRoot, name)) ? name : undefined))).find(Boolean); let names: string[] = [];
   try { names = (await readdir(join(storyRoot, "exports"))).filter((name) => isVisibleManifest(name, ".mp4.json")); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
-  const exports = (await mapLimit(names, 8, async (name) => { const raw = await readJsonIfExists(join(storyRoot, "exports", name)).catch((error) => { logger.warn({ event: "video.export_manifest_ignored", story: slug, manifest: name, error: error instanceof Error ? error.message : String(error) }, "Ignoring unreadable video export manifest"); return undefined; }); const parsed = raw ? videoExportManifestSchema.safeParse(raw) : undefined; if (!parsed?.success || parsed.data.story !== slug || !(await currentVideoExport(root, slug, parsed.data))) return undefined; const { output: _output, ...manifest } = parsed.data; return { ...manifest, downloadUrl: `/api/stories/${slug}/video-exports/${parsed.data.from}-${parsed.data.to}.mp4` }; })).filter((item): item is NonNullable<typeof item> => Boolean(item)).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  const exports = (await mapLimit(names, 8, async (name) => { const raw = await readJsonIfExists(join(storyRoot, "exports", name)).catch((error) => { logger.warn({ event: "video.export_manifest_ignored", story: slug, manifest: name, error: error instanceof Error ? error.message : String(error) }, "Ignoring unreadable video export manifest"); return undefined; }); const parsed = raw ? videoExportManifestSchema.safeParse(raw) : undefined; if (!parsed?.success || parsed.data.story !== slug || !(await currentVideoExport(root, slug, parsed.data))) return undefined; const { output: _output, ...manifest } = parsed.data; return { ...manifest, downloadUrl: `/api/stories/${slug}/video-exports/${parsed.data.from}-${parsed.data.to}${parsed.data.edition ? `-${parsed.data.edition}` : ""}.mp4` }; })).filter((item): item is NonNullable<typeof item> => Boolean(item)).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   const summary = { minChapter: chapters[0]?.chapter, maxChapter: chapters.at(-1)?.chapter, settings: story.video, backgroundMusic: story.backgroundMusic, subtitleSettings: story.subtitles, background: { coverAvailable: Boolean(cover), coverName: cover, effectiveMode: story.video.backgroundMode === "gradient" || !cover ? "fallback" : story.video.backgroundMode }, counts: { total: chapters.length, mastered: chapters.filter((item) => item.audioAvailable || item.audioMastering === "complete").length, subtitles: chapters.filter((item) => item.subtitles === "complete").length, videos: chapters.filter((item) => item.video === "complete").length }, exports };
   logger.debug({ event: "video.summary", story: slug, durationMs: Date.now() - startedAt, total: chapters.length });
   return summary;
@@ -1550,6 +1550,7 @@ async function intactAudioExport(root: string, slug: string, manifest: z.infer<t
 
 async function currentVideoExport(root: string, slug: string, manifest: z.infer<typeof videoExportManifestSchema>) {
   if (await fileFingerprint(videoExportPaths(root, slug, manifest.from, manifest.to, manifest.edition).output) !== manifest.outputFingerprint) return false;
+  for (const clip of manifest.summaries) { try { if ((await selectSummaryVideo(root, slug, clip.id)).fingerprint !== clip.fingerprint) return false; } catch { return false; } }
   for (const chapter of manifest.chapters) { const paths = storyPaths(root, slug, chapter.chapter); const raw = await readJsonIfExists<Chapter>(paths.chapterMeta); const parsed = raw ? chapterSchema.safeParse(raw) : undefined; if (!parsed?.success || parsed.data.stages.video.status !== "complete" || await fileFingerprint(paths.video) !== chapter.fingerprint) return false; }
   return true;
 }
