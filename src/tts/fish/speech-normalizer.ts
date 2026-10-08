@@ -115,6 +115,10 @@ export function normalizeFishSpeechText(text: string, model?: string, options: {
   const withoutMarkup = renderFishVocalizations(disambiguateFishS2Brackets(stripFishMarkdownEmphasis(stripEmojiForSpeech(stripMarkdownForSpeech(structured))), model), model, options)
     // A performed reaction can be tagged more than once by earlier preparation.
     // Repeated adjacent laugh tags describe one reaction, not separate sounds.
+    .replace(/“[^”\r\n]{1,2000}”|"[^"\r\n]{1,2000}"|‘[^’\r\n]{1,2000}’/gu, (quote: string, offset: number, source: string) => {
+      if (/\b(?:word|text|transcript|term|wrote|typed|spelled|literal(?:ly)?)\b[^.!?\n]{0,35}$/iu.test(source.slice(Math.max(0, offset - 45), offset))) return quote;
+      return quote.slice(0, -1).replace(/(?<=[\p{L}\p{N}])(?:\.{3,}|…+)[ \t]*$/gu, ".") + quote.slice(-1);
+    })
     .replace(/\[laughing\](?:[ \t]*\[laughing\])+/giu, "[laughing]")
     .replace(/(?<![\p{L}\p{N}])(EXP|XP|HP|MP)\s*\/\s*(\d{1,6})?(?![\p{L}\p{N}])/giu, (_match, label: string, number?: string) =>
       number ? `${label.toUpperCase()}: ${speakInteger(Number(number))}` : label.toUpperCase());

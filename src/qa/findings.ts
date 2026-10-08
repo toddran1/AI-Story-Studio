@@ -44,6 +44,7 @@ const SHOULD_BE_RELATION = /["“]([^"”]{1,80})["”]\s+should be\s+["“]?(.+
 const USES_FOR_RELATION = /\buses?\s+["“]([^"”]{1,80})["”]\s+for\s+["“]?(.+?)["”]?\s*(?:[.,;:(]|$)/i;
 const CONTAINS_NEVER_RELATION = /contains\s+["“]([^"”]{1,80})["”]\s+but\s+never\s+["“]?(.+?)["”]?\s*(?:[.,;)]|$)/i;
 const INSTEAD_OF_RELATION = /\b(?:uses?|calls?|renders?|names?)\s+["“]([^"”]{1,120})["”]\s+instead of\s+(?:the required\s+)?["“]([^"”]{1,120})["”]/i;
+const CONTEXTUAL_NAME_RELATION = /\b(?:uses?|calls?|renders?|names?)\s+["“]([^"”]{1,120})["”]\s+instead of\s+(?:the\s+)?(?:contextual\s+)?(?:short|full)\s+form\s+["“]([^"”]{1,120})["”]/i;
 
 /**
  * Stable semantic discriminator for naming-style issues: the normalized
@@ -53,6 +54,7 @@ const INSTEAD_OF_RELATION = /\b(?:uses?|calls?|renders?|names?)\s+["“]([^"”]
 export function extractNameRelation(issue: { message: string; evidence: string }): string | undefined {
   const attempts: [string, RegExp, 1 | 2][] = [
     [issue.message, INSTEAD_OF_RELATION, 1],
+    [issue.message, CONTEXTUAL_NAME_RELATION, 1],
     [issue.message, RENAME_RELATION, 2],
     [issue.message, CALLS_RELATION, 2],
     [issue.message, SHOULD_BE_RELATION, 1],
@@ -159,7 +161,47 @@ export function migrateQaState(raw: unknown, options: { chapter?: number } = {})
   const parsed = qaStateSchema.parse(raw);
   const originalScore = parsed.originalScore ?? parsed.score;
   const originalStatus = parsed.originalStatus ?? parsed.status;
-  if (parsed.findings.length) return { ...parsed, originalScore, originalStatus, issues: deriveIssues(parsed.findings) };
+  if (parsed.findings.length) {
+    const byId = new Map<string, QaFinding[]>();
+    for (const finding of parsed.findings) byId.set(finding.id, [...(byId.get(finding.id) ?? []), finding]);
+    const findings: QaFinding[] = [];
+    for (const [id, group] of byId) {
+      if (group.length === 1) { findings.push(group[0]!); continue; }
+      const byIdentity = new Map<string, QaFinding[]>();
+      for (const finding of group) {
+        const relation = finding.provenance?.relation ?? extractNameRelation(finding);
+        const entityIds = [...(finding.provenance?.entityIds ?? [])].sort();
+        const identity = relation
+          ? `${finding.category}\0${entityIds.join(",")}\0${relation}`
+          : `${finding.category}\0${entityIds.join(",")}\0${normalizeExcerptKey(finding.message)}\0${normalizeExcerptKey(finding.evidence)}`;
+        byIdentity.set(identity, [...(byIdentity.get(identity) ?? []), finding]);
+      }
+      for (const [identity, duplicates] of byIdentity) {
+        const relation = duplicates[0]!.provenance?.relation ?? extractNameRelation(duplicates[0]!);
+        const entityIds = duplicates[0]!.provenance?.entityIds;
+        const excerptKey = duplicates[0]!.provenance?.excerptKey;
+        const messageKey = normalizeExcerptKey(duplicates[0]!.message);
+        const stableRelation = relation ?? `duplicate:${identity}`;
+        const uniqueId = computeFindingId(duplicates[0]!.category, options.chapter ?? duplicates[0]!.provenance?.chapter ?? 0, {
+          entityIds, excerptKey, messageKey, relation: stableRelation,
+        });
+        const selected = [...duplicates].sort((a, b) => {
+          if ((a.status === "open") !== (b.status === "open")) return a.status === "open" ? -1 : 1;
+          return (b.lastVerifiedAt ?? b.firstDetectedAt ?? "").localeCompare(a.lastVerifiedAt ?? a.firstDetectedAt ?? "");
+        })[0]!;
+        const priorResolution = duplicates.map((finding) => finding.resolution).filter((value): value is NonNullable<typeof value> => Boolean(value))
+          .sort((a, b) => b.resolvedAt.localeCompare(a.resolvedAt))[0];
+        findings.push({
+          ...selected,
+          id: uniqueId,
+          ...(relation ? { provenance: { ...selected.provenance, relation } } : {}),
+          ...(selected.status === "open" && priorResolution && !selected.resolution ? { resolution: priorResolution, reopenedAt: priorResolution.resolvedAt } : {}),
+        });
+      }
+    }
+    const summary = findings.length === parsed.findings.length ? undefined : recomputeQaSummary(findings, { score: parsed.score, originalScore, status: parsed.status, originalStatus });
+    return { ...parsed, ...(summary ?? {}), originalScore, originalStatus, findings, issues: deriveIssues(findings) };
+  }
   if (!parsed.issues.length) return { ...parsed, originalScore, originalStatus };
   const chapter = options.chapter ?? 0;
   const findings: QaFinding[] = parsed.issues.map((issue) => {

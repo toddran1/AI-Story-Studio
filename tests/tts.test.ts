@@ -33,6 +33,26 @@ describe("Fish TTS", () => {
       .toContain("gained five thousand E X P.");
   });
 
+  it.each([
+    ["“Clang! Clang! Clang...”", "“Clang! Clang! Clang.”"],
+    ['"Clang! Clang! Clang…"', '"Clang! Clang! Clang."'],
+    ["‘Wait... I hear something…’", "‘Wait... I hear something.’"],
+    ["“Wait... are you sure?” He paused... then nodded.", "“Wait... are you sure?” He paused... then nodded."],
+    ["“Hahaha...”", "“[laughing]”"],
+  ])("closes quoted trailing ellipses while preserving interior pauses: %s", (input, expected) => {
+    expect(normalizeFishSpeechText(input, "s2-pro")).toBe(expected);
+  });
+
+  it("sends the quoted Clang line to Fish with a definite ending", async () => {
+    const posted: string[] = [];
+    const fetcher = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      posted.push(JSON.parse(String(init?.body)).text);
+      return new Response(new Uint8Array([1]), { headers: { "content-type": "audio/mpeg" } });
+    });
+    await new FishAudioProvider("test-key", fetcher as typeof fetch).synthesize({ text: "“Clang! Clang! Clang...”", model: "s2-pro", speed: 1, format: "mp3", sampleRate: 44100, bitrate: 128, normalize: true, maxCharsPerRequest: 500 });
+    expect(posted).toEqual(["“Clang! Clang! Clang.”"]);
+  });
+
   it("splits on natural boundaries", () => {
     const chunks = splitForTTS(`${"First sentence. ".repeat(40)}\n\n${"Second paragraph. ".repeat(40)}`, 500);
     expect(chunks.length).toBeGreaterThan(1);
@@ -92,7 +112,7 @@ describe("Fish TTS", () => {
     await provider.synthesize({ text: "**Important:** *whisper this.* [sad] 2 * 2", model: "s2.1-pro", speed: 1, format: "mp3", sampleRate: 44100, bitrate: 128, normalize: true, maxCharsPerRequest: 500 });
     const body = JSON.parse(String((fetcher.mock.calls[0]?.[1] as RequestInit).body));
     expect(body.text).toBe("Important: whisper this. [sad] 2 * 2");
-    expect(provider.inputNormalizationVersion).toBe("fish-speech-normalization-v25-grouped-panel-numbers");
+    expect(provider.inputNormalizationVersion).toBe("fish-speech-normalization-v26-quoted-terminal-ellipsis");
   });
 
   it("does not turn profanity into the literal word bleep inside Fish", async () => {

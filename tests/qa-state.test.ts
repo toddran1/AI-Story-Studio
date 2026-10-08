@@ -9,7 +9,7 @@ import { ChapterPipeline } from "../src/pipeline/chapter-pipeline.js";
 import { LLMRouter } from "../src/llm/router.js";
 import { LLMProvider } from "../src/llm/provider.js";
 import {
-  anchorFromIssue, computeFindingId, deriveIssues, matchEntityIds, migrateQaState, openFindings, qaCounts, recomputeQaSummary,
+  anchorFromIssue, computeFindingId, deriveIssues, extractNameRelation, matchEntityIds, migrateQaState, openFindings, qaCounts, recomputeQaSummary,
 } from "../src/qa/findings.js";
 import {
   buildQaState, compactFindingsContext, computeContentSpans, inspectQaRecheck, recheckChapterQa, reconcileQaState, resolveQaFindingsByIndex, selectChangedParagraphs,
@@ -85,6 +85,17 @@ describe("finding identity", () => {
     const a = computeFindingId("numbers", 3, anchorFromIssue(detection()));
     const b = computeFindingId("numbers", 3, anchorFromIssue(detection({ evidence: `Translation says "five miles" but narration says "three miles".` })));
     expect(a).not.toBe(b);
+  });
+
+  it("uses wrong-to-authorized short-name pairs to distinguish findings in the same passage", () => {
+    const evidence = 'TRANSLATION: "Wang Xiaoming and Huo Haitao leaned closer." NARRATION: "Leo Ward and Cadien Hao leaned closer."';
+    const leo = { message: "The fault lies in the NARRATION: it uses “Leo Ward” instead of the contextual short form “Leo” for an established character.", evidence };
+    const cadien = { message: "The fault lies in the NARRATION: it uses “Cadien Hao” instead of the contextual short form “Cadien” for an established character.", evidence };
+    expect(extractNameRelation(leo)).toBe("leo ward>leo");
+    expect(extractNameRelation(cadien)).toBe("cadien hao>cadien");
+    const entities = namingBible().canonicalEntities;
+    expect(computeFindingId("names", 104, anchorFromIssue(leo, { canonicalEntities: entities })))
+      .not.toBe(computeFindingId("names", 104, anchorFromIssue(cadien, { canonicalEntities: entities })));
   });
 
   it("keeps the id stable across manual text edits when entities anchor the issue", () => {
@@ -244,6 +255,38 @@ describe("reconcileQaState outcome matrix", () => {
     expect(qaCounts({ findings: resolved.findings })).toEqual({ open: 0, resolved: 1, safeFixesAvailable: 0 });
     const reopened = reconcileQaState(resolved, [detection({ severity: "fail" })], { chapter: 3, now: NOW }).findings;
     expect(recomputeQaSummary(reopened, resolved).status).toBe("fail");
+  });
+});
+
+describe("duplicate legacy finding IDs", () => {
+  it("splits distinct name findings and merges duplicate open/resolved copies so each resolves independently", () => {
+    const entities = namingBible().canonicalEntities;
+    const evidence = 'TRANSLATION: "Wang Xiaoming and Huo Haitao leaned closer." NARRATION: "Leo Ward and Cadien Hao leaned closer."';
+    const leo = detection({ category: "names", severity: "fail", message: "The fault lies in the NARRATION: it uses “Leo Ward” instead of the contextual short form “Leo” for an established character.", evidence });
+    const cadien = detection({ category: "names", severity: "fail", message: "The fault lies in the NARRATION: it uses “Cadien Hao” instead of the contextual short form “Cadien” for an established character.", evidence });
+    const generated = buildQaState(undefined, [leo, cadien], {
+      chapter: 104, canonicalEntities: entities, effectiveNamingEntities: entities,
+      translation: "Wang Xiaoming and Huo Haitao leaned closer.", narration: "Leo Ward and Cadien Hao leaned closer.", now: NOW,
+    }).state;
+    const collisionId = "qaf_aaaaaaaaaaaaaaaaaaaaaaaa";
+    const leoFinding = generated.findings.find((finding) => finding.message.includes("Leo Ward"))!;
+    const cadienFinding = generated.findings.find((finding) => finding.message.includes("Cadien Hao"))!;
+    const legacyFindings = [
+      { ...leoFinding, id: collisionId, status: "fixed_manual" as const, resolution: { action: "manual_fix" as const, resolvedAt: "2026-10-07T15:00:00.000Z" } },
+      { ...leoFinding, id: collisionId, status: "open" as const, resolution: undefined },
+      { ...cadienFinding, id: collisionId, status: "open" as const },
+    ];
+    const migrated = migrateQaState({
+      ...generated, findings: legacyFindings, issues: deriveIssues(legacyFindings), status: "fail",
+    }, { chapter: 104 });
+
+    expect(migrated.findings).toHaveLength(2);
+    expect(new Set(migrated.findings.map((finding) => finding.id)).size).toBe(2);
+    expect(migrated.findings.find((finding) => finding.message.includes("Leo Ward"))).toMatchObject({
+      status: "open", resolution: { action: "manual_fix" },
+    });
+    const resolved = resolveQaFindingsByIndex(migrated, [0, 1], "manually_fixed", NOW, 104);
+    expect(openFindings(resolved)).toHaveLength(0);
   });
 });
 
