@@ -120,9 +120,21 @@ export function normalizeFishSpeechText(text: string, model?: string, options: {
       return quote.slice(0, -1).replace(/(?<=[\p{L}\p{N}])(?:\.{3,}|…+)[ \t]*$/gu, ".") + quote.slice(-1);
     })
     .replace(/\[laughing\](?:[ \t]*\[laughing\])+/giu, "[laughing]")
+    // A cue-only quotation followed by narration is a reaction, not an empty
+    // dialogue turn. Keep it inline to avoid speaker/soft/calm switches around it.
+    .replace(/“(\[(?:laughing|chuckle)\])”(?=[ \t]+\p{L})|"(\[(?:laughing|chuckle)\])"(?=[ \t]+\p{L})/gu, (_match, curly: string | undefined, straight: string | undefined) => curly ?? straight!)
     .replace(/(?<![\p{L}\p{N}])(EXP|XP|HP|MP)\s*\/\s*(\d{1,6})?(?![\p{L}\p{N}])/giu, (_match, label: string, number?: string) =>
       number ? `${label.toUpperCase()}: ${speakInteger(Number(number))}` : label.toUpperCase());
-  const normalizedValues = withoutMarkup
+  // Numeric exclamations at a prose paragraph boundary can invite an extra
+  // vocal reaction. Close the quantity explicitly without changing dialogue.
+  const closedParagraphs = withoutMarkup.replace(
+    /(?<![\p{L}\p{N}_.,:/-])(\d{1,3}(?:,\d{3})*|\d{1,9})!(?=[ \t]*\n[ \t]*\n)/gu,
+    (written, digits: string) => {
+      const value = Number(digits.replaceAll(",", ""));
+      return Number.isSafeInteger(value) && value <= 999_999_999 ? `${speakInteger(value)}.` : written;
+    },
+  );
+  const normalizedValues = closedParagraphs
     .replace(/\$(\d+(?:,\d{3})*(?:\.\d+)?)([KMBT])\b/gi, (_match, amount: string, suffix: string) => {
       const scale = ({ K: "thousand", M: "million", B: "billion", T: "trillion" } as const)[suffix.toUpperCase() as "K" | "M" | "B" | "T"];
       return `${amount} ${scale} dollars`;

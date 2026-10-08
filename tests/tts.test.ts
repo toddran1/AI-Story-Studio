@@ -53,6 +53,33 @@ describe("Fish TTS", () => {
     expect(posted).toEqual(["“Clang! Clang! Clang.”"]);
   });
 
+  it.each(["same-voice-dialogue", "narrator-dialogue"] as const)("keeps the reported laughter inline in %s mode", async (voiceMode) => {
+    const posted: string[] = [];
+    const fetcher = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      posted.push(JSON.parse(String(init?.body)).text);
+      return new Response(new Uint8Array([1]), { headers: { "content-type": "audio/mpeg" } });
+    });
+    const text = "Yixue’s eyes went wide at the sight. They were practically human chain bombs.\n\n“Hahahaha...” Asher was very pleased with the effect of [Undead Bomb]. He couldn’t contain his joy and burst out laughing.";
+    await new FishAudioProvider("test-key", fetcher as typeof fetch).synthesize({ text, model: "s2-pro", referenceId: "narrator", secondaryReferenceId: "dialogue", voiceMode, deliveryIntensity: "restrained", speed: 1, format: "mp3", sampleRate: 44100, bitrate: 128, normalize: true, maxCharsPerRequest: 500 });
+    expect(posted.join(" ")).toContain("[laughing] Asher was very pleased");
+    expect(posted.join(" ")).not.toMatch(/Hahaha|\[soft\]|\[calm\]|<\|speaker:1\|>/u);
+  });
+
+  it("closes chapter 137's numeric paragraph ending before After all", async () => {
+    const posted: string[] = [];
+    const fetcher = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      posted.push(JSON.parse(String(init?.body)).text);
+      return new Response(new Uint8Array([1]), { headers: { "content-type": "audio/mpeg" } });
+    });
+    const text = "Without any increase in difficulty, perhaps the level of this [Land of Bones] should have been 20, not 30!\n\nAfter all, the [Ancient Battlefield] he opened with a Bronze Key last time was only Level 20. Since both keys were Bronze, their levels should have been the same.\n\nAsher strode forward and gathered all the loot that had dropped.";
+    await new FishAudioProvider("test-key", fetcher as typeof fetch).synthesize({ text, model: "s2.1-pro-free", speed: 1, format: "mp3", sampleRate: 44100, bitrate: 192, normalize: true, maxCharsPerRequest: 3000 });
+    expect(posted).toHaveLength(1);
+    expect(posted[0]).toContain("20, not thirty.\n\nAfter all,");
+    expect(posted[0]).not.toContain("30!");
+    expect(normalizeFishSpeechText('“Level 30!”\n\nAfter all, he shouted.', "s2-pro")).toContain('“Level 30!”');
+    expect(normalizeFishSpeechText("He won!\n\nAfter all, he trained.", "s2-pro")).toContain("He won!");
+  });
+
   it("splits on natural boundaries", () => {
     const chunks = splitForTTS(`${"First sentence. ".repeat(40)}\n\n${"Second paragraph. ".repeat(40)}`, 500);
     expect(chunks.length).toBeGreaterThan(1);
@@ -112,7 +139,7 @@ describe("Fish TTS", () => {
     await provider.synthesize({ text: "**Important:** *whisper this.* [sad] 2 * 2", model: "s2.1-pro", speed: 1, format: "mp3", sampleRate: 44100, bitrate: 128, normalize: true, maxCharsPerRequest: 500 });
     const body = JSON.parse(String((fetcher.mock.calls[0]?.[1] as RequestInit).body));
     expect(body.text).toBe("Important: whisper this. [sad] 2 * 2");
-    expect(provider.inputNormalizationVersion).toBe("fish-speech-normalization-v26-quoted-terminal-ellipsis");
+    expect(provider.inputNormalizationVersion).toBe("fish-speech-normalization-v28-numeric-paragraph-endings");
   });
 
   it("does not turn profanity into the literal word bleep inside Fish", async () => {

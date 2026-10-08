@@ -14,6 +14,7 @@ import { parseWhisperJson } from "./whisper-cpp.js";
 export class WhisperCppSpeechTranscriber implements SpeechTranscriber {
   readonly name = "whisper-cpp";
   private validation?: Promise<void>;
+  private cpuFallback = false;
   constructor(private readonly executable = "whisper-cli", private readonly configuredModel?: string, private readonly timeoutMs = 1_800_000, private readonly runner: CommandRunner = runCommand, private readonly device: "auto" | "cpu" | "gpu" = "auto") {}
 
   validateConfiguration() { return this.validation ??= this.checkConfiguration(); }
@@ -30,8 +31,18 @@ export class WhisperCppSpeechTranscriber implements SpeechTranscriber {
     const output = join(directory, "whisper");
     try {
       const args = ["-m", this.configuredModel!, "-f", request.audioPath, "-ojf", "-of", output, "-np", "-sow", "-ml", "1", "-l", request.language.trim().toLowerCase().split(/[-_]/)[0] || "auto"];
-      if (this.device === "cpu") args.push("-ng");
-      await this.runner(this.executable, args, this.timeoutMs);
+      if (this.device === "cpu" || this.cpuFallback) args.push("-ng");
+      try {
+        await this.runner(this.executable, args, this.timeoutMs);
+      } catch (error) {
+        // Auto device selection can fail while initializing Metal on some Macs.
+        // Retry only a recognizable GPU/backend failure, never general I/O errors.
+        const detail = error instanceof Error ? error.message : String(error);
+        if (this.device !== "auto" || this.cpuFallback || !/GGML_ASSERT\(buffer\)|(?:metal|gpu).*(?:failed|error)|(?:failed|error).*(?:metal|gpu)/iu.test(detail)) throw error;
+        await rm(`${output}.json`, { force: true });
+        await this.runner(this.executable, [...args, "-ng"], this.timeoutMs);
+        this.cpuFallback = true;
+      }
       return parseWhisperJson(JSON.parse(await readFile(`${output}.json`, "utf8")));
     } finally { await rm(directory, { recursive: true, force: true }); }
   }
