@@ -96,6 +96,10 @@ const dependencies: Record<StageExecutionNode, StageExecutionNode[]> = {
 
 const allStageOrder = topologicalOrder(Object.keys(dependencies) as StageExecutionNode[]);
 
+export function directStagePrerequisites(stage: StageExecutionNode): readonly StageExecutionNode[] {
+  return dependencies[stage];
+}
+
 function topologicalOrder(nodes: readonly StageExecutionNode[]): StageExecutionNode[] {
   const result: StageExecutionNode[] = []; const visited = new Set<StageExecutionNode>();
   const visit = (node: StageExecutionNode) => { if (visited.has(node)) return; visited.add(node); for (const dependency of dependencies[node]) visit(dependency); result.push(node); };

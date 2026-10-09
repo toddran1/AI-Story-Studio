@@ -46,7 +46,8 @@
     "web:build": "vite build",
     "smoke": "node --import tsx apps/cli/smoke.ts",
     "test": "vitest run",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "story:agent": "node --import tsx apps/cli/agent.ts"
   },
   "dependencies": {
     "@fontsource/ibm-plex-mono": "^5.3.0",

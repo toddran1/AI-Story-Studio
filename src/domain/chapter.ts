@@ -40,6 +40,17 @@ export const stageStateSchema = z.object({
   error: z.object({ message: z.string(), cause: z.string().optional() }).optional(),
   staleReason: z.string().max(500).optional(),
   manualReviewRequired: z.boolean().optional(),
+  execution: z.object({
+    source: z.literal("subscription-agent"),
+    agent: z.enum(["codex", "antigravity"]),
+    runId: z.string().uuid(),
+    modelReported: z.boolean(),
+    apiRequests: z.literal(0),
+  }).optional(),
+  lastAgentAttempt: z.object({
+    runId: z.string().uuid(), agent: z.enum(["codex", "antigravity"]), model: z.string(),
+    status: z.enum(["failed", "refused"]), message: z.string(), at: z.string(),
+  }).optional(),
   /** A deliberate, auditable acceptance of an existing artifact. */
   manualAcceptance: z.object({
     acceptedAt: z.string(),

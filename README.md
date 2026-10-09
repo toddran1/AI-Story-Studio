@@ -1,5 +1,11 @@
 # AI Story Studio
 
+## Subscription agent processing
+
+Use the shared `story-studio` project skill in Codex or Antigravity to process selections such as `1,5-10,78,100-150` with your signed-in agent. It previews the requested stages and session model, waits for confirmation, then saves validated translation, narration text, QA, Story Bible, continuity, scene plans, and native image outputs through the app's local services. The bridge has no paid provider fallback; spoken audio remains a separate stage.
+
+See [subscription processing](docs/subscription-processing.md) for prompts, prerequisites, refusal/QA behavior, recovery, and `npm run story:agent -- --help`.
+
 ## Milestone 20 — Entity pronunciation
 
 Pronunciation is opt-in and separate from canonical identity, localization, and visible narration: an entity with no pronunciation configuration simply uses default TTS — a valid state that creates no QA warning or review obligation. The Story Bible editor includes source language, original text, romanization, automatic/original-language/custom modes, advanced IPA and phonetic hints, and a pronunciation lock. **Generate pronunciation with AI** uses bounded original-novel excerpts from the entity's provenance and chapter appearances; it does not guess source characters from an English transliteration. AI outcomes are stored as optional *suggestions* — accepting or editing one is what activates pronunciation. The collapsible **Pronunciation desk** supports search plus configured/suggestions/default-TTS/needs-review/manual/locked filters, bulk suggestion generation, and per-suggestion accept/edit/ignore actions. Needs Review lists only active configurations genuinely flagged for review.
