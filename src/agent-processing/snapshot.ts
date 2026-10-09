@@ -16,6 +16,7 @@ export async function inventory(directory: string): Promise<FileMap> {
   const result: FileMap = {};
   async function walk(dir: string) {
     for (const entry of (await readdir(dir, { withFileTypes: true })).sort((a, b) => a.name.localeCompare(b.name))) {
+      if (entry.name === ".DS_Store" || entry.name.startsWith("._")) continue;
       if (dir === directory && (excluded.has(entry.name) || entry.name.startsWith(".lock-"))) continue;
       const path = join(dir, entry.name);
       if (entry.isSymbolicLink()) throw new Error(`Agent processing rejects symlink: ${relative(directory, path)}`);
