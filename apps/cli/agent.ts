@@ -45,8 +45,24 @@ export async function runAgentCommand(args: string[], root: string) {
   return reportAgentRun(root, story, id);
 }
 async function main() {
-  const result = await runAgentCommand(process.argv.slice(2), resolveStudioRoot(loadEnvironment()));
-  process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+  const started = Date.now();
+  const command = process.argv[2] ?? "help";
+  // Keep stdout reserved for the final JSON result. A yielded host command is
+  // still running until its terminal task reports an exit code.
+  const heartbeat = setInterval(() => {
+    process.stderr.write(`${JSON.stringify({ progress: "running", command, elapsedSeconds: Math.floor((Date.now() - started) / 1000), instruction: "Wait for this command to exit; do not resubmit or start a second command for this run." })}\n`);
+  }, 15_000);
+  heartbeat.unref();
+  try {
+    const result = await runAgentCommand(process.argv.slice(2), resolveStudioRoot(loadEnvironment()));
+    const run = "status" in result ? result as { status: string; request?: unknown } : undefined;
+    const nextAction = run?.status === "complete" ? "Report the completed batch."
+      : run?.status === "awaiting-confirmation" ? "Show the preview and wait for user confirmation."
+      : run?.status === "needs-input" ? "Explain the diagnostic and required user input."
+      : run?.request ? "Generate and submit the returned request; continue the confirmed batch without ending the turn."
+      : run ? "Run next for this existing run; continue until complete or blocked." : undefined;
+    process.stdout.write(`${JSON.stringify({ ...result, ...(nextAction ? { runner: { commandFinished: true, nextAction } } : {}) }, null, 2)}\n`);
+  } finally { clearInterval(heartbeat); }
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) main().catch((error) => {
   process.stderr.write(`${JSON.stringify({ error: error instanceof Error ? error.message : String(error), apiRequests: 0 })}\n`);

@@ -1,3 +1,5 @@
+import { bumpChapterStatusReadRevision } from "../studio/chapter-status-revision.js";
+import { bumpStoryBibleReadRevision } from "../story-bible/read-revision.js";
 import { randomUUID } from "node:crypto";
 import { readFile, rm, stat } from "node:fs/promises";
 import { join } from "node:path";
@@ -44,6 +46,7 @@ const stepSchema = z.object({
 });
 const runSchema = z.object({
   version: z.literal(1), id: idSchema, input: agentPlanInputSchema, planFingerprint: z.string(),
+  inventoryMode: z.enum(["text-v1", "full"]).optional(),
   storyFingerprint: z.string(), approvedAt: z.string().optional(), createdAt: z.string(), updatedAt: z.string(),
   status: z.enum(["awaiting-confirmation", "running", "needs-input", "complete"]),
   steps: z.array(stepSchema), cursor: z.number().int().nonnegative(),
@@ -52,6 +55,21 @@ const runSchema = z.object({
   diagnostic: z.string().optional(),
 });
 export type AgentRun = z.infer<typeof runSchema>;
+function inventoryScope(run: Pick<AgentRun, "input" | "inventoryMode">) {
+  return run.inventoryMode === "text-v1" ? { chapters: run.input.chapters } : undefined;
+}
+function preferredInventoryMode(input: AgentRun["input"]): "text-v1" | "full" {
+  return input.stages.some((stage) => stage === "scenePlanning" || stage === "artwork") ? "full" : "text-v1";
+}
+/** Older confirmed runs verify their original baseline once before narrowing it. */
+async function upgradeInventory(root: string, run: AgentRun, storyDir: string) {
+  if (run.inventoryMode) return;
+  const files = await inventory(storyDir);
+  if (inventoryFingerprint(files) !== run.storyFingerprint) throw new Error("Story changed since preview. Prepare and confirm a new plan.");
+  run.inventoryMode = preferredInventoryMode(run.input);
+  run.storyFingerprint = inventoryFingerprint(await inventory(storyDir, inventoryScope(run)));
+  await save(root, run);
+}
 function runPaths(root: string, story: string, id: string) {
   const directory = join(storyPaths(root, slugSchema.parse(story), 1).story, "agent-runs", idSchema.parse(id));
   return { directory, manifest: join(directory, "run.json"), snapshotRoot: join(directory, "snapshot") };
@@ -116,7 +134,8 @@ export async function prepareAgentRun(root: string, raw: unknown): Promise<Agent
   return withStoryLock(root, input.story, "prepare subscription processing", async () => {
     const story = storyPaths(root, input.story, 1).story;
     await recoverTransactions(story);
-    const before = await inventory(story);
+    const inventoryMode = preferredInventoryMode(input);
+    const before = await inventory(story, inventoryScope({ input, inventoryMode }));
     const steps: AgentRun["steps"] = [];
     for (const chapter of input.chapters) {
       const simulated = new Set<string>();
@@ -131,7 +150,7 @@ export async function prepareAgentRun(root: string, raw: unknown): Promise<Agent
     }
     const storyFingerprint = inventoryFingerprint(before);
     const now = new Date().toISOString();
-    const run: AgentRun = { version: 1, id: randomUUID(), input, planFingerprint: fingerprint({ input, storyFingerprint, steps }), storyFingerprint,
+    const run: AgentRun = { version: 1, inventoryMode, id: randomUUID(), input, planFingerprint: fingerprint({ input, storyFingerprint, steps }), storyFingerprint,
       createdAt: now, updatedAt: now, status: "awaiting-confirmation", steps, cursor: 0, responses: {}, contextGaps: [] };
     await save(root, run);
     return run;
@@ -142,7 +161,8 @@ export async function confirmAgentRun(root: string, story: string, id: string, p
     await recoverTransactions(storyPaths(root, story, 1).story);
     const run = await load(root, story, id);
     if (run.planFingerprint !== planFingerprint) throw new Error("Confirmation does not match the preview");
-    if (inventoryFingerprint(await inventory(storyPaths(root, story, 1).story)) !== run.storyFingerprint) throw new Error("Story changed since preview. Prepare and confirm a new plan.");
+    await upgradeInventory(root, run, storyPaths(root, story, 1).story);
+    if (inventoryFingerprint(await inventory(storyPaths(root, story, 1).story, inventoryScope(run))) !== run.storyFingerprint) throw new Error("Story changed since preview. Prepare and confirm a new plan.");
     if (!run.approvedAt) { run.approvedAt = new Date().toISOString(); run.status = "running"; await save(root, run); }
     return run;
   });
@@ -190,6 +210,7 @@ export async function nextAgentRequest(root: string, storySlug: string, id: stri
     const run = await load(root, storySlug, id);
     if (!run.approvedAt) throw new Error("Confirm the preview before execution");
     if (run.status === "complete" || run.status === "needs-input") return run;
+    await upgradeInventory(root, run, storyDir);
     const paths = runPaths(root, storySlug, id);
     const finishStep = async (step: AgentRun["steps"][number]) => {
       if (["failed", "refused", "blocked"].includes(step.status) && run.input.stages.includes("storyBible") && !await canReuse(root, storySlug, step.chapter, "storyBible")) run.contextGaps = [...new Set([...run.contextGaps, step.chapter])];
@@ -210,7 +231,7 @@ export async function nextAgentRequest(root: string, storySlug: string, id: stri
           if (state.status !== "complete") { state.status = "failed"; state.error = { message }; }
           metadata.updatedAt = new Date().toISOString();
           await atomicWriteJson(metadataPath, metadata);
-          run.storyFingerprint = inventoryFingerprint(await inventory(storyDir));
+          run.storyFingerprint = inventoryFingerprint(await inventory(storyDir, inventoryScope(run)));
         }
       }
       step.completedAt ??= new Date().toISOString();
@@ -223,7 +244,7 @@ export async function nextAgentRequest(root: string, storySlug: string, id: stri
     while (run.cursor < run.steps.length) {
       const step = run.steps[run.cursor]!;
       if (step.status !== "pending") { if (await finishStep(step)) return run; continue; }
-      const before = await inventory(storyDir);
+      const before = await inventory(storyDir, inventoryScope(run));
       if (inventoryFingerprint(before) !== run.storyFingerprint) {
         run.status = "needs-input"; run.diagnostic = "Story changed while this run was paused. Prepare and confirm a new run; prior completed outputs are preserved."; await save(root, run); return run;
       }
@@ -248,7 +269,9 @@ export async function nextAgentRequest(root: string, storySlug: string, id: stri
           // request still suspends the entire stage before any live commit.
           if (pending) { run.request = pending; await save(root, run); return run; }
           await annotate(paths.snapshotRoot, run, step.stage, step.chapter, config, root);
-          const after = await inventory(snapshotStory);
+          await bumpChapterStatusReadRevision(paths.snapshotRoot, storySlug);
+          await bumpStoryBibleReadRevision(paths.snapshotRoot, storySlug);
+          const after = await inventory(snapshotStory, inventoryScope(run));
           run.storyFingerprint = inventoryFingerprint(after);
           step.status = "complete"; step.reason = undefined; step.completedAt = new Date().toISOString();
           if (step.stage === "qa") step.quality = qaStateSchema.parse(await readJsonIfExists(storyPaths(paths.snapshotRoot, storySlug, step.chapter).qa)).status;
@@ -257,7 +280,7 @@ export async function nextAgentRequest(root: string, storySlug: string, id: stri
           committing = true;
           await commitSnapshot(storyDir, snapshotStory, paths.directory, before, after, {
             path: join("agent-runs", id, "run.json"), data: JSON.stringify(runSchema.parse(run), null, 2),
-          });
+          }, inventoryScope(run));
           committing = false;
       }
       } catch (error) {

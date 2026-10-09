@@ -1,3 +1,5 @@
+import { subscriptionProcessing } from "../../src/cost/subscription-processing.js";
+import { getChapterStatusReadRevision } from "../../src/studio/chapter-status-revision.js";
 import { listSummaryVideos } from "../../src/video/video-export.js";
 import { visualRoleSchema } from "../../src/domain/visual-profile.js";
 import { streamSourceInspection } from "./source-inspection-stream.js";
@@ -553,6 +555,8 @@ export function createApiHandler(operations: StudioOperations) {
       const productionStatusMatch = /^\/api\/stories\/([a-z0-9-]+)\/production\/status$/.exec(url.pathname);
       if (productionStatusMatch && request.method === "GET") return send(response, 200, await getProductionStatus(operations.root, productionStatusMatch[1]!));
       if (productionMatch && request.method === "GET") return send(response, 200, await getProductionStatus(operations.root, productionMatch[1]!));
+      const subscriptionCostsMatch = /^\/api\/stories\/([a-z0-9-]+)\/costs\/subscription$/.exec(url.pathname);
+      if (subscriptionCostsMatch && request.method === "GET") return send(response, 200, { items: await subscriptionProcessing(operations.root, subscriptionCostsMatch[1]!, costFilters(url)) });
       const costsMatch = /^\/api\/stories\/([a-z0-9-]+)\/costs$/.exec(url.pathname);
       if (costsMatch && request.method === "GET") return send(response, 200, await operations.costAnalytics(costsMatch[1]!, costFilters(url)));
       const costRecordsMatch = /^\/api\/stories\/([a-z0-9-]+)\/costs\/records$/.exec(url.pathname);
@@ -735,6 +739,8 @@ export function createApiHandler(operations: StudioOperations) {
       }
       const importMatch = /^\/api\/stories\/([a-z0-9-]+)\/source\/import$/.exec(url.pathname);
       if (importMatch && request.method === "POST") { const input = z.object({ inspectionId: z.string().uuid(), allowGaps: z.boolean().default(false), overwriteExisting: z.boolean().default(true) }).parse(await jsonBody(request)); return send(response, 200, await operations.importInspection(importMatch[1]!, input.inspectionId, input.allowGaps, input.overwriteExisting)); }
+      const readRevisionMatch = /^\/api\/stories\/([a-z0-9-]+)\/read-revision$/.exec(url.pathname);
+      if (readRevisionMatch && request.method === "GET") return send(response, 200, { revision: await getChapterStatusReadRevision(operations.root, readRevisionMatch[1]!) });
       const activeJobMatch = /^\/api\/stories\/([a-z0-9-]+)\/jobs\/active$/.exec(url.pathname);
       if (activeJobMatch && request.method === "GET") {
         const job = operations.getActiveStoryJob(activeJobMatch[1]!);

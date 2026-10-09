@@ -1,4 +1,6 @@
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { subscriptionProcessing } from "../src/cost/subscription-processing.js";
+import { getChapterStatusReadRevision } from "../src/studio/chapter-status-revision.js";
+import { mkdtemp, readFile, rm, writeFile, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -11,6 +13,8 @@ import { qaStateSchema } from "../src/domain/qa.js";
 import { transitionQaFinding } from "../src/qa/review.js";
 import { prepareAgentRun, confirmAgentRun, nextAgentRequest, submitAgentResponse, failAgentRequest, reportAgentRun, resumeAgentRun, type AgentRun } from "../src/agent-processing/service.js";
 import { inventory, inventoryFingerprint, recoverTransactions, commitSnapshot, copySnapshot } from "../src/agent-processing/snapshot.js";
+import * as fileFingerprints from "../src/utils/file-fingerprint.js";
+import { importedChapterFingerprint } from "../src/source/importer.js";
 import { fingerprint } from "../src/utils/hash.js";
 import { runAgentCommand } from "../apps/cli/agent.js";
 import { sceneManifestSchema } from "../src/scenes/types.js";
@@ -58,11 +62,18 @@ describe("subscription processing", () => {
     expect(await reportAgentRun(root, "demo-story", run.id)).toEqual(request);
   });
   it("commits translation/narration using ordinary artifacts, fingerprints, provenance, and reuse", async () => {
+    const priorRevision = await getChapterStatusReadRevision(root, "demo-story");
     const run = await core();
+    expect(await getChapterStatusReadRevision(root, "demo-story")).not.toBe(priorRevision);
     expect(run.status).toBe("complete");
     expect(run.steps.map((step) => step.status)).toEqual(["complete", "complete"]);
     const chapter = await metadata();
     expect(chapter.stages.translation.provider).toBe("codex");
+    const external = await subscriptionProcessing(root, "demo-story");
+    expect(external.map(item => item.stage)).toEqual(["narration", "translation"]);
+    expect(external.every(item => item.apiCostUsd === 0 && item.chapter === 1)).toBe(true);
+    expect(await subscriptionProcessing(root, "demo-story", { stage: "tts" })).toEqual([]);
+    expect(await subscriptionProcessing(root, "demo-story", { chapterFrom: 2 })).toEqual([]);
     expect(chapter.stages.narration.model).toBe("session-model");
     expect(chapter.stages.narration.execution?.apiRequests).toBe(0);
     expect(chapter.stages.narration.outputFingerprint).toMatch(/^[a-f0-9]{64}$/);
@@ -255,6 +266,72 @@ describe("subscription processing", () => {
     await atomicWrite(join(story, "done.txt"), "completed output");
     await recoverTransactions(story);
     expect(await readFile(join(story, "done.txt"), "utf8")).toBe("completed output");
+  });
+  it("never hashes or snapshots unrelated media and preserves media changed during a text request", async () => {
+    const paths = storyPaths(root, "demo-story", 1);
+    await atomicWrite(paths.audio, Buffer.alloc(1024 * 1024, 7));
+    await atomicWrite(join(paths.scenesDirectory, "scene-001.png"), pngWithDims(16, 16));
+    await atomicWrite(join(storyPaths(root, "demo-story", 3).ttsWorking, "large.mp3"), "unrelated");
+    const hashSpy = vi.spyOn(fileFingerprints, "fileFingerprint");
+    let run = await start(await plan(["translation"]));
+    expect(run.inventoryMode).toBe("text-v1");
+    expect(hashSpy.mock.calls.some(([path]) => /\.(mp3|png)$/.test(path))).toBe(false);
+    const snapshot = join(paths.story, "agent-runs", run.id, "snapshot", "stories", "demo-story");
+    await expect(readFile(join(snapshot, "chapters", "0001", "audio.mp3"))).rejects.toThrow();
+    await atomicWrite(paths.audio, "media edited while agent works");
+    run = await respond(run, translation);
+    expect(run.status).toBe("complete");
+    expect(await readFile(paths.audio, "utf8")).toBe("media edited while agent works");
+    expect(await readFile(join(paths.scenesDirectory, "scene-001.png"))).toEqual(pngWithDims(16, 16));
+  });
+  it("detects edits and additions to canonical history outside the selected chapter", async () => {
+    const run = await start(await plan(["translation"], [2]));
+    await atomicWriteJson(storyPaths(root, "demo-story", 1).bibleUpdate, { chapterSummary: "New prior canon" });
+    const stopped = await respond(run, translation);
+    expect(stopped.status).toBe("needs-input");
+    expect(stopped.diagnostic).toContain("Story changed");
+    await expect(readFile(storyPaths(root, "demo-story", 2).english)).rejects.toThrow();
+  });
+  it("retains selected imported sources without copying other source chapters", async () => {
+    const paths = storyPaths(root, "demo-story", 1);
+    const ref = { chapter: 1, sourceId: "source-1", sourceType: "text" as const, metadata: {} };
+    await atomicWrite(join(paths.sourceChapters, "0001.txt"), source);
+    await atomicWrite(join(paths.sourceChapters, "0002.txt"), "Unselected original");
+    await atomicWriteJson(paths.sourceManifest, { version: 1, adapterVersion: "fixture", type: "text", origin: { path: "fixture.txt", name: "fixture" }, fingerprint: "a".repeat(64), importedAt: new Date().toISOString(), warnings: [], unnumberedSections: [], chapters: [{ chapter: 1, file: "chapters/0001.txt", ref, fingerprint: importedChapterFingerprint(ref, source) }] });
+    const run = await start(await plan(["translation"]));
+    const snapshot = join(paths.story, "agent-runs", run.id, "snapshot", "stories", "demo-story");
+    expect(await readFile(join(snapshot, "source", "chapters", "0001.txt"), "utf8")).toBe(source);
+    await expect(readFile(join(snapshot, "source", "chapters", "0002.txt"))).rejects.toThrow();
+    expect((await respond(run, translation)).status).toBe("complete");
+  });
+  it("upgrades a legacy confirmed run without losing its request, approval, or outputs", async () => {
+    const paths = storyPaths(root, "demo-story", 1);
+    await atomicWrite(paths.audio, "Legacy media");
+    const run = await start(await plan(["translation"]));
+    const legacy = { ...run, inventoryMode: undefined, storyFingerprint: inventoryFingerprint(await inventory(paths.story)) };
+    await atomicWriteJson(join(paths.story, "agent-runs", run.id, "run.json"), legacy);
+    const upgraded = await nextAgentRequest(root, "demo-story", run.id);
+    expect(upgraded.inventoryMode).toBe("text-v1");
+    expect(upgraded.approvedAt).toBe(run.approvedAt);
+    expect(upgraded.planFingerprint).toBe(run.planFingerprint);
+    expect(upgraded.request?.id).toBe(run.request?.id);
+    expect((await respond(upgraded, translation)).status).toBe("complete");
+    expect(await readFile(paths.audio, "utf8")).toBe("Legacy media");
+  });
+  it("does not upgrade a legacy baseline after a manual edit", async () => {
+    const run = await start(await plan(["translation"]));
+    const paths = storyPaths(root, "demo-story", 1);
+    await atomicWriteJson(join(paths.story, "agent-runs", run.id, "run.json"), { ...run, inventoryMode: undefined, storyFingerprint: inventoryFingerprint(await inventory(paths.story)) });
+    await atomicWrite(paths.english, "Manual correction");
+    await expect(nextAgentRequest(root, "demo-story", run.id)).rejects.toThrow("Story changed");
+    expect(await readFile(paths.english, "utf8")).toBe("Manual correction");
+  });
+  it("rejects symlinks in relevant inputs while skipping unrelated media directories", async () => {
+    const paths = storyPaths(root, "demo-story", 1);
+    await symlink(join(root, "missing-media"), paths.segments);
+    expect((await start(await plan(["translation"]))).request).toBeDefined();
+    await symlink(join(root, "missing-context"), paths.bibleManual);
+    await expect(plan(["translation"])).rejects.toThrow("symlink");
   });
   it("parses mixed chapter selections and rejects paid stages and unsafe identities", async () => {
     const run = await runAgentCommand(["prepare", "--story", "demo-story", "--chapters", "3,1-2,1", "--stages", "translation", "--agent", "antigravity", "--model", "unknown"], root) as AgentRun;

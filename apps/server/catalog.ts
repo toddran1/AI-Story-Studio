@@ -43,7 +43,7 @@ import { logger } from "../../src/utils/logger.js";
 import { AlignmentArtifact, alignmentArtifactSchema } from "../../src/alignment/types.js";
 import { SubtitleDocument, subtitleDocumentSchema } from "../../src/subtitles/types.js";
 import { normalizeSpeechForProvider } from "../../src/tts/speech-normalization.js";
-import { continuityReviewSchema } from "../../src/story-bible/continuity.js";
+import { continuityInputFingerprint, continuityReviewSchema } from "../../src/story-bible/continuity.js";
 import { applyCanonicalOverlay, CanonicalOverlay, canonicalOverlaySchema, findDuplicateSuggestions, loadStoryBibleWithCanonicalOverlay } from "../../src/story-bible/canonical.js";
 import { ttsProviderNameSchema } from "../../src/domain/provider.js";
 import { analyzeStoryBible } from "../../src/story-bible/granularity.js";
@@ -911,7 +911,7 @@ async function continuityReadContext(root: string, slug: string) {
     const activeIds = new Set(bible.canonicalEntities.map((item) => item.id));
     const findings = parsed.findings.filter((item) => item.entityIds.some((id) => activeIds.has(id)) && !(item.type === "identity_alias_ambiguity" && item.entityIds.length === 2 && bible.rejectedMergePairs.some(pair => pair.every(id => item.entityIds.includes(id)))));
     const names = new Map(bible.canonicalEntities.map((item) => [item.id, item.canonicalName]));
-    const needsReanalysis = parsed.inputFingerprint !== fingerprint({ version: 1, entities: bible.canonicalEntities, timeline: bible.entityTimeline, relationships: bible.canonicalRelationships });
+    const needsReanalysis = parsed.inputFingerprint !== continuityInputFingerprint(bible);
     const counts = { open: findings.filter((item) => item.status === "open").length, resolved: findings.filter((item) => item.status !== "open").length, dismissed: findings.filter((item) => item.status === "dismissed").length };
     return { parsed, findings, names, needsReanalysis, counts };
   });
