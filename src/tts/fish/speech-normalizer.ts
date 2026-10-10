@@ -113,6 +113,9 @@ export function normalizeFishSpeechText(text: string, model?: string, options: {
   const structured = normalizeFishLeadingHesitations(stripMusicCuesForSpeech(stripStandaloneEllipsisLines(itemPanels)), model).replace(/【[^【】\n]{1,500}】/gu, normalizeStructuredSpeechBlock)
     .replace(/(?<![\p{L}\p{N}])([A-Z][\p{L}\p{N} -]{1,80})\s+\((Passive|Active)\)\s+\((Level [^()\n]{1,30}|Rank [^()\n]{1,30})\)/gu, normalizeSystemMetadataText);
   const withoutMarkup = renderFishVocalizations(disambiguateFishS2Brackets(stripFishMarkdownEmphasis(stripEmojiForSpeech(stripMarkdownForSpeech(structured))), model), model, options)
+    // Repeated periods after words are spoken as a comma pause. Keep silent
+    // punctuation-only lines handled separately and leave decimal points alone.
+    .replace(/(?<=\p{L})(?:\.{2,}|…+)/gu, ",")
     // A performed reaction can be tagged more than once by earlier preparation.
     // Repeated adjacent laugh tags describe one reaction, not separate sounds.
     .replace(/“[^”\r\n]{1,2000}”|"[^"\r\n]{1,2000}"|‘[^’\r\n]{1,2000}’/gu, (quote: string, offset: number, source: string) => {

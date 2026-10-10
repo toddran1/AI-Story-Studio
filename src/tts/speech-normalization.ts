@@ -159,7 +159,8 @@ export function speechNormalizationSettingsFromNarration(narrationSettings: {
 export function stripStandaloneEllipsisLines(text: string): string {
   // Scene-break/silent-response lines have no words to synthesize. Preserve
   // paragraph separation and punctuation inside actual sentences.
-  return text.replace(/^[\t ]*(?:["“”‘’']?[\t ]*)(?:\.[\t ]*){3,}["“”‘’']?[\t ]*\r?$/gm, "")
+  return text.replace(/【[\t ]*(?:(?:[.．][\t ]*){2,}|(?:…[\t ]*)+|(?:[?？][\t ]*){2,})】/gu, "")
+    .replace(/^[\t ]*(?:["“”‘’']?[\t ]*)(?:\.[\t ]*){3,}["“”‘’']?[\t ]*\r?$/gm, "")
     .replace(/^[\t ]*["“”‘’']?[\t ]*(?:…[\t ]*)+["“”‘’']?[\t ]*\r?$/gm, "")
     .replace(/^[\t ]*["“”‘’']?[\t ]*(?:[?？][\t ]*){2,}["“”‘’']?[\t ]*\r?$/gm, "");
 }

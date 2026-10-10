@@ -53,8 +53,8 @@ export class FishAudioProvider implements TTSProvider {
     } = {},
   ) {
     this.inputNormalizationVersion = speechOptions.tskRendering === "direction"
-      ? "fish-speech-normalization-v28-numeric-paragraph-endings-tsk-direction"
-      : "fish-speech-normalization-v28-numeric-paragraph-endings";
+      ? "fish-speech-normalization-v31-word-ellipsis-commas-tsk-direction"
+      : "fish-speech-normalization-v31-word-ellipsis-commas";
   }
 
   resolveReferenceId(referenceId?: string): string | undefined {

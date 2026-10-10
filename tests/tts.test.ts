@@ -34,10 +34,10 @@ describe("Fish TTS", () => {
   });
 
   it.each([
-    ["“Clang! Clang! Clang...”", "“Clang! Clang! Clang.”"],
-    ['"Clang! Clang! Clang…"', '"Clang! Clang! Clang."'],
-    ["‘Wait... I hear something…’", "‘Wait... I hear something.’"],
-    ["“Wait... are you sure?” He paused... then nodded.", "“Wait... are you sure?” He paused... then nodded."],
+    ["“Clang! Clang! Clang...”", "“Clang! Clang! Clang,”"],
+    ['"Clang! Clang! Clang…"', '"Clang! Clang! Clang,"'],
+    ["‘Wait... I hear something…’", "‘Wait, I hear something,’"],
+    ["“Wait... are you sure?” He paused... then nodded.", "“Wait, are you sure?” He paused, then nodded."],
     ["“Hahaha...”", "“[laughing]”"],
   ])("closes quoted trailing ellipses while preserving interior pauses: %s", (input, expected) => {
     expect(normalizeFishSpeechText(input, "s2-pro")).toBe(expected);
@@ -50,7 +50,7 @@ describe("Fish TTS", () => {
       return new Response(new Uint8Array([1]), { headers: { "content-type": "audio/mpeg" } });
     });
     await new FishAudioProvider("test-key", fetcher as typeof fetch).synthesize({ text: "“Clang! Clang! Clang...”", model: "s2-pro", speed: 1, format: "mp3", sampleRate: 44100, bitrate: 128, normalize: true, maxCharsPerRequest: 500 });
-    expect(posted).toEqual(["“Clang! Clang! Clang.”"]);
+    expect(posted).toEqual(["“Clang! Clang! Clang,”"]);
   });
 
   it.each(["same-voice-dialogue", "narrator-dialogue"] as const)("keeps the reported laughter inline in %s mode", async (voiceMode) => {
@@ -139,7 +139,7 @@ describe("Fish TTS", () => {
     await provider.synthesize({ text: "**Important:** *whisper this.* [sad] 2 * 2", model: "s2.1-pro", speed: 1, format: "mp3", sampleRate: 44100, bitrate: 128, normalize: true, maxCharsPerRequest: 500 });
     const body = JSON.parse(String((fetcher.mock.calls[0]?.[1] as RequestInit).body));
     expect(body.text).toBe("Important: whisper this. [sad] 2 * 2");
-    expect(provider.inputNormalizationVersion).toBe("fish-speech-normalization-v28-numeric-paragraph-endings");
+    expect(provider.inputNormalizationVersion).toBe("fish-speech-normalization-v31-word-ellipsis-commas");
   });
 
   it("does not turn profanity into the literal word bleep inside Fish", async () => {
@@ -301,7 +301,7 @@ describe("Fish TTS", () => {
 
   it("omits standalone ellipsis lines while preserving sentence pauses and cues", () => {
     const narration = "Before.\n\n......\n\nAfter... still speaking.\n…\n“……”\n. . .\n[laughing] Hello.";
-    expect(normalizeFishSpeechText(narration, "s2-pro")).toBe("Before.\n\nAfter... still speaking.\n\n[laughing] Hello.");
+    expect(normalizeFishSpeechText(narration, "s2-pro")).toBe("Before.\n\nAfter, still speaking.\n\n[laughing] Hello.");
     expect(narration).toContain("......");
     expect(normalizeFishSpeechText("......", "s2-pro")).toBe("");
   });
