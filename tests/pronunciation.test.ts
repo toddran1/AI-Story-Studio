@@ -137,3 +137,17 @@ describe("pronunciation batch enrichment resilience", () => {
     await expect(enrichPronunciationBatch(provider, config, candidates, "zh-CN")).rejects.toThrow("Interactions API request failed");
   });
 });
+
+describe("localized short-name custom pronunciation", () => {
+  const localized = { ...entity, localizedNaming: { locale: "en-US", fullName: "Caydien Huo", shortName: "Caydien", usageMode: "ai_contextual" as const }, pronunciation: { mode: "custom" as const, customPronunciation: "Caydeean Huo" } };
+  it("uses the given-name hint for short names and preserves the full hint", () => {
+    const text = "Caydien Huo greeted Caydien. Caydien’s turn.";
+    const occurrences = resolvePronunciations(text, [localized]);
+    expect(adaptPronunciationText(text, occurrences, { phoneticText: true })).toBe("Caydeean Huo greeted Caydeean. Caydeean’s turn.");
+    expect(localized.pronunciation.customPronunciation).toBe("Caydeean Huo");
+  });
+  it("does not append a surname when syllable spelling cannot be split reliably", () => {
+    const ambiguous = { ...localized, pronunciation: { mode: "custom" as const, customPronunciation: "KAY dee an Huo" } };
+    expect(resolvePronunciations("Caydien", [ambiguous])).toEqual([]);
+  });
+});

@@ -70,7 +70,25 @@ export function resolvePronunciations(text: string, entities: readonly Canonical
         const localized = [entity.localizedNaming?.fullName, entity.localizedNaming?.shortName].some(value => value?.toLocaleLowerCase() === name.toLocaleLowerCase());
         // Automatic source-language hints must not turn a localized English name back into its source name.
         const preferred = entity.preferredNarrationName?.toLocaleLowerCase() === name.toLocaleLowerCase() && name.toLocaleLowerCase() !== entity.canonicalName.toLocaleLowerCase();
-        const pronunciation = entity.pronunciation ?? { mode: "automatic" as const };
+        let pronunciation = entity.pronunciation ?? { mode: "automatic" as const };
+        const shortName = entity.localizedNaming?.shortName;
+        if (pronunciation.mode === "custom" && shortName?.toLocaleLowerCase() === name.toLocaleLowerCase()) {
+          const fullName = entity.localizedNaming?.fullName ?? entity.preferredNarrationName;
+          const roots = fullName?.trim().split(/\s+/) ?? [];
+          const hints = pronunciation.customPronunciation?.trim().split(/\s+/) ?? [];
+          const short = shortName.trim().split(/\s+/);
+          if (roots.length > short.length) {
+            const positions = roots.flatMap((_, index) => roots.slice(index, index + short.length).map(value => value.toLocaleLowerCase()).join(" ") === short.map(value => value.toLocaleLowerCase()).join(" ") ? [index] : []);
+            // Only split an explicitly configured short name with a unique,
+            // one-to-one name/hint token mapping. Ambiguous hints stay unforced.
+            if (positions.length !== 1) continue;
+            if (roots.length === hints.length) {
+              pronunciation = { ...pronunciation, customPronunciation: hints.slice(positions[0], positions[0]! + short.length).join(" ") };
+            } else if (hints.at(-1)?.toLocaleLowerCase() === roots.at(-1)?.toLocaleLowerCase()) {
+              continue;
+            }
+          }
+        }
         if ((localized || preferred) && pronunciation.mode === "automatic") continue;
         candidates.push({ entityId: entity.id, surfaceText: match[0], start, end, pronunciation, canonicalName: entity.canonicalName });
       }
