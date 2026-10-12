@@ -139,7 +139,7 @@ describe("Fish TTS", () => {
     await provider.synthesize({ text: "**Important:** *whisper this.* [sad] 2 * 2", model: "s2.1-pro", speed: 1, format: "mp3", sampleRate: 44100, bitrate: 128, normalize: true, maxCharsPerRequest: 500 });
     const body = JSON.parse(String((fetcher.mock.calls[0]?.[1] as RequestInit).body));
     expect(body.text).toBe("Important: whisper this. [sad] 2 * 2");
-    expect(provider.inputNormalizationVersion).toBe("fish-speech-normalization-v31-word-ellipsis-commas");
+    expect(provider.inputNormalizationVersion).toBe("fish-speech-normalization-v32-leading-hehe-omission");
   });
 
   it("does not turn profanity into the literal word bleep inside Fish", async () => {
@@ -294,7 +294,8 @@ describe("Fish TTS", () => {
     const narration = "“Actually… it’s not impossible.” “Hehe, I guessed it!” “Ahem, ahem, ahem… You’re right.”";
     await new FishAudioProvider("test-key", fetcher as typeof fetch).synthesize({ text: narration, model: "s2-pro", speed: 1, format: "mp3", sampleRate: 44100, bitrate: 128, normalize: true, maxCharsPerRequest: 500 });
     expect(posted.join(" ")).toContain("Actually, it’s not impossible");
-    expect(posted.join(" ")).toContain("[laughing] I guessed it");
+    expect(posted.join(" ")).toContain("I guessed it");
+    expect(posted.join(" ")).not.toMatch(/hehe|\[laughing\]/i);
     expect(posted.join(" ")).toContain("[cough] You’re right");
     expect(narration).toContain("Ahem, ahem, ahem…");
   });

@@ -2,7 +2,7 @@ import { fingerprint } from "../utils/hash.js";
 import { scanVocalizations, type VocalizationRenderStrategy } from "./vocalizations.js";
 import type { TTSProvider } from "./provider.js";
 
-export const SPEECH_NORMALIZATION_VERSION = "speech-normalization-v6-grouped-panel-numbers";
+export const SPEECH_NORMALIZATION_VERSION = "speech-normalization-v7-fish-leading-hehe";
 export type SpeechNormalizationMode = "automatic" | "enabled" | "disabled";
 export type TimeSpeechMode = "natural_12h" | "natural_24h" | "preserve";
 export type VocalizationMode = "automatic" | "preserve" | "disabled";
@@ -165,9 +165,14 @@ export function stripStandaloneEllipsisLines(text: string): string {
     .replace(/^[\t ]*["“”‘’']?[\t ]*(?:[?？][\t ]*){2,}["“”‘’']?[\t ]*\r?$/gm, "");
 }
 
+/** Omit unstable spelled laughter at the start of a spoken sentence, not literal mentions. */
+export function stripFishLeadingHehe(text: string): string {
+  return text.replace(/(^|[.!?\n“"‘'])([ \t]*)he(?:he)+(?:[ \t]+he(?:he)+)*[ \t]*(?:[,!…]+|\.{3,})[ \t]*(?=\p{L})/gimu, "$1$2");
+}
+
 export function normalizeSpeechForProvider(text: string, language: string, narrationSettings: Parameters<typeof speechNormalizationSettingsFromNarration>[0], provider?: TTSProvider, model?: string) {
   const strategy = provider?.vocalizationStrategy?.(model) ?? { kind: "safe_normalize" as const };
-  const input = provider?.name === "fish" ? stripStandaloneEllipsisLines(text) : text;
+  const input = provider?.name === "fish" ? stripFishLeadingHehe(stripStandaloneEllipsisLines(text)) : text;
   return speechNormalizationFingerprint(input, language, speechNormalizationSettingsFromNarration(narrationSettings), provider ? { ...strategy, provider: provider.name } : strategy);
 }
 

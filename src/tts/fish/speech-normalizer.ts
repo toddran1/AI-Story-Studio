@@ -1,7 +1,7 @@
 import { stripSpeechMarkdownEmphasis as stripFishMarkdownEmphasis } from "../markdown-emphasis.js";
 export { stripSpeechMarkdownEmphasis as stripFishMarkdownEmphasis } from "../markdown-emphasis.js";
 import { disambiguateFishS2Brackets, isFishS2Model } from "./control-cues.js";
-import { normalizeStructuredSpeechBlock, normalizeSystemMetadataText, speakInteger, stripStandaloneEllipsisLines } from "../speech-normalization.js";
+import { stripFishLeadingHehe, normalizeStructuredSpeechBlock, normalizeSystemMetadataText, speakInteger, stripStandaloneEllipsisLines } from "../speech-normalization.js";
 import { scanVocalizations } from "../vocalizations.js";
 
 const TITLE_REPLACEMENTS: ReadonlyArray<readonly [RegExp, string]> = [
@@ -104,6 +104,7 @@ function replaceAll(text: string, replacements: ReadonlyArray<readonly [RegExp, 
  * fictional terminology are not silently changed.
  */
 export function normalizeFishSpeechText(text: string, model?: string, options: { tskRendering?: "preserve" | "direction" } = {}): string {
+  text = stripFishLeadingHehe(text);
   // Only item panels with a recognized rarity and metadata colon qualify;
   // ordinary prose parentheses and deliberate delivery cues remain untouched.
   const itemPanels = text.replace(/\[[^\[\]\r\n]{1,500}\]/gu, (block) =>
