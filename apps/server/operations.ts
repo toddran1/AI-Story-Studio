@@ -1,3 +1,4 @@
+import { requireCurrentOriginal } from "../../src/source/current-original.js";
 import { visualRegenerationInputSchema, visualSceneSelectionSchema, visualSceneKey } from "../../src/visual-canon/regeneration-selection.js";
 import { pricingFor, calculateCost } from "../../src/cost/pricing.js";
 import { analyzeArtworkVisuals, artworkVisualCheckTargetSchema, readVisualCheckImage, visualCheckTargetFingerprint, visualCheckSchema } from "../../src/artwork/visual-check.js";
@@ -826,7 +827,7 @@ export class StudioOperations {
       const state = migrateQaState(qaRaw, { chapter });
       const findings = validateQaRepairFindingSnapshots(state, snapshots);
       const [source, translationArtifact, narrationArtifact, context] = await Promise.all([
-        readFile(paths.original, "utf8"), readTextIfExists(paths.english), readTextIfExists(paths.narration), resolveStoredQaContext({ storyContext: paths.storyContext, chapter }),
+        requireCurrentOriginal(this.root, slug, chapter), readTextIfExists(paths.english), readTextIfExists(paths.narration), resolveStoredQaContext({ storyContext: paths.storyContext, chapter }),
       ]);
       validateQaRepairTextSnapshot(snapshots[0]!, translationArtifact, narrationArtifact);
       const texts = { translation: translationArtifact ?? "", narration: narrationArtifact ?? "" };
@@ -1037,7 +1038,7 @@ export class StudioOperations {
       const state = migrateQaState(qaRaw, { chapter });
       const finding = validateQaRepairFindingSnapshots(state, [selection])[0]!;
       const [source, translation, narration, context] = await Promise.all([
-        readFile(paths.original, "utf8"), readTextIfExists(paths.english), readTextIfExists(paths.narration), resolveStoredQaContext({ storyContext: paths.storyContext, chapter }),
+        requireCurrentOriginal(this.root, slug, chapter), readTextIfExists(paths.english), readTextIfExists(paths.narration), resolveStoredQaContext({ storyContext: paths.storyContext, chapter }),
       ]);
       validateQaRepairTextSnapshot(selection, translation, narration);
       const chapterBeforeRepair = chapterSchema.parse(await readJsonIfExists<Chapter>(paths.chapterMeta));
@@ -1072,7 +1073,7 @@ export class StudioOperations {
     slugSchema.parse(slug); if (!Number.isSafeInteger(chapter) || chapter < 1) throw new ConfigurationError("Chapter must be a positive integer");
     const paths = storyPaths(this.root, slug, chapter); const story = await loadStory(paths.storyConfig);
     const [qaRaw, source, translationArtifact, narrationArtifact, context] = await Promise.all([
-      readJsonIfExists(paths.qa), readFile(paths.original, "utf8"), readTextIfExists(paths.english), readTextIfExists(paths.narration), resolveStoredQaContext({ storyContext: paths.storyContext, chapter }),
+      readJsonIfExists(paths.qa), requireCurrentOriginal(this.root, slug, chapter), readTextIfExists(paths.english), readTextIfExists(paths.narration), resolveStoredQaContext({ storyContext: paths.storyContext, chapter }),
     ]);
     if (!qaRaw) throw new Error(`Chapter ${chapter} does not have a QA result`);
     const state = migrateQaState(qaRaw, { chapter });

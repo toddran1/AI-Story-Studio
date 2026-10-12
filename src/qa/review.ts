@@ -1,3 +1,4 @@
+import { requireCurrentOriginal } from "../source/current-original.js";
 import { readFile } from "node:fs/promises";
 import { chapterSchema } from "../domain/chapter.js";
 import { QaCategory, QaFinding, QaState, qaStateSchema, QaStatus } from "../domain/qa.js";
@@ -689,7 +690,7 @@ export async function recheckChapterQa(deps: {
   const { root, story, chapter, provider } = deps;
   const paths = storyPaths(root, story.slug, chapter);
   const [qaRaw, chapterRaw, source, translation, narration, qaContext] = await Promise.all([
-    readJsonIfExists(paths.qa), readJsonIfExists(paths.chapterMeta), readFile(paths.original, "utf8"),
+    readJsonIfExists(paths.qa), readJsonIfExists(paths.chapterMeta), requireCurrentOriginal(root, story.slug, chapter),
     readFile(paths.english, "utf8"), readFile(paths.narration, "utf8"), resolveStoredQaContext({ storyContext: paths.storyContext, chapter }),
   ]);
   if (!chapterRaw) throw new Error(`Chapter ${chapter} has no production metadata`);

@@ -1,3 +1,4 @@
+import { readCurrentOriginal } from "../../src/source/current-original.js";
 import { summarySchema } from "../../src/summaries/types.js";
 import { summaryMediaPaths } from "../../src/summaries/media.js";
 import { listSummaryMusicExports, summaryMusicExportPath } from "../../src/music/summary-export.js";
@@ -191,7 +192,7 @@ export async function getChapter(root: string, slug: string, chapter: number) {
   const speech = ttsScript && story ? normalizeSpeechForProvider(ttsScript, story.outputLanguage, story.narrationSettings).normalized : undefined;
   const qaFreshness = story && qaRaw ? await deriveChapterQaFreshness(root, story, chapter, metadata?.stages.qa) : undefined;
   return {
-    chapter, navigation, metadata, stale: !fresh || metadata?.stages.ingestion.status !== "complete", original: await readTextIfExists(paths.original),
+    chapter, navigation, metadata, stale: !fresh || metadata?.stages.ingestion.status !== "complete", original: await readCurrentOriginal(root, slug, chapter),
     translation: await readTextIfExists(paths.english), narration, spokenText: speech?.text, speechTransformations: speech?.transformations ?? [],
     qa: qaRaw ? qaResultSchema.parse(qaRaw) : undefined, qaStale: Boolean(qaRaw) && (qaFreshness ? qaFreshness.freshness !== "current" : !fresh || metadata?.stages.qa.status !== "complete"), qaFingerprint: qaFreshness?.currentFingerprint, storyContext, storyContextStale: storyContext !== undefined && !fresh, audioAvailable, audioStale,
     alignment: alignment?.success ? alignment.data : undefined, alignmentStale: Boolean(alignment?.success) && (!fresh || metadata?.stages.alignment.status !== "complete"),

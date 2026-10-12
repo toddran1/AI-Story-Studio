@@ -1,3 +1,4 @@
+import { readCurrentOriginal } from "../source/current-original.js";
 import { randomUUID } from "node:crypto";
 import { readdir, rm } from "node:fs/promises";
 import { join } from "node:path";
@@ -117,7 +118,7 @@ export class SummaryService {
     const bibleRaw = mode === "chapter-summaries" ? await readJsonIfExists(storyPaths(this.root, story, 1).bible) : undefined;
     const bible = bibleRaw ? storyBibleSchema.parse(bibleRaw) : undefined; const result: SourceChapter[] = [];
     for (const chapter of chapters) {
-      const paths = storyPaths(this.root, story, chapter); const text = mode === "original" ? await readTextIfExists(paths.original) : mode === "translated" ? await readTextIfExists(paths.english) : bible?.chapterSummaries[String(chapter)];
+      const paths = storyPaths(this.root, story, chapter); const text = mode === "original" ? await readCurrentOriginal(this.root, story, chapter) : mode === "translated" ? await readTextIfExists(paths.english) : bible?.chapterSummaries[String(chapter)];
       if (!text?.trim()) throw new ConfigurationError(`Chapter ${chapter} has no ${mode === "chapter-summaries" ? "existing chapter summary" : `${mode} text`}. Choose another source mode or process the chapter first.`);
       result.push({ chapter, text: text.trim(), characters: [...text].length, fingerprint: fingerprint(text) });
     }

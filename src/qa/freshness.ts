@@ -1,3 +1,4 @@
+import { readCurrentOriginal } from "../source/current-original.js";
 import { StageState } from "../domain/chapter.js";
 import { QaException, QaState } from "../domain/qa.js";
 import { Story } from "../domain/story.js";
@@ -209,7 +210,7 @@ export async function loadStoredQaDependencies(
 ): Promise<QaDependencies | undefined> {
   const paths = storyPaths(root, story.slug, chapter);
   const [source, translation, narration, qaContext, deterministicDeps] = await Promise.all([
-    readTextIfExists(paths.original), readTextIfExists(paths.english), readTextIfExists(paths.narration),
+    readCurrentOriginal(root, story.slug, chapter), readTextIfExists(paths.english), readTextIfExists(paths.narration),
     resolveStoredQaContext({ storyContext: paths.storyContext, chapter }), deterministic ? Promise.resolve(deterministic) : loadQaDeterministicDependencies(root, story.slug),
   ]);
   if (!source?.trim() || !translation?.trim() || !narration?.trim()) return undefined;

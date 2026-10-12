@@ -1,3 +1,5 @@
+import { readCurrentOriginal } from "../src/source/current-original.js";
+import { atomicWrite } from "../src/storage/atomic-write.js";
 import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -72,6 +74,14 @@ describe("source ingestion", () => {
     const manifest = sourceManifestSchema.parse(JSON.parse(await readFile(join(root, "stories/novel/source/source.json"), "utf8")));
     expect(manifest.fingerprint).toBe(changedInspection.fingerprint);
     expect(await readFile(join(root, "stories/novel/source/chapters/0001.txt"), "utf8")).toContain("Revised");
+    await atomicWrite(storyPaths(root, "novel", 1).original, "Old source with blank EXP");
+    expect(await readCurrentOriginal(root, "novel", 1)).toContain("Revised");
+    await atomicWrite(storyPaths(root, "novel", 3).original, "Legacy source");
+    expect(await readCurrentOriginal(root, "novel", 3)).toBe("Legacy source");
+    const latestSource = await readCurrentOriginal(root, "novel", 1);
+    await writeFile(join(root, "stories/novel/source/chapters/0001.txt"), "");
+    await expect(readCurrentOriginal(root, "novel", 1)).rejects.toThrow("empty");
+    await writeFile(join(root, "stories/novel/source/chapters/0001.txt"), latestSource!);
     expect(() => sourceManifestSchema.parse({ ...manifest, chapters: [{ ...manifest.chapters[0]!, ref: { ...manifest.chapters[0]!.ref, chapter: 2 } }] })).toThrow(/Reference chapter/);
     await writeFile(join(root, "stories/novel/source/chapters/0001.txt"), "tampered", "utf8");
     expect((await importSource(root, "novel", changedInspection)).status).toBe("updated");
