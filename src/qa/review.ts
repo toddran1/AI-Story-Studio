@@ -225,6 +225,7 @@ export function reconcileQaState(
     dependencyFingerprint?: string;
     /** Content the verification actually evaluated (subset for changed-only rechecks). */
     evaluatedContent?: string;
+    fullRecheck?: boolean;
     qaPolicy?: Story["qaPolicy"];
   } = {},
 ): { findings: QaFinding[]; outcome: ReconcileOutcome } {
@@ -329,12 +330,12 @@ export function reconcileQaState(
       // when the anchor text remains (e.g. the rule itself was removed).
       const verifiedAbsent = anchorGone || prior.origin === "deterministic";
       const authorized = covered ? authorizedNamingObjection(prior, namingEntities) : undefined;
-      if ((dependenciesChanged && covered && verifiedAbsent) || authorized) {
+      if ((options.fullRecheck && covered) || (dependenciesChanged && covered && verifiedAbsent) || authorized) {
         prior.status = "obsolete";
         prior.resolution = {
           action: "obsolete", resolvedAt: now,
           ...(authorized ? { reason: `Obsolete because the current Story Bible explicitly authorizes “${authorized.used}” as the narration name for ${authorized.entity}.` }
-            : options.dependencyFingerprint ? { reason: "Verified absent after the QA dependency fingerprint changed" } : {}),
+            : options.fullRecheck ? { reason: "Not reported by the full chapter recheck" } : options.dependencyFingerprint ? { reason: "Verified absent after the QA dependency fingerprint changed" } : {}),
         };
         prior.lastVerifiedAt = now;
         stampVerification(prior);
@@ -444,6 +445,7 @@ export function buildQaState(
     dependencyFingerprint?: string;
     dependencySnapshot?: QaDependencySnapshot;
     evaluatedContent?: string;
+    fullRecheck?: boolean;
     qaPolicy?: Story["qaPolicy"];
   },
 ): { state: QaState; outcome: ReconcileOutcome } {
@@ -477,6 +479,7 @@ export function buildQaState(
     content: `${options.translation}\n\n${options.narration}`,
     dependencyFingerprint: options.dependencyFingerprint,
     evaluatedContent: options.evaluatedContent,
+    fullRecheck: options.fullRecheck,
     qaPolicy: options.qaPolicy,
   });
   const base = {
@@ -745,6 +748,7 @@ export async function recheckChapterQa(deps: {
     dependencyFingerprint,
     dependencySnapshot,
     evaluatedContent: mode === "full" ? fullContent : changedContent,
+    fullRecheck: mode === "full",
     qaPolicy: story.qaPolicy,
   });
   await persistQaStateWithMetadata(paths, state, metadata, (outputFingerprint, prior) => ({

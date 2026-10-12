@@ -243,7 +243,7 @@ describe("chapter QA state endpoint", () => {
     const finished = await waitForJob(jobs, operations.startQaRecheck(story.slug, 1, { mode: "changed" }).id);
     expect(finished.status).toBe("completed");
     // Legacy QA without a dependency snapshot cannot prove a text-only edit, so it falls back conservatively.
-    expect(finished.result).toMatchObject({ chapter: 1, qaOnly: true, summary: { mode: "full", fellBackToFull: true, open: 1 } });
+    expect(finished.result).toMatchObject({ chapter: 1, qaOnly: true, summary: { mode: "full", fellBackToFull: true, open: 0 } });
     expect(() => operations.startQaRecheck(story.slug, 1, { mode: "bogus" })).toThrow();
     await operations.close();
   });
@@ -422,7 +422,7 @@ describe("safe fixes", () => {
     expect(await readFile(paths.narration, "utf8")).toContain("Asher");
     const after = await readState(paths);
     expect(after.findings.find((finding) => finding.id === safeId)).toMatchObject({ status: "fixed_ai", resolution: { action: "ai_fix" } });
-    expect(after.findings.find((finding) => finding.id === unsafeId)!.status).toBe("open");
+    expect(after.findings.find((finding) => finding.id === unsafeId)!.status).toBe("obsolete");
     await operations.close();
   });
 });

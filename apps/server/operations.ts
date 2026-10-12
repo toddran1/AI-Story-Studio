@@ -1077,10 +1077,12 @@ export class StudioOperations {
     ]);
     if (!qaRaw) throw new Error(`Chapter ${chapter} does not have a QA result`);
     const state = migrateQaState(qaRaw, { chapter });
+    const currentQa = await this.getChapterQa(slug, chapter);
+    if (currentQa.qaStale) throw new QaFindingStaleSelectionError("Run Full chapter recheck before applying safe fixes to previous findings.");
     // The backend alone decides what is safe: open + explicitly marked safeToFix.
     const translation = translationArtifact ?? ""; const narration = narrationArtifact ?? "";
     const safe = state.findings.filter((finding) => {
-      if (finding.status !== "open" || finding.safeToFix !== true) return false;
+      if (finding.status !== "open" || finding.safeToFix !== true || finding.verifiedAgainstFingerprint !== currentQa.currentFingerprint) return false;
       const inference = inferQaRepairTargets(finding, { translation, narration });
       return inference.confidence === "high" && inference.targets.length > 0 && inference.targets.every((target) => Boolean((target === "translation" ? translationArtifact : narrationArtifact)?.trim()));
     });

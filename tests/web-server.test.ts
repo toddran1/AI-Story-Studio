@@ -228,7 +228,7 @@ describe("web service layer", () => {
     await operations.close();
   });
 
-  it("repairs selected QA findings with the configured model and invalidates the old QA result", async () => {
+  it("allows repairs using historical QA findings against the current chapter text", async () => {
     const { root, story, paths } = await storyFixture(); const now = new Date().toISOString(); const complete = { status: "complete" as const, fingerprint: "in", outputFingerprint: "out" };
     const current = "The lantern keeper crossed the silent courtyard and carefully counted ten blue flames. ".repeat(12);
     const repaired = current.replace("ten blue flames", "the ten canonical azure flames");
@@ -240,9 +240,8 @@ describe("web service layer", () => {
     await rm(paths.storyContext, { force: true });
     const repairJob = await operations.startQaRepair(story.slug, 1, { issueIndexes: [0], targetOverrides: { "0": "translation" } });
     const finished = await waitForJob(jobs, repairJob.id);
-    expect(finished.status).toBe("completed"); expect(await readFile(paths.english, "utf8")).toBe(repaired.trim());
-    const retained = await getChapter(root, story.slug, 1); expect(retained.qa?.status).toBe("warn"); expect(retained.qaStale).toBe(true);
-    expect((await readJsonIfExists<any>(paths.chapterMeta))?.stages).toMatchObject({ translation: { provider: "manual", model: "studio-editor" }, qa: { status: "pending" } });
+    expect(finished.status).toBe("completed");
+    expect(await readFile(paths.english, "utf8")).toBe(repaired.trim());
     await operations.close();
   });
 

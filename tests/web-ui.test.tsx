@@ -174,6 +174,11 @@ describe("web UI", () => {
     id: "qaf_0123456789abcdef01234567", category: "dialogue", severity: "warn", message: "A threat is softened", evidence: "The intent remains intact.",
     status: "open", origin: "llm", fingerprint: "fp", ...overrides,
   });
+  it("labels historical evidence while allowing AI repair against current text", () => {
+    const html = renderToStaticMarkup(<QaFindingCard finding={qaFinding({})} pendingVerification busy="" expanded={[]} onToggle={() => undefined} onFixAi={() => undefined} onEdit={() => undefined} onResolve={() => undefined} onDismiss={() => undefined} />);
+    expect(html).toContain("Historical finding");
+    expect(html).toMatch(/<button class="button primary">Fix with AI<\/button>/);
+  });
   it("shows QA severity and both human resolution actions", () => {
     const html = renderToStaticMarkup(<QaFindingCard finding={qaFinding({})} busy="" expanded={[]} onToggle={() => undefined} onFixAi={() => undefined} onEdit={() => undefined} onResolve={() => undefined} onDismiss={() => undefined} />);
     expect(html).toContain("Warning"); expect(html).toContain("Dialogue"); expect(html).toContain("Fix with AI"); expect(html).toContain("Edit manually"); expect(html).toContain("Mark resolved"); expect(html).toContain("Dismiss");

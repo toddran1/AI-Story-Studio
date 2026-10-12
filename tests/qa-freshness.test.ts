@@ -221,7 +221,7 @@ describe("finding lifecycle vs verification (Feixue/Xiaoxue)", () => {
     expect(retired.id).toBe(finding.id);
     expect(retired.status).toBe("obsolete");
     expect(retired.resolution?.action).toBe("obsolete");
-    expect(retired.resolution?.reason).toContain("dependency fingerprint changed");
+    expect(retired.resolution?.reason).toContain("full chapter recheck");
     expect(retired.verifiedAgainstFingerprint).toBe(editedFp);
     expect(findingVerification(retired, editedFp)).toBe("current");
     expect(openFindings(second.state)).toHaveLength(0);

@@ -1,3 +1,4 @@
+import { recheckChapterQa } from "../qa/review.js";
 import { syncAppearanceChanges } from "../visual-canon/appearance-changes.js";
 import { mkdir, readFile, readdir, rm, stat } from "node:fs/promises";
 import { join } from "node:path";
@@ -103,6 +104,13 @@ export class ChapterPipeline {
   async run(options: PipelineOptions): Promise<Chapter> {
     const paths = storyPaths(options.root, options.story.slug, options.chapter);
     const executionStages = options.executionStages ? new Set(options.executionStages) : undefined;
+    if (executionStages?.size === 1 && executionStages.has("qa")) {
+      options.onStageEvent?.({ stage: "qa", status: "started", state: { status: "running" }, detail: "Rechecking the full chapter against current saved text" });
+      const result = await recheckChapterQa({ root: options.root, story: options.story, chapter: options.chapter, provider: this.llms.forStage(options.story.pipeline.qa), mode: "full" });
+      options.onStageEvent?.({ stage: "qa", status: "completed", state: { status: "complete" } });
+      if (result.state.status === "fail") throw new QualityGateError(`Chapter ${options.chapter} failed QA`, { ...result.state, issues: activeQaIssues(result.state) });
+      return chapterSchema.parse(await readJsonIfExists(paths.chapterMeta));
+    }
     const shouldRun = (stage: StageExecutionNode) => !executionStages || executionStages.has(stage);
     await mkdir(paths.chapterDir, { recursive: true });
     const now = new Date().toISOString();

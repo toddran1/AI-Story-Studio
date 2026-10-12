@@ -39,12 +39,12 @@ describe("pipeline QA fresh execution and recovery", () => {
     return { root, input, gemini, openai, pipeline, story, paths };
   }
 
-  it("runs QA once at four issues and replaces old chapter review state", async () => {
+  it("runs QA once at four issues and preserves prior review history", async () => {
     const ctx = await fixture([qaWithIssues(4)]);
     const contextBefore = await readFile(ctx.paths.storyContext, "utf8");
     const preserved = [ctx.paths.audioRaw, ctx.paths.audio, ctx.paths.subtitlesSrt, ctx.paths.scenesManifest, ctx.paths.video];
     for (const path of preserved) await writeFile(path, "keep", "utf8");
-    const oldQa = { ...qaWithIssues(1), findings: [{ id: "qaf_aaaaaaaaaaaaaaaaaaaaaaaa", category: "numbers", severity: "warn", message: "Old", evidence: "Old", status: "dismissed", fingerprint: "old" }] };
+    const oldQa = { ...qaWithIssues(1), findings: [{ id: "qaf_aaaaaaaaaaaaaaaaaaaaaaaa", category: "numbers", severity: "warn", message: "Old", evidence: "Old", status: "dismissed", fingerprint: "old", origin: "llm" }] };
     await atomicWriteJson(ctx.paths.qa, oldQa);
     const beforeTranslation = await readFile(ctx.paths.english, "utf8");
     const beforeNarration = await readFile(ctx.paths.narration, "utf8");
@@ -56,9 +56,20 @@ describe("pipeline QA fresh execution and recovery", () => {
     expect(await readFile(ctx.paths.narration, "utf8")).toBe(beforeNarration);
     for (const path of preserved) expect(await readFile(path, "utf8")).toBe("keep");
     expect(await readFile(ctx.paths.storyContext, "utf8")).toBe(contextBefore);
-    expect(qa.findings).toHaveLength(4);
-    expect(qa.findings.some((finding) => finding.id === "qaf_aaaaaaaaaaaaaaaaaaaaaaaa")).toBe(false);
+    expect(qa.findings).toHaveLength(5);
+    expect(qa.findings.some((finding) => finding.id === "qaf_aaaaaaaaaaaaaaaaaaaaaaaa")).toBe(true);
     expect(result.quality?.status).toBe("warn");
+  });
+
+  it("QA-only full recheck never regenerates text even with nine findings", async () => {
+    const ctx = await fixture([qaWithIssues(9)]);
+    const translation = await readFile(ctx.paths.english, "utf8");
+    const narration = await readFile(ctx.paths.narration, "utf8");
+    await ctx.pipeline.run({ root: ctx.root, story: ctx.story, chapter: 1, inputPath: ctx.input, executionStages: ["qa"], stopAfter: "qa" });
+    expect(ctx.openai.qaCalls).toBe(1);
+    expect(ctx.gemini.calls).toHaveLength(1);
+    expect(await readFile(ctx.paths.english, "utf8")).toBe(translation);
+    expect(await readFile(ctx.paths.narration, "utf8")).toBe(narration);
   });
 
   it("recovers once at five mixed issues and keeps the second QA result", async () => {

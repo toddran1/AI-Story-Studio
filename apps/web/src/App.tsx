@@ -4885,7 +4885,7 @@ export function QaDetail({ slug, chapter, onJob, onEditManually, onChanged, init
   const sortedOpenFindings = sortQaFindingsBySeverity(openFindingsList);
   const visibleOpenFindings = filterQaFindingsBySeverity(sortedOpenFindings, severityFilter);
   const needsVerification = data.stats?.needsVerification ?? (stale ? data.state.findings.filter((finding) => finding.status !== "obsolete").length : 0);
-  const unverified = (finding: QaFinding) => stale && finding.verifiedAgainstFingerprint !== data.currentFingerprint;
+  const unverified = (finding: QaFinding) => stale || finding.verifiedAgainstFingerprint !== data.currentFingerprint;
   const summaryParts = recheckSummary ? [recheckSummary.verified ? `✓ ${recheckSummary.verified} fix${recheckSummary.verified === 1 ? "" : "es"} verified` : "", recheckSummary.respected ? `✓ ${recheckSummary.respected} dismissal${recheckSummary.respected === 1 ? "" : "s"} respected` : "", recheckSummary.reopened ? `⚠ ${recheckSummary.reopened} returned` : "", recheckSummary.newFindings ? `${recheckSummary.newFindings} new issue${recheckSummary.newFindings === 1 ? "" : "s"}` : ""].filter(Boolean) : [];
   return <div className="qa-detail stateful">
     <div className="qa-attention-head">
@@ -4946,7 +4946,7 @@ export function QaDetail({ slug, chapter, onJob, onEditManually, onChanged, init
       </div>
       <div className="qa-attention-actions">
         {data.counts.safeFixesAvailable > 0 && !stale && <button className="button primary" disabled={Boolean(busy)} onClick={() => void safeFixes()}>{busy === "safeFixes" ? "Fixing…" : `Fix ${data.counts.safeFixesAvailable} safe issue${data.counts.safeFixesAvailable === 1 ? "" : "s"}`}</button>}
-        <div className="qa-recheck-split"><button className={`button${stale ? " primary" : ""}`} disabled={Boolean(busy)} onClick={() => void recheck("changed")}>{busy === "recheck" ? "Rechecking…" : "Recheck QA"}</button><details className="qa-recheck-menu"><summary aria-label="Recheck options">▾</summary><div><button disabled={Boolean(busy)} onClick={() => void recheck("changed")}>Recheck changed content</button><button disabled={Boolean(busy)} onClick={() => void recheck("full")}>Full chapter recheck</button><button disabled={Boolean(busy)} onClick={() => setResetOpen(true)}>Reset QA data…</button></div></details></div>
+        <div className="qa-recheck-split"><button className={`button${stale ? " primary" : ""}`} disabled={Boolean(busy)} onClick={() => void recheck("full")}>{busy === "recheck" ? "Rechecking…" : "Recheck QA"}</button><details className="qa-recheck-menu"><summary aria-label="Recheck options">▾</summary><div><button disabled={Boolean(busy)} onClick={() => void recheck("changed")}>Recheck changed content</button><button disabled={Boolean(busy)} onClick={() => void recheck("full")}>Full chapter recheck</button><button disabled={Boolean(busy)} onClick={() => setResetOpen(true)}>Reset QA data…</button></div></details></div>
       </div>
     </div>
     {stale && <ArtifactStatusNotice status="stale" reason={data.freshness === "missing"
@@ -4963,7 +4963,10 @@ export function QaDetail({ slug, chapter, onJob, onEditManually, onChanged, init
     {recheckSummary && <div className="naming-notice qa-recheck-summary"><b>Recheck complete{recheckSummary.fellBackToFull ? " (full recheck — changed content could not be isolated)" : ""}</b><span>{summaryParts.length ? summaryParts.join(" · ") : "No changes to findings"}{` — Needs attention: ${recheckSummary.open}`}</span></div>}
     {stale && openFindingsList.length > 0 && <p className="qa-unverified-label">{openFindingsList.length} previous open finding{openFindingsList.length === 1 ? "" : "s"} — awaiting QA verification, not yet confirmed against the current chapter.</p>}
     <div className="issues">
-      {visibleOpenFindings.map((finding) => (
+      {[false, true].map(historical => {
+        const findings = visibleOpenFindings.filter(finding => unverified(finding) === historical);
+        if (!findings.length) return null;
+        const cards = findings.map(finding => (
         <QaFindingCard
           key={finding.id}
           finding={finding}
@@ -4977,7 +4980,9 @@ export function QaDetail({ slug, chapter, onJob, onEditManually, onChanged, init
           onResolve={() => void resolveManual(finding)}
           onDismiss={() => setDismissTarget(finding)}
         />
-      ))}
+        ));
+        return historical ? <details key="historical" open={!openFindingsList.some(finding => !unverified(finding))}><summary>Historical findings awaiting verification ({findings.length})</summary>{cards}</details> : <div key="current">{cards}</div>;
+      })}
       {openFindingsList.length > 0 && visibleOpenFindings.length === 0 && (
         <Empty
           title={severityFilter === "critical" ? "No critical findings" : "No warning findings"}
@@ -5006,6 +5011,7 @@ export function QaFindingCard({ finding, busy, expanded, pendingVerification = f
   return <article>
     <div className="qa-issue-heading"><span className="qa-category">{pretty(finding.category)}</span><div className="qa-issue-badges"><Status status={finding.severity} label={finding.severity === "fail" ? "Critical" : "Warning"} /><span className="qa-origin-badge">{finding.origin === "llm" ? "AI" : "Deterministic"}</span>{finding.safeToFix === true && <span className="qa-safe-badge">Safe fix</span>}{finding.reopenedAt && <span className="qa-reviewed">Returned after fix</span>}{pendingVerification && <span className="qa-reviewed">Awaiting QA verification</span>}</div></div>
     <h3>{finding.message}</h3>
+    {pendingVerification && <p className="qa-unverified-label">Historical finding · Previous evidence below may no longer match the current text. Fix with AI checks the current text; unchanged repairs are not saved.</p>}
     <blockquote>{evidenceLong && !expanded.includes(evidenceKey) ? `${finding.evidence.slice(0, 240)}…` : finding.evidence}{evidenceLong && <button className="qa-inline-toggle" onClick={() => onToggle(evidenceKey)}>{expanded.includes(evidenceKey) ? "Show less" : "Show more"}</button>}</blockquote>
     {finding.suggestedFix && <p className="qa-suggested-fix"><b>Suggested fix</b>{finding.suggestedFix}</p>}
     <div className="qa-finding-actions"><button className="button primary" disabled={Boolean(busy)} onClick={onFixAi}>{busy === `fix:${finding.id}` ? "Repairing…" : "Fix with AI"}</button><button className="button" disabled={Boolean(busy)} onClick={onEdit}>Edit manually</button><button className="button" disabled={Boolean(busy)} onClick={onResolve}>{busy === `resolve:${finding.id}` ? "Marking…" : "Mark resolved"}</button><button className="button" disabled={Boolean(busy)} onClick={onDismiss}>Dismiss</button>{slug && finding.provenance?.entityIds?.length ? <a className="button" href={`/stories/${slug}/bible?entity=${finding.provenance.entityIds[0]}`}>Open entity{finding.provenance.entityIds.length > 1 ? ` (+${finding.provenance.entityIds.length - 1})` : ""}</a> : null}</div>

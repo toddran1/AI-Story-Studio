@@ -152,6 +152,14 @@ describe("reconcileQaState outcome matrix", () => {
   const resolveFirst = (state: ReturnType<typeof baseState>, disposition: "dismissed" | "manually_fixed") =>
     resolveQaFindingsByIndex(state, [0], disposition, "2026-09-16T13:00:00.000Z", 3);
 
+  it("retires unmatched historical findings after a full recheck", () => {
+    const state = baseState();
+    const { findings, outcome } = reconcileQaState(state, [], { chapter: 3, now: NOW, content: "Current text", evaluatedContent: "Current text", fullRecheck: true, dependencyFingerprint: "current" });
+    expect(findings[0]!.status).toBe("obsolete");
+    expect(findings[0]!.resolution?.reason).toBe("Not reported by the full chapter recheck");
+    expect(outcome.obsoleted).toBe(1);
+  });
+
   it("keeps an unmatched open finding open", () => {
     const { findings, outcome } = reconcileQaState(baseState(), [], { chapter: 3, now: NOW });
     expect(findings[0]!.status).toBe("open");
