@@ -103,7 +103,7 @@ export type QaRepairInference = { targets: QaRepairTarget[]; confidence: "high" 
 /** Infer the artifact(s) supported by finding evidence; never guess translation by default. */
 export function inferQaRepairTargets(finding: Pick<QaFinding, "category" | "message" | "evidence" | "provenance" | "origin">, texts: { translation: string; narration: string }): QaRepairInference {
   const description = `${finding.message}\n${finding.evidence}`;
-  if (/both (?:the )?translation and narration/i.test(description)) return { targets: ["translation", "narration"], confidence: "high", reason: "The finding explicitly identifies both artifacts." };
+  if (/\bboth\s+(?:the\s+)?translation\s+and\s+(?:the\s+)?narration\b/i.test(description)) return { targets: ["translation", "narration"], confidence: "high", reason: "The finding explicitly identifies both artifacts." };
   const fault = /\b(?:fault lies in|fault is in|error lies in|issue lies in)\s+(?:the\s+)?(translation|narration)\b/i.exec(description)?.[1]?.toLowerCase();
   if (fault === "translation" || fault === "narration") return { targets: [fault], confidence: "high", reason: `The finding explicitly attributes the fault to ${fault}.` };
   if (finding.category === "narrationFidelity") return { targets: ["narration"], confidence: "high", reason: "Narration Fidelity findings belong to the narration artifact." };

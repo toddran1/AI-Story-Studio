@@ -642,3 +642,25 @@ describe("Chapter QA Severity Filters UI (<QaDetail />)", () => {
     expect(headings).toEqual(["Critical Second"]);
   });
 });
+
+it("starts historical AI repair after confirmation and shows request progress", async () => {
+  const finding = makeFinding({ id: "qaf_0123456789abcdef01234567" });
+  const detail = makeDetail({ qaStale: true, state: { status: "warn", score: .8, issues: [], checks: {}, findings: [finding] }, counts: { open: 1, resolved: 0, safeFixesAvailable: 0 } });
+  const nativeConfirm = vi.fn(() => false);
+  vi.stubGlobal("confirm", nativeConfirm);
+  let finish!: (response: Response) => void;
+  const fetcher = vi.fn(() => new Promise<Response>(resolve => { finish = resolve; }));
+  vi.stubGlobal("fetch", fetcher);
+  await mount(<QaDetail slug="test-story" chapter={1} initialData={detail} onJob={() => undefined} onEditManually={() => undefined} onChanged={() => undefined} />);
+  const button = [...container!.querySelectorAll("button")].find(button => button.textContent === "Fix with AI")!;
+  await act(async () => { button.click(); });
+  expect(fetcher).not.toHaveBeenCalled();
+  nativeConfirm.mockReturnValue(true);
+  await act(async () => { button.click(); });
+  expect(nativeConfirm).toHaveBeenCalledTimes(2);
+  expect(fetcher).toHaveBeenCalledWith(expect.stringContaining(`/qa/findings/${finding.id}/fix-ai`), expect.objectContaining({ method: "POST" }));
+  expect(button.textContent).toBe("Repairing…");
+  await act(async () => { finish(new Response(JSON.stringify({ error: "Test repair failure" }), { status: 500, headers: { "content-type": "application/json" } })); });
+  expect(container!.textContent).toContain("Test repair failure");
+  expect(button.disabled).toBe(false);
+});

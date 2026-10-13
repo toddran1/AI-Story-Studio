@@ -54,6 +54,9 @@ describe("QA hardening", () => {
 
   it("infers repair artifact from evidence and keeps ambiguous comparison findings unresolved", () => {
     const common = { category: "dialogue" as const, message: "The wording is changed.", provenance: undefined, origin: "llm" as const };
+    for (const message of ["The fault lies in both the TRANSLATION and the NARRATION: they render the group’s self-designation incorrectly.", "Both translation and narration have the wrong term.", "Both the translation and narration have the wrong term."]) {
+      expect(inferQaRepairTargets({ ...common, message, evidence: "" }, { translation: "", narration: "" }).targets).toEqual(["translation", "narration"]);
+    }
     expect(inferQaRepairTargets({ ...common, evidence: "Translation contains a unique line here." }, { translation: "A unique line here.", narration: "Other natural words." }).targets).toEqual(["translation"]);
     expect(inferQaRepairTargets({ ...common, evidence: "Narration contains a unique spoken line here." }, { translation: "Different words entirely.", narration: "A unique spoken line here." }).targets).toEqual(["narration"]);
     expect(inferQaRepairTargets({ ...common, evidence: "Translation/narration comparison: meaning differs." }, { translation: "One version.", narration: "Another version." }).confidence).toBe("ambiguous");
