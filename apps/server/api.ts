@@ -752,6 +752,8 @@ export function createApiHandler(operations: StudioOperations) {
       if (qaRecheckMatch && request.method === "POST") return send(response, 202, operations.startQaRecheck(qaRecheckMatch[1]!, chapterParam(qaRecheckMatch[2]!), await jsonBody(request)));
       const previewMatch = /^\/api\/stories\/([a-z0-9-]+)\/jobs\/preview$/.exec(url.pathname);
       if (previewMatch && request.method === "POST") return send(response, 202, operations.startPreview(previewMatch[1]!, await jsonBody(request)));
+      const audioRegenerationMatch = /^\/api\/stories\/([a-z0-9-]+)\/jobs\/audio-regeneration$/.exec(url.pathname);
+      if (audioRegenerationMatch && request.method === "POST") return send(response, 202, operations.startAudioRegeneration(audioRegenerationMatch[1]!, await jsonBody(request)));
       const audioJobMatch = /^\/api\/stories\/([a-z0-9-]+)\/jobs\/audio$/.exec(url.pathname);
       if (audioJobMatch && request.method === "POST") return send(response, 202, operations.startAudio(audioJobMatch[1]!, await jsonBody(request)));
       const audiobookJobMatch = /^\/api\/stories\/([a-z0-9-]+)\/jobs\/audiobook$/.exec(url.pathname);

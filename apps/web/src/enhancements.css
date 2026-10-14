@@ -313,3 +313,44 @@
 .video-summary-columns li { padding: .7rem 0; border-bottom: 1px solid var(--border, #333); }
 .video-summary-columns li > div { display: flex; gap: .4rem; margin-top: .4rem; }
 @media (max-width: 720px) { .video-summary-columns { grid-template-columns: 1fr; } }
+
+/* Speech repair desk: chapter ledger with a persistent take list. */
+.audio-regeneration { --regen-border: #343443; --regen-paper: #1b1b25; --regen-ink: #dedcea; --regen-cue: #aaa0f5; }
+.regen-layout { display: grid; grid-template-columns: minmax(0,1fr) 330px; gap: 24px; align-items: start; }
+.regen-tools { display: flex; gap: 10px; align-items: end; flex-wrap: wrap; }
+.regen-tools label { display: grid; gap: 7px; flex: 1; min-width: 200px; }
+.regen-pager { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 18px 0; font-size: 12px; color: var(--regen-ink); }
+.regen-chapter { border: 1px solid var(--regen-border); border-left: 3px solid transparent; background: var(--regen-paper); margin-bottom: 10px; border-radius: 8px; overflow: hidden; }
+.regen-chapter.selected { border-left-color: var(--regen-cue); }
+.regen-chapter-head { display: flex; align-items: center; justify-content: space-between; gap: 15px; padding: 16px; }
+.regen-chapter-head label { display: flex; gap: 12px; align-items: center; min-width: 0; }
+.regen-chapter small, .regen-selection li small { display: block; color: #aaa8bb; margin-top: 5px; }
+.regen-number { font: 16px ui-monospace, monospace; color: var(--regen-cue); }
+.audio-regeneration input[type=checkbox] { width: 16px; height: 16px; flex-shrink: 0; accent-color: var(--regen-cue); }
+.regen-segments { padding: 16px; border-top: 1px solid var(--regen-border); }
+.regen-segment { margin-top: 12px; border-top: 1px solid var(--regen-border); padding: 12px 0; }
+.regen-segment summary { display: flex; align-items: center; justify-content: space-between; gap: 14px; cursor: pointer; }
+.regen-segment label { display: inline-flex; align-items: center; gap: 10px; }
+.regen-segment summary > span { color: #c4aa73; font-size: 12px; }
+.regen-segment audio { width: 100%; margin-top: 14px; }
+.regen-script { white-space: pre-wrap; max-height: 220px; overflow: auto; font-size: 13px; line-height: 1.7; }
+.regen-selection { position: sticky; top: 100px; padding: 22px; background: #22212f; border: 1px solid var(--regen-border); border-top: 3px solid var(--regen-cue); border-radius: 8px; }
+.regen-selection h3 { margin: 10px 0; }
+.regen-selection p { font-size: 13px; line-height: 1.6; }
+.regen-selection ol { list-style: none; padding: 0; max-height: 260px; overflow: auto; }
+.regen-selection li { display: flex; gap: 12px; align-items: center; justify-content: space-between; padding: 10px 0; border-top: 1px solid var(--regen-border); }
+.regen-selection > .primary { width: 100%; margin: 12px 0; }
+.regen-selection > small { display: block; color: #b1afc1; }
+.regen-selection > label { display: flex; gap: 10px; align-items: center; }
+.regen-error { color: #f2a5ad; background: #351f29; padding: 12px; border-radius: 5px; }
+.regen-run { margin-top: 20px; border-top: 1px solid var(--regen-border); padding-top: 16px; }
+.regen-run progress { width: 100%; accent-color: var(--regen-cue); }
+@media(max-width: 1000px) { .regen-layout { grid-template-columns: minmax(0,1fr); } .regen-selection { position: static; } }
+@media(max-width: 600px) { .regen-chapter-head { flex-wrap: wrap; } .regen-pager { font-size: 10px; } .regen-tools > button { flex: 1; } }
+.audio-workspace-tabs { display: flex; gap: 6px; border-bottom: 1px solid #343443; margin-bottom: 26px; padding-bottom: 8px; }
+.audio-workspace-tabs > button { appearance: none; background: transparent; border: 1px solid transparent; color: #aba9bd; padding: 10px 16px; border-radius: 6px; font: inherit; font-size: 13px; cursor: pointer; }
+.audio-workspace-tabs > button[aria-selected=true] { color: #e7e3ff; border-color: #635e91; background: #2b283e; }
+.audio-regeneration .regen-tools input { width: 100%; box-sizing: border-box; padding: 11px 12px; background: #111117; color: #dedcea; border: 1px solid #414052; border-radius: 6px; font: inherit; }
+.regen-pager > label { display: inline-flex; align-items: center; gap: 6px; }
+.regen-pager input { width: 54px; padding: 6px; background: #111117; color: #dedcea; border: 1px solid #414052; border-radius: 4px; }
+.audio-workspace-tabs button:focus-visible, .audio-regeneration input:focus-visible { outline: 2px solid #aaa0f5; outline-offset: 3px; }

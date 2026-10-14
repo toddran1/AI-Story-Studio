@@ -1,3 +1,4 @@
+import { audioRegenerationInputSchema } from "../../src/tts/regeneration-selection.js";
 import { requireCurrentOriginal } from "../../src/source/current-original.js";
 import { visualRegenerationInputSchema, visualSceneSelectionSchema, visualSceneKey } from "../../src/visual-canon/regeneration-selection.js";
 import { pricingFor, calculateCost } from "../../src/cost/pricing.js";
@@ -1843,6 +1844,13 @@ export class StudioOperations {
   startRegenerateChapterTtsSegment(slug: string, chapter: number, segment: number) {
     slugSchema.parse(slug); chapterParamSchema.parse(chapter); segmentParamSchema.parse(segment);
     return this.jobs.create("ttsSegmentRegenerate", slug, async () => withStoryLock(this.root, slug, "TTS segment regeneration", async () => {
+      const quality = await this.regenerateSingleAudioSegment(slug, chapter, segment);
+      await recordActivity(this.root, slug, "tts.quality.segment_regenerated", `Regenerated TTS segment ${segment} for Chapter ${chapter}`);
+      return { quality };
+    }));
+  }
+
+  private async regenerateSingleAudioSegment(slug: string, chapter: number, segment: number) {
       const story = await loadStory(storyPaths(this.root, slug, chapter).storyConfig);
       const config = story.pipeline.tts;
       const entities = await loadPronunciationEntities(this.root, slug);
@@ -1855,8 +1863,57 @@ export class StudioOperations {
         transcriber: this.speechTranscriber(),
       });
       const quality = await withUsageScope({ story: slug, chapter, stage: "tts" }, () => regenerateStoredChapterTtsSegment({ root: this.root, story, chapter, segment: segment - 1, provider, maxRetries: 0 }));
-      await recordActivity(this.root, slug, "tts.quality.segment_regenerated", `Regenerated TTS segment ${segment} for Chapter ${chapter}`);
-      return { quality };
+      return quality;
+  }
+
+  startAudioRegeneration(slug: string, raw: unknown) {
+    slugSchema.parse(slug); const input = audioRegenerationInputSchema.parse(raw);
+    return this.jobs.create("audioRegeneration", slug, async (control) => withStoryLock(this.root, slug, "bulk audio regeneration", async () => {
+      const story = await loadStory(storyPaths(this.root, slug, 1).storyConfig);
+      const fullChapters = input.selections.filter(row => !row.segments).map(row => row.chapter);
+      const sources = new Map(fullChapters.length ? selectChapterNumbers((await loadImportedChapters(this.root, slug)).chapters, fullChapters).map(row => [row.chapter, row]) : []);
+      const plans = new Map<number, Awaited<ReturnType<typeof planStageExecution>>>();
+      // Validate the entire selection before issuing any paid request.
+      for (const row of input.selections) {
+        if (row.segments) {
+          const quality = await loadChapterTtsQuality(this.root, slug, row.chapter);
+          for (const segment of row.segments) {
+            if (!quality?.segments.some(item => item.index === segment - 1) || !await exists(join(storyPaths(this.root, slug, row.chapter).segments, `${String(segment).padStart(4, "0")}.mp3`))) throw new ConfigurationError(`Chapter ${row.chapter}, segment ${segment} is unavailable. Refresh the selection.`);
+          }
+        } else {
+          const plan = await planStageExecution({ root: this.root, story: slug, chapter: row.chapter, selectedStages: ["tts"], mode: "selected", force: true, executionPolicy: "chapter-stage", storyConfig: story });
+          if (plan.blockedStages.length) throw new ConfigurationError(`Chapter ${row.chapter} cannot regenerate TTS: ${plan.entries.filter(entry => entry.action === "blocked").map(entry => entry.reason).join("; ")}`);
+          plans.set(row.chapter, plan);
+        }
+      }
+      const shutdown = new ShutdownController(); control.setPause(() => shutdown.request());
+      const results: Array<{ chapter: number; segment?: number; status: "completed" | "failed"; error?: string }> = [];
+      const total = input.selections.reduce((sum, row) => sum + (row.segments?.length ?? 1), 0); let completed = 0;
+      for (const row of input.selections) {
+        if (shutdown.isRequested) break;
+        let changed = false;
+        for (const segment of row.segments ?? [undefined]) {
+          if (shutdown.isRequested) break;
+          control.update({ chapter: row.chapter, segment, completed, total, phase: "generating" });
+          try {
+            if (segment !== undefined) await this.regenerateSingleAudioSegment(slug, row.chapter, segment);
+            else {
+              const source = sources.get(row.chapter)!;
+              await executeStagePlan({ root: this.root, story, chapter: row.chapter, inputPath: source.path, source: source.source, plan: plans.get(row.chapter)!, runtime: { pipeline: this.pipeline, alignment: { config: this.alignConfig, engine: this.aligner }, scenePlanner: this.scenePlanner ?? this.runtime.router.forStage(story.pipeline.scenePlanner), image: this.image, video: this.video } });
+            }
+            changed = true; results.push({ chapter: row.chapter, segment, status: "completed" });
+          } catch (error) { results.push({ chapter: row.chapter, segment, status: "failed", error: createErrorDiagnostic(error).summary }); }
+          completed++; control.update({ chapter: row.chapter, segment, completed, total, phase: "generated", results });
+        }
+        if (changed && input.rebuildMasters) {
+          control.update({ chapter: row.chapter, completed, total, phase: "mastering", results });
+          try { await masterStoredChapter({ root: this.root, story, chapter: row.chapter, processor: this.audio, force: true }); }
+          catch (error) { results.push({ chapter: row.chapter, status: "failed", error: `Master rebuild: ${createErrorDiagnostic(error).summary}` }); }
+        }
+        await invalidateChapterStatusDerivedReads(this.root, slug);
+      }
+      invalidateCatalogCache(this.root, slug);
+      return { status: shutdown.isRequested ? "paused" : "completed", results, completed, total };
     }));
   }
 

@@ -694,6 +694,24 @@ describe("tts quality server operations", () => {
     await operations.close();
   });
 
+  it("bulk segment regeneration runs sorted selections once each and leaves mastering pending", async () => {
+    const { story, paths, operations, jobs, inner } = await endpointFixture();
+    const job = await waitForJob(jobs, operations.startAudioRegeneration(story.slug, { selections: [{ chapter: 1, segments: [2, 1] }], rebuildMasters: false }).id);
+    expect(job.status).toBe("completed");
+    expect(inner.calls).toHaveLength(2);
+    expect(inner.calls.every(call => call.singleAttempt)).toBe(true);
+    expect((job.result as any).results.map((row: any) => row.segment)).toEqual([1,2]);
+    const meta = chapterSchema.parse(JSON.parse(await readFile(paths.chapterMeta, "utf8")));
+    expect(meta.stages.audioMastering.status).toBe("pending");
+    await operations.close();
+  });
+  it("bulk preflight rejects missing segments before making a TTS request", async () => {
+    const { story, operations, jobs, inner } = await endpointFixture();
+    const job = await waitForJob(jobs, operations.startAudioRegeneration(story.slug, { selections: [{ chapter: 1, segments: [1, 99] }], rebuildMasters: false }).id);
+    expect(job.status).toBe("failed"); expect(inner.calls).toHaveLength(0);
+    await operations.close();
+  });
+
   it("accept endpoint records manual acceptance without claiming a pass", async () => {
     const { story, operations } = await endpointFixture();
     const response = await operations.acceptChapterTtsSegment(story.slug, 1, 2, { reason: "reviewed by ear" });
