@@ -154,7 +154,7 @@ describe("QA authorized narration naming", () => {
   });
 
   it("records the bumped prompt version", () => {
-    expect(QA_PROMPT_VERSION).toBe("12");
+    expect(QA_PROMPT_VERSION).toBe("13-silent-character-reactions");
   });
 
   it("documents the output contract, severity rubric, and repair-routing phrasing", () => {

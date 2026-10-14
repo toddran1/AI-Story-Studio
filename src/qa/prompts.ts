@@ -1,7 +1,8 @@
+import { silentReactionGuidance } from "../narration/silent-reactions.js";
 import type { NarrationProfanityMode } from "../domain/story.js";
 import type { CanonicalEntity, StoryBible } from "../domain/story-bible.js";
 
-export const QA_PROMPT_VERSION = "12";
+export const QA_PROMPT_VERSION = "13-silent-character-reactions";
 
 const contextualNamingClarification = `For ai_contextual localizedNaming, context chooses between the configured fullName and shortName. The canonical/original name is not a third authorized narration form unless it exactly matches a configured form or an explicit no_override alias rule applies. Check dialogue as well as prose; a canonical name left in a character's spoken line is a confirmed names-category FAIL when the configured localized forms differ. Manual localizedNaming notes can authorize other forms and require case-by-case review.`;
 
@@ -21,6 +22,8 @@ export function previousQaFindingsSection(compactFindings: string): string {
 }
 
 export const qaInstructions = `Act as a strict bilingual fiction quality-control editor. Compare the complete source, translation, and narration against the established Story Bible context. Detect substantial omissions or shortening; inconsistent names, places, abilities, factions, classes, ranks, items, and system terms; changed numeric facts; dropped dialogue or merged speaker turns; terminology drift; contradictions with established facts; and narration edits that alter plot, facts, relationships, point of view, or dialogue meaning. Judge omissions against a length tolerance: light condensation of a few percent is normal narration polish; report omissions only when whole sentences, lines of dialogue, events, or facts are missing, or when the narration loses materially more content than the translation (for example more than roughly ten percent).
+
+${silentReactionGuidance}
 
 DIALOGUE AND FORMATTING TOLERANCE: Evaluate speech content, speaker attribution, sequence, and meaningful pauses rather than matching visual line breaks, paragraph counts, or quotation-block counts. Consecutive lines from the same speaker may be regrouped into one quotation or paragraph, and speech may be attached to its attribution sentence, when every utterance retains its meaning and order and no intervening action, speaker change, or deliberate interruption is lost. These harmless presentation changes are authorized audiobook polish: do not report them as dialogue, narrationFidelity, completeness, or formatting issues, do not lower the score for them, and do not label them warn or fail. For example, the same speaker's separate quotations "Cut the crap! The earlier we leave, the earlier we finish!" and "If we leave too late, I'm afraid we'll run into unnecessary trouble!" may become one continuous quotation with both sentences intact. Similarly, the same speaker's "Didn't you say that with you around... there wouldn't be any issues?", "Why would there still be trouble?", and "Are you messing with me?" may form one quotation retaining all three questions. A different paragraph layout alone is not evidence of lost pacing or fidelity. Still flag dropped or materially changed speech, merged speaker turns that misattribute or obscure who is speaking, reordered exchanges, narration/action swallowed into dialogue, missing meaningful interruptions or pauses, unbalanced quotation marks, and punctuation damage that changes meaning or makes speech boundaries unclear. Use the source and surrounding context to verify speaker turns; do not infer different speakers solely from separate quotation blocks. Any formatting finding must identify the concrete reading, meaning, or speaker-boundary defect beyond cosmetic layout.
 

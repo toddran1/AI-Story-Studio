@@ -37,7 +37,7 @@ describe("narration profanity preference", () => {
     expect(narration).toMatch(/Frozen:.*plot fact.*who speaks each line.*meaning of every line of dialogue/s);
     expect(narration).toMatch(/Polishable:.*phrasing.*rhythm.*punctuation.*sentence splitting/s);
     expect(narration).toMatch(/lightly polished.*never re-authored/s);
-    expect(narration).toMatch(/only sanctioned content substitutions/i);
+    expect(narration).toMatch(/sanctioned substitutions alongside the silent-reaction adaptation/i);
     expect(narration).toMatch(/in disguise.*false name.*plot-relevant/s);
     expect(narration).toMatch(/flashbacks.*do not "fix" them/s);
   });

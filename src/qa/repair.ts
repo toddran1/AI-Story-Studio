@@ -1,3 +1,4 @@
+import { silentReactionGuidance } from "../narration/silent-reactions.js";
 import { QaResult, QaState } from "../domain/qa.js";
 import { CanonicalEntity, storyBibleSchema } from "../domain/story-bible.js";
 import { StageModelConfig } from "../domain/provider.js";
@@ -154,6 +155,7 @@ export async function repairQaText(provider: LLMProvider, config: StageModelConf
     "Preserve every unaffected detail, paragraph, event, number, proper name, and line of dialogue.",
     "Make the smallest changes necessary to resolve every supplied QA finding. Never shorten the chapter into a summary.",
     "If a supplied finding is wrong, already resolved, or contradicts the source, make no change for that finding rather than inventing changes.",
+    input.target === "narration" ? silentReactionGuidance : "",
     "System panels, status windows, stat blocks, and game interfaces must remain verbatim, character for character; never fill in, estimate, round, or normalize numeric values.",
     input.target === "translation"
       ? `Keep the result faithful to the ${input.sourceLanguage} source and natural in ${input.outputLanguage}.`
