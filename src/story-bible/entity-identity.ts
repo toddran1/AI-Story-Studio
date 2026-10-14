@@ -274,7 +274,8 @@ export function matchesSuppressedIdentity(
 function uniqueIdentityNames(names: string[]): string[] {
   const seen = new Set<string>();
   return names.filter((name) => {
-    const key = normalizeEntityName(name);
+    // Preserve distinct written aliases used by exact narration/pronunciation matching.
+    const key = name.normalize("NFKC").trim().replace(/\s+/gu, " ").toLocaleLowerCase();
     if (!key || seen.has(key)) return false;
     seen.add(key);
     return true;

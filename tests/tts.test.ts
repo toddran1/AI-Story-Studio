@@ -6,6 +6,16 @@ import { normalizeSpeechText } from "../src/tts/speech-normalization.js";
 import { TTSRequest } from "../src/tts/types.js";
 
 describe("Fish TTS", () => {
+  it.each(["network", "rate_limit"])("manual single-attempt synthesis does not retry %s failures", async (failure) => {
+    const fetcher = vi.fn(async () => {
+      if (failure === "network") throw Object.assign(new Error("connection reset"), { code: "ECONNRESET" });
+      return new Response("rate limited", { status: 429 });
+    });
+    const provider = new FishAudioProvider("test-key", fetcher as typeof fetch);
+    await expect(provider.synthesize({ text: "A single manual attempt.", exactChunk: true, singleAttempt: true, model: "s2-pro", speed: 1, format: "mp3", sampleRate: 44100, bitrate: 128, normalize: true, maxCharsPerRequest: 500 })).rejects.toThrow();
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+
   it.each([
     ["5,000 EXP", "five thousand E X P"],
     ["5000 EXP", "five thousand E X P"],
@@ -139,7 +149,7 @@ describe("Fish TTS", () => {
     await provider.synthesize({ text: "**Important:** *whisper this.* [sad] 2 * 2", model: "s2.1-pro", speed: 1, format: "mp3", sampleRate: 44100, bitrate: 128, normalize: true, maxCharsPerRequest: 500 });
     const body = JSON.parse(String((fetcher.mock.calls[0]?.[1] as RequestInit).body));
     expect(body.text).toBe("Important: whisper this. [sad] 2 * 2");
-    expect(provider.inputNormalizationVersion).toBe("fish-speech-normalization-v32-leading-hehe-omission");
+    expect(provider.inputNormalizationVersion).toBe("fish-speech-normalization-v33-calm-before-narration");
   });
 
   it("does not turn profanity into the literal word bleep inside Fish", async () => {
@@ -176,7 +186,7 @@ describe("Fish TTS", () => {
     await provider.synthesize({ text: "The guard said, \"Stop.\" Then he left.", model: "s2.1-pro-free", referenceId: "narrator", voiceMode: "same-voice-dialogue", deliveryIntensity: "restrained", speed: 1, format: "mp3", sampleRate: 44100, bitrate: 128, normalize: true, maxCharsPerRequest: 500 });
     const body = JSON.parse(String((fetcher.mock.calls[0]?.[1] as RequestInit).body));
     expect(body.reference_id).toBe("narrator");
-    expect(body.text).toBe("The guard said, [soft] \"Stop.\"[calm] Then he left.");
+    expect(body.text).toBe('The guard said, [soft] "Stop." [calm] Then he left.');
     expect(body.text).not.toContain("<|speaker:");
   });
 

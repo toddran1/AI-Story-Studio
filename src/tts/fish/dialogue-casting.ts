@@ -40,15 +40,23 @@ export function castQuotedDialogue(text: string): string {
 export function directQuotedDialogue(text: string): string {
   const openToClose: Record<string, string> = { "\"": "\"", "“": "”", "\u300c": "\u300d", "\u300e": "\u300f", "\u00ab": "\u00bb" };
   let output = "";
+  let returnToNarration = false;
 
   for (let index = 0; index < text.length;) {
     const close = openToClose[text[index]!];
     if (!close) {
+      if (returnToNarration && /[\p{L}\p{N}]/u.test(text[index]!)) {
+        output += "[calm] "; returnToNarration = false;
+      } else if (returnToNarration && text[index] === "[") {
+        // A deliberate cue already directs the following text.
+        returnToNarration = false;
+      }
       output += text[index]!;
       index += 1;
       continue;
     }
 
+    returnToNarration = false;
     const closeIndex = text.indexOf(close, index + 1);
     if (closeIndex < 0) {
       output += text.slice(index);
@@ -56,10 +64,11 @@ export function directQuotedDialogue(text: string): string {
     }
 
     // Preserve a deliberate emotion cue already placed immediately before a
-    // quote. Otherwise use a restrained direction and reset after the line.
+    // quote. Otherwise use a restrained direction; cue narration only when it resumes.
     const alreadyDirected = /\[[a-z][a-z -]*\]\s*$/i.test(output);
     if (!alreadyDirected) output += "[soft] ";
-    output += `${text.slice(index, closeIndex + 1)}[calm]`;
+    output += text.slice(index, closeIndex + 1);
+    returnToNarration = true;
     index = closeIndex + 1;
   }
 

@@ -1040,3 +1040,9 @@ describe("Story Bible narration rendering identity", () => {
     expect(index.resolve(["World Mirror"], { expectedType: "concept" }).status).toBe("none");
   });
 });
+
+it("preserves spaced identity aliases alongside compact spellings", () => {
+  const entity = established().canonicalEntities[0]!;
+  const view = effectiveEntityIdentity(entity, { aliases: ["Xiaowei", "Xiao wei", "XIAO WEI", "Sister Qiao"] });
+  expect(view.aliases).toEqual(["Xiaowei", "Xiao wei", "Sister Qiao"]);
+});

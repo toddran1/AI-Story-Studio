@@ -622,6 +622,25 @@ export function ChapterPage({
     }
   };
 
+  const [masterRevision, setMasterRevision] = useState(0);
+  const rebuildAudioMaster = async () => {
+    if (working) return;
+    try {
+      setError(""); setSaved(""); setWorking("audioMastering");
+      const job = await post<Job>(`/stories/${slug}/jobs/audio`, { from: chapter, to: chapter, force: true });
+      onJob(job); watcher.current?.();
+      watcher.current = watchJob(job.id, async (next) => {
+        onJob(next);
+        if (isTerminalJob(next)) {
+          setWorking("");
+          if (next.status === "completed") { setMasterRevision(Date.now()); setSaved("Audio master rebuilt. Playback and downloads now use the updated chapter audio."); }
+          else if (next.status === "failed") setError(next.error ?? "Audio mastering failed");
+          await load();
+        }
+      }, (value) => { setWorking(""); setError(message(value)); });
+    } catch (value) { setWorking(""); setError(message(value)); }
+  };
+
   const runStage = async (stage: StageName) => {
     if (working) return;
     try {
@@ -860,7 +879,8 @@ export function ChapterPage({
       {tab === "audio" && <>
         {data.audioStale && <ArtifactStatusNotice status="stale" reason="This master was rendered from older inputs or settings. You can still listen to it, but it will not be treated as current until it is regenerated or marked current." />}
         {data.metadata?.stages?.tts?.usage && <p className="field-note">Fish requests: {data.metadata.stages.tts.usage.requests ?? "—"} · Chunks generated: {data.metadata.stages.tts.usage.chunks ?? "—"} · Automatic retries: {data.metadata.stages.tts.usage.quality?.retried ?? 0}{data.metadata.stages.tts.usage.quality ? ` · Quality: ${pretty(data.metadata.stages.tts.usage.quality.status)}` : " · Post-generation verification: not run"}</p>}
-        <AudioDeck src={data.audioUrl} title={`Chapter ${chapter} master`} />
+        <div className="tts-quality-summary"><button type="button" className="button primary" disabled={Boolean(working)} onClick={() => void rebuildAudioMaster()}>{working === "audioMastering" ? "Rebuilding master…" : "Rebuild audio master"}</button><span className="field-note">Uses saved TTS segments to update the full chapter audio and download. Runs locally without generating new speech.</span></div>
+        <AudioDeck key={`${chapter}-${masterRevision}`} src={data.audioUrl && masterRevision ? `${data.audioUrl}${data.audioUrl.includes("?") ? "&" : "?"}v=${masterRevision}` : data.audioUrl} title={`Chapter ${chapter} master`} />
         <TtsQualityPanel slug={slug} chapter={chapter} onJob={onJob} onChanged={() => void load()} />
       </>}
       {tab === "subtitles" && <SubtitleWorkspace data={data} cues={cues} working={working} onCue={updateCue} onAlign={(estimated) => void runSubtitleJob("alignment", estimated)} onGenerate={(estimated) => void runSubtitleJob("subtitles", estimated)} onSave={() => void saveCues()} onReset={() => void resetCues()} />}
@@ -929,7 +949,7 @@ export function TtsSegmentRow({ slug, chapter, segment, busy, onRegenerate, onAc
   const actions = <div className="tts-segment-actions">
     <audio controls preload="none" src={chapterTtsSegmentAudioUrl(slug, chapter, number)} aria-label={`Play segment ${number}`} />
     {segment.status !== "verified" && segment.status !== "manually_accepted" && <>
-      <button type="button" className="button" disabled={busy} onClick={onRegenerate}>{busy ? "Working…" : "Regenerate segment"}</button>
+      <button type="button" className="button" disabled={busy} title="Generates once with no automatic retries; review the result before rebuilding the master." onClick={onRegenerate}>{busy ? "Working…" : "Regenerate segment"}</button>
       <button type="button" className="button" disabled={busy} onClick={onAccept}>Accept anyway</button>
     </>}
   </div>;

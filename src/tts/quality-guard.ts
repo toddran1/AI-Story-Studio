@@ -390,7 +390,7 @@ export class QualityGuardTTSProvider implements TTSProvider {
   async synthesize(request: TTSRequest): Promise<TTSResult> {
     const result = await this.inner.synthesize(request);
     if (request.qualityGuard === false || !result.segmentTexts || result.segmentTexts.length !== result.segments.length) return result;
-    const maxAttempts = 1 + Math.max(0, Math.min(5, this.options.maxRetries));
+    const maxAttempts = request.singleAttempt ? 1 : 1 + Math.max(0, Math.min(5, this.options.maxRetries));
     const available = await this.transcriberAvailable();
     const directory = await mkdtemp(join(tmpdir(), "ai-story-tts-quality-"));
     const onQualityProgress = request.onQualityProgress ?? this.options.onQualityProgress;

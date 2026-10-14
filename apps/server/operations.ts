@@ -1849,12 +1849,12 @@ export class StudioOperations {
       const { provider } = createEffectiveTtsProvider({
         baseProvider: this.tts.forName(config.provider),
         pronunciationEntities: entities,
-        qualityMode: "auto_repair",
-        maxQualityRetries: config.maxQualityRetries,
+        qualityMode: "verify",
+        maxQualityRetries: 0,
         language: story.outputLanguage,
         transcriber: this.speechTranscriber(),
       });
-      const quality = await withUsageScope({ story: slug, chapter, stage: "tts" }, () => regenerateStoredChapterTtsSegment({ root: this.root, story, chapter, segment: segment - 1, provider, maxRetries: config.maxQualityRetries }));
+      const quality = await withUsageScope({ story: slug, chapter, stage: "tts" }, () => regenerateStoredChapterTtsSegment({ root: this.root, story, chapter, segment: segment - 1, provider, maxRetries: 0 }));
       await recordActivity(this.root, slug, "tts.quality.segment_regenerated", `Regenerated TTS segment ${segment} for Chapter ${chapter}`);
       return { quality };
     }));

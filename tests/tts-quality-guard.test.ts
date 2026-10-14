@@ -576,6 +576,17 @@ describe("stored chapter quality service", () => {
     expect(meta.stages.tts.usage?.quality?.manuallyAccepted).toBe(1);
   });
 
+  it("manual regeneration does not retry a poor quality result", async () => {
+    const { root, story } = await fixture();
+    const transcriber = new FakeTranscriber(() => say("unexpected gibberish instead of the intended narration"));
+    const inner = new ScriptedTTS((req) => singleSegment(req.text, "cc"));
+    const quality = await regenerateStoredChapterTtsSegment({ root, story, chapter: 1, segment: 1, provider: guard(inner, transcriber), maxRetries: 2 });
+    expect(inner.calls).toHaveLength(1);
+    expect(inner.calls[0]).toMatchObject({ singleAttempt: true, providerQualityGuard: false });
+    expect(quality.segments[1]?.status).toBe("needs_review");
+    expect(quality.segments[1]?.attempts).toHaveLength(1);
+  });
+
   it("regenerates exactly one segment, replaces its audio, and stales mastering downstream", async () => {
     const { root, story, paths } = await fixture();
     const transcriber = new FakeTranscriber(() => say(bad));

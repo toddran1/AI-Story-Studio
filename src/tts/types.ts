@@ -33,6 +33,8 @@ export type TTSRequest = {
   deliveryIntensity?: "none" | "restrained" | "expressive";
   /** Used by the explicit verification wrapper. Ordinary production omits it. */
   qualityGuard?: boolean;
+  /** Manual segment regeneration: one synthesis attempt, including transport and quality checks. */
+  singleAttempt?: boolean;
   /** Enables provider-native quality assistance when supported (e.g. Fish features: ["quality-guard"]). */
   providerQualityGuard?: boolean;
   bleepStrongProfanity?: boolean; speed: number; format: "mp3";

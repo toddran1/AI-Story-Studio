@@ -53,8 +53,8 @@ export class FishAudioProvider implements TTSProvider {
     } = {},
   ) {
     this.inputNormalizationVersion = speechOptions.tskRendering === "direction"
-      ? "fish-speech-normalization-v32-leading-hehe-omission-tsk-direction"
-      : "fish-speech-normalization-v32-leading-hehe-omission";
+      ? "fish-speech-normalization-v33-calm-before-narration-tsk-direction"
+      : "fish-speech-normalization-v33-calm-before-narration";
   }
 
   resolveReferenceId(referenceId?: string): string | undefined {
@@ -85,9 +85,12 @@ export class FishAudioProvider implements TTSProvider {
           const speechText = normalizeFishSpeechText(adaptPronunciationText(request.text, request.pronunciation ?? [], this.pronunciationCapabilities), request.model, this.speechOptions);
           if (!speechText) throw new ProviderError("Fish Audio narration is empty after speech normalization");
           const castText = multiSpeaker ? castQuotedDialogue(speechText) : directedSingleVoice ? directQuotedDialogue(speechText) : speechText;
-          const prepared = multiSpeaker
+          let prepared = multiSpeaker
             ? prepareFishMultiSpeakerChunks(castText, request.maxCharsPerRequest)
             : splitForTTS(castText, request.maxCharsPerRequest);
+          // A split can leave the narration cue at the end of a request.
+          // Remove only orphan trailing calm cues; preserve normal grouping.
+          if (directedSingleVoice) prepared = prepared.map(chunk => chunk.replace(/(?:\s*\[calm\]\s*)+$/gi, "").trim()).filter(Boolean);
           if (prepared.some((chunk) => chunk.length > request.maxCharsPerRequest)) throw new ProviderError("Fish Audio chunk exceeds the configured character limit after speaker formatting");
           return prepared;
         })();
@@ -179,7 +182,7 @@ export class FishAudioProvider implements TTSProvider {
       safeProgress(request.onChunkProgress, { currentChunk, totalChunks, status: "started" });
       logger.debug({ event: "tts.fish.segment_input", segment: currentChunk, characters: text.length });
 
-      for (let attempt = 1; attempt <= 3; attempt++) {
+      for (let attempt = 1; attempt <= (request.singleAttempt ? 1 : 3); attempt++) {
         let response: Response | undefined;
         let fetchError: unknown;
         try {
@@ -205,7 +208,7 @@ export class FishAudioProvider implements TTSProvider {
 
         if (fetchError !== undefined) {
           const isTransient = isTransientError(fetchError);
-          if (isTransient && attempt < 3) {
+          if (isTransient && !request.singleAttempt && attempt < 3) {
             const retryAfterMs = findRetryAfterMs(fetchError);
             const delay = this.speechOptions.retryDelayMs !== undefined
               ? this.speechOptions.retryDelayMs
@@ -248,7 +251,7 @@ export class FishAudioProvider implements TTSProvider {
           const rawDetail = (await resp.text()).slice(0, 1000);
           const status = resp.status;
           const isTransient = isTransientError({ status, headers: resp.headers, message: rawDetail });
-          if (isTransient && attempt < 3) {
+          if (isTransient && !request.singleAttempt && attempt < 3) {
             const retryAfterMs = findRetryAfterMs({ headers: resp.headers, message: rawDetail });
             const delay = this.speechOptions.retryDelayMs !== undefined
               ? this.speechOptions.retryDelayMs
