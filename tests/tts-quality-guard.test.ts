@@ -406,16 +406,20 @@ describe("tts quality guard verification", () => {
 describe("tts quality settings and fingerprints", () => {
   it("defaults maxCharsPerRequest to 1750 for new configuration only", () => {
     expect(fishTtsStageConfigSchema.parse({ provider: "fish", model: "s2-pro" }).maxCharsPerRequest).toBe(1750);
-    expect(fishTtsStageConfigSchema.parse({ provider: "fish", model: "s2-pro" }).maxQualityRetries).toBe(2);
+    expect(fishTtsStageConfigSchema.parse({ provider: "fish", model: "s2-pro" }).maxQualityRetries).toBe(1);
     const env = loadEnvironment({});
     expect(env.FISH_AUDIO_MAX_CHARS).toBe(1750);
     expect(defaultStory("new-story", env).pipeline.tts.maxCharsPerRequest).toBe(1750);
   });
 
+  it("loads older saved retry settings without rewriting them; preserves zero", () => {
+    for (const maxQualityRetries of [2, 5]) expect(fishTtsStageConfigSchema.parse({ provider: "fish", model: "s2-pro", maxQualityRetries }).maxQualityRetries).toBe(maxQualityRetries);
+    expect(fishTtsStageConfigSchema.parse({ provider: "fish", model: "s2-pro", maxQualityRetries: 0 }).maxQualityRetries).toBe(0);
+  });
   it("loads legacy explicit maxCharsPerRequest 4000 untouched", () => {
     const story = storySchema.parse({ ...testStory(), pipeline: { ...testStory().pipeline, tts: { provider: "fish", model: "s2-pro", maxCharsPerRequest: 4000 } } });
     expect(story.pipeline.tts.maxCharsPerRequest).toBe(4000);
-    expect(story.pipeline.tts.maxQualityRetries).toBe(2);
+    expect(story.pipeline.tts.maxQualityRetries).toBe(1);
   });
 
   it("keeps the synthesis fingerprint stable when only verification settings change", () => {
@@ -574,6 +578,72 @@ describe("stored chapter quality service", () => {
     expect(reverified.status).toBe("partial");
     const meta = chapterSchema.parse(JSON.parse(await readFile(paths.chapterMeta, "utf8")));
     expect(meta.stages.tts.usage?.quality?.manuallyAccepted).toBe(1);
+  });
+
+  it("refreshes an edited segment from current saved narration before synthesizing", async () => {
+    const { root, story, paths } = await fixture();
+    const edited = "The tower stood beside the sea at dawn.";
+    await atomicWrite(paths.narration, `${good}\n\n${edited}`);
+    await atomicWrite(paths.narrationTts, `${good}\n\n${edited}`);
+    const inner = Object.assign(new ScriptedTTS(req => singleSegment(req.text,"cc")), { prepareSegments: (request: TTSRequest) => { expect(request.text).toContain(edited); return [good,edited]; } });
+    const quality = await regenerateStoredChapterTtsSegment({ root, story, chapter:1, segment:1, provider:guard(inner,new FakeTranscriber(() => say(edited))), maxRetries:0 });
+    expect(inner.calls).toHaveLength(1); expect(inner.calls[0]?.text).toBe(edited);
+    expect(quality.segments[1]?.expectedText).toBe(edited); expect(quality.segments[0]?.expectedText).toBe(good);
+  });
+  it("permits edits within multiple explicitly selected segments without expanding the scope", async () => {
+    const { root, story, paths } = await fixture();
+    const edited = ["New first paragraph.", "New second paragraph."];
+    await atomicWrite(paths.narrationTts,edited.join("\n\n"));
+    const inner = Object.assign(new ScriptedTTS(req => singleSegment(req.text,"cc")), { prepareSegments: () => edited });
+    await regenerateStoredChapterTtsSegment({ root, story, chapter:1, segment:1, allowedChangedSegments:[0,1], provider:guard(inner,new FakeTranscriber(() => say(edited[1]!))), maxRetries:0 });
+    expect(inner.calls).toHaveLength(1); expect(inner.calls[0]?.text).toBe(edited[1]);
+  });
+  it("refreshes edited narration when untouched segments only move the calm cue", async () => {
+    const { root, story, paths } = await fixture();
+    const artifact = JSON.parse(await readFile(paths.ttsQuality, "utf8"));
+    artifact.segments[0].expectedText = '[soft] “Go!”[calm]\n\nHe left. “Stay!”';
+    await atomicWriteJson(paths.ttsQuality, artifact);
+    const edited = "All he could do was counter with his own skill.";
+    await atomicWrite(paths.narrationTts, edited);
+    const before = await readFile(join(paths.segments, "0001.mp3"));
+    const inner = Object.assign(new ScriptedTTS(req => singleSegment(req.text, "cc")), {
+      prepareSegments: () => ['[soft] “Go!”\n\n[calm] He left. [soft] “Stay!”', edited],
+    });
+    const quality = await regenerateStoredChapterTtsSegment({ root, story, chapter: 1, segment: 1, provider: guard(inner, new FakeTranscriber(() => say(edited))), maxRetries: 0 });
+    expect(inner.calls).toHaveLength(1);
+    expect(inner.calls[0]?.text).toBe(edited);
+    expect(quality.segments[1]?.expectedText).toBe(edited);
+    expect(quality.segments[0]?.expectedText).toBe(artifact.segments[0].expectedText);
+    expect(await readFile(join(paths.segments, "0001.mp3"))).toEqual(before);
+  });
+  it("rejects shifted boundaries before generating or replacing any segment", async () => {
+    const { root, story, paths } = await fixture();
+    await atomicWrite(paths.narrationTts,"Updated narration with a new paragraph.");
+    const before = await readFile(join(paths.segments,"0002.mp3"));
+    const inner = Object.assign(new ScriptedTTS(req => singleSegment(req.text,"cc")), { prepareSegments: () => [good,"new boundary","another chunk"] });
+    await expect(regenerateStoredChapterTtsSegment({ root, story, chapter:1, segment:1, provider:guard(inner,new FakeTranscriber(() => say(bad))), maxRetries:0 })).rejects.toThrow("Regenerate the full chapter audio");
+    expect(inner.calls).toHaveLength(0); expect(await readFile(join(paths.segments,"0002.mp3"))).toEqual(before);
+  });
+  it("allows separate regeneration of edits in multiple segments when paragraph joins stay fixed", async () => {
+    const { root, story, paths } = await fixture();
+    const artifact = JSON.parse(await readFile(paths.ttsQuality, "utf8"));
+    artifact.segments[0].expectedText = "She stepped forward.\n\nThe battle continued.";
+    await atomicWriteJson(paths.ttsQuality, artifact);
+    await atomicWrite(paths.narrationTts, "He stepped forward.\n\nThe battle continued.\n\nHe countered with his skill.");
+    const inner = Object.assign(new ScriptedTTS(req => singleSegment(req.text, "cc")), {
+      prepareSegments: () => ["He stepped forward.\n\nThe battle continued.", "He countered with his skill."],
+    });
+    const quality = await regenerateStoredChapterTtsSegment({ root, story, chapter: 1, segment: 1, provider: guard(inner, new FakeTranscriber(() => say("He countered with his skill."))), maxRetries: 0 });
+    expect(inner.calls).toHaveLength(1);
+    expect(inner.calls[0]?.text).toBe("He countered with his skill.");
+    expect(quality.segments[0]?.expectedText).toBe(artifact.segments[0].expectedText);
+  });
+  it("rejects edits to other segments even when the total segment count is unchanged", async () => {
+    const { root, story, paths } = await fixture();
+    await atomicWrite(paths.narrationTts,"Updated narration.");
+    const inner = Object.assign(new ScriptedTTS(req => singleSegment(req.text,"cc")), { prepareSegments: () => ["Edited first segment",bad] });
+    await expect(regenerateStoredChapterTtsSegment({ root, story, chapter:1, segment:1, provider:guard(inner,new FakeTranscriber(() => say(bad))), maxRetries:0 })).rejects.toThrow("Regenerate the full chapter audio");
+    expect(inner.calls).toHaveLength(0);
   });
 
   it("manual regeneration does not retry a poor quality result", async () => {

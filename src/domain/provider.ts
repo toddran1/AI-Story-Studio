@@ -48,7 +48,8 @@ export const fishTtsStageConfigSchema = z.object({
   providerQualityGuard: z.boolean().default(true),
   /** Extra attempts only in explicit auto_repair or manual segment regeneration;
    * never part of the initial synthesis fingerprint. */
-  maxQualityRetries: z.number().int().min(0).max(5).default(2),
+  // Accept older saved values unchanged; the effective provider caps repair retries at one.
+  maxQualityRetries: z.number().int().min(0).max(5).default(1),
   speed: z.number().min(0.5).max(2).default(1),
   format: z.literal("mp3").default("mp3"),
   sampleRate: z.union([z.literal(32000), z.literal(44100)]).default(44100),

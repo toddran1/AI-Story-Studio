@@ -32,6 +32,14 @@ describe("vocalization detection matrix", () => {
     expect(scanned[0]!.confidence).toBeGreaterThanOrEqual(0.6);
   });
 
+  it.each(["Ahhhhh!", "AHHHHH!", "Aaaaaah!", "AAAAA!"])("classifies %s as a scream", input => {
+    expect(scanVocalizations(input)[0]).toMatchObject({ vocalization: "scream", intensity: "strong" });
+  });
+  it("keeps a short or hesitant ah as a gasp and protects literal mentions", () => {
+    expect(scanVocalizations("Ah!")[0]?.vocalization).toBe("gasp");
+    expect(scanVocalizations("Ahhhh…")[0]?.vocalization).toBe("gasp");
+    expect(scanVocalizations('He typed the word “Ahhhhh!”')).toEqual([]);
+  });
   it("detectVocalizations omits the spokenForm helper field", () => {
     const [detection] = detectVocalizations("Hahaha!");
     expect(detection).toMatchObject({ vocalization: "laugh", sourceText: "Hahaha!" });
@@ -68,7 +76,7 @@ describe("vocalization repetition collapsing", () => {
   it.each([
     ["Hahahahahahaha!", "Hahaha!"],
     ["Grrrrrrrrrr!", "Grrr!"],
-    ["Ahhhhhhhhh!", "Ahhh!"],
+    ["Ahhhhhhhhh!", "Ah!"],
   ])("collapses %s to canonical %s", (input, spokenForm) => {
     expect(scanVocalizations(input)[0]).toMatchObject({ sourceText: input, spokenForm });
   });

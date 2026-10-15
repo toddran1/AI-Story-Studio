@@ -354,3 +354,25 @@
 .regen-pager > label { display: inline-flex; align-items: center; gap: 6px; }
 .regen-pager input { width: 54px; padding: 6px; background: #111117; color: #dedcea; border: 1px solid #414052; border-radius: 4px; }
 .audio-workspace-tabs button:focus-visible, .audio-regeneration input:focus-visible { outline: 2px solid #aaa0f5; outline-offset: 3px; }
+.error-chapter-heading { margin: 12px 0; font-size: 16px; font-weight: 650; }
+.error-chapter-heading a { color: #c4bdf7; text-decoration: none; }
+.error-chapter-heading a:hover { text-decoration: underline; }
+.error-chapter-heading a:focus-visible { outline: 2px solid #aaa0f5; outline-offset: 4px; }
+.error-chapter-heading > span { color: #b6b3c7; }
+
+/* A chapter's next take can be narrowed in place without losing the queue. */
+.regen-selection li { display: block; }
+.regen-selection-row, .regen-selection-actions, .regen-edit-actions { display: flex; align-items: center; gap: 8px; }
+.regen-selection-row { justify-content: space-between; }
+.regen-selection-row > span { min-width: 0; overflow-wrap: anywhere; }
+.regen-selection-actions { flex-shrink: 0; }
+.regen-selection ol.regen-selection-editing { max-height: 60vh; }
+.regen-quick-edit { margin-top: 12px; padding: 14px 12px; background: var(--regen-paper); border: 1px solid var(--regen-border); border-left: 3px solid var(--regen-cue); border-radius: 6px; }
+.regen-quick-edit .regen-edit-title { margin: 0 0 12px; font-weight: 600; color: var(--regen-ink); }
+.regen-edit-mode { display: flex; gap: 8px; align-items: center; padding: 7px 0; font-size: 13px; }
+.regen-edit-mode input[type=radio] { width: 16px; height: 16px; margin: 0; accent-color: var(--regen-cue); }
+.regen-segment-picks { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 8px; margin-top: 12px; }
+.regen-segment-picks label { display: flex; align-items: center; gap: 6px; padding: 8px 6px; border: 1px solid var(--regen-border); border-radius: 5px; font-size: 12px; cursor: pointer; }
+.regen-segment-picks label.chosen { border-color: var(--regen-cue); background: #302c4b; color: var(--regen-ink); }
+.regen-edit-actions { justify-content: flex-end; flex-wrap: wrap; margin-top: 14px; }
+.regen-quick-edit :focus-visible { outline: 2px solid var(--regen-cue); outline-offset: 3px; }

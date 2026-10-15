@@ -1,4 +1,4 @@
-export type VocalizationType = "laugh" | "chuckle" | "scoff" | "throat_clear" | "sigh" | "gasp" | "grunt" | "groan" | "sob" | "cry" | "growl" | "thinking" | "hesitation" | "exclamation" | "other";
+export type VocalizationType = "laugh" | "chuckle" | "scoff" | "throat_clear" | "sigh" | "gasp" | "scream" | "grunt" | "groan" | "sob" | "cry" | "growl" | "thinking" | "hesitation" | "exclamation" | "other";
 export type VocalizationIntensity = "light" | "medium" | "strong";
 export interface VocalizationInstruction {
   type: "vocalization";
@@ -64,6 +64,8 @@ const lexicon: LexemeEntry[] = [
   { pattern: "sniff", vocalization: "sob", confidence: .7, spoken: fixed("sniff") },
   { pattern: "gasp(?:[, \\t]+gasp)*", vocalization: "gasp", confidence: .85, spoken: fixed("gasp") },
   { pattern: "oo+h", vocalization: "gasp", confidence: .6, spoken: collapsed() },
+  // An elongated, emphatic cry is a scream, not an intake of breath.
+  { pattern: "(?:a+h{3,}|a{3,}h*)(?=!)", vocalization: "scream", confidence: .9, spoken: fixed("ah") },
   { pattern: "ah+", vocalization: "gasp", confidence: .65, spoken: collapsed() },
   { pattern: "oh", vocalization: "exclamation", confidence: .5, spoken: fixed("oh") },
 ];
@@ -72,7 +74,7 @@ const expression = new RegExp(
   `(?<![\\p{L}\\p{N}])(${lexicon.map((entry) => entry.pattern).join("|")})(?![\\p{L}\\p{N}])([!?…—,.]*)`,
   "giu",
 );
-const anchored = lexicon.map((entry) => new RegExp(`^(?:${entry.pattern})$`, "iu"));
+const anchored = lexicon.map((entry) => new RegExp(`^(?:${entry.pattern})[!?…—,.]*$`, "iu"));
 
 function intensityFor(punctuation: string, token: string): VocalizationIntensity {
   if (punctuation.includes("!") || /(.)\1{3,}/iu.test(token)) return "strong";
@@ -86,11 +88,11 @@ export function scanVocalizations(text: string): ScannedVocalization[] {
   const results: ScannedVocalization[] = [];
   for (const match of text.matchAll(expression)) {
     const token = match[1]!;
-    const entry = lexicon[anchored.findIndex((pattern) => pattern.test(token))];
+    const entry = lexicon[anchored.findIndex((pattern) => pattern.test(match[0]))];
     if (!entry) continue;
     const start = match.index!;
     const sourceText = match[0];
-    if (entry.vocalization === "throat_clear" || entry.vocalization === "laugh") {
+    if (entry.vocalization === "throat_clear" || entry.vocalization === "laugh" || entry.vocalization === "scream") {
       const before = text.slice(Math.max(0, start - 45), start);
       // A quoted lexical mention is prose, not a performed reaction.
       if (/\b(?:word|text|transcript|term|wrote|typed|spelled|literal(?:ly)?)\b[^.!?\n]{0,35}$/iu.test(before)) continue;

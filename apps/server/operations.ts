@@ -358,7 +358,7 @@ export class StudioOperations {
           if (!input.continueOnError) throw error;
           const diagnostic = createErrorDiagnostic(error, { chapter });
           results.push({ chapter, status: "failed", plan, error: diagnostic.summary, diagnostic });
-          control.update({ type: "stage-execution.chapter.failed", chapter, error: diagnostic.summary });
+          control.update({ type: "stage-execution.chapter.failed", chapter, error: diagnostic.summary, diagnostic });
         }
       }
       invalidateCatalogCache(this.root, slug); await invalidateChapterStatusDerivedReads(this.root, slug); await invalidateStoryBibleDerivedReads(this.root, slug);
@@ -1850,7 +1850,7 @@ export class StudioOperations {
     }));
   }
 
-  private async regenerateSingleAudioSegment(slug: string, chapter: number, segment: number) {
+  private async regenerateSingleAudioSegment(slug: string, chapter: number, segment: number, selectedSegments?: number[]) {
       const story = await loadStory(storyPaths(this.root, slug, chapter).storyConfig);
       const config = story.pipeline.tts;
       const entities = await loadPronunciationEntities(this.root, slug);
@@ -1862,7 +1862,7 @@ export class StudioOperations {
         language: story.outputLanguage,
         transcriber: this.speechTranscriber(),
       });
-      const quality = await withUsageScope({ story: slug, chapter, stage: "tts" }, () => regenerateStoredChapterTtsSegment({ root: this.root, story, chapter, segment: segment - 1, provider, maxRetries: 0 }));
+      const quality = await withUsageScope({ story: slug, chapter, stage: "tts" }, () => regenerateStoredChapterTtsSegment({ root: this.root, story, chapter, segment: segment - 1, provider, maxRetries: 0, allowedChangedSegments: selectedSegments?.map(value => value - 1) }));
       return quality;
   }
 
@@ -1896,7 +1896,7 @@ export class StudioOperations {
           if (shutdown.isRequested) break;
           control.update({ chapter: row.chapter, segment, completed, total, phase: "generating" });
           try {
-            if (segment !== undefined) await this.regenerateSingleAudioSegment(slug, row.chapter, segment);
+            if (segment !== undefined) await this.regenerateSingleAudioSegment(slug, row.chapter, segment, row.segments);
             else {
               const source = sources.get(row.chapter)!;
               await executeStagePlan({ root: this.root, story, chapter: row.chapter, inputPath: source.path, source: source.source, plan: plans.get(row.chapter)!, runtime: { pipeline: this.pipeline, alignment: { config: this.alignConfig, engine: this.aligner }, scenePlanner: this.scenePlanner ?? this.runtime.router.forStage(story.pipeline.scenePlanner), image: this.image, video: this.video } });

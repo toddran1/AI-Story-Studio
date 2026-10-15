@@ -26,6 +26,8 @@ export class JobManager {
   private readonly durablePaths = new Map<string, string>();
   private readonly durableWrites = new Map<string, Promise<void>>();
   private errorHistoryRoot?: string;
+  private readonly collectedFailures = new Map<string, Array<{ chapter?: number; diagnostic: ErrorDiagnostic }>>();
+  private readonly errorWrites = new Map<string, Promise<void>>();
 
   constructor(options: { maxRetainedJobs?: number } = {}) {
     this.maxRetainedJobs = options.maxRetainedJobs ?? JobManager.defaultMaxRetainedJobs;
@@ -118,9 +120,20 @@ export class JobManager {
     this.set(job, { status: "running" });
     try {
       const result = await runner({
-        update: (progress) => this.set(job, { progress }),
+        update: (progress) => {
+          this.set(job, { progress });
+          if (progress && typeof progress === "object") {
+            const event = progress as { type?: string; error?: string; chapter?: number; diagnostic?: ErrorDiagnostic };
+            const failures = failedResultDiagnostics(progress);
+            if (event.type?.endsWith("failed") && event.error) failures.push(...failedResultDiagnostics({ results: [{ ...event, status: "failed" }] }));
+            for (const failure of failures) void this.recordFailure(job, failure.diagnostic, { results: [{ ...failure, status: "failed" }] });
+          }
+        },
         setPause: (handler) => { this.pauseHandlers.set(job.id, handler); if (this.pendingVisualPauses.delete(job.id)) handler(); },
       });
+      const finalFailures = failedResultDiagnostics(result);
+      if (finalFailures.length) await this.recordFailure(job, finalFailures.at(-1)!.diagnostic, result);
+      await this.errorWrites.get(job.id);
       const resultStatus = typeof result === "object" && result !== null && "status" in result ? (result as { status?: unknown; stopReason?: unknown }).status : undefined;
       if (resultStatus === "paused") this.set(job, { status: "paused", result });
       else if (resultStatus === "failed" || (resultStatus === "completed_with_errors" && job.type !== "batch")) {
@@ -146,12 +159,16 @@ export class JobManager {
   }
   private async recordFailure(job: Job, diagnostic: ErrorDiagnostic, result?: unknown) {
     if (!this.errorHistoryRoot) return;
-    try {
-      await saveJobError(this.errorHistoryRoot, {
-        jobId: job.id, story: job.story, type: job.type, createdAt: job.createdAt,
-        failedAt: new Date().toISOString(), diagnostic, failures: failedResultDiagnostics(result),
-      });
-    } catch (error) { logger.error({ error, jobId: job.id }, "Unable to save job error history"); }
+    const collected = this.collectedFailures.get(job.id) ?? [];
+    const incoming = failedResultDiagnostics(result);
+    for (const failure of incoming.length ? incoming : [{ chapter: diagnostic.chapter, diagnostic }]) {
+      if (!collected.some(item => item.chapter === failure.chapter && item.diagnostic.id === failure.diagnostic.id)) collected.push(failure);
+    }
+    this.collectedFailures.set(job.id, collected);
+    const record = { jobId: job.id, story: job.story, type: job.type, createdAt: job.createdAt, failedAt: new Date().toISOString(), diagnostic, failures: [...collected] };
+    const write = (this.errorWrites.get(job.id) ?? Promise.resolve()).then(() => saveJobError(this.errorHistoryRoot!, record)).catch(error => { logger.error({ error, jobId: job.id }, "Unable to save job error history"); });
+    this.errorWrites.set(job.id, write);
+    await write;
   }
   private set(job: Job, patch: Partial<Job>) {
     Object.assign(job, patch, { updatedAt: new Date().toISOString() });
@@ -178,6 +195,7 @@ export class JobManager {
     for (const job of excess) {
       this.jobs.delete(job.id);
       this.events.delete(job.id);
+      this.collectedFailures.delete(job.id); this.errorWrites.delete(job.id);
       const path = this.durablePaths.get(job.id);
       if (path) {
         const inFlight = this.durableWrites.get(job.id) ?? Promise.resolve();

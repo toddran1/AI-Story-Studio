@@ -74,6 +74,17 @@ const multiSegments = (texts: string[]): TTSResult => {
 };
 
 describe("effective TTS provider construction", () => {
+  it("allows only one quality retry even when a caller requests five", async () => {
+    const text = "Mara walked through the gate.";
+    let calls = 0;
+    const base = new ScriptedTTS(() => { calls++; return singleSegment(text, "a"); });
+    const transcriber = new FakeTranscriber(() => say("Completely unrelated incorrect words are spoken instead."));
+    const effective = createEffectiveTtsProvider({ baseProvider: base, qualityMode: "auto_repair", maxQualityRetries: 5, transcriber, language: "en-US" });
+    const result = await effective.provider.synthesize({ text, model: "s2-pro", speed: 1, format: "mp3", sampleRate: 44100, bitrate: 128, normalize: true, maxCharsPerRequest: 1750, qualityGuard: true });
+    expect(calls).toBe(2);
+    expect(result.quality?.segments[0]?.attempts).toHaveLength(2);
+    expect(result.quality?.segments[0]?.status).toBe("needs_review");
+  });
   it("wraps baseProvider with pronunciation and QualityGuard in the correct order", async () => {
     const text = "Mara walked through the gate.";
     let synthesizeCount = 0;

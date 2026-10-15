@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { FishAudioProvider, normalizeFishSpeechText } from "../src/tts/fish/fish-audio.provider.js";
+import { directQuotedDialogue } from "../src/tts/fish/dialogue-casting.js";
 import { disambiguateFishS2Brackets } from "../src/tts/fish/control-cues.js";
 import { normalizeSpeechText } from "../src/tts/speech-normalization.js";
 import { adaptPronunciationText, resolvePronunciations } from "../src/tts/pronunciation.js";
@@ -10,7 +11,7 @@ describe("Fish vocalization strategy", () => {
 
   it.each(["s2-pro", "s2.1-pro", "s2.1-pro-free"])("uses verified native tags for %s", (model) => {
     const strategy = provider.vocalizationStrategy(model);
-    expect(strategy).toEqual({ kind: "native_tags", tags: { laugh: "[laughing]", chuckle: "[chuckle]", throat_clear: "[cough]", sigh: "[sigh]", gasp: "[gasp]" } });
+    expect(strategy).toEqual({ kind: "native_tags", tags: { laugh: "[laughing]", chuckle: "[chuckle]", throat_clear: "[cough]", sigh: "[sigh]", gasp: "[gasp]", scream: "[shouting] Ah!" } });
   });
 
   it.each(["s1", "s1-mini", "unknown-model", undefined])("falls back to safe_normalize for %s", (model) => {
@@ -18,7 +19,7 @@ describe("Fish vocalization strategy", () => {
   });
 
   it("advertises expressive tags for the supported subset only", () => {
-    expect(provider.vocalizationCapabilities).toEqual({ expressiveTags: true, supportedTypes: ["laugh", "chuckle", "throat_clear", "sigh", "gasp"], separateSegments: false });
+    expect(provider.vocalizationCapabilities).toEqual({ expressiveTags: true, supportedTypes: ["laugh", "chuckle", "throat_clear", "sigh", "gasp", "scream"], separateSegments: false });
   });
 
   it("strategy tags survive the S2 bracket disambiguator, and guessed tags never leak", () => {
@@ -29,6 +30,18 @@ describe("Fish vocalization strategy", () => {
     }
     // Safety net: a hallucinated tag is stripped to ordinary spoken words.
     expect(disambiguateFishS2Brackets("[laughs] he said [cackling]", "s2-pro")).toBe("laughs he said cackling");
+  });
+
+  it("renders an emphatic scream rather than a gasp and avoids conflicting soft direction", () => {
+    const original = "King Issar swung his sword again.\n\n“Ahhhhh!”\n\nTheir anguished screams rang through the night.";
+    const spoken = normalizeSpeechText(original, "en-US", {}, provider.vocalizationStrategy("s2.1-pro-free")).text;
+    expect(spoken).toContain("“[shouting] Ah!”");
+    expect(spoken).not.toContain("[gasp]");
+    const directed = directQuotedDialogue(normalizeFishSpeechText(spoken, "s2.1-pro-free"));
+    expect(directed).not.toContain("[soft]");
+    expect(directed).toContain("[calm] Their anguished screams");
+    expect(normalizeFishSpeechText("“Ahhhhh!”", "s2.1-pro-free")).toBe("“[shouting] Ah!”");
+    expect(original).toContain("Ahhhhh!");
   });
 
   it("renders a standalone ahem reaction as a throat clear without changing literal mentions", () => {

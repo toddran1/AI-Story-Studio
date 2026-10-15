@@ -11,6 +11,8 @@ export interface TTSProvider {
   vocalizationStrategy?(model?: string): VocalizationRenderStrategy;
   /** Resolves a per-story voice override to the concrete voice used by the provider. */
   resolveReferenceId?(referenceId?: string): string | undefined;
+  /** Prepare exact synthesis chunks locally without generating audio. */
+  prepareSegments?(request: TTSRequest): string[];
   synthesize(request: TTSRequest): Promise<TTSResult>;
   validateConfiguration(): Promise<void>;
 }

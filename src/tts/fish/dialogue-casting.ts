@@ -65,7 +65,7 @@ export function directQuotedDialogue(text: string): string {
 
     // Preserve a deliberate emotion cue already placed immediately before a
     // quote. Otherwise use a restrained direction; cue narration only when it resumes.
-    const alreadyDirected = /\[[a-z][a-z -]*\]\s*$/i.test(output);
+    const alreadyDirected = /\[[a-z][a-z -]*\]\s*$/i.test(output) || /^\s*\[[a-z][a-z -]*\]/i.test(text.slice(index + 1, closeIndex));
     if (!alreadyDirected) output += "[soft] ";
     output += text.slice(index, closeIndex + 1);
     returnToNarration = true;

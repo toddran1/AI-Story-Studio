@@ -2,7 +2,7 @@ import { fingerprint } from "../utils/hash.js";
 import { scanVocalizations, type VocalizationRenderStrategy } from "./vocalizations.js";
 import type { TTSProvider } from "./provider.js";
 
-export const SPEECH_NORMALIZATION_VERSION = "speech-normalization-v7-fish-leading-hehe";
+export const SPEECH_NORMALIZATION_VERSION = "speech-normalization-v8-emphatic-cries";
 export type SpeechNormalizationMode = "automatic" | "enabled" | "disabled";
 export type TimeSpeechMode = "natural_12h" | "natural_24h" | "preserve";
 export type VocalizationMode = "automatic" | "preserve" | "disabled";

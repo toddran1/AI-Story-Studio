@@ -586,7 +586,7 @@ export class ChapterPipeline {
             chapter: options.chapter,
             config: ttsConfig,
             report: result.quality,
-            maxRetries: ttsConfig.maxQualityRetries,
+            maxRetries: Math.min(1, ttsConfig.maxQualityRetries),
             transcriber: this.qualityVerification?.transcriber?.name ?? "unavailable",
           });
         } else if (result.segmentTexts?.length === result.segments.length) {

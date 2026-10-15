@@ -13,6 +13,7 @@ export const errorDiagnosticSchema = z.object({
   retryable: z.boolean(),
   recommendedAction: z.string().min(1),
   chapter: z.number().int().positive().optional(),
+  chapterTitle: z.string().min(1).max(2000).optional(),
   stage: z.string().min(1).optional(),
   provider: z.string().min(1).optional(),
   model: z.string().min(1).optional(),

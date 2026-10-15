@@ -90,8 +90,8 @@ describe("vocalization speech normalization", () => {
     const tagged = normalizeSpeechText(fiendDragon, "en-US", {}, fishS2Tags);
     expect(tagged.text).toBe("[laugh] Brat, once my fiend dragon comes out, all your bullshit undead are nothing but ants!");
     expect(tagged.transformations[0]).toMatchObject({ kind: "vocalization", written: "Hahaha...", spoken: "[laugh]" });
-    // Sigh and gasp are mapped; growl has no tag and falls back to safe_normalize.
-    expect(normalizeSpeechText("He sighed. Sigh. Ahhh! Grrrrr!", "en-US", {}, fishS2Tags).text).toBe("He sighed. [sigh] [gasp] Grrr!");
+    // Sigh is mapped; screams and growls use short spoken forms when unmapped.
+    expect(normalizeSpeechText("He sighed. Sigh. Ahhh! Grrrrr!", "en-US", {}, fishS2Tags).text).toBe("He sighed. [sigh] Ah! Grrr!");
   });
 
   it("renders a repeated heh laugh as one cue instead of three separate reactions", () => {

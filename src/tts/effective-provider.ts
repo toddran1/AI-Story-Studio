@@ -37,7 +37,7 @@ export function createEffectiveTtsProvider(options: CreateEffectiveTtsProviderOp
   const qualityMode = options.qualityMode ?? "off";
   const provider = qualityMode !== "off"
     ? new QualityGuardTTSProvider(basePronunciationProvider, options.transcriber, {
-        maxRetries: qualityMode === "auto_repair" ? options.maxQualityRetries ?? 2 : 0,
+        maxRetries: qualityMode === "auto_repair" ? Math.min(1, Math.max(0, options.maxQualityRetries ?? 1)) : 0,
         language: options.language ?? "en-US",
         durationProbe: options.durationProbe,
         thresholds: options.thresholds,

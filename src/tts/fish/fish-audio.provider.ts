@@ -37,7 +37,7 @@ export class FishAudioProvider implements TTSProvider {
   // Fish docs (docs.fish.audio TTS): S2 models support natural-language expression
   // control. Tags are limited to the verified FISH_S2_CONTROL_CUES allowlist subset
   // that maps to vocalization types; disambiguateFishS2Brackets strips anything else.
-  readonly vocalizationCapabilities: VocalizationCapabilities = { expressiveTags: true, supportedTypes: ["laugh", "chuckle", "throat_clear", "sigh", "gasp"], separateSegments: false };
+  readonly vocalizationCapabilities: VocalizationCapabilities = { expressiveTags: true, supportedTypes: ["laugh", "chuckle", "throat_clear", "sigh", "gasp", "scream"], separateSegments: false };
   // Included in the TTS fingerprint so audio made before normalization or
   // deterministic dialogue casting changes is never silently reused.
   readonly inputNormalizationVersion: string;
@@ -53,8 +53,8 @@ export class FishAudioProvider implements TTSProvider {
     } = {},
   ) {
     this.inputNormalizationVersion = speechOptions.tskRendering === "direction"
-      ? "fish-speech-normalization-v33-calm-before-narration-tsk-direction"
-      : "fish-speech-normalization-v33-calm-before-narration";
+      ? "fish-speech-normalization-v34-emphatic-cries-tsk-direction"
+      : "fish-speech-normalization-v34-emphatic-cries";
   }
 
   resolveReferenceId(referenceId?: string): string | undefined {
@@ -65,21 +65,16 @@ export class FishAudioProvider implements TTSProvider {
    * unknown models fall back to canonical short spoken forms. No guessed tags. */
   vocalizationStrategy(model?: string): VocalizationRenderStrategy {
     if (!isFishS2Model(model)) return { kind: "safe_normalize" };
-    return { kind: "native_tags", tags: { laugh: "[laughing]", chuckle: "[chuckle]", throat_clear: "[cough]", sigh: "[sigh]", gasp: "[gasp]" } };
+    return { kind: "native_tags", tags: { laugh: "[laughing]", chuckle: "[chuckle]", throat_clear: "[cough]", sigh: "[sigh]", gasp: "[gasp]", scream: "[shouting] Ah!" } };
   }
 
   async validateConfiguration(): Promise<void> { if (!this.apiKey) throw new ConfigurationError("Missing required fish credential (FISH_AUDIO_API_KEY). Add it to .env."); }
-  async synthesize(request: TTSRequest) {
-    await this.validateConfiguration();
+  prepareSegments(request: TTSRequest): string[] {
     const referenceId = this.resolveReferenceId(request.referenceId);
     const secondaryReferenceId = normalizeFishReferenceId(request.secondaryReferenceId);
     const multiSpeaker = request.voiceMode === "narrator-dialogue" && Boolean(referenceId) && Boolean(secondaryReferenceId) && isFishS2Model(request.model);
     const directedSingleVoice = request.voiceMode === "same-voice-dialogue" && request.deliveryIntensity !== "none" && isFishS2Model(request.model);
-    const segments: Uint8Array[] = [];
-    const requestIds: string[] = [];
-    const reusedRequestIds: string[] = [];
-    let reusedChunks = 0;
-    const chunks = request.exactChunk
+    return request.exactChunk
       ? [request.text]
       : (() => {
           const speechText = normalizeFishSpeechText(adaptPronunciationText(request.text, request.pronunciation ?? [], this.pronunciationCapabilities), request.model, this.speechOptions);
@@ -94,6 +89,19 @@ export class FishAudioProvider implements TTSProvider {
           if (prepared.some((chunk) => chunk.length > request.maxCharsPerRequest)) throw new ProviderError("Fish Audio chunk exceeds the configured character limit after speaker formatting");
           return prepared;
         })();
+  }
+
+  async synthesize(request: TTSRequest) {
+    await this.validateConfiguration();
+    const referenceId = this.resolveReferenceId(request.referenceId);
+    const secondaryReferenceId = normalizeFishReferenceId(request.secondaryReferenceId);
+    const multiSpeaker = request.voiceMode === "narrator-dialogue" && Boolean(referenceId) && Boolean(secondaryReferenceId) && isFishS2Model(request.model);
+    const directedSingleVoice = request.voiceMode === "same-voice-dialogue" && request.deliveryIntensity !== "none" && isFishS2Model(request.model);
+    const segments: Uint8Array[] = [];
+    const requestIds: string[] = [];
+    const reusedRequestIds: string[] = [];
+    let reusedChunks = 0;
+    const chunks = this.prepareSegments(request);
 
     let newBilledRequests = 0;
     let newBilledCharacters = 0;

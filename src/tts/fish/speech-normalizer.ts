@@ -104,6 +104,10 @@ function replaceAll(text: string, replacements: ReadonlyArray<readonly [RegExp, 
  * fictional terminology are not silently changed.
  */
 export function normalizeFishSpeechText(text: string, model?: string, options: { tskRendering?: "preserve" | "direction" } = {}): string {
+  // Physical sound effects have no application-supported Fish delivery cue.
+  // Describe only standalone effects; preserve quoted dialogue and prose uses.
+  text = text.replace(/^[ \t]*(WHU+M|RI+P)[ \t]*[—–-]*[ \t]*!+[ \t]*$/gm,
+    (_match, effect: string) => effect.startsWith("WH") ? "A low whoosh sounded." : "A ripping sound rang out.");
   text = stripFishLeadingHehe(text);
   // Only item panels with a recognized rarity and metadata colon qualify;
   // ordinary prose parentheses and deliberate delivery cues remain untouched.
@@ -199,6 +203,7 @@ export function renderFishVocalizations(text: string, model?: string, options: {
     const replacement = item.vocalization === "throat_clear" ? "[cough]"
       : item.vocalization === "laugh" && item.confidence >= .8 && openingReaction ? "[laughing]"
       : item.vocalization === "chuckle" && /^(?:heh|ha)(?:\.{3,}|…+|[!,])$/iu.test(item.sourceText) && openingReaction ? "[chuckle]"
+      : item.vocalization === "scream" ? "[shouting] Ah!"
       : item.vocalization === "scoff" && /^tsk\b/iu.test(item.sourceText) && options.tskRendering === "direction" ? "[clicks tongue disapprovingly]"
       : undefined;
     if (replacement) result = result.slice(0, item.start) + replacement + result.slice(item.end);
