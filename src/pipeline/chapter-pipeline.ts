@@ -1,3 +1,4 @@
+import { storyPronunciationPolicy } from "../tts/pronunciation-dictionary.js";
 import { recheckChapterQa } from "../qa/review.js";
 import { syncAppearanceChanges } from "../visual-canon/appearance-changes.js";
 import { mkdir, readFile, readdir, rm, stat } from "node:fs/promises";
@@ -516,6 +517,7 @@ export class ChapterPipeline {
     const { provider: ttsProvider, basePronunciationProvider: baseTtsProvider } = createEffectiveTtsProvider({
       baseProvider: this.tts.forName(ttsConfig.provider),
       pronunciationEntities: pronunciationData.entities,
+      pronunciationPolicy: storyPronunciationPolicy(options.story),
       qualityMode,
       maxQualityRetries: ttsConfig.maxQualityRetries,
       language: options.story.outputLanguage,
@@ -523,7 +525,7 @@ export class ChapterPipeline {
       onQualityProgress,
     });
     const speech = normalizeSpeechForProvider(ttsScript, options.story.outputLanguage, options.story.narrationSettings, ttsProvider, ttsConfig.model);
-    const pronunciationFp = pronunciationFingerprint(resolvePronunciations(speech.normalized.text, pronunciationData.entities));
+    const pronunciationFp = fingerprint({ entity: pronunciationFingerprint(resolvePronunciations(speech.normalized.text, pronunciationData.entities)), dictionary: ttsProvider.pronunciationFingerprint?.(speech.normalized.text) });
     const referenceId = ttsProvider.resolveReferenceId?.(ttsConfig.referenceId) ?? ttsConfig.referenceId;
     const bleepStrongProfanity = options.story.narrationSettings.bleepStrongProfanity === true;
     // Verification-policy settings change whether verification runs, not what is

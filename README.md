@@ -748,3 +748,34 @@ this milestone generates still-image scenes. MP4 playback/download and individua
 PNG downloads are available in the library. CLI actions use the same services and
 validation as the API. `produce --force` replans scenes; force artwork replacement
 separately with the artwork command when intentionally replacing protected images.
+
+### Pronunciation across audio segments
+
+Story settings → Voice → Pronunciation across segments controls a local story-wide
+pronunciation dictionary. Rules use a written word/name plus tone-number Mandarin
+pinyin (`zhang1 qi3 tian1`) or English CMU Arpabet (`JH AA1 NG`). Matching uses word
+boundaries and longer phrases first. Approved entity pronunciations take priority;
+explicit dictionary rules override derived defaults. Rules apply to new chapter
+speech, summaries, A/B and voice previews, quality retries, and manual segment takes.
+
+Source-language name guidance is enabled unless explicitly disabled. For Chinese
+or Mandarin sources, matching romanized entity names with known Chinese source
+characters receive locally derived pinyin, including unambiguous surnames. Ordinary
+English surname words, localized names, translated phrases, unsupported languages,
+and mismatched spellings remain unchanged. This is Mandarin name guidance, not a
+regional-dialect detector or a change to the narrator's accent. Polyphonic names can
+need an explicit correction. No extra language-model or synthesis requests are added.
+
+Fish S2 receives word-bounded phoneme controls built from this dictionary; this
+avoids the substring matching of Fish's remote dictionary keys. Review text and
+manuscripts keep their readable spelling. Changed pronunciation controls invalidate
+corresponding synthesis checkpoints; previously generated audio is not rewritten.
+Regenerate affected speech and rebuild its master to hear updated pronunciation.
+
+Individual audio regeneration preserves existing segment joins when unchanged,
+unique closing paragraphs can be located in the latest narration. Character-count
+repacking alone does not require regenerating the entire chapter. Changed or
+ambiguous joins still require full-chapter speech generation. Bulk regeneration
+checks saved narration and segment availability for the whole selection before
+making any synthesis request, so a blocked later item cannot repeatedly charge for
+earlier items during preflight. Each manual segment take still makes one attempt.

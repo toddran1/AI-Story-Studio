@@ -1,3 +1,6 @@
+import { pronunciationProvider } from "../tts/pronunciation.js";
+import { storyPronunciationPolicy } from "../tts/pronunciation-dictionary.js";
+import { loadPronunciationEntities } from "../story-bible/pronunciation.js";
 import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { Story } from "../domain/story.js";
@@ -53,7 +56,7 @@ export class PreviewRunner {
       await atomicWriteJson(choice === "a" ? paths.qaA : paths.qaB, qa);
       let audioGenerated = false;
       if (options.audioPreview && qa.status !== "fail") {
-        const provider = this.tts.forName(preset.tts.provider);
+        const provider = pronunciationProvider(this.tts.forName(preset.tts.provider), await loadPronunciationEntities(options.root, options.story.slug), { ...storyPronunciationPolicy(options.story), ...preset.tts });
         const sample = normalizeSpeechForProvider(audioSample(narrationScript), options.story.outputLanguage, options.story.narrationSettings, provider, preset.tts.model).normalized.text;
         const result = await this.censor.synthesize(provider, { text: sample, model: preset.tts.model, referenceId: preset.tts.referenceId, secondaryReferenceId: preset.tts.secondaryReferenceId,
           voiceMode: preset.tts.voiceMode, deliveryIntensity: preset.tts.deliveryIntensity, qualityGuard: preset.tts.qualityGuard, providerQualityGuard: preset.tts.providerQualityGuard,

@@ -1,3 +1,4 @@
+import { storyPronunciationPolicy } from "../tts/pronunciation-dictionary.js";
 import { prepareCreatureForms } from "../visual-canon/creature-forms.js";
 import { randomUUID } from "node:crypto";
 import { mkdir, rename, rm, stat } from "node:fs/promises";
@@ -97,13 +98,14 @@ export class SummaryMediaService {
     const { provider } = createEffectiveTtsProvider({
       baseProvider: this.ttsRouter.forName(config.provider),
       pronunciationEntities,
+      pronunciationPolicy: storyPronunciationPolicy(story),
       qualityMode: ttsQualityMode(config),
       maxQualityRetries: config.maxQualityRetries,
       language: story.outputLanguage,
       transcriber,
     });
     const spoken = normalizeSpeechForProvider(summary.narration?.ttsText ?? summary.narration?.text ?? "", story.outputLanguage, story.narrationSettings, provider, config.model);
-    const pronunciationFp = pronunciationFingerprint(resolvePronunciations(spoken.normalized.text, pronunciationEntities));
+    const pronunciationFp = fingerprint({ entity: pronunciationFingerprint(resolvePronunciations(spoken.normalized.text, pronunciationEntities)), dictionary: provider.pronunciationFingerprint?.(spoken.normalized.text) });
     const referenceId = provider.resolveReferenceId?.(config.referenceId) ?? config.referenceId;
     const ttsFingerprint = fingerprint({ version: "summary-tts-v1", text: summary.narration?.ttsText ?? summary.narration?.text, speech: spoken.fingerprint,
       config: { ...ttsSynthesisSettings(config), referenceId }, normalization: provider.inputNormalizationVersion,

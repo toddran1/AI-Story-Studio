@@ -1,3 +1,4 @@
+import { pronunciationDictionarySchema } from "../../src/domain/pronunciation-dictionary.js";
 import { readCurrentOriginal } from "../../src/source/current-original.js";
 import { summarySchema } from "../../src/summaries/types.js";
 import { summaryMediaPaths } from "../../src/summaries/media.js";
@@ -1070,6 +1071,7 @@ export const settingsUpdateSchema = z.object({
   pipelineOverrides: z.record(z.string(), z.boolean()).optional(),
   tts: z.object({ provider: ttsProviderNameSchema.optional(), model: z.string().trim().min(1).optional(), referenceId: z.string().trim().optional(), secondaryReferenceId: z.string().trim().optional(),
     voiceMode: z.enum(["narrator-only", "same-voice-dialogue", "narrator-dialogue"]).optional(), deliveryIntensity: z.enum(["none", "restrained", "expressive"]).optional(), qualityGuard: z.boolean().optional(), qualityMode: z.enum(["off", "verify", "auto_repair"]).optional(), providerQualityGuard: z.boolean().optional(), speed: z.number().min(0.5).max(2),
+    pronunciationDictionary: pronunciationDictionarySchema.optional(), sourceLanguagePronunciation: z.boolean().optional(),
     maxCharsPerRequest: z.number().int().min(500).max(20_000).optional(), maxQualityRetries: z.number().int().min(0).max(5).optional(), normalize: z.boolean().optional() }),
   audio: z.object({ loudnessTarget: z.number().min(-24).max(-12), truePeak: z.number().min(-6).max(-0.1), segmentGapSeconds: z.number().min(0).max(5),
     chapterGapSeconds: z.number().min(0).max(10), bitrate: z.enum(["64k", "96k", "128k", "160k", "192k", "256k", "320k"]), sampleRate: z.union([z.literal(32000), z.literal(44100), z.literal(48000)]) }).optional(),
@@ -1110,6 +1112,8 @@ export async function updateStorySettings(root: string, slug: string, input: unk
           qualityMode: update.tts.qualityMode ?? current.pipeline.tts.qualityMode,
           providerQualityGuard: update.tts.providerQualityGuard ?? current.pipeline.tts.providerQualityGuard,
           speed: update.tts.speed,
+          pronunciationDictionary: update.tts.pronunciationDictionary ?? current.pipeline.tts.pronunciationDictionary,
+          sourceLanguagePronunciation: update.tts.sourceLanguagePronunciation ?? current.pipeline.tts.sourceLanguagePronunciation,
           maxCharsPerRequest: update.tts.maxCharsPerRequest ?? current.pipeline.tts.maxCharsPerRequest,
           maxQualityRetries: update.tts.maxQualityRetries ?? current.pipeline.tts.maxQualityRetries,
           normalize: update.tts.normalize ?? current.pipeline.tts.normalize,

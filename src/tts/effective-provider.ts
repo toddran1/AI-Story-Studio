@@ -1,3 +1,4 @@
+import type { PronunciationPolicy } from "./pronunciation-dictionary.js";
 import type { CanonicalEntity } from "../domain/story-bible.js";
 import { pronunciationProvider } from "./pronunciation.js";
 import type { TTSProvider } from "./provider.js";
@@ -5,6 +6,7 @@ import { QualityGuardTTSProvider, type QualityGuardOptions, type SpeechTranscrib
 
 export type CreateEffectiveTtsProviderOptions = {
   baseProvider: TTSProvider;
+  pronunciationPolicy?: PronunciationPolicy;
   pronunciationEntities?: readonly CanonicalEntity[];
   /** @deprecated Use explicit qualityMode. */
   qualityGuardEnabled?: boolean;
@@ -30,9 +32,7 @@ export type EffectiveTtsProvider = {
  */
 export function createEffectiveTtsProvider(options: CreateEffectiveTtsProviderOptions): EffectiveTtsProvider {
   const baseProvider = options.baseProvider;
-  const basePronunciationProvider = options.pronunciationEntities
-    ? pronunciationProvider(baseProvider, options.pronunciationEntities)
-    : baseProvider;
+  const basePronunciationProvider = pronunciationProvider(baseProvider, options.pronunciationEntities ?? [], options.pronunciationPolicy);
 
   const qualityMode = options.qualityMode ?? "off";
   const provider = qualityMode !== "off"

@@ -12,6 +12,7 @@ export interface TTSProvider {
   /** Resolves a per-story voice override to the concrete voice used by the provider. */
   resolveReferenceId?(referenceId?: string): string | undefined;
   /** Prepare exact synthesis chunks locally without generating audio. */
+  pronunciationFingerprint?(text: string): string | undefined;
   prepareSegments?(request: TTSRequest): string[];
   synthesize(request: TTSRequest): Promise<TTSResult>;
   validateConfiguration(): Promise<void>;

@@ -74,11 +74,16 @@ export function promoteConfirmedMaterialIssues(value: unknown): unknown {
       && /\bnarration\b/i.test(description)
       && /\badds?\s+(?:an?\s+)?insult\b/i.test(description)
       && /\babsent\s+from\b/i.test(description);
+    const confirmedIdentityMismatch = ["names", "storyConsistency", "narrationFidelity"].includes(issue.category)
+      && /^Confirmed identity mismatch:\s*The fault lies in\s+(?:both the translation and narration|the TRANSLATION|the NARRATION)\b/i.test(issue.message)
+      && /\bSOURCE\s*:/i.test(issue.evidence ?? "")
+      && /\b(?:TRANSLATION|NARRATION)\s*:/i.test(issue.evidence ?? "")
+      && !/\b(?:may|might|possibly|uncertain|ambiguous|unconfirmed|cannot verify)\b/i.test(issue.message);
     if (translationChapterTitleDefect && issue.severity === "fail") {
       downgradedTitleCategories.add(issue.category);
       return { ...issue, severity: "warn" as const };
     }
-    return wrongAuthorizedName || addedInsult ? { ...issue, severity: "fail" as const } : issue;
+    return wrongAuthorizedName || addedInsult || confirmedIdentityMismatch ? { ...issue, severity: "fail" as const } : issue;
   });
   const checks = { ...parsed.checks };
   for (const issue of issues) if (issue.severity === "fail") checks[issue.category] = "fail";

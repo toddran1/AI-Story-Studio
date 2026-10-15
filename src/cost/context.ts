@@ -40,8 +40,9 @@ export class TrackedLLMProvider implements LLMProvider {
 
 export class TrackedTTSProvider implements TTSProvider {
   readonly name; readonly inputNormalizationVersion; readonly pronunciationCapabilities; readonly vocalizationCapabilities;
+  readonly pronunciationFingerprint?: (text: string) => string | undefined;
   readonly prepareSegments?: (request: TTSRequest) => string[];
-  constructor(private readonly inner: TTSProvider, private readonly sink: UsageSink) { this.prepareSegments = inner.prepareSegments?.bind(inner); this.name = inner.name; this.inputNormalizationVersion = inner.inputNormalizationVersion; this.pronunciationCapabilities = inner.pronunciationCapabilities; this.vocalizationCapabilities = inner.vocalizationCapabilities; }
+  constructor(private readonly inner: TTSProvider, private readonly sink: UsageSink) { this.pronunciationFingerprint = inner.pronunciationFingerprint?.bind(inner); this.prepareSegments = inner.prepareSegments?.bind(inner); this.name = inner.name; this.inputNormalizationVersion = inner.inputNormalizationVersion; this.pronunciationCapabilities = inner.pronunciationCapabilities; this.vocalizationCapabilities = inner.vocalizationCapabilities; }
   vocalizationStrategy(model?: string) { return this.inner.vocalizationStrategy?.(model) ?? { kind: "safe_normalize" as const }; }
   resolveReferenceId(id?: string) { return this.inner.resolveReferenceId?.(id); } validateConfiguration() { return this.inner.validateConfiguration(); }
   async synthesize(request: TTSRequest) {

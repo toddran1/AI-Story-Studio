@@ -155,6 +155,7 @@ export async function repairQaText(provider: LLMProvider, config: StageModelConf
     "Preserve every unaffected detail, paragraph, event, number, proper name, and line of dialogue.",
     "Make the smallest changes necessary to resolve every supplied QA finding. Never shorten the chapter into a summary.",
     "If a supplied finding is wrong, already resolved, or contradicts the source, make no change for that finding rather than inventing changes.",
+    "For character-identity findings, resolve the speaker, actor, recipient, and possessive owner against explicit source evidence and neighboring sentences. Correct gender/pronouns only where that reference is established; matching errors in translation and narration do not validate one another. Respect authorized narration names and protected identity notes. Do not copy an isolated source pronoun typo, invent gender for an ambiguous reference, or let a conflated Story Bible record override clear source evidence.",
     input.target === "narration" ? silentReactionGuidance : "",
     "System panels, status windows, stat blocks, and game interfaces must remain verbatim, character for character; never fill in, estimate, round, or normalize numeric values.",
     input.target === "translation"

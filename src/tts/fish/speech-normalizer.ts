@@ -104,6 +104,9 @@ function replaceAll(text: string, replacements: ReadonlyArray<readonly [RegExp, 
  * fictional terminology are not silently changed.
  */
 export function normalizeFishSpeechText(text: string, model?: string, options: { tskRendering?: "preserve" | "direction" } = {}): string {
+  // Canonicalize before reaction detection so Unicode and typed ellipses take
+  // exactly the same path. This only changes hidden delivery text.
+  text = text.replace(/…/gu, "...");
   // Physical sound effects have no application-supported Fish delivery cue.
   // Describe only standalone effects; preserve quoted dialogue and prose uses.
   text = text.replace(/^[ \t]*(WHU+M|RI+P)[ \t]*[—–-]*[ \t]*!+[ \t]*$/gm,
@@ -128,6 +131,10 @@ export function normalizeFishSpeechText(text: string, model?: string, options: {
       return quote.slice(0, -1).replace(/(?<=[\p{L}\p{N}])(?:\.{3,}|…+)[ \t]*$/gu, ".") + quote.slice(-1);
     })
     .replace(/\[laughing\](?:[ \t]*\[laughing\])+/giu, "[laughing]")
+    // Attach an otherwise text-free reaction to immediately following quoted
+    // dialogue. Keep each reaction and never cross intervening narration.
+    .replace(/“(\[(?:laughing|chuckle)\])”\s*\n\s*“(?![ \t]*\[)(?=[^”\n]*\p{L})/gu, "“$1 ")
+    .replace(/"(\[(?:laughing|chuckle)\])"\s*\n\s*"(?![ \t]*\[)(?=[^"\n]*\p{L})/gu, '"$1 ')
     // A cue-only quotation followed by narration is a reaction, not an empty
     // dialogue turn. Keep it inline to avoid speaker/soft/calm switches around it.
     .replace(/“(\[(?:laughing|chuckle)\])”(?=[ \t]+\p{L})|"(\[(?:laughing|chuckle)\])"(?=[ \t]+\p{L})/gu, (_match, curly: string | undefined, straight: string | undefined) => curly ?? straight!)

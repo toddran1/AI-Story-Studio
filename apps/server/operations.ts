@@ -1,3 +1,4 @@
+import { storyPronunciationPolicy } from "../../src/tts/pronunciation-dictionary.js";
 import { audioRegenerationInputSchema } from "../../src/tts/regeneration-selection.js";
 import { requireCurrentOriginal } from "../../src/source/current-original.js";
 import { visualRegenerationInputSchema, visualSceneSelectionSchema, visualSceneKey } from "../../src/visual-canon/regeneration-selection.js";
@@ -151,7 +152,7 @@ import { batchStageSchema } from "../../src/studio/stage-selection.js";
 import { WhisperCppSpeechTranscriber } from "../../src/alignment/transcription.js";
 import { QualityGuardTTSProvider, SpeechTranscriber, type TtsQualityProgress } from "../../src/tts/quality-guard.js";
 import { createEffectiveTtsProvider } from "../../src/tts/effective-provider.js";
-import { acceptStoredChapterTtsSegment, loadChapterTtsQuality, regenerateStoredChapterTtsSegment, verifyStoredChapterTts } from "../../src/tts/chapter-quality.js";
+import { acceptStoredChapterTtsSegment, prepareStoredChapterTtsSegment, loadChapterTtsQuality, regenerateStoredChapterTtsSegment, verifyStoredChapterTts } from "../../src/tts/chapter-quality.js";
 
 const chapterParamSchema = z.number().int().positive();
 const segmentParamSchema = z.number().int().min(1).max(99_999);
@@ -1420,8 +1421,8 @@ export class StudioOperations {
       const entity = entities.find(item => item.id === id); if (!entity) throw new Error("Canonical entity was not found");
       const name = entity.localizedNaming?.fullName ?? entity.preferredNarrationName ?? entity.canonicalName;
       const text = entity.type === "location" ? `They finally arrived in ${name}.` : `${name} followed them through the gate.`;
-      const config = story.pipeline.tts; const provider = pronunciationProvider(this.tts.forName(config.provider), entities); const speech = normalizeSpeechForProvider(text, story.outputLanguage, story.narrationSettings, provider, config.model);
-      const key = fingerprint({ text, speech: speech.fingerprint, config, reference: provider.resolveReferenceId?.(config.referenceId), pronunciation: pronunciationFingerprint(resolvePronunciations(speech.normalized.text, entities)), normalization: provider.inputNormalizationVersion, censor: { version: this.censor.version, config: censorToneConfig }, bleep: story.narrationSettings.bleepStrongProfanity });
+      const config = story.pipeline.tts; const provider = pronunciationProvider(this.tts.forName(config.provider), entities, storyPronunciationPolicy(story)); const speech = normalizeSpeechForProvider(text, story.outputLanguage, story.narrationSettings, provider, config.model);
+      const key = fingerprint({ text, speech: speech.fingerprint, config, reference: provider.resolveReferenceId?.(config.referenceId), pronunciation: { entity: pronunciationFingerprint(resolvePronunciations(speech.normalized.text, entities)), dictionary: provider.pronunciationFingerprint?.(speech.normalized.text) }, normalization: provider.inputNormalizationVersion, censor: { version: this.censor.version, config: censorToneConfig }, bleep: story.narrationSettings.bleepStrongProfanity });
       const cachePath = join(storyPaths(this.root, slug, 1).story, "pronunciation-previews", `${key}.json`);
       const cachedRaw = await readJsonIfExists(cachePath);
       const cacheResult = z.object({ id: z.string().uuid(), audioUrl: z.string(), bytes: z.number().positive() }).safeParse(cachedRaw);
@@ -1733,6 +1734,7 @@ export class StudioOperations {
       const { provider } = createEffectiveTtsProvider({
         baseProvider: this.tts.forName(request.provider),
         pronunciationEntities: entities,
+        pronunciationPolicy: storyPronunciationPolicy(story),
         qualityMode: ttsQualityMode(config),
         maxQualityRetries: config.maxQualityRetries,
         language: story.outputLanguage,
@@ -1857,6 +1859,7 @@ export class StudioOperations {
       const { provider } = createEffectiveTtsProvider({
         baseProvider: this.tts.forName(config.provider),
         pronunciationEntities: entities,
+        pronunciationPolicy: storyPronunciationPolicy(story),
         qualityMode: "verify",
         maxQualityRetries: 0,
         language: story.outputLanguage,
@@ -1872,13 +1875,18 @@ export class StudioOperations {
       const story = await loadStory(storyPaths(this.root, slug, 1).storyConfig);
       const fullChapters = input.selections.filter(row => !row.segments).map(row => row.chapter);
       const sources = new Map(fullChapters.length ? selectChapterNumbers((await loadImportedChapters(this.root, slug)).chapters, fullChapters).map(row => [row.chapter, row]) : []);
+      const total = input.selections.reduce((sum, row) => sum + (row.segments?.length ?? 1), 0);
       const plans = new Map<number, Awaited<ReturnType<typeof planStageExecution>>>();
+      const preflightEntities = input.selections.some(row => row.segments) ? await loadPronunciationEntities(this.root, slug) : [];
+      const preflightProvider = createEffectiveTtsProvider({ baseProvider: this.tts.forName(story.pipeline.tts.provider), pronunciationEntities: preflightEntities, pronunciationPolicy: storyPronunciationPolicy(story), qualityMode: "off" }).provider;
       // Validate the entire selection before issuing any paid request.
       for (const row of input.selections) {
+        control.update({ chapter: row.chapter, completed: 0, total, phase: "checking selection" });
         if (row.segments) {
           const quality = await loadChapterTtsQuality(this.root, slug, row.chapter);
           for (const segment of row.segments) {
             if (!quality?.segments.some(item => item.index === segment - 1) || !await exists(join(storyPaths(this.root, slug, row.chapter).segments, `${String(segment).padStart(4, "0")}.mp3`))) throw new ConfigurationError(`Chapter ${row.chapter}, segment ${segment} is unavailable. Refresh the selection.`);
+            await prepareStoredChapterTtsSegment({ root: this.root, story, chapter: row.chapter, segment: segment - 1, provider: preflightProvider, allowedChangedSegments: row.segments.map(value => value - 1), artifact: quality ?? undefined });
           }
         } else {
           const plan = await planStageExecution({ root: this.root, story: slug, chapter: row.chapter, selectedStages: ["tts"], mode: "selected", force: true, executionPolicy: "chapter-stage", storyConfig: story });
@@ -1887,8 +1895,8 @@ export class StudioOperations {
         }
       }
       const shutdown = new ShutdownController(); control.setPause(() => shutdown.request());
-      const results: Array<{ chapter: number; segment?: number; status: "completed" | "failed"; error?: string }> = [];
-      const total = input.selections.reduce((sum, row) => sum + (row.segments?.length ?? 1), 0); let completed = 0;
+      const results: Array<{ chapter: number; segment?: number; status: "completed" | "failed"; error?: string; diagnostic?: ErrorDiagnostic }> = [];
+      let completed = 0;
       for (const row of input.selections) {
         if (shutdown.isRequested) break;
         let changed = false;
@@ -1902,13 +1910,21 @@ export class StudioOperations {
               await executeStagePlan({ root: this.root, story, chapter: row.chapter, inputPath: source.path, source: source.source, plan: plans.get(row.chapter)!, runtime: { pipeline: this.pipeline, alignment: { config: this.alignConfig, engine: this.aligner }, scenePlanner: this.scenePlanner ?? this.runtime.router.forStage(story.pipeline.scenePlanner), image: this.image, video: this.video } });
             }
             changed = true; results.push({ chapter: row.chapter, segment, status: "completed" });
-          } catch (error) { results.push({ chapter: row.chapter, segment, status: "failed", error: createErrorDiagnostic(error).summary }); }
+          } catch (error) {
+            const diagnostic = createErrorDiagnostic(error, { chapter: row.chapter });
+            if (segment !== undefined) diagnostic.summary = `Segment ${segment}: ${diagnostic.summary}`;
+            results.push({ chapter: row.chapter, segment, status: "failed", error: diagnostic.summary, diagnostic });
+          }
           completed++; control.update({ chapter: row.chapter, segment, completed, total, phase: "generated", results });
         }
         if (changed && input.rebuildMasters) {
           control.update({ chapter: row.chapter, completed, total, phase: "mastering", results });
           try { await masterStoredChapter({ root: this.root, story, chapter: row.chapter, processor: this.audio, force: true }); }
-          catch (error) { results.push({ chapter: row.chapter, status: "failed", error: `Master rebuild: ${createErrorDiagnostic(error).summary}` }); }
+          catch (error) {
+            const diagnostic = createErrorDiagnostic(error, { chapter: row.chapter });
+            diagnostic.summary = `Master rebuild: ${diagnostic.summary}`;
+            results.push({ chapter: row.chapter, status: "failed", error: diagnostic.summary, diagnostic });
+          }
         }
         await invalidateChapterStatusDerivedReads(this.root, slug);
       }

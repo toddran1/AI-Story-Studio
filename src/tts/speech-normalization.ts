@@ -82,6 +82,8 @@ export function normalizeStructuredSpeechBlock(written: string): string {
   const content = written.slice(1, -1).trim();
   if (!content) return written;
   return content
+    // Resolve an ellipsis before punctuation spacing can turn it into ". . .".
+    .replace(/(?<=\p{L})(?:\.{2,}|…+)/gu, ",")
     .replace(/\s*\(([^()]{1,80})\)/gu, (_match, label: string) => `. ${label.trim()}`)
     .replace(/(?<![\p{L}\p{N}])(EXP|XP|HP|MP)\s*\/\s*(\d{1,6})(?![\p{L}\p{N}])/giu,
       (_match, label: string, number: string) => `${label.toUpperCase()}: ${speakInteger(Number(number))}`)

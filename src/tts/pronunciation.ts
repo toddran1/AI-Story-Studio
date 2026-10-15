@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { buildPronunciationDictionary, dictionaryForText, hasExplicitPronunciationGuidance, PRONUNCIATION_DICTIONARY_VERSION, type PronunciationPolicy } from "./pronunciation-dictionary.js";
 import { pronunciationSchema, hasActivePronunciation, type CanonicalEntity, type EntityPronunciation } from "../domain/story-bible.js";
 import type { LLMProvider } from "../llm/provider.js";
 import type { StageModelConfig } from "../domain/provider.js";
@@ -38,8 +39,15 @@ export type PronunciationOccurrence = {
 export type PronunciationCapabilities = { ipa?: boolean; dictionary?: boolean; ssml?: boolean; languageTags?: boolean; phoneticText?: boolean };
 
 /** Resolve again for each actual request, so censor splitting cannot corrupt offsets. */
-export function pronunciationProvider(provider: TTSProvider, entities: readonly CanonicalEntity[]): TTSProvider {
-  if (!entities.some(entity => hasActivePronunciation(entity.pronunciation))) return provider;
+export function pronunciationProvider(provider: TTSProvider, entities: readonly CanonicalEntity[], policy: PronunciationPolicy = {}): TTSProvider {
+  const dictionary = buildPronunciationDictionary(entities, policy);
+  const protectedTerms = entities.flatMap(entity => {
+    const configured = hasExplicitPronunciationGuidance(entity);
+    return [
+      ...(configured ? [entity.canonicalName, ...entity.aliases, entity.preferredNarrationName, entity.pronunciation?.customPronunciation, entity.pronunciation?.phoneticHint] : []),
+    ].filter((name): name is string => Boolean(name));
+  });
+  if (!dictionary.length && !entities.some(entity => hasActivePronunciation(entity.pronunciation))) return provider;
   return {
     name: provider.name, inputNormalizationVersion: provider.inputNormalizationVersion,
     pronunciationCapabilities: provider.pronunciationCapabilities,
@@ -47,9 +55,12 @@ export function pronunciationProvider(provider: TTSProvider, entities: readonly 
     vocalizationStrategy: provider.vocalizationStrategy?.bind(provider),
     resolveReferenceId: provider.resolveReferenceId?.bind(provider),
     validateConfiguration: () => provider.validateConfiguration(),
+    pronunciationFingerprint: text => { const rules = dictionaryForText(text, dictionary); return rules.length ? fingerprint({ version: PRONUNCIATION_DICTIONARY_VERSION, rules }) : undefined; },
     prepareSegments: provider.prepareSegments ? request => provider.prepareSegments!({ ...request, pronunciation: request.exactChunk ? [] : (request.pronunciation ?? resolvePronunciations(request.text, entities)) }) : undefined,
     synthesize: request => provider.synthesize({
       ...request,
+      pronunciationDictionary: request.pronunciationDictionary ?? dictionaryForText(request.text, dictionary),
+      pronunciationProtectedTerms: request.pronunciationProtectedTerms ?? protectedTerms,
       pronunciation: request.exactChunk ? [] : (request.pronunciation ?? resolvePronunciations(request.text, entities)),
     }),
   };

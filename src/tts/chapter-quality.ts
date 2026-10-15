@@ -257,6 +257,62 @@ export async function verifyStoredChapterTts(options: {
   return updated;
 }
 
+/** Read-only preflight shared by single and bulk regeneration. */
+export async function prepareStoredChapterTtsSegment(options: { root: string; story: Story; chapter: number; segment: number; provider: TTSProvider; allowedChangedSegments?: number[]; artifact?: TtsQualityArtifact }) {
+  const { root, story, chapter, provider } = options;
+  const paths = storyPaths(root, story.slug, chapter);
+  const artifact = options.artifact ?? await loadChapterTtsQuality(root, story.slug, chapter);
+  if (!artifact) throw new StorageError(`Chapter ${chapter} has no TTS quality artifact; run TTS first`);
+  let current = artifact.segments.find(segment => segment.index === options.segment);
+  if (!current) throw new StorageError(`Chapter ${chapter} has no TTS segment ${options.segment + 1}`);
+  if (!await exists(segmentFile(root, story.slug, chapter, current.index))) throw new StorageError(`Chapter ${chapter} segment ${current.index + 1} audio is missing; rerun the TTS stage`);
+  const config = story.pipeline.tts;
+  const savedScript = await exists(paths.narrationTts) ? await readFile(paths.narrationTts, "utf8") : undefined;
+  const savedNarration = await exists(paths.narration) ? await readFile(paths.narration, "utf8") : undefined;
+  const script = savedScript?.trim() || savedNarration?.trim();
+  if (!script && (savedScript !== undefined || savedNarration !== undefined)) throw new StorageError("Saved narration is empty; save the intended narration before regenerating speech.");
+  if (script && provider.prepareSegments) {
+    const speech = normalizeSpeechForProvider(script, story.outputLanguage, story.narrationSettings, provider, config.model);
+    const prepared = provider.prepareSegments({ text: speech.normalized.text, model: config.model, referenceId: config.referenceId, secondaryReferenceId: config.secondaryReferenceId, voiceMode: config.voiceMode, deliveryIntensity: config.deliveryIntensity, speed: config.speed, format: config.format, sampleRate: config.sampleRate, bitrate: config.bitrate, normalize: config.normalize, maxCharsPerRequest: config.maxCharsPerRequest });
+    // Older Fish artifacts put the narration reset immediately after dialogue;
+    // current formatting puts it before the following narration. Current formatting also
+    // repeats soft cues for adjacent dialogue. Neither change alters
+    // the words in untouched audio and neither should block an edit.
+    const comparableText = (text: string | undefined) => provider.name === "fish" ? text?.replace(/\[(?:calm|soft)\]/gi, " ").replace(/\s+/g, " ").trim() : text;
+    const unchangedOthers = artifact.segments.every(segment => segment.index === options.segment || options.allowedChangedSegments?.includes(segment.index) || comparableText(prepared[segment.index]) === comparableText(segment.expectedText));
+    // Edits in another segment are allowed: they remain pending for that segment's
+    // own regeneration. Require the same paragraph at every join so we cannot
+    // silently duplicate or omit narration by replacing a shifted chunk.
+    const lastParagraph = (text: string | undefined) => comparableText(text?.trim().split(/\n\s*\n/).at(-1));
+    const stableJoins = artifact.segments.slice(0, -1).every(segment => lastParagraph(prepared[segment.index]) === lastParagraph(segment.expectedText));
+    let refreshed = prepared;
+    if (prepared.length !== artifact.segments.length || (!unchangedOthers && !stableJoins)) {
+      // Repacking by character count can move an unchanged paragraph into the
+      // next chunk. Preserve the existing joins using unique closing paragraphs.
+      const paragraphs = prepared.join("\n\n").split(/\n\s*\n/).map(text => text.trim()).filter(Boolean);
+      const normalized = paragraphs.map(comparableText);
+      const restored: string[] = [];
+      let cursor = 0;
+      for (const segment of artifact.segments.slice(0, -1)) {
+        const anchor = lastParagraph(segment.expectedText);
+        const positions = normalized.flatMap((text, index) => text === anchor ? [index] : []);
+        if (!anchor || anchor.length < 20 || positions.length !== 1 || positions[0]! < cursor) break;
+        const boundary = positions[0]! + 1;
+        restored.push(paragraphs.slice(cursor, boundary).join("\n\n")); cursor = boundary;
+      }
+      if (restored.length === artifact.segments.length - 1 && cursor < paragraphs.length) {
+        restored.push(paragraphs.slice(cursor).join("\n\n")); refreshed = restored;
+      } else refreshed = [];
+    }
+    if (!refreshed[options.segment] || refreshed.length !== artifact.segments.length || refreshed[options.segment]!.length > 20_000) throw new StorageError(`Chapter ${chapter}, segment ${options.segment + 1}: the saved narration cannot be matched safely to the existing segment boundaries. Regenerate the full chapter audio. No segment audio was generated.`);
+    current = { ...current, expectedText: refreshed[options.segment]! };
+  } else if (script) {
+    const metadata = await readJsonIfExists(paths.chapterMeta).then(raw => raw ? chapterSchema.parse(raw) : undefined);
+    if (metadata?.stages.tts.status !== "complete") throw new StorageError("Saved narration changed. This provider cannot refresh individual segment text; regenerate the full chapter audio.");
+  }
+  return current;
+}
+
 /** Regenerates exactly one failed segment through the guard-wrapped provider,
  * replaces its audio file atomically, and marks mastering and downstream stages
  * pending. Mastered audio is never silently reassembled here. */
@@ -279,30 +335,7 @@ export async function regenerateStoredChapterTtsSegment(options: { root: string;
   const oldChapterMetaJson = (await exists(paths.chapterMeta)) ? await readFile(paths.chapterMeta) : undefined;
 
   const config = story.pipeline.tts;
-  const savedScript = await exists(paths.narrationTts) ? await readFile(paths.narrationTts, "utf8") : undefined;
-  const savedNarration = await exists(paths.narration) ? await readFile(paths.narration, "utf8") : undefined;
-  const script = savedScript?.trim() || savedNarration?.trim();
-  if (!script && (savedScript !== undefined || savedNarration !== undefined)) throw new StorageError("Saved narration is empty; save the intended narration before regenerating speech.");
-  if (script && provider.prepareSegments) {
-    const speech = normalizeSpeechForProvider(script, story.outputLanguage, story.narrationSettings, provider, config.model);
-    const prepared = provider.prepareSegments({ text: speech.normalized.text, model: config.model, referenceId: config.referenceId, secondaryReferenceId: config.secondaryReferenceId, voiceMode: config.voiceMode, deliveryIntensity: config.deliveryIntensity, speed: config.speed, format: config.format, sampleRate: config.sampleRate, bitrate: config.bitrate, normalize: config.normalize, maxCharsPerRequest: config.maxCharsPerRequest });
-    // Older Fish artifacts put the narration reset immediately after dialogue;
-    // current formatting puts it before the following narration. That migration
-    // and now repeats soft cues for adjacent dialogue. Neither change alters
-    // the words in untouched audio and neither should block an edit.
-    const comparableText = (text: string | undefined) => provider.name === "fish" ? text?.replace(/\[(?:calm|soft)\]/gi, " ").replace(/\s+/g, " ").trim() : text;
-    const unchangedOthers = artifact.segments.every(segment => segment.index === options.segment || options.allowedChangedSegments?.includes(segment.index) || comparableText(prepared[segment.index]) === comparableText(segment.expectedText));
-    // Edits in another segment are allowed: they remain pending for that segment's
-    // own regeneration. Require the same paragraph at every join so we cannot
-    // silently duplicate or omit narration by replacing a shifted chunk.
-    const lastParagraph = (text: string | undefined) => comparableText(text?.trim().split(/\n\s*\n/).at(-1));
-    const stableJoins = artifact.segments.slice(0, -1).every(segment => lastParagraph(prepared[segment.index]) === lastParagraph(segment.expectedText));
-    if (prepared.length !== artifact.segments.length || (!unchangedOthers && !stableJoins) || !prepared[options.segment]) throw new StorageError("Saved narration or speech settings changed other segments or their boundaries. Regenerate the full chapter audio to apply the latest narration safely. No segment audio was generated.");
-    current = { ...current, expectedText: prepared[options.segment]! };
-  } else if (script) {
-    const metadata = oldChapterMetaJson ? chapterSchema.parse(JSON.parse(oldChapterMetaJson.toString("utf8"))) : undefined;
-    if (metadata?.stages.tts.status !== "complete") throw new StorageError("Saved narration changed. This provider cannot refresh individual segment text; regenerate the full chapter audio.");
-  }
+  current = await prepareStoredChapterTtsSegment({ ...options, artifact });
   const result = await provider.synthesize({
     text: current.expectedText, exactChunk: true, singleAttempt: true, model: config.model, referenceId: config.referenceId, secondaryReferenceId: config.secondaryReferenceId,
     voiceMode: config.voiceMode, deliveryIntensity: config.deliveryIntensity, qualityGuard: true,

@@ -376,3 +376,9 @@
 .regen-segment-picks label.chosen { border-color: var(--regen-cue); background: #302c4b; color: var(--regen-ink); }
 .regen-edit-actions { justify-content: flex-end; flex-wrap: wrap; margin-top: 14px; }
 .regen-quick-edit :focus-visible { outline: 2px solid var(--regen-cue); outline-offset: 3px; }
+.pronunciation-rule { display: grid; grid-template-columns: minmax(120px,1fr) minmax(140px,1fr) minmax(140px,1fr) auto; gap: 12px; align-items: end; padding: 14px 0; border-bottom: 1px solid var(--border, #343443); }
+.pronunciation-rule .field { min-width: 0; }
+.pronunciation-rule input, .pronunciation-rule select { width: 100%; box-sizing: border-box; }
+@media (max-width: 800px) { .pronunciation-rule { grid-template-columns: minmax(0,1fr); } }
+.pronunciation-source-toggle { display: flex; align-items: center; gap: 10px; padding: 12px 0 4px; font-size: 13px; }
+.pronunciation-source-toggle input[type=checkbox] { width: 16px; height: 16px; margin: 0; accent-color: #aaa0f5; flex-shrink: 0; }

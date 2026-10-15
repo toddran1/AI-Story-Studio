@@ -616,11 +616,11 @@ describe("stored chapter quality service", () => {
     expect(quality.segments[0]?.expectedText).toBe(artifact.segments[0].expectedText);
     expect(await readFile(join(paths.segments, "0001.mp3"))).toEqual(before);
   });
-  it("rejects shifted boundaries before generating or replacing any segment", async () => {
+  it("rejects changed joins before generating or replacing any segment", async () => {
     const { root, story, paths } = await fixture();
     await atomicWrite(paths.narrationTts,"Updated narration with a new paragraph.");
     const before = await readFile(join(paths.segments,"0002.mp3"));
-    const inner = Object.assign(new ScriptedTTS(req => singleSegment(req.text,"cc")), { prepareSegments: () => [good,"new boundary","another chunk"] });
+    const inner = Object.assign(new ScriptedTTS(req => singleSegment(req.text,"cc")), { prepareSegments: () => ["Changed join paragraph.","new boundary","another chunk"] });
     await expect(regenerateStoredChapterTtsSegment({ root, story, chapter:1, segment:1, provider:guard(inner,new FakeTranscriber(() => say(bad))), maxRetries:0 })).rejects.toThrow("Regenerate the full chapter audio");
     expect(inner.calls).toHaveLength(0); expect(await readFile(join(paths.segments,"0002.mp3"))).toEqual(before);
   });
@@ -637,6 +637,31 @@ describe("stored chapter quality service", () => {
     expect(inner.calls).toHaveLength(1);
     expect(inner.calls[0]?.text).toBe("He countered with his skill.");
     expect(quality.segments[0]?.expectedText).toBe(artifact.segments[0].expectedText);
+  });
+  it("restores existing joins when current character-based chunks repack unchanged paragraphs", async () => {
+    const { root, story, paths } = await fixture();
+    const artifact = JSON.parse(await readFile(paths.ttsQuality, "utf8"));
+    artifact.segments[0].expectedText = "She opened the gate.\n\nThe guards waited beside the old stone wall.";
+    artifact.segments[1].expectedText = "The tower stood beside the sea.";
+    await atomicWriteJson(paths.ttsQuality, artifact);
+    const first = "He opened the gate.";
+    const closing = "The guards waited beside the old stone wall.";
+    const tail = "The tower stood beside the sea.";
+    await atomicWrite(paths.narrationTts, `${first}\n\n${closing}\n\n${tail}`);
+    const unchanged = await readFile(join(paths.segments, "0002.mp3"));
+    const inner = Object.assign(new ScriptedTTS(req => singleSegment(req.text, "cc")), { prepareSegments: () => [first, `${closing}\n\n${tail}`] });
+    const quality = await regenerateStoredChapterTtsSegment({ root, story, chapter: 1, segment: 0, provider: guard(inner, new FakeTranscriber(() => say(`${first} ${closing}`))), maxRetries: 0 });
+    expect(inner.calls).toHaveLength(1);
+    expect(inner.calls[0]?.text).toBe(`${first}\n\n${closing}`);
+    expect(quality.segments[1]?.expectedText).toBe(tail);
+    expect(await readFile(join(paths.segments, "0002.mp3"))).toEqual(unchanged);
+  });
+  it("rejects ambiguous paragraph anchors without synthesizing", async () => {
+    const { root, story, paths } = await fixture();
+    await atomicWrite(paths.narrationTts, "Changed narration.");
+    const inner = Object.assign(new ScriptedTTS(req => singleSegment(req.text, "cc")), { prepareSegments: () => [good, `${good}\n\n${bad}`, "New ending."] });
+    await expect(regenerateStoredChapterTtsSegment({ root, story, chapter: 1, segment: 0, provider: inner, maxRetries: 0 })).rejects.toThrow("Regenerate the full chapter audio");
+    expect(inner.calls).toHaveLength(0);
   });
   it("rejects edits to other segments even when the total segment count is unchanged", async () => {
     const { root, story, paths } = await fixture();
@@ -779,6 +804,24 @@ describe("tts quality server operations", () => {
     const { story, operations, jobs, inner } = await endpointFixture();
     const job = await waitForJob(jobs, operations.startAudioRegeneration(story.slug, { selections: [{ chapter: 1, segments: [1, 99] }], rebuildMasters: false }).id);
     expect(job.status).toBe("failed"); expect(inner.calls).toHaveLength(0);
+    await operations.close();
+  });
+
+  it("bulk preflight checks a later chapter's text before regenerating earlier audio", async () => {
+    const { root, story, paths, operations, jobs, inner } = await endpointFixture();
+    const second = storyPaths(root, story.slug, 2);
+    const quality = JSON.parse(await readFile(paths.ttsQuality, "utf8"));
+    await atomicWriteJson(second.ttsQuality, { ...quality, chapter: 2 });
+    await atomicWrite(join(second.segments, "0001.mp3"), bytes("aa"));
+    await atomicWrite(join(second.segments, "0002.mp3"), bytes("bb"));
+    await atomicWrite(paths.narrationTts, "First chapter.");
+    await atomicWrite(second.narrationTts, "Second chapter.");
+    Object.assign(inner, { prepareSegments: (request: TTSRequest) => request.text === "First chapter." ? [good, bad] : ["A changed join that cannot be matched.", "The remaining narration shifted too."] });
+    const job = await waitForJob(jobs, operations.startAudioRegeneration(story.slug, { selections: [{ chapter: 1, segments: [1] }, { chapter: 2, segments: [1] }], rebuildMasters: false }).id);
+    expect(job.status).toBe("failed");
+    expect(job.error).toContain("Chapter 2, segment 1");
+    expect(inner.calls).toHaveLength(0);
+    expect(await readFile(join(paths.segments, "0001.mp3"))).toEqual(Buffer.from(bytes("aa")));
     await operations.close();
   });
 

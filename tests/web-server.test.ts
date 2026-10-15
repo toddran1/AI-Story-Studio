@@ -520,6 +520,15 @@ describe("web service layer", () => {
     expect((await updateStorySettings(root, story.slug, { ...valid, qaPolicy: { disabledCategories: ["dialogue"], disabledRules: ["duplicateParagraph"] } })).qaPolicy).toEqual({ disabledCategories: ["dialogue"], disabledRules: ["duplicateParagraph"] });
     expect((await updateStorySettings(root, story.slug, valid)).qaPolicy.disabledRules).toEqual(["duplicateParagraph"]);
     await expect(updateStorySettings(root, story.slug, { ...valid, qaPolicy: { disabledCategories: ["not-a-category"], disabledRules: [] } })).rejects.toThrow();
+    const dictionary = [{ text: "Zhang", alphabet: "pinyin" as const, phonemes: "zhang1" }];
+    const withDictionary = await updateStorySettings(root, story.slug, { ...valid, tts: { ...valid.tts, pronunciationDictionary: dictionary, sourceLanguagePronunciation: false } });
+    expect(withDictionary.pipeline.tts.pronunciationDictionary).toEqual(dictionary);
+    expect(withDictionary.pipeline.tts.sourceLanguagePronunciation).toBe(false);
+    const preserved = await updateStorySettings(root, story.slug, valid);
+    expect(preserved.pipeline.tts.pronunciationDictionary).toEqual(dictionary);
+    expect(preserved.pipeline.tts.sourceLanguagePronunciation).toBe(false);
+    await expect(updateStorySettings(root, story.slug, { ...valid, tts: { ...valid.tts, pronunciationDictionary: [{ ...dictionary[0], phonemes: "[bad tag]" }] } })).rejects.toThrow();
+    expect((await updateStorySettings(root, story.slug, { ...valid, tts: { ...valid.tts, pronunciationDictionary: [] } })).pipeline.tts.pronunciationDictionary).toEqual([]);
     const chapter = chapterSchema.parse(await readJsonIfExists(paths.chapterMeta)); expect(chapter.stages.translation.status).toBe("complete"); expect(chapter.stages.narration.status).toBe("pending"); expect(chapter.stages.qa.status).toBe("pending");
     const persisted = await readFile(storyPaths(root, story.slug, 1).storyConfig, "utf8");
     await expect(updateStorySettings(root, story.slug, { ...valid, tts: { ...valid.tts, model: "" } })).rejects.toThrow();

@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { pronunciationDictionarySchema } from "./pronunciation-dictionary.js";
 
 export const llmProviderNameSchema = z.enum(["openai", "gemini", "kimi"]);
 export const ttsProviderNameSchema = z.enum(["fish"]);
@@ -55,6 +56,8 @@ export const fishTtsStageConfigSchema = z.object({
   sampleRate: z.union([z.literal(32000), z.literal(44100)]).default(44100),
   bitrate: z.union([z.literal(64), z.literal(128), z.literal(192)]).default(128),
   normalize: z.boolean().default(true),
+  pronunciationDictionary: pronunciationDictionarySchema.optional(),
+  sourceLanguagePronunciation: z.boolean().optional(),
   maxCharsPerRequest: z.number().int().min(500).max(20_000).default(1750),
 });
 

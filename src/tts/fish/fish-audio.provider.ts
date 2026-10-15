@@ -1,3 +1,4 @@
+import { renderFishPronunciationDictionary } from "./pronunciation-dictionary.js";
 import { mkdir, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { z } from "zod";
@@ -53,8 +54,8 @@ export class FishAudioProvider implements TTSProvider {
     } = {},
   ) {
     this.inputNormalizationVersion = speechOptions.tskRendering === "direction"
-      ? "fish-speech-normalization-v34-emphatic-cries-tsk-direction"
-      : "fish-speech-normalization-v34-emphatic-cries";
+      ? "fish-speech-normalization-v36-laughter-boundaries-tsk-direction"
+      : "fish-speech-normalization-v36-laughter-boundaries";
   }
 
   resolveReferenceId(referenceId?: string): string | undefined {
@@ -114,13 +115,14 @@ export class FishAudioProvider implements TTSProvider {
     const sleep = this.speechOptions.sleep ?? ((ms: number) => new Promise((resolve) => setTimeout(resolve, ms)));
 
     for (const [index, text] of chunks.entries()) {
+      const wireText = renderFishPronunciationDictionary(text, request.pronunciationDictionary, request.model, request.pronunciationProtectedTerms);
       const currentChunk = index + 1;
       const totalChunks = chunks.length;
       const chunkStem = String(currentChunk).padStart(4, "0");
       const metaPath = request.checkpointDir ? join(request.checkpointDir, `${chunkStem}.json`) : undefined;
       const audioPath = request.checkpointDir ? join(request.checkpointDir, `${chunkStem}.mp3`) : undefined;
       const chunkFp = fingerprint({
-        text,
+        text: wireText,
         model: request.model,
         referenceId,
         secondaryReferenceId,
@@ -199,7 +201,7 @@ export class FishAudioProvider implements TTSProvider {
             signal: AbortSignal.timeout(this.timeoutMs),
             headers: { Authorization: `Bearer ${this.apiKey}`, "Content-Type": "application/json", model: request.model },
             body: JSON.stringify({
-              text,
+              text: wireText,
               reference_id: multiSpeaker ? [referenceId!, secondaryReferenceId!] : referenceId,
               format: request.format,
               sample_rate: request.sampleRate,
@@ -360,14 +362,14 @@ export class FishAudioProvider implements TTSProvider {
             fingerprint: chunkFp,
             createdAt: new Date().toISOString(),
             requestId,
-            characters: [...text].length,
-            utf8Bytes: Buffer.byteLength(text),
+            characters: [...wireText].length,
+            utf8Bytes: Buffer.byteLength(wireText),
           });
         }
         segments.push(audio);
         newBilledRequests++;
-        newBilledCharacters += [...text].length;
-        newBilledBytes += Buffer.byteLength(text);
+        newBilledCharacters += [...wireText].length;
+        newBilledBytes += Buffer.byteLength(wireText);
         newAudioBytes += audio.byteLength;
         safeProgress(request.onChunkProgress, { currentChunk, totalChunks, status: "completed" });
         break;

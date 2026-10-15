@@ -6,6 +6,36 @@ import { normalizeSpeechText } from "../src/tts/speech-normalization.js";
 import { TTSRequest } from "../src/tts/types.js";
 
 describe("Fish TTS", () => {
+  it.each(["Hahaha", "Heh", "Hehe", "Wait"])("uses the same delivery text for both ellipses after %s", (reaction) => {
+    const unicode = normalizeFishSpeechText(`“${reaction}… Big talk!”`, "s2.1-pro-free");
+    expect(unicode).toBe(normalizeFishSpeechText(`“${reaction}... Big talk!”`, "s2.1-pro-free"));
+    expect(unicode).not.toContain("…");
+  });
+
+  it("normalizes both ellipses before system-panel punctuation spacing", () => {
+    const unicode = normalizeFishSpeechText("【Wait… more enemies are coming!】", "s2.1-pro-free");
+    expect(unicode).toContain("Wait, more enemies");
+    expect(unicode).toBe(normalizeFishSpeechText("【Wait... more enemies are coming!】", "s2.1-pro-free"));
+  });
+
+  it.each([['“', '”'], ['"', '"']])("attaches a cue-only laugh to following dialogue with %s quotes", (open, close) => {
+    const text = `${open}Hahaha…${close}\n\n${open}Big talk!${close}`;
+    const spoken = normalizeFishSpeechText(text, "s2.1-pro-free");
+    expect(spoken).toBe(`${open}[laughing] Big talk!${close}`);
+    expect(normalizeFishSpeechText(spoken, "s2.1-pro-free")).toBe(spoken);
+  });
+
+  it("does not attach a laugh across narration or invent speech for a final reaction", () => {
+    const text = '“Hahaha…”\n\nLeo looked away.\n\n“Big talk!”';
+    expect(normalizeFishSpeechText(text, "s2.1-pro-free")).toBe('“[laughing]”\n\nLeo looked away.\n\n“Big talk!”');
+    expect(normalizeFishSpeechText('“Hahaha…”', "s2.1-pro-free")).toBe('“[laughing]”');
+  });
+
+  it("keeps an attached laugh with following speech at a request boundary", () => {
+    const provider = new FishAudioProvider();
+    const chunks = provider.prepareSegments({ text: 'Earlier narration ends here.\n\n“Hahaha…”\n\n“Big talk!”', model: "s2.1-pro-free", speed: 1, format: "mp3", sampleRate: 44100, bitrate: 128, normalize: true, maxCharsPerRequest: 30 });
+    expect(chunks).toEqual(['Earlier narration ends here.', '“[laughing] Big talk!”']);
+  });
   it("describes standalone stretched physical effects without inventing control tags", () => {
     const text = "The jeers had barely begun when—\n\nWHUM—!\n\nA soft white light spread across the altar.\n\nRIIIIP—!\n\nHis T-shirt split.\n\nAAH!";
     const spoken = normalizeFishSpeechText(text, "s2.1-pro");
@@ -160,7 +190,7 @@ describe("Fish TTS", () => {
     await provider.synthesize({ text: "**Important:** *whisper this.* [sad] 2 * 2", model: "s2.1-pro", speed: 1, format: "mp3", sampleRate: 44100, bitrate: 128, normalize: true, maxCharsPerRequest: 500 });
     const body = JSON.parse(String((fetcher.mock.calls[0]?.[1] as RequestInit).body));
     expect(body.text).toBe("Important: whisper this. [sad] 2 * 2");
-    expect(provider.inputNormalizationVersion).toBe("fish-speech-normalization-v34-emphatic-cries");
+    expect(provider.inputNormalizationVersion).toBe("fish-speech-normalization-v36-laughter-boundaries");
   });
 
   it("does not turn profanity into the literal word bleep inside Fish", async () => {

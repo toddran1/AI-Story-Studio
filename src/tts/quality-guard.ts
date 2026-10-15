@@ -367,13 +367,14 @@ export type QualityGuardOptions = {
 export class QualityGuardTTSProvider implements TTSProvider {
   readonly name; readonly inputNormalizationVersion; readonly pronunciationCapabilities; readonly vocalizationCapabilities;
   private availability?: Promise<boolean>;
+  readonly pronunciationFingerprint?: (text: string) => string | undefined;
   readonly prepareSegments?: (request: TTSRequest) => string[];
   constructor(
     private readonly inner: TTSProvider,
     private readonly transcriber?: SpeechTranscriber,
     private readonly options: QualityGuardOptions = { maxRetries: 1, language: "en-US" },
   ) {
-    this.prepareSegments = inner.prepareSegments?.bind(inner);
+    this.pronunciationFingerprint = inner.pronunciationFingerprint?.bind(inner); this.prepareSegments = inner.prepareSegments?.bind(inner);
     this.name = inner.name; this.inputNormalizationVersion = inner.inputNormalizationVersion;
     this.pronunciationCapabilities = inner.pronunciationCapabilities; this.vocalizationCapabilities = inner.vocalizationCapabilities;
   }
