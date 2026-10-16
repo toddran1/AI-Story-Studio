@@ -154,7 +154,7 @@ describe("QA authorized narration naming", () => {
   });
 
   it("records the bumped prompt version", () => {
-    expect(QA_PROMPT_VERSION).toBe("14-character-identity-verification");
+    expect(QA_PROMPT_VERSION).toBe("15-prefer-short-name");
   });
 
   it("documents the output contract, severity rubric, and repair-routing phrasing", () => {

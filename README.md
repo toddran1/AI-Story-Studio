@@ -646,7 +646,7 @@ npm run story:names -- set undead-disaster ent_<24-hex-id> --locale en-US --full
 npm run story:names -- clear undead-disaster ent_<24-hex-id>
 ```
 
-`ai_contextual` gives the narration model the full and familiar forms plus contextual guidance; it deliberately does not apply a deterministic text replacement. Use `always_full`, `always_short`, or `manual` only when you need an explicit non-contextual rule.
+`ai_contextual` gives the narration model the full and familiar forms plus contextual guidance; it deliberately does not apply a deterministic text replacement. In Names / Localization, characters using AI contextual can enable **Prefer short name** (requires a short name). Narration then defaults to the short form in prose, thoughts, and casual dialogue; the full form is reserved for explicit formal introductions or address, IDs and official records, deliberate full-name emphasis, or genuine ambiguity. A new chapter or scene alone does not justify the full name. QA checks the same contextual policy. Save localization to apply the preference to future generation and mark affected outputs stale. Use `always_full`, `always_short`, or `manual` only when you need an explicit non-contextual rule.
 
 ### Administration CLI
 

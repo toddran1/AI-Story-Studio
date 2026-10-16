@@ -1,3 +1,5 @@
+import { narrationNameRequirements } from "../src/narration/naming-preferences.js";
+import { authorizedNarrationNaming } from "../src/qa/prompts.js";
 import { describe, expect, it } from "vitest";
 import { localizedNamingSchema } from "../src/domain/story-bible.js";
 import { LLMProvider } from "../src/llm/provider.js";
@@ -18,6 +20,20 @@ describe("entity localization", () => {
     expect(localizedNamingSchema.safeParse({ locale: "en-US", fullName: "Simon Su", usageMode: "always_short" }).success).toBe(false);
     expect(localizedNamingSchema.safeParse({ locale: "not a locale", fullName: "Simon Su", usageMode: "manual" }).success).toBe(false);
     expect(localizationSuggestionRequestSchema.parse({})).toEqual({ count: 5 });
+  });
+
+  it("requires a short name for the preference and carries its exceptions into generation and QA", () => {
+    expect(localizedNamingSchema.safeParse({ locale: "en-US", fullName: "Kyrie Lamb", usageMode: "ai_contextual", preferShortName: true }).success).toBe(false);
+    const naming = localizedNamingSchema.parse({ locale: "en-US", fullName: "Kyrie Lamb", shortName: "Kyrie", usageMode: "ai_contextual", preferShortName: true });
+    const localized = { ...entity(), localizedNaming: naming };
+    const context = retrieveRelevantContext(emptyStoryBible(), "Su Ming entered the academy.", 13, { narrationNamingEntities: [localized], maxCharacters: 1800 });
+    expect(context.canonicalEntities[0]?.localizedNaming?.preferShortName).toBe(true);
+    for (const instructions of [narrationNameRequirements({ canonicalEntities: [localized] }), authorizedNarrationNaming([localized])]) {
+      expect(instructions).toContain("Prefer short name:");
+      expect(instructions).toContain("identification cards");
+      expect(instructions).toContain("first mention in a chapter is not by itself a reason");
+    }
+    expect(narrationNameRequirements({ canonicalEntities: [{ ...localized, localizedNaming: { ...naming, preferShortName: false } }] })).not.toContain("Prefer short name:");
   });
 
   it("asks the configured provider for distinct locale-aware full and short forms", async () => {

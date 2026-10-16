@@ -15,9 +15,11 @@ export const localizedNamingSchema = z.object({
   fullName: z.string().trim().min(1).max(300).optional(),
   shortName: z.string().trim().min(1).max(300).optional(),
   usageMode: z.enum(["ai_contextual", "always_full", "always_short", "manual"]),
+  preferShortName: z.boolean().optional(),
   notes: z.string().trim().max(5_000).optional(),
 }).superRefine((value, context) => {
   if (!value.fullName && !value.shortName) context.addIssue({ code: "custom", message: "Provide a localized full or short name", path: ["fullName"] });
+  if (value.usageMode === "ai_contextual" && value.preferShortName && !value.shortName) context.addIssue({ code: "custom", message: "Prefer short name requires a short name", path: ["shortName"] });
   if (value.usageMode === "always_full" && !value.fullName) context.addIssue({ code: "custom", message: "Always full requires a full name", path: ["fullName"] });
   if (value.usageMode === "always_short" && !value.shortName) context.addIssue({ code: "custom", message: "Always short requires a short name", path: ["shortName"] });
 });

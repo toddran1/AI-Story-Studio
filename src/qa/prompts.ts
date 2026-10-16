@@ -1,8 +1,9 @@
+import { preferShortNameGuidance } from "../narration/naming-guidance.js";
 import { silentReactionGuidance } from "../narration/silent-reactions.js";
 import type { NarrationProfanityMode } from "../domain/story.js";
 import type { CanonicalEntity, StoryBible } from "../domain/story-bible.js";
 
-export const QA_PROMPT_VERSION = "14-character-identity-verification";
+export const QA_PROMPT_VERSION = "15-prefer-short-name";
 
 export const qaIdentityInstructions = `CHARACTER IDENTITY VERIFICATION — REQUIRED SOURCE CHECK:
 Compare SOURCE -> TRANSLATION and SOURCE -> NARRATION independently. Agreement between the two English artifacts does not establish correctness: narration can inherit a translation's mistake. Check every clear character reference, not just the spelling of names or the first correct mention.
@@ -73,7 +74,8 @@ export function authorizedNarrationNaming(context: StoryBible | CanonicalEntity[
     if (entity.localizedNaming) {
       const naming = entity.localizedNaming;
       const names = [naming.fullName ? `fullName "${naming.fullName}"` : "", naming.shortName ? `shortName "${naming.shortName}"` : ""].filter(Boolean).join(", ");
-      lines.push(`  Authorized narration rendering: localizedNaming for locale ${naming.locale} (${names}), usageMode "${naming.usageMode}" — ${usageModeDescription[naming.usageMode] ?? "as configured"}. This takes precedence over the Preferred Narration Name.${naming.notes ? ` Notes: ${naming.notes}` : ""}`);
+      if (naming.usageMode === "ai_contextual" && naming.preferShortName) lines.push(`  ${preferShortNameGuidance} Evaluate each full-name occurrence against these exceptions; a clear violation is a names-category FAIL, an uncertain contextual choice is warn at most.`);
+      lines.push(`  Authorized narration rendering: localizedNaming for locale ${naming.locale} (${names}), usageMode "${naming.usageMode}" — ${naming.usageMode === "ai_contextual" && naming.preferShortName ? "shortName is the default; fullName requires one of the explicit exceptions above" : usageModeDescription[naming.usageMode] ?? "as configured"}. This takes precedence over the Preferred Narration Name.${naming.notes ? ` Notes: ${naming.notes}` : ""}`);
     } else if (entity.preferredNarrationName) {
       lines.push(`  Authorized narration rendering: Preferred Narration Name "${entity.preferredNarrationName}" replaces the canonical name, original name, and ordinary aliases everywhere in narration, including inside spoken dialogue.`);
     }

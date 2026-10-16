@@ -28,6 +28,23 @@ describe("preferred narration names", () => {
     const rebuilt = mergeStoryBible(emptyStoryBible(), update(), 1); const reapplied = await applyCanonicalOverlay(root, "demo-story", rebuilt); expect(reapplied.bible.canonicalEntities[0]).toMatchObject(patch);
   });
 
+  it("preserves alias rules when localization or unrelated fields are patched, but allows explicit clearing", async () => {
+    const root = await mkdtemp(join(tmpdir(), "narration-partial-patch-"));
+    const base = mergeStoryBible(emptyStoryBible(), update(), 1);
+    const entity = base.canonicalEntities[0]!;
+    const rules = [{ alias: "Mike", behavior: "use_preferred" as const }, { alias: "Coach Johnson", behavior: "custom" as const, replacement: "Coach Mike" }];
+    entity.aliasNarrationRules = rules;
+    await updateCanonicalEntity(root, "demo-story", base, entity.id, { notes: "Protected notes" });
+    expect((await applyCanonicalOverlay(root, "demo-story", base)).bible.canonicalEntities[0]?.aliasNarrationRules).toEqual(rules);
+    await updateCanonicalEntity(root, "demo-story", base, entity.id, { aliasNarrationRules: rules });
+    const localizedNaming = { locale: "en-US", fullName: "Michael Johnson", shortName: "Mike", usageMode: "ai_contextual" as const, preferShortName: true };
+    const saved = await updateCanonicalEntity(root, "demo-story", base, entity.id, { localizedNaming });
+    expect(saved.bible.canonicalEntities[0]?.aliasNarrationRules).toEqual(rules);
+    expect((await applyCanonicalOverlay(root, "demo-story", base)).bible.canonicalEntities[0]).toMatchObject({ localizedNaming, aliasNarrationRules: rules });
+    const cleared = await updateCanonicalEntity(root, "demo-story", base, entity.id, { aliasNarrationRules: [] });
+    expect(cleared.bible.canonicalEntities[0]?.aliasNarrationRules).toEqual([]);
+  });
+
   it("retrieves bounded current-chapter naming rules without replacing chapter text", async () => {
     const root = await mkdtemp(join(tmpdir(), "narration-context-")); const base = mergeStoryBible(emptyStoryBible(), update(), 1); const entity = base.canonicalEntities[0]!;
     await atomicWriteJson(storyPaths(root, "demo-story", 1).bible, base); await updateCanonicalEntity(root, "demo-story", base, entity.id, { preferredNarrationName: "Big Mike", aliasNarrationRules: [{ alias: "Mike", behavior: "use_preferred" }] });

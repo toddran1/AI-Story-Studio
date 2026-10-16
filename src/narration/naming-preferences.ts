@@ -1,3 +1,4 @@
+import { preferShortNameGuidance } from "./naming-guidance.js";
 import type { CanonicalEntity } from "../domain/story-bible.js";
 
 type NamingRule = { alias?: unknown; behavior?: unknown; replacement?: unknown };
@@ -28,7 +29,7 @@ export function applyNarrationNamingPreferences(text: string, context?: unknown)
   };
 
   for (const entity of entities) {
-    const localized = entity.localizedNaming && typeof entity.localizedNaming === "object" ? entity.localizedNaming as { usageMode?: unknown; fullName?: unknown; shortName?: unknown } : undefined;
+    const localized = entity.localizedNaming && typeof entity.localizedNaming === "object" ? entity.localizedNaming as { usageMode?: unknown; fullName?: unknown; shortName?: unknown; preferShortName?: unknown } : undefined;
     // Contextual and manual localization have no single safe output form.
     const preferred = localized?.usageMode === "always_full" ? stringValue(localized.fullName) : localized?.usageMode === "always_short" ? stringValue(localized.shortName) : localized ? undefined : stringValue(entity.preferredNarrationName);
     const rules = new Map<string, NamingRule>();
@@ -89,7 +90,7 @@ export function narrationNameRequirements(context: unknown): string {
   const lines = namingEntities(context).flatMap((entity) => {
     const canonical = stringValue(entity.canonicalName);
     if (!canonical) return [];
-    const localized = entity.localizedNaming && typeof entity.localizedNaming === "object" ? entity.localizedNaming as { usageMode?: unknown; fullName?: unknown; shortName?: unknown } : undefined;
+    const localized = entity.localizedNaming && typeof entity.localizedNaming === "object" ? entity.localizedNaming as { usageMode?: unknown; fullName?: unknown; shortName?: unknown; preferShortName?: unknown } : undefined;
     const form = localized?.usageMode === "always_full" ? stringValue(localized.fullName) : localized?.usageMode === "always_short" ? stringValue(localized.shortName) : localized ? undefined : stringValue(entity.preferredNarrationName);
     const base = form ? `${canonical} → ${form} (required in narration)` : localized ? `${canonical}: localized ${String(localized.usageMode)}; full ${stringValue(localized.fullName) ?? "—"}, short ${stringValue(localized.shortName) ?? "—"} (choose by context)` : "";
     const aliases = Array.isArray(entity.aliasNarrationRules) ? entity.aliasNarrationRules.flatMap((raw) => {
@@ -101,7 +102,7 @@ export function narrationNameRequirements(context: unknown): string {
       if (rule.behavior === "custom") return [`${alias} → ${stringValue(rule.replacement) ?? "?"} (required custom alias)`];
       return form ? [`${alias} → ${form} (required alias)`] : [];
     }) : [];
-    return [base, ...aliases].filter(Boolean);
+    return [localized?.usageMode === "ai_contextual" && localized.preferShortName === true ? `${base}. ${preferShortNameGuidance}` : base, ...aliases].filter(Boolean);
   });
   return lines.length ? `NARRATION NAME REQUIREMENTS FOR THIS CHAPTER:\n${lines.map((line) => `- ${line}`).join("\n")}` : "";
 }
