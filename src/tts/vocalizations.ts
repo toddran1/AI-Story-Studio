@@ -92,6 +92,16 @@ export function scanVocalizations(text: string): ScannedVocalization[] {
     if (!entry) continue;
     const start = match.index!;
     const sourceText = match[0];
+    if (entry.vocalization === "sigh") {
+      // A noun in prose ("let out a long sigh") must be spoken, not performed.
+      // Only an isolated reaction at a line/utterance boundary is a cue.
+      const before = text.slice(0, start);
+      const after = text.slice(start + sourceText.length);
+      const reactionStart = /(?:^|[.!?…\n“"‘']\s*)$/u.test(before);
+      const reactionEnd = Boolean(match[2]) || /^[ \t]*[”"’']?(?:[ \t]*\n|[ \t]*$)/u.test(after);
+      const literalMention = /\b(?:word|text|transcript|term|wrote|typed|spelled|literal(?:ly)?)\b[^.!?\n]{0,35}$/iu.test(before.slice(-80));
+      if (!reactionStart || !reactionEnd || literalMention) continue;
+    }
     if (entry.vocalization === "throat_clear" || entry.vocalization === "laugh" || entry.vocalization === "scream") {
       const before = text.slice(Math.max(0, start - 45), start);
       // A quoted lexical mention is prose, not a performed reaction.

@@ -1755,9 +1755,9 @@ export class StudioOperations {
           bleepStrongProfanity: story.narrationSettings.bleepStrongProfanity,
           speed: request.speed,
           format: config.format,
-          sampleRate: 44100,
-          bitrate: 192,
-          normalize: true,
+          sampleRate: config.sampleRate,
+          bitrate: config.bitrate,
+          normalize: config.normalize,
           maxCharsPerRequest: config.maxCharsPerRequest,
           onChunkProgress: ({ currentChunk, totalChunks, status }) => {
             control.update({

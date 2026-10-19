@@ -6,6 +6,26 @@ import { normalizeSpeechText } from "../src/tts/speech-normalization.js";
 import { TTSRequest } from "../src/tts/types.js";
 
 describe("Fish TTS", () => {
+  it.each([
+    ["41.5%", "forty-one point five percent"],
+    ["42.3%", "forty-two point three percent"],
+    ["0.05%", "zero point zero five percent"],
+    ["100.00%", "one hundred point zero zero percent"],
+    ["-2.5%", "minus two point five percent"],
+    ["1,234.50%", "one thousand two hundred thirty-four point five zero percent"],
+  ])("speaks decimal percentage %s explicitly through both preparation paths", (number, expected) => {
+    for (const text of [number, `[${number}…]`, `【${number}…】`]) {
+      const generic = normalizeSpeechText(text, "en-US").text;
+      expect(generic).toContain(expected);
+      expect(normalizeFishSpeechText(text, "s2.1-pro-free")).toContain(expected);
+      expect(normalizeFishSpeechText(generic, "s2.1-pro-free")).toContain(expected);
+    }
+  });
+
+  it("does not expand decimal fragments inside identifiers or malformed percentages", () => {
+    const text = "ID42.3% 1.42.3%";
+    expect(normalizeSpeechText(text, "en-US").text).not.toContain("point");
+  });
   it.each(["Hahaha", "Heh", "Hehe", "Wait"])("uses the same delivery text for both ellipses after %s", (reaction) => {
     const unicode = normalizeFishSpeechText(`“${reaction}… Big talk!”`, "s2.1-pro-free");
     expect(unicode).toBe(normalizeFishSpeechText(`“${reaction}... Big talk!”`, "s2.1-pro-free"));
@@ -190,7 +210,7 @@ describe("Fish TTS", () => {
     await provider.synthesize({ text: "**Important:** *whisper this.* [sad] 2 * 2", model: "s2.1-pro", speed: 1, format: "mp3", sampleRate: 44100, bitrate: 128, normalize: true, maxCharsPerRequest: 500 });
     const body = JSON.parse(String((fetcher.mock.calls[0]?.[1] as RequestInit).body));
     expect(body.text).toBe("Important: whisper this. [sad] 2 * 2");
-    expect(provider.inputNormalizationVersion).toBe("fish-speech-normalization-v36-laughter-boundaries");
+    expect(provider.inputNormalizationVersion).toBe("fish-speech-normalization-v38-decimal-percentages");
   });
 
   it("does not turn profanity into the literal word bleep inside Fish", async () => {

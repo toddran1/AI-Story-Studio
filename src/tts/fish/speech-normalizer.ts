@@ -1,7 +1,7 @@
 import { stripSpeechMarkdownEmphasis as stripFishMarkdownEmphasis } from "../markdown-emphasis.js";
 export { stripSpeechMarkdownEmphasis as stripFishMarkdownEmphasis } from "../markdown-emphasis.js";
 import { disambiguateFishS2Brackets, isFishS2Model } from "./control-cues.js";
-import { stripFishLeadingHehe, normalizeStructuredSpeechBlock, normalizeSystemMetadataText, speakInteger, stripStandaloneEllipsisLines } from "../speech-normalization.js";
+import { stripFishLeadingHehe, normalizeDecimalPercentages, normalizeStructuredSpeechBlock, normalizeSystemMetadataText, speakInteger, stripStandaloneEllipsisLines } from "../speech-normalization.js";
 import { scanVocalizations } from "../vocalizations.js";
 
 const TITLE_REPLACEMENTS: ReadonlyArray<readonly [RegExp, string]> = [
@@ -106,7 +106,7 @@ function replaceAll(text: string, replacements: ReadonlyArray<readonly [RegExp, 
 export function normalizeFishSpeechText(text: string, model?: string, options: { tskRendering?: "preserve" | "direction" } = {}): string {
   // Canonicalize before reaction detection so Unicode and typed ellipses take
   // exactly the same path. This only changes hidden delivery text.
-  text = text.replace(/…/gu, "...");
+  text = normalizeDecimalPercentages(text).replace(/…/gu, "...");
   // Physical sound effects have no application-supported Fish delivery cue.
   // Describe only standalone effects; preserve quoted dialogue and prose uses.
   text = text.replace(/^[ \t]*(WHU+M|RI+P)[ \t]*[—–-]*[ \t]*!+[ \t]*$/gm,

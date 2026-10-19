@@ -9,6 +9,23 @@ import { storyBibleSchema, emptyStoryBible, type CanonicalEntity } from "../src/
 describe("Fish vocalization strategy", () => {
   const provider = new FishAudioProvider();
 
+  it.each([
+    "Asher let out a long sigh and plopped back down in his camping chair, utterly dejected.",
+    "He gave a sigh of relief.",
+    "Sigh of relief was the phrase he used.",
+    "She wrote the word ‘sigh’.",
+  ])("preserves the spoken word sigh in prose: %s", (text) => {
+    const strategy = provider.vocalizationStrategy("s2.1-pro-free");
+    const spoken = normalizeSpeechText(text, "en-US", {}, strategy).text;
+    expect(spoken).toBe(text);
+    expect(normalizeFishSpeechText(spoken, "s2.1-pro-free")).toBe(text);
+  });
+
+  it.each(["Sigh!", "“Sigh…”", "Sigh", "[sigh] He sat down."])("preserves deliberate sigh reactions: %s", (text) => {
+    const spoken = normalizeSpeechText(text, "en-US", {}, provider.vocalizationStrategy("s2.1-pro-free")).text;
+    expect(spoken).toContain("[sigh]");
+  });
+
   it.each(["s2-pro", "s2.1-pro", "s2.1-pro-free"])("uses verified native tags for %s", (model) => {
     const strategy = provider.vocalizationStrategy(model);
     expect(strategy).toEqual({ kind: "native_tags", tags: { laugh: "[laughing]", chuckle: "[chuckle]", throat_clear: "[cough]", sigh: "[sigh]", gasp: "[gasp]", scream: "[shouting] Ah!" } });
@@ -42,6 +59,14 @@ describe("Fish vocalization strategy", () => {
     expect(directed).toContain("[calm] Their anguished screams");
     expect(normalizeFishSpeechText("“Ahhhhh!”", "s2.1-pro-free")).toBe("“[shouting] Ah!”");
     expect(original).toContain("Ahhhhh!");
+  });
+
+  it("prepares the Alters laughter excerpt without added punctuation in either entry path", () => {
+    const text = "【The government says the cameras are down!】\n\n【Haha! Now the skies will be bluer!】\n\nGlobal surveillance was down!";
+    const generic = normalizeSpeechText(text, "en-US", {}, provider.vocalizationStrategy("s2.1-pro-free")).text;
+    const fromVoice = provider.prepareSegments({ text: generic, model: "s2.1-pro-free", voiceMode: "same-voice-dialogue", speed: 1, format: "mp3", sampleRate: 44100, bitrate: 128, normalize: true, maxCharsPerRequest: 1750 });
+    expect(fromVoice).toEqual(["The government says the cameras are down!\n\n[laughing] Now the skies will be bluer!\n\nGlobal surveillance was down!"]);
+    expect(normalizeFishSpeechText(text, "s2.1-pro-free")).toBe(fromVoice[0]);
   });
 
   it("renders a standalone ahem reaction as a throat clear without changing literal mentions", () => {

@@ -12,6 +12,20 @@ describe("provider-neutral speech normalization", () => {
     expect(result.transformations.map(item => item.kind)).toEqual(["time", "currency", "percentage", "measurement", "measurement", "chapter", "number"]);
   });
 
+  it.each([
+    ["【The cameras are down!】", "The cameras are down!"],
+    ["【Are the cameras down?】", "Are the cameras down?"],
+    ["【All clear.】", "All clear."],
+    ["【All clear】", "All clear."],
+    ["【Number 666】!", "Number six hundred sixty-six!"],
+  ])("does not stack sentence punctuation on structured panels: %s", (input, expected) => {
+    expect(normalizeSpeechText(input, "en-US").text).toBe(expected);
+  });
+  it("records numeric source offsets even when normalization patterns capture groups", () => {
+    const result = normalizeSpeechText("Before. 【Everything is fine!】", "en-US");
+    expect(result.transformations[0]).toMatchObject({ start: 8, end: 29, spoken: "Everything is fine!" });
+  });
+
   it("handles natural 12-hour clock edge cases", () => {
     expect(normalizeSpeechText("07:05. 00:00. 12:00. 14:30. 3:30 PM.", "en-US").text).toBe("seven oh five a.m. midnight. noon. two thirty p.m. three thirty p.m.");
   });

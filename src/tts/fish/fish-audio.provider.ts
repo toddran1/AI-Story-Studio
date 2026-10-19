@@ -54,8 +54,8 @@ export class FishAudioProvider implements TTSProvider {
     } = {},
   ) {
     this.inputNormalizationVersion = speechOptions.tskRendering === "direction"
-      ? "fish-speech-normalization-v36-laughter-boundaries-tsk-direction"
-      : "fish-speech-normalization-v36-laughter-boundaries";
+      ? "fish-speech-normalization-v38-decimal-percentages-tsk-direction"
+      : "fish-speech-normalization-v38-decimal-percentages";
   }
 
   resolveReferenceId(referenceId?: string): string | undefined {

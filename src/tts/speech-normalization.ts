@@ -2,7 +2,7 @@ import { fingerprint } from "../utils/hash.js";
 import { scanVocalizations, type VocalizationRenderStrategy } from "./vocalizations.js";
 import type { TTSProvider } from "./provider.js";
 
-export const SPEECH_NORMALIZATION_VERSION = "speech-normalization-v8-emphatic-cries";
+export const SPEECH_NORMALIZATION_VERSION = "speech-normalization-v11-decimal-percentages";
 export type SpeechNormalizationMode = "automatic" | "enabled" | "disabled";
 export type TimeSpeechMode = "natural_12h" | "natural_24h" | "preserve";
 export type VocalizationMode = "automatic" | "preserve" | "disabled";
@@ -26,7 +26,11 @@ export function normalizeSpeechText(text: string, language: string, settings: Sp
   const transformations: SpeechTransformation[] = [];
   let output = text;
   const replace = (kind: SpeechTransformation["kind"], expression: RegExp, render: (written: string, offset: number, source: string) => string | undefined) => {
-    output = output.replace(expression, (written: string, offset: number, source: string) => {
+    output = output.replace(expression, (...args: unknown[]) => {
+      const written = args[0] as string;
+      // Capturing groups precede the offset in String.replace callbacks.
+      const source = args.at(-1) as string;
+      const offset = args.at(-2) as number;
       const spoken = render(written, offset, source);
       if (!spoken || spoken === written) return written;
       transformations.push({ kind, written, spoken, start: offset, end: offset + written.length });
@@ -36,7 +40,8 @@ export function normalizeSpeechText(text: string, language: string, settings: Sp
   // Quotation marks around a named game/story term can make some TTS engines
   // insert a dialogue-sized pause. Only remove them when the surrounding grammar
   // clearly identifies the quote as a label within an ongoing noun phrase.
-  replace("structured-block", /【([^【】\n]{1,500})】/gu, (written) => normalizeStructuredSpeechBlock(written));
+  replace("percentage", decimalPercentagePattern, normalizeDecimalPercentages);
+  replace("structured-block", /【([^【】\n]{1,500})】/gu, (written, offset, source) => normalizeStructuredSpeechBlock(written, offset, source));
   replace("structured-block", /(?<![\p{L}\p{N}])([A-Z][\p{L}\p{N} -]{1,80})\s+\((Passive|Active)\)\s+\((Level [^()\n]{1,30}|Rank [^()\n]{1,30})\)/gu,
     (written) => normalizeSystemMetadataText(written));
   replace("quoted-label", new RegExp(`\\b((?:the|an?|his|her|its|their)\\s+)"([^"\\n]{1,120})"\\s+(${labelNouns})\\b`, "giu"), written => {
@@ -78,10 +83,10 @@ export function normalizeSpeechText(text: string, language: string, settings: Sp
 }
 
 /** Converts bounded game UI panels into speech without touching prose parentheses. */
-export function normalizeStructuredSpeechBlock(written: string): string {
+export function normalizeStructuredSpeechBlock(written: string, offset?: number, source?: string): string {
   const content = written.slice(1, -1).trim();
   if (!content) return written;
-  return content
+  const spoken = content
     // Resolve an ellipsis before punctuation spacing can turn it into ". . .".
     .replace(/(?<=\p{L})(?:\.{2,}|…+)/gu, ",")
     .replace(/\s*\(([^()]{1,80})\)/gu, (_match, label: string) => `. ${label.trim()}`)
@@ -93,7 +98,23 @@ export function normalizeStructuredSpeechBlock(written: string): string {
       return Number.isSafeInteger(value) && value <= 999_999_999 ? speakInteger(value) : number;
     })
     .replace(/\s*\.\s*/gu, ". ")
-    .trim().replace(/[\s.]+$/u, "") + ".";
+    .trim().replace(/[\s.]+$/u, "");
+  const following = offset === undefined ? "" : source?.slice(offset + written.length) ?? "";
+  // Preserve existing sentence punctuation and punctuation outside the panel.
+  return /[!?。！？][”"’']*$/u.test(spoken) || /^[ \t]*[.!?。！？,;:]/u.test(following) ? spoken : `${spoken}.`;
+}
+
+const decimalPercentagePattern = /(?<![\p{L}\p{N}_.,+-])[+-]?(?:\d{1,3}(?:,\d{3})+|\d{1,9})\.\d+[ \t]*[%％](?![\p{L}\p{N}_])/gu;
+
+/** Spell the decimal point and every fractional digit, preserving trailing zeroes. */
+export function normalizeDecimalPercentages(text: string): string {
+  return text.replace(decimalPercentagePattern, written => {
+    const match = /^([+-]?)([\d,]+)\.(\d+)/u.exec(written)!;
+    const whole = Number(match[2]!.replaceAll(",", ""));
+    if (!Number.isSafeInteger(whole) || whole > 999_999_999) return written;
+    const sign = match[1] === "-" ? "minus " : match[1] === "+" ? "plus " : "";
+    return `${sign}${speakInteger(whole)} point ${[...match[3]!].map(digit => speakInteger(Number(digit))).join(" ")} percent`;
+  });
 }
 
 export function normalizeSystemMetadataText(written: string): string {

@@ -1,3 +1,6 @@
+import { persistChapterTtsQuality, regenerateStoredChapterTtsSegment } from "../src/tts/chapter-quality.js";
+import { chapterSchema } from "../src/domain/chapter.js";
+import { normalizeSpeechForProvider } from "../src/tts/speech-normalization.js";
 import { mkdtemp, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -263,6 +266,38 @@ describe("effective TTS provider construction", () => {
 });
 
 describe("voice preview with quality guard", () => {
+  it("sends the same prepared passage in voice test, chapter generation and manual regeneration", async () => {
+    const root = await mkdtemp(join(tmpdir(), "voice-chapter-parity-"));
+    const env = loadEnvironment({});
+    const original = await createBlankStory(root, env, { title: "Alters Parity", slug: "alters-parity" });
+    const story = { ...original, pipeline: { ...original.pipeline, tts: { ...original.pipeline.tts, model: "s2.1-pro-free", referenceId: "voice", qualityMode: "off" as const, bitrate: 64 as const, sampleRate: 32000 as const, normalize: false } } };
+    const paths = storyPaths(root, story.slug, 1);
+    await atomicWriteJson(paths.storyConfig, story);
+    const bodies: any[] = [];
+    const fetcher = async (_url: any, init?: RequestInit) => { bodies.push(JSON.parse(String(init?.body))); return new Response(new Uint8Array([1,2,3]), { headers: { "content-type": "audio/mpeg" } }); };
+    const fish = new FishAudioProvider("fake-key", fetcher as typeof fetch);
+    const jobs = new JobManager();
+    const operations = new StudioOperations(root, env, jobs, { tts: fish, censor: { version: "fake", synthesize: (provider: TTSProvider, request: TTSRequest) => provider.synthesize(request) } });
+    const text = "【The government says the cameras are down!】\n\n【Haha! Now the skies will be bluer!】\n\nGlobal surveillance was down!";
+    const job = operations.startVoicePreview(story.slug, { text });
+    await vi.waitFor(() => expect(jobs.get(job.id)?.status).toBe("completed"));
+    const speech = normalizeSpeechForProvider(text, story.outputLanguage, story.narrationSettings, fish, story.pipeline.tts.model);
+    const generated = await fish.synthesize({ ...story.pipeline.tts, text: speech.normalized.text });
+    await atomicWrite(paths.narrationTts, text);
+    const now = new Date().toISOString();
+    await atomicWriteJson(paths.chapterMeta, chapterSchema.parse({ chapter: 1, sourceLanguage: story.sourceLanguage, outputLanguage: story.outputLanguage, counts: { originalCharacters: 1, englishWords: 20, narrationWords: 20 }, createdAt: now, updatedAt: now, stages: { ingestion: { status: "complete" }, translation: { status: "complete" }, narration: { status: "complete" }, storyBible: { status: "complete" }, tts: { status: "complete" } } }));
+    await atomicWrite(join(paths.segments, "0001.mp3"), generated.audio);
+    await persistChapterTtsQuality({ root, story, chapter: 1, maxRetries: 0, transcriber: "fake", report: { version: 1, status: "unverified", retried: 0, segments: [{ index: 0, expectedText: generated.segmentTexts![0]!, status: "unverified", issues: [], attempts: [], finalAttempt: 1 }] } });
+    await regenerateStoredChapterTtsSegment({ root, story, chapter: 1, segment: 0, provider: fish, maxRetries: 0 });
+    expect(bodies).toHaveLength(3);
+    expect(bodies.map(body => body.text)).toEqual(Array(3).fill(generated.segmentTexts![0]));
+    expect(bodies.every(body => body.sample_rate === 32000 && body.mp3_bitrate === 64 && body.normalize === false)).toBe(true);
+    expect(bodies[0].features).toEqual(["quality-guard"]);
+    expect(bodies[2].features).toBeUndefined();
+    expect(bodies[2].text).toContain("[laughing]");
+    expect(bodies[2].text).not.toContain("!.");
+    await operations.close();
+  });
   it("runs QualityGuardTTSProvider on voice preview and includes quality in the saved manifest", async () => {
     const root = await mkdtemp(join(tmpdir(), "voice-preview-quality-"));
     const env = loadEnvironment({});
