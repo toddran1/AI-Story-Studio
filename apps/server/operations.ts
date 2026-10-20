@@ -1382,8 +1382,8 @@ export class StudioOperations {
   }
   async listPronunciationDesk(slug: string) {
     slugSchema.parse(slug);
-    const [bible, suggestions] = await Promise.all([getStoryBible(this.root, slug), loadPronunciationSuggestions(this.root, slug)]);
-    return { entities: bible.canonicalEntities, suggestions };
+    const [bible, suggestions, story] = await Promise.all([getStoryBible(this.root, slug), loadPronunciationSuggestions(this.root, slug), loadStory(storyPaths(this.root, slug, 1).storyConfig)]);
+    return { entities: bible.canonicalEntities, suggestions, sourceLanguage: story.sourceLanguage };
   }
   /** Accepting a suggestion is the explicit user action that activates pronunciation. */
   async acceptPronunciationSuggestion(slug: string, id: string) {

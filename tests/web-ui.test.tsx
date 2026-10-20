@@ -147,6 +147,20 @@ describe("web UI", () => {
     const desk = renderToStaticMarkup(<PronunciationPanel slug="demo-story" />);
     expect(desk).toContain("Default TTS"); expect(desk).toContain("✨ Generate pronunciation suggestions"); expect(desk).toContain("Suggestions"); expect(desk).toContain("Needs review");
   });
+  it.each(["zh-CN", "ja-JP", "ko-KR", "en-US"])("defaults unconfigured character pronunciation to the book language %s", (sourceLanguage) => {
+    const html = renderToStaticMarkup(<PronunciationFields sourceLanguage={sourceLanguage} entityType="character" originalName="Known source name" onChange={() => undefined} />);
+    expect(html).toContain(`value="${sourceLanguage}" selected=""`);
+    expect(html).toContain('value="original_language" selected=""');
+    expect(html).toContain('value="Known source name"');
+  });
+  it("preserves explicit pronunciation modes and source-language overrides", () => {
+    const html = renderToStaticMarkup(<PronunciationFields sourceLanguage="zh-CN" entityType="character" value={{ mode: "automatic", sourceLanguage: "en-US", source: "manual" }} onChange={() => undefined} />);
+    expect(html).toContain('value="automatic" selected=""');
+    expect(html).toContain('value="en-US" selected=""');
+    expect(html).not.toContain("Defaults to the book");
+    const other = renderToStaticMarkup(<PronunciationFields sourceLanguage="zh-CN" entityType="item" onChange={() => undefined} />);
+    expect(other).toContain('value="automatic" selected=""');
+  });
   it("uses readable labels for pipeline identifiers", () => {
     expect(pretty("storyBible")).toBe("Story Bible"); expect(pretty("narrationFidelity")).toBe("Narration Fidelity"); expect(pretty("qa")).toBe("QA"); expect(pretty("tts")).toBe("TTS");
   });

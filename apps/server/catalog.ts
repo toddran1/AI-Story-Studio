@@ -467,7 +467,9 @@ export async function getCanonicalEntityDetail(root: string, slug: string, id: s
   const relatedReferences = (bible.minorReferences ?? []).filter((ref) => ref.parentEntityId === id);
   const duplicateSuggestions = context.duplicateSuggestions.filter((item) => item.entityIds.includes(id)).slice(0, 20);
   logger.debug({ event: "story_bible.entity_detail", story: slug, entityId: id, durationMs: Date.now() - startedAt });
+  const storyConfig = await readJsonIfExists(storyPaths(root, slug, 1).storyConfig);
   return {
+    sourceLanguage: storyConfig ? storySchema.parse(storyConfig).sourceLanguage : undefined,
     entity,
     visualEvidenceResolution: resolveEntityVisualEvidence(entity, Number.MAX_SAFE_INTEGER),
     timeline: bible.entityTimeline.filter((item) => item.entityId === id).sort((a, b) => a.chapter - b.chapter),
