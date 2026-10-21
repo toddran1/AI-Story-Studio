@@ -1865,7 +1865,7 @@ export class StudioOperations {
         language: story.outputLanguage,
         transcriber: this.speechTranscriber(),
       });
-      const quality = await withUsageScope({ story: slug, chapter, stage: "tts" }, () => regenerateStoredChapterTtsSegment({ root: this.root, story, chapter, segment: segment - 1, provider, maxRetries: 0, allowedChangedSegments: selectedSegments?.map(value => value - 1) }));
+      const quality = await withUsageScope({ story: slug, chapter, stage: "tts" }, () => regenerateStoredChapterTtsSegment({ root: this.root, story, chapter, segment: segment - 1, provider, maxRetries: 0, censor: this.censor, allowedChangedSegments: selectedSegments?.map(value => value - 1) }));
       return quality;
   }
 

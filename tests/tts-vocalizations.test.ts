@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { FishAudioProvider, normalizeFishSpeechText } from "../src/tts/fish/fish-audio.provider.js";
 import { directQuotedDialogue } from "../src/tts/fish/dialogue-casting.js";
 import { disambiguateFishS2Brackets } from "../src/tts/fish/control-cues.js";
-import { normalizeSpeechText } from "../src/tts/speech-normalization.js";
+import { normalizeSpeechText, normalizeSpeechForProvider } from "../src/tts/speech-normalization.js";
 import { adaptPronunciationText, resolvePronunciations } from "../src/tts/pronunciation.js";
 import { storyBibleSchema, emptyStoryBible, type CanonicalEntity } from "../src/domain/story-bible.js";
 
@@ -161,6 +161,14 @@ describe("vocalization rendering coexists with pronunciation hints (M20)", () =>
 });
 
  describe("silent system panels", () => {
+  it.each(["!", "!!", "?!", "！？", "“!”", '"?!"', "！ ! ？"])("removes standalone reaction punctuation %s from speech only", (punctuation) => {
+    const original = `And the result?\n\n${punctuation}\n\nHe was the punchline all along!`;
+    const prepared = normalizeSpeechForProvider(original, "en-US", {}, new FishAudioProvider(), "s2.1-pro-free").normalized.text;
+    expect(prepared).not.toContain(`\n${punctuation}\n`);
+    expect(normalizeFishSpeechText(original, "s2.1-pro-free")).toBe("And the result?\n\nHe was the punchline all along!");
+    expect(normalizeFishSpeechText(prepared, "s2.1-pro-free")).toBe("And the result?\n\nHe was the punchline all along!");
+    expect(original).toContain(punctuation);
+  });
   it.each(["【…】", "【..】", "【……】", "【...】", "【 … … 】", "【？？？】"])("removes %s without losing spoken system messages", (panel) => {
     const input = `【Successfully killed Skeleton Soldier. Gained 5,500 EXP.】\n\n${panel}\n\nThere were still a thousand of them, giving him another 5.5 million EXP!`;
     const spoken = normalizeFishSpeechText(input, "s2.1-pro");

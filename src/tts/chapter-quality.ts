@@ -18,7 +18,7 @@ import {
   compareSpokenText, defaultQualityThresholds, hasFishControlCues, summarizeQuality, ttsSegmentQualitySchema, ttsQualitySummaryStatusSchema,
 } from "./quality-guard.js";
 import { scanVocalizations } from "./vocalizations.js";
-import { CensorManifest, FfmpegCensorAudioService } from "./censor-audio.js";
+import { CensorManifest, type CensorAudioService, FfmpegCensorAudioService, planCensoredSpeech, speechForSynthesis } from "./censor-audio.js";
 import { logger } from "../utils/logger.js";
 import { safeErrorMessage } from "../errors/diagnostic.js";
 
@@ -203,7 +203,7 @@ export async function verifyStoredChapterTts(options: {
     try {
       const observations = await transcriber.transcribe({ audioPath: file, language: story.outputLanguage });
       if (!observations.length) throw new Error("Transcription produced no speech tokens");
-      const comparison = compareSpokenText(segment.expectedText, observations, {
+      const comparison = compareSpokenText(segment.expectedSpokenText ?? segment.expectedText, observations, {
         thresholds,
         expectedVocalizations: scanVocalizations(segment.expectedText).length > 0 || hasFishControlCues(segment.expectedText),
       });
@@ -267,13 +267,17 @@ export async function prepareStoredChapterTtsSegment(options: { root: string; st
   if (!current) throw new StorageError(`Chapter ${chapter} has no TTS segment ${options.segment + 1}`);
   if (!await exists(segmentFile(root, story.slug, chapter, current.index))) throw new StorageError(`Chapter ${chapter} segment ${current.index + 1} audio is missing; rerun the TTS stage`);
   const config = story.pipeline.tts;
+  const existingCensor = await readJsonIfExists<CensorManifest>(paths.censorManifest);
+  if (existingCensor?.items.some(item => item.kind === "tone") && story.narrationSettings.bleepStrongProfanity !== true) throw new StorageError("This chapter contains saved bleep tones but bleeping is now disabled. Regenerate the full chapter audio to restore the censored words safely.");
   const savedScript = await exists(paths.narrationTts) ? await readFile(paths.narrationTts, "utf8") : undefined;
   const savedNarration = await exists(paths.narration) ? await readFile(paths.narration, "utf8") : undefined;
   const script = savedScript?.trim() || savedNarration?.trim();
   if (!script && (savedScript !== undefined || savedNarration !== undefined)) throw new StorageError("Saved narration is empty; save the intended narration before regenerating speech.");
   if (script && provider.prepareSegments) {
     const speech = normalizeSpeechForProvider(script, story.outputLanguage, story.narrationSettings, provider, config.model);
-    const prepared = provider.prepareSegments({ text: speech.normalized.text, model: config.model, referenceId: config.referenceId, secondaryReferenceId: config.secondaryReferenceId, voiceMode: config.voiceMode, deliveryIntensity: config.deliveryIntensity, speed: config.speed, format: config.format, sampleRate: config.sampleRate, bitrate: config.bitrate, normalize: config.normalize, maxCharsPerRequest: config.maxCharsPerRequest });
+    const prepare = (text: string) => provider.prepareSegments!({ text, model: config.model, referenceId: config.referenceId, secondaryReferenceId: config.secondaryReferenceId, voiceMode: config.voiceMode, deliveryIntensity: config.deliveryIntensity, speed: config.speed, format: config.format, sampleRate: config.sampleRate, bitrate: config.bitrate, normalize: config.normalize, maxCharsPerRequest: config.maxCharsPerRequest });
+    const plan = existingCensor ? planCensoredSpeech(speech.normalized.text) : undefined;
+    const prepared = plan ? plan.flatMap((part, index) => part.kind === "speech" ? prepare(speechForSynthesis(plan, index)) : []) : prepare(speech.normalized.text);
     // Older Fish artifacts put the narration reset immediately after dialogue;
     // current formatting puts it before the following narration. Current formatting also
     // repeats soft cues for adjacent dialogue. Neither change alters
@@ -316,7 +320,7 @@ export async function prepareStoredChapterTtsSegment(options: { root: string; st
 /** Regenerates exactly one failed segment through the guard-wrapped provider,
  * replaces its audio file atomically, and marks mastering and downstream stages
  * pending. Mastered audio is never silently reassembled here. */
-export async function regenerateStoredChapterTtsSegment(options: { root: string; story: Story; chapter: number; segment: number; provider: TTSProvider; maxRetries: number; allowedChangedSegments?: number[] }): Promise<TtsQualityArtifact> {
+export async function regenerateStoredChapterTtsSegment(options: { root: string; story: Story; chapter: number; segment: number; provider: TTSProvider; maxRetries: number; censor?: CensorAudioService; allowedChangedSegments?: number[] }): Promise<TtsQualityArtifact> {
   const { root, story, chapter, provider } = options;
   const paths = storyPaths(root, story.slug, chapter);
   const artifact = await loadChapterTtsQuality(root, story.slug, chapter);
@@ -336,14 +340,15 @@ export async function regenerateStoredChapterTtsSegment(options: { root: string;
 
   const config = story.pipeline.tts;
   current = await prepareStoredChapterTtsSegment({ ...options, artifact });
-  const result = await provider.synthesize({
+  const result = await (options.censor ?? new FfmpegCensorAudioService()).synthesize(provider, {
     text: current.expectedText, exactChunk: true, singleAttempt: true, model: config.model, referenceId: config.referenceId, secondaryReferenceId: config.secondaryReferenceId,
     voiceMode: config.voiceMode, deliveryIntensity: config.deliveryIntensity, qualityGuard: true,
-    providerQualityGuard: false,
+    providerQualityGuard: config.providerQualityGuard,
+    bleepStrongProfanity: story.narrationSettings.bleepStrongProfanity === true,
     speed: config.speed, format: config.format, sampleRate: config.sampleRate, bitrate: config.bitrate,
     normalize: config.normalize, maxCharsPerRequest: config.maxCharsPerRequest,
   });
-  const replacement = result.segments.length === 1 ? result.segments[0]! : result.audio;
+  const replacement = result.assembled ? result.audio : result.segments.length === 1 ? result.segments[0]! : result.audio;
   if (!replacement.byteLength) throw new StorageError("Segment regeneration returned empty audio; keeping the previous segment");
 
   const stagedSegmentPath = `${targetSegmentFile}.staged-${randomUUID()}.mp3`;
@@ -355,19 +360,37 @@ export async function regenerateStoredChapterTtsSegment(options: { root: string;
 
     if (censorManifest) {
       stagedRawPath = `${paths.audioRaw}.staged-${randomUUID()}.mp3`;
-      const censorService = new FfmpegCensorAudioService();
+      const censorService = options.censor?.reassemble ? options.censor : new FfmpegCensorAudioService();
       const overrides = new Map<number, string>([[current.index, stagedSegmentPath]]);
-      await censorService.reassemble(paths.segments, censorManifest, stagedRawPath, config, overrides);
+      await censorService.reassemble!(paths.segments, censorManifest, stagedRawPath, config, overrides);
       const stagedRawFp = await fileFingerprint(stagedRawPath);
       if (!stagedRawFp) {
         throw new StorageError("Staged censored raw audio reassembly produced empty or missing file");
       }
     }
 
-    const verified = result.quality?.segments[0];
+    const parts = result.quality?.segments;
+    // One editable segment may now contain several speech fragments plus tones.
+    // Preserve its original joins and verify all fragments, not only the first.
+    const verified = result.assembled && parts?.length ? {
+      expectedText: current.expectedText,
+      expectedSpokenText: parts.map(part => part.expectedText).join(" "),
+      transcription: parts.map(part => part.transcription ?? "").join(" ").trim() || undefined,
+      status: parts.some(part => part.status === "needs_review") ? "needs_review" as const
+        : parts.every(part => part.status === "verified") ? "verified" as const : "unverified" as const,
+      score: parts.every(part => part.score !== undefined) ? Math.min(...parts.map(part => part.score!)) : undefined,
+      issues: parts.flatMap(part => part.issues),
+      attempts: [{ attempt: 1, settings: { deliveryIntensity: config.deliveryIntensity },
+        status: parts.some(part => part.status === "needs_review") ? "needs_review" as const
+          : parts.every(part => part.status === "verified") ? "pass" as const : "unverified" as const,
+        issues: parts.flatMap(part => part.issues), requestId: result.requestIds?.join(",") || undefined }],
+      finalAttempt: 1,
+    } : parts?.[0];
     const segments = artifact.segments.map((segment) => segment.index === current.index
       ? {
           ...(verified ?? { expectedText: current.expectedText, status: "unverified" as const, issues: [{ type: "transcription_failed" as const, severity: 0.5, detail: "Regenerated segment was not verified" }], attempts: [], finalAttempt: 0 }),
+          expectedText: current.expectedText,
+          ...(result.assembled ? { expectedSpokenText: result.segmentTexts?.join(" ") ?? planCensoredSpeech(current.expectedText).flatMap(part => part.kind === "speech" ? [part.text] : []).join(" ") } : {}),
           index: current.index,
           audioFingerprint: newFingerprint,
           acceptedAt: undefined,

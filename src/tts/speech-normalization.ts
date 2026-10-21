@@ -2,7 +2,7 @@ import { fingerprint } from "../utils/hash.js";
 import { scanVocalizations, type VocalizationRenderStrategy } from "./vocalizations.js";
 import type { TTSProvider } from "./provider.js";
 
-export const SPEECH_NORMALIZATION_VERSION = "speech-normalization-v11-decimal-percentages";
+export const SPEECH_NORMALIZATION_VERSION = "speech-normalization-v12-silent-punctuation";
 export type SpeechNormalizationMode = "automatic" | "enabled" | "disabled";
 export type TimeSpeechMode = "natural_12h" | "natural_24h" | "preserve";
 export type VocalizationMode = "automatic" | "preserve" | "disabled";
@@ -185,7 +185,8 @@ export function stripStandaloneEllipsisLines(text: string): string {
   return text.replace(/【[\t ]*(?:(?:[.．][\t ]*){2,}|(?:…[\t ]*)+|(?:[?？][\t ]*){2,})】/gu, "")
     .replace(/^[\t ]*(?:["“”‘’']?[\t ]*)(?:\.[\t ]*){3,}["“”‘’']?[\t ]*\r?$/gm, "")
     .replace(/^[\t ]*["“”‘’']?[\t ]*(?:…[\t ]*)+["“”‘’']?[\t ]*\r?$/gm, "")
-    .replace(/^[\t ]*["“”‘’']?[\t ]*(?:[?？][\t ]*){2,}["“”‘’']?[\t ]*\r?$/gm, "");
+    .replace(/^[\t ]*["“”‘’']?[\t ]*(?:[?？][\t ]*){2,}["“”‘’']?[\t ]*\r?$/gm, "")
+    .replace(/^[\t ]*["“”‘’']?[\t ]*(?:[!?！？][\t ]*)+["“”‘’']?[\t ]*\r?$/gm, "");
 }
 
 /** Omit unstable spelled laughter at the start of a spoken sentence, not literal mentions. */

@@ -237,7 +237,7 @@ export class FfmpegCensorAudioService implements CensorAudioService {
 
 function clamp(minimum: number, maximum: number, value: number) { return Math.max(minimum, Math.min(maximum, value)); }
 
-function speechForSynthesis(plan: CensorSegment[], index: number) {
+export function speechForSynthesis(plan: CensorSegment[], index: number) {
   const segment = plan[index];
   if (!segment || segment.kind !== "speech") throw new AudioError("Invalid censor speech segment");
   const text = segment.text.trim();

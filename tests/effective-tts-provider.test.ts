@@ -293,7 +293,7 @@ describe("voice preview with quality guard", () => {
     expect(bodies.map(body => body.text)).toEqual(Array(3).fill(generated.segmentTexts![0]));
     expect(bodies.every(body => body.sample_rate === 32000 && body.mp3_bitrate === 64 && body.normalize === false)).toBe(true);
     expect(bodies[0].features).toEqual(["quality-guard"]);
-    expect(bodies[2].features).toBeUndefined();
+    expect(bodies[2].features).toEqual(["quality-guard"]);
     expect(bodies[2].text).toContain("[laughing]");
     expect(bodies[2].text).not.toContain("!.");
     await operations.close();

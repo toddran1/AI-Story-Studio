@@ -43,6 +43,8 @@ export type TtsSegmentStatus = z.infer<typeof ttsSegmentStatusSchema>;
 export const ttsSegmentQualitySchema = z.object({
   index: z.number().int().nonnegative(),
   expectedText: z.string(),
+  /** Spoken words when the segment includes locally inserted censor tones. */
+  expectedSpokenText: z.string().optional(),
   transcription: z.string().optional(),
   score: z.number().min(0).max(1).optional(),
   status: ttsSegmentStatusSchema,

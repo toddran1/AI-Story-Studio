@@ -677,9 +677,57 @@ describe("stored chapter quality service", () => {
     const inner = new ScriptedTTS((req) => singleSegment(req.text, "cc"));
     const quality = await regenerateStoredChapterTtsSegment({ root, story, chapter: 1, segment: 1, provider: guard(inner, transcriber), maxRetries: 2 });
     expect(inner.calls).toHaveLength(1);
-    expect(inner.calls[0]).toMatchObject({ singleAttempt: true, providerQualityGuard: false });
+    expect(inner.calls[0]).toMatchObject({ singleAttempt: true, providerQualityGuard: story.pipeline.tts.providerQualityGuard });
     expect(quality.segments[1]?.status).toBe("needs_review");
     expect(quality.segments[1]?.attempts).toHaveLength(1);
+  });
+
+  it.each([true, false])("uses current book synthesis settings, including provider quality guard %s", async (providerQualityGuard) => {
+    const { root, story } = await fixture();
+    Object.assign(story.pipeline.tts, { providerQualityGuard, referenceId: "book-voice", secondaryReferenceId: "dialogue-voice", voiceMode: "narrator-dialogue", deliveryIntensity: "expressive", speed: 1.2, sampleRate: 32000, bitrate: 64, normalize: false });
+    const inner = new ScriptedTTS(req => singleSegment(req.text, "cc"));
+    await regenerateStoredChapterTtsSegment({ root, story, chapter: 1, segment: 1, provider: inner, maxRetries: 0 });
+    expect(inner.calls).toHaveLength(1);
+    for (const key of ["model", "referenceId", "secondaryReferenceId", "voiceMode", "deliveryIntensity", "speed", "sampleRate", "bitrate", "normalize", "format", "maxCharsPerRequest", "providerQualityGuard"] as const) expect(inner.calls[0]![key]).toEqual(story.pipeline.tts[key]);
+    expect(inner.calls[0]).toMatchObject({ text: bad, exactChunk: true, singleAttempt: true, qualityGuard: true, bleepStrongProfanity: false });
+  });
+
+  it("bleeps regenerated profanity, retains the assembled tone, and verifies every speech fragment", async () => {
+    const { root, story, paths } = await fixture();
+    story.narrationSettings.bleepStrongProfanity = true;
+    const saved = (await loadChapterTtsQuality(root, story.slug, 1))!;
+    saved.segments[1]!.expectedText = "He said shit and then fuck before dawn.";
+    await atomicWriteJson(paths.ttsQuality, saved);
+    const inner = new ScriptedTTS(req => singleSegment(req.text, "speech"));
+    const transcriber = new FakeTranscriber(() => say(inner.calls.at(-1)!.text));
+    const commands: string[][] = [];
+    const censor = new FfmpegCensorAudioService({ validateAvailability: async () => undefined, ffmpeg: async (args: string[]) => { commands.push(args); await atomicWrite(args.at(-1)!, bytes("assembled")); } } as never);
+    const result = await regenerateStoredChapterTtsSegment({ root, story, chapter: 1, segment: 1, provider: guard(inner, transcriber), censor, maxRetries: 0 });
+    expect(inner.calls).toHaveLength(3);
+    expect(inner.calls.every(call => !/shit|fuck/iu.test(call.text))).toBe(true);
+    expect(commands.filter(args => args.includes("lavfi"))).toHaveLength(2);
+    expect(new Uint8Array(await readFile(join(paths.segments, "0002.mp3")))).toEqual(bytes("assembled"));
+    expect(result.segments[1]!.expectedText).toBe(saved.segments[1]!.expectedText);
+    expect(result.segments[1]!.expectedSpokenText).not.toMatch(/shit|fuck/iu);
+    expect(result.segments[1]!.status).toBe("verified");
+    expect(result.segments[1]!.attempts).toHaveLength(1);
+    const rechecked = await verifyStoredChapterTts({ root, story, chapter: 1, transcriber: new FakeTranscriber(audio => say(Buffer.from(audio).toString().startsWith("aa") ? good : result.segments[1]!.expectedSpokenText!)) });
+    expect(rechecked.segments[1]!.status).toBe("verified");
+  });
+
+  it("matches saved censored speech boundaries without reinserting removed words", async () => {
+    const { root, story, paths } = await fixture();
+    story.narrationSettings.bleepStrongProfanity = true;
+    await atomicWrite(paths.narrationTts, `${good}\n\nShit! ${bad}`);
+    await atomicWriteJson(paths.censorManifest, { version: 1, items: [{ kind: "speech", speechIndex: 0 }, { kind: "tone", original: "Shit", durationSeconds: .3 }, { kind: "speech", speechIndex: 1 }] });
+    const inner = Object.assign(new ScriptedTTS(req => singleSegment(req.text, "cc")), { prepareSegments: (req: TTSRequest) => [req.text] });
+    const censor = new FfmpegCensorAudioService({ validateAvailability: async () => undefined, ffmpeg: async (args: string[]) => atomicWrite(args.at(-1)!, bytes("assembled")) } as never);
+    await regenerateStoredChapterTtsSegment({ root, story, chapter: 1, segment: 1, provider: inner, censor, maxRetries: 0 });
+    expect(inner.calls).toHaveLength(1);
+    expect(inner.calls[0]!.text).toBe(bad);
+    story.narrationSettings.bleepStrongProfanity = false;
+    await expect(regenerateStoredChapterTtsSegment({ root, story, chapter: 1, segment: 1, provider: inner, censor, maxRetries: 0 })).rejects.toThrow("Regenerate the full chapter audio");
+    expect(inner.calls).toHaveLength(1);
   });
 
   it("regenerates exactly one segment, replaces its audio, and stales mastering downstream", async () => {
