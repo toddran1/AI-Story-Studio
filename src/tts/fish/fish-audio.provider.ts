@@ -9,6 +9,7 @@ import { splitForTTS } from "../split-text.js";
 import { normalizeFishSpeechText } from "./speech-normalizer.js";
 import { castQuotedDialogue, directQuotedDialogue, prepareFishMultiSpeakerChunks } from "./dialogue-casting.js";
 import { isFishS2Model } from "./control-cues.js";
+import { normalizeUnknownFieldValues } from "../speech-normalization.js";
 import { adaptPronunciationText } from "../pronunciation.js";
 import type { VocalizationCapabilities, VocalizationRenderStrategy } from "../vocalizations.js";
 import { logger } from "../../utils/logger.js";
@@ -54,8 +55,8 @@ export class FishAudioProvider implements TTSProvider {
     } = {},
   ) {
     this.inputNormalizationVersion = speechOptions.tskRendering === "direction"
-      ? "fish-speech-normalization-v39-silent-punctuation-tsk-direction"
-      : "fish-speech-normalization-v39-silent-punctuation";
+      ? "fish-speech-normalization-v41-unknown-fields-tsk-direction"
+      : "fish-speech-normalization-v41-unknown-fields";
   }
 
   resolveReferenceId(referenceId?: string): string | undefined {
@@ -80,7 +81,9 @@ export class FishAudioProvider implements TTSProvider {
       : (() => {
           const speechText = normalizeFishSpeechText(adaptPronunciationText(request.text, request.pronunciation ?? [], this.pronunciationCapabilities), request.model, this.speechOptions);
           if (!speechText) throw new ProviderError("Fish Audio narration is empty after speech normalization");
-          const castText = multiSpeaker ? castQuotedDialogue(speechText) : directedSingleVoice ? directQuotedDialogue(speechText) : speechText;
+          const meaningfulText = stripEmptyDialogueLines(speechText);
+          if (!meaningfulText) throw new ProviderError("Fish Audio narration is empty after removing empty dialogue");
+          const castText = multiSpeaker ? castQuotedDialogue(meaningfulText) : directedSingleVoice ? directQuotedDialogue(meaningfulText) : meaningfulText;
           let prepared = multiSpeaker
             ? prepareFishMultiSpeakerChunks(castText, request.maxCharsPerRequest)
             : splitForTTS(castText, request.maxCharsPerRequest);
@@ -115,7 +118,12 @@ export class FishAudioProvider implements TTSProvider {
     const sleep = this.speechOptions.sleep ?? ((ms: number) => new Promise((resolve) => setTimeout(resolve, ms)));
 
     for (const [index, text] of chunks.entries()) {
-      const wireText = renderFishPronunciationDictionary(text, request.pronunciationDictionary, request.model, request.pronunciationProtectedTerms);
+      // Saved exact chunks can contain empty dialogue left after profanity was
+      // replaced by a tone. Clean only the wire input so their stored boundaries
+      // remain usable for segment regeneration and censor reassembly.
+      const meaningfulText = normalizeUnknownFieldValues(stripEmptyDialogueLines(text));
+      if (!meaningfulText) throw new ProviderError("Fish Audio segment contains only empty dialogue");
+      const wireText = renderFishPronunciationDictionary(meaningfulText, request.pronunciationDictionary, request.model, request.pronunciationProtectedTerms);
       const currentChunk = index + 1;
       const totalChunks = chunks.length;
       const chunkStem = String(currentChunk).padStart(4, "0");
@@ -480,6 +488,10 @@ export function normalizeFishReferenceId(value?: string): string | undefined {
     }
   } catch { /* A plain model ID is the normal API form. */ }
   return trimmed;
+}
+
+function stripEmptyDialogueLines(text: string): string {
+  return text.split(/\r?\n/u).filter(line => !/^\s*(?:\[(?:soft|calm)\]\s*)*(?:“\s*”|"\s*"|‘\s*’|「\s*」|『\s*』|«\s*»)\s*$/iu.test(line)).join("\n").trim();
 }
 
 /** Documented S2/S2.1 production defaults. Other/unknown models retain the portable request shape. */

@@ -1,7 +1,7 @@
 import { stripSpeechMarkdownEmphasis as stripFishMarkdownEmphasis } from "../markdown-emphasis.js";
 export { stripSpeechMarkdownEmphasis as stripFishMarkdownEmphasis } from "../markdown-emphasis.js";
 import { disambiguateFishS2Brackets, isFishS2Model } from "./control-cues.js";
-import { stripFishLeadingHehe, normalizeDecimalPercentages, normalizeStructuredSpeechBlock, normalizeSystemMetadataText, speakInteger, stripStandaloneEllipsisLines } from "../speech-normalization.js";
+import { stripFishLeadingHehe, normalizeUnknownFieldValues, normalizeDecimalPercentages, normalizeStructuredSpeechBlock, normalizeSystemMetadataText, speakInteger, stripStandaloneEllipsisLines } from "../speech-normalization.js";
 import { scanVocalizations } from "../vocalizations.js";
 
 const TITLE_REPLACEMENTS: ReadonlyArray<readonly [RegExp, string]> = [
@@ -114,7 +114,7 @@ export function normalizeFishSpeechText(text: string, model?: string, options: {
   text = stripFishLeadingHehe(text);
   // Only item panels with a recognized rarity and metadata colon qualify;
   // ordinary prose parentheses and deliberate delivery cues remain untouched.
-  const itemPanels = text.replace(/\[[^\[\]\r\n]{1,500}\]/gu, (block) =>
+  const itemPanels = normalizeUnknownFieldValues(text).replace(/\[[^\[\]\r\n]{1,500}\]/gu, (block) =>
     /\((?:common|uncommon|rare|epic|legendary|mythic|unique|normal)\)\s*:/iu.test(block)
       ? normalizeStructuredSpeechBlock(block).replace(/\s*:\s*/gu, ". ").replace(/,\s*(?=Special Effect\b)/giu, ". ")
       : block);

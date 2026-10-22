@@ -2,7 +2,7 @@ import { fingerprint } from "../utils/hash.js";
 import { scanVocalizations, type VocalizationRenderStrategy } from "./vocalizations.js";
 import type { TTSProvider } from "./provider.js";
 
-export const SPEECH_NORMALIZATION_VERSION = "speech-normalization-v12-silent-punctuation";
+export const SPEECH_NORMALIZATION_VERSION = "speech-normalization-v13-unknown-fields";
 export type SpeechNormalizationMode = "automatic" | "enabled" | "disabled";
 export type TimeSpeechMode = "natural_12h" | "natural_24h" | "preserve";
 export type VocalizationMode = "automatic" | "preserve" | "disabled";
@@ -40,6 +40,7 @@ export function normalizeSpeechText(text: string, language: string, settings: Sp
   // Quotation marks around a named game/story term can make some TTS engines
   // insert a dialogue-sized pause. Only remove them when the surrounding grammar
   // clearly identifies the quote as a label within an ongoing noun phrase.
+  replace("structured-block", /[:：][ \t]*[?？]{2,}(?=[ \t]*(?:[】\]]|$))/gmu, normalizeUnknownFieldValues);
   replace("percentage", decimalPercentagePattern, normalizeDecimalPercentages);
   replace("structured-block", /【([^【】\n]{1,500})】/gu, (written, offset, source) => normalizeStructuredSpeechBlock(written, offset, source));
   replace("structured-block", /(?<![\p{L}\p{N}])([A-Z][\p{L}\p{N} -]{1,80})\s+\((Passive|Active)\)\s+\((Level [^()\n]{1,30}|Rank [^()\n]{1,30})\)/gu,
@@ -86,7 +87,7 @@ export function normalizeSpeechText(text: string, language: string, settings: Sp
 export function normalizeStructuredSpeechBlock(written: string, offset?: number, source?: string): string {
   const content = written.slice(1, -1).trim();
   if (!content) return written;
-  const spoken = content
+  const spoken = normalizeUnknownFieldValues(content)
     // Resolve an ellipsis before punctuation spacing can turn it into ". . .".
     .replace(/(?<=\p{L})(?:\.{2,}|…+)/gu, ",")
     .replace(/\s*\(([^()]{1,80})\)/gu, (_match, label: string) => `. ${label.trim()}`)
@@ -102,6 +103,11 @@ export function normalizeStructuredSpeechBlock(written: string, offset?: number,
   const following = offset === undefined ? "" : source?.slice(offset + written.length) ?? "";
   // Preserve existing sentence punctuation and punctuation outside the panel.
   return /[!?。！？][”"’']*$/u.test(spoken) || /^[ \t]*[.!?。！？,;:]/u.test(following) ? spoken : `${spoken}.`;
+}
+
+/** Unknown UI field values are labels, not punctuation or vocal reactions. */
+export function normalizeUnknownFieldValues(text: string): string {
+  return text.replace(/([:：])[ \t]*[?？]{2,}(?=[ \t]*(?:[】\]]|$))/gmu, "$1 unknown");
 }
 
 const decimalPercentagePattern = /(?<![\p{L}\p{N}_.,+-])[+-]?(?:\d{1,3}(?:,\d{3})+|\d{1,9})\.\d+[ \t]*[%％](?![\p{L}\p{N}_])/gu;

@@ -6,6 +6,31 @@ import { normalizeSpeechText } from "../src/tts/speech-normalization.js";
 import { TTSRequest } from "../src/tts/types.js";
 
 describe("Fish TTS", () => {
+  it("speaks unknown panel values without interpreting question marks", () => {
+    const text = "Name: ???】\n\n【Quality: ???】\n\n【Description: ???】";
+    for (const spoken of [normalizeSpeechText(text, "en-US").text, normalizeFishSpeechText(text, "s2.1-pro-free")]) {
+      expect(spoken).toContain("Name: unknown");
+      expect(spoken).toContain("Quality: unknown");
+      expect(spoken).toContain("Description: unknown");
+      expect(spoken).not.toContain("???");
+    }
+    expect(normalizeFishSpeechText("【Quality：？？？】", "s2.1-pro-free")).toContain("unknown");
+    expect(normalizeFishSpeechText('“What??” he asked. Why???', "s2.1-pro-free")).toContain("What??");
+  });
+
+  it.each([false, true])("removes empty censored dialogue from Fish input (exact chunk: %s)", async exactChunk => {
+    const fetcher = vi.fn(async (_url: unknown, _init?: RequestInit) => new Response(new Uint8Array([1, 2, 3]), { status: 200 }));
+    const provider = new FishAudioProvider("test-key", fetcher as typeof fetch);
+    const text = `${exactChunk ? '[soft] ' : ''}“”\n\n[calm] Kyree sucked in a sharp breath.\n\n“[laughing]”\n\n“Hello.”`;
+    await provider.synthesize({ text, exactChunk, singleAttempt: true, model: "s2.1-pro-free", voiceMode: "same-voice-dialogue", deliveryIntensity: "restrained", speed: 1, format: "mp3", sampleRate: 44100, bitrate: 128, normalize: true, maxCharsPerRequest: 1750 });
+    const body = JSON.parse(String(fetcher.mock.calls[0]?.[1]?.body));
+    expect(body.text).not.toContain('“”');
+    expect(body.text).toContain("Kyree sucked in a sharp breath.");
+    expect(body.text).toContain("[laughing]");
+    expect(body.text).toContain("Hello.");
+    expect(text).toContain('“”'); // Stored boundaries are not rewritten.
+  });
+
   it.each([
     ["41.5%", "forty-one point five percent"],
     ["42.3%", "forty-two point three percent"],
@@ -210,7 +235,7 @@ describe("Fish TTS", () => {
     await provider.synthesize({ text: "**Important:** *whisper this.* [sad] 2 * 2", model: "s2.1-pro", speed: 1, format: "mp3", sampleRate: 44100, bitrate: 128, normalize: true, maxCharsPerRequest: 500 });
     const body = JSON.parse(String((fetcher.mock.calls[0]?.[1] as RequestInit).body));
     expect(body.text).toBe("Important: whisper this. [sad] 2 * 2");
-    expect(provider.inputNormalizationVersion).toBe("fish-speech-normalization-v39-silent-punctuation");
+    expect(provider.inputNormalizationVersion).toBe("fish-speech-normalization-v41-unknown-fields");
   });
 
   it("does not turn profanity into the literal word bleep inside Fish", async () => {
