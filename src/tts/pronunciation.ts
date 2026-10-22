@@ -41,6 +41,13 @@ export type PronunciationCapabilities = { ipa?: boolean; dictionary?: boolean; s
 /** Resolve again for each actual request, so censor splitting cannot corrupt offsets. */
 export function pronunciationProvider(provider: TTSProvider, entities: readonly CanonicalEntity[], policy: PronunciationPolicy = {}): TTSProvider {
   const dictionary = buildPronunciationDictionary(entities, policy);
+  const rulesForText = (text: string, exactChunk = false, occurrences?: PronunciationOccurrence[]) => {
+    const spoken = exactChunk ? text : adaptPronunciationText(text, occurrences ?? resolvePronunciations(text, entities), provider.pronunciationCapabilities ?? {});
+    // A manual spoken form can introduce a dictionary key (Kyrie -> Kyree).
+    // Select against both forms; final bounded replacement still happens only
+    // after provider preparation, with protected manual names left intact.
+    return dictionaryForText(`${text}\n${spoken}`, dictionary);
+  };
   const protectedTerms = entities.flatMap(entity => {
     const configured = hasExplicitPronunciationGuidance(entity);
     return [
@@ -55,11 +62,11 @@ export function pronunciationProvider(provider: TTSProvider, entities: readonly 
     vocalizationStrategy: provider.vocalizationStrategy?.bind(provider),
     resolveReferenceId: provider.resolveReferenceId?.bind(provider),
     validateConfiguration: () => provider.validateConfiguration(),
-    pronunciationFingerprint: text => { const rules = dictionaryForText(text, dictionary); return rules.length ? fingerprint({ version: PRONUNCIATION_DICTIONARY_VERSION, rules }) : undefined; },
+    pronunciationFingerprint: text => { const rules = rulesForText(text); return rules.length ? fingerprint({ version: PRONUNCIATION_DICTIONARY_VERSION, rules }) : undefined; },
     prepareSegments: provider.prepareSegments ? request => provider.prepareSegments!({ ...request, pronunciation: request.exactChunk ? [] : (request.pronunciation ?? resolvePronunciations(request.text, entities)) }) : undefined,
     synthesize: request => provider.synthesize({
       ...request,
-      pronunciationDictionary: request.pronunciationDictionary ?? dictionaryForText(request.text, dictionary),
+      pronunciationDictionary: request.pronunciationDictionary ?? rulesForText(request.text, request.exactChunk, request.pronunciation),
       pronunciationProtectedTerms: request.pronunciationProtectedTerms ?? protectedTerms,
       pronunciation: request.exactChunk ? [] : (request.pronunciation ?? resolvePronunciations(request.text, entities)),
     }),

@@ -89,6 +89,24 @@ describe("story-wide pronunciation dictionary", () => {
     expect(fish.bodies).toHaveLength(2);
     expect(fish.bodies.every(body => body.text.includes(phoneme("zhang1")) && body.text.includes(phoneme("qi3")))).toBe(true);
   });
+  it("applies a localized short-name dictionary rule after custom spelling in fresh and exact requests", async () => {
+    const fish = mockFish();
+    const character = entity("Su Ming", "苏铭", {
+      localizedNaming: { locale: "en-US", fullName: "Kyrie Lamb", shortName: "Kyrie", usageMode: "ai_contextual" },
+      preferredNarrationName: "Kyrie Lamb",
+      pronunciation: { mode: "custom", customPronunciation: "Kyree Lamb", sourceLanguage: "en-US", source: "manual", locked: true },
+    });
+    const make = (phonemes: string) => createEffectiveTtsProvider({ baseProvider: fish.provider, pronunciationEntities: [character], pronunciationPolicy: { ...policy, pronunciationDictionary: [{ text: "Kyree", alphabet: "arpabet", phonemes }] } }).provider;
+    const provider = make("K AY1 R IY0");
+    const generated = await provider.synthesize({ ...base, text: "Kyrie arrived. Kyrie’s turn." });
+    expect(fish.bodies[0].text).toBe(`${phoneme("K AY1 R IY0")} arrived. ${phoneme("K AY1 R IY0")}’s turn.`);
+    await provider.synthesize({ ...base, text: generated.segmentTexts![0]!, exactChunk: true, singleAttempt: true });
+    expect(fish.bodies[1].text).toBe(fish.bodies[0].text);
+    expect(provider.pronunciationFingerprint?.("Kyrie arrived.")).not.toBe(make("K AY1 R IY1").pronunciationFingerprint?.("Kyrie arrived."));
+    // Full-name manual guidance remains protected from partial dictionary rules.
+    await provider.synthesize({ ...base, text: "Kyrie Lamb arrived." });
+    expect(fish.bodies[2].text).toBe("Kyree Lamb arrived.");
+  });
   it("preserves localized names from derived surnames but allows explicit dictionary corrections", async () => {
     const fish = mockFish();
     const localized = entity("Original Name", "原名", { id: "ent_abcdef0123456789abcdef01", localizedNaming: { locale: "en-US", fullName: "Zhang Smith", shortName: "Zhang", usageMode: "always_full" } });
