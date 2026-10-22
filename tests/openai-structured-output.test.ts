@@ -170,6 +170,29 @@ describe("OpenAIProvider execution & error diagnostics", () => {
     }
   });
 
+  it("explains a client timeout without inventing an API error response", async () => {
+    const provider = new OpenAIProvider("fake", 120_000);
+    stubClient(provider, async () => { throw Object.assign(new Error("Request timed out.", { cause: new Error("This operation was aborted") }), { name: "APIConnectionTimeoutError" }); });
+    await expect(provider.generateStructured({ model: "test", instructions: "Extract", input: "Chapter", schemaName: "test", schema: z.object({ ok: z.boolean() }) })).rejects.toMatchObject({
+      category: "timeout", retryable: true,
+      message: expect.stringContaining("client deadline 120s; elapsed"),
+    });
+    const error = toOpenAiProviderError(new Error("Request timed out."), "Failed", "test");
+    expect(error.message).toContain("No HTTP error response was received");
+    expect(error.message).toContain("server outcome is unknown");
+    expect(error.status).toBeUndefined();
+  });
+
+  it("preserves API timeout details and native Headers request IDs", () => {
+    const error = toOpenAiProviderError(Object.assign(new Error("Gateway timeout"), {
+      status: 504, code: "upstream_timeout", type: "server_error", param: "input",
+      headers: new Headers({ "x-request-id": "req_timeout" }),
+    }), "Failed", "test");
+    expect(error).toMatchObject({ category: "timeout", status: 504, requestId: "req_timeout", code: "upstream_timeout" });
+    for (const detail of ["HTTP 504", "upstream_timeout", "server_error", "param=input", "req_timeout", "API returned a timeout response"]) expect(error.message).toContain(detail);
+    expect(error.message).not.toContain("No HTTP error response");
+  });
+
   it("maps HTTP 401 to authentication_error", () => {
     const err = Object.assign(new Error("Incorrect API key provided"), {
       status: 401,

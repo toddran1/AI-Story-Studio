@@ -131,6 +131,7 @@ ELEVENLABS_API_KEY=
 FISH_AUDIO_MODEL=s2-pro
 FISH_AUDIO_REFERENCE_ID=
 PROVIDER_TIMEOUT_MS=120000
+LLM_PROVIDER_TIMEOUT_MS=180000
 MEDIA_PROCESS_TIMEOUT_MS=1800000
 ALIGNMENT_ENGINE=whisper-cpp
 ALIGNMENT_EXECUTABLE=whisper-cli
@@ -269,7 +270,7 @@ Chapters run strictly in ascending order because each chapter's translation depe
 
 Transient network, timeout, rate-limit, and server failures use bounded exponential backoff with jitter. Defaults are three attempts, a 1-second initial delay, and a 30-second cap. Configure these with `--max-attempts`, `--initial-delay-ms`, and `--max-delay-ms`; add `--delay-ms` to throttle between chapters.
 
-Each provider request also has a 120-second deadline by default. Set `PROVIDER_TIMEOUT_MS` in `.env` to adjust it. Commands that mutate one story acquire a per-story lock, so accidentally starting an import, batch, or single-chapter run for the same story twice fails clearly instead of corrupting shared state.
+Text-model requests (including Story Bible extraction) have a three-minute deadline by default, configured with `LLM_PROVIDER_TIMEOUT_MS` in `.env`. Speech requests retain their separate 120-second default (`PROVIDER_TIMEOUT_MS`); image requests use `IMAGE_PROVIDER_TIMEOUT_MS`. These are client deadlines, not guarantees that a provider will finish in time. Commands that mutate one story acquire a per-story lock, so accidentally starting an import, batch, or single-chapter run for the same story twice fails clearly instead of corrupting shared state.
 
 Every run has a unique manifest under `stories/<story>/batches/`, plus `latest.json`. Rerunning the normal batch is safe: the chapter pipeline remains the authority for fingerprints and reuses valid expensive outputs. Retry only failures from the latest manifest with:
 

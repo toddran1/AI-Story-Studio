@@ -9,8 +9,18 @@ describe("configuration", () => {
     const env = loadEnvironment({ OPENAI_API_KEY: "test", GEMINI_API_KEY: "test", FISH_AUDIO_API_KEY: "test" });
     expect(env.FISH_AUDIO_MODEL).toBe("s2.1-pro");
     expect(env.PROVIDER_TIMEOUT_MS).toBe(120_000);
+    expect(env.LLM_PROVIDER_TIMEOUT_MS).toBe(180_000);
     expect(env.IMAGE_PROVIDER_TIMEOUT_MS).toBe(300_000);
     expect(env.FISH_AUDIO_MP3_BITRATE).toBe(128);
+  });
+
+  it("configures text-model deadlines independently of speech and rejects invalid limits", () => {
+    const env = loadEnvironment({ LLM_PROVIDER_TIMEOUT_MS: "450000", PROVIDER_TIMEOUT_MS: "30000" });
+    expect(env.LLM_PROVIDER_TIMEOUT_MS).toBe(450_000);
+    expect(env.PROVIDER_TIMEOUT_MS).toBe(30_000);
+    for (const value of ["0", "900001", "invalid"]) {
+      expect(() => loadEnvironment({ LLM_PROVIDER_TIMEOUT_MS: value })).toThrow(/LLM_PROVIDER_TIMEOUT_MS/);
+    }
   });
 
   it("allows a separate image generation deadline", () => {

@@ -26,9 +26,9 @@ export function createPipeline(env: Environment): ChapterPipeline {
 export function createPipelineRuntime(env: Environment, usage?: UsageSink) {
   const trackLlm = (provider: LLMProvider) => usage ? new TrackedLLMProvider(provider, usage) : provider;
   const router = new LLMRouter(new Map<string, LLMProvider>([
-      ["openai", trackLlm(new OpenAIProvider(env.OPENAI_API_KEY, env.PROVIDER_TIMEOUT_MS))],
-      ["gemini", trackLlm(new GeminiProvider(env.GEMINI_API_KEY, env.PROVIDER_TIMEOUT_MS))],
-      ["kimi", trackLlm(new KimiProvider(env.KIMI_API_KEY, env.PROVIDER_TIMEOUT_MS))],
+      ["openai", trackLlm(new OpenAIProvider(env.OPENAI_API_KEY, env.LLM_PROVIDER_TIMEOUT_MS))],
+      ["gemini", trackLlm(new GeminiProvider(env.GEMINI_API_KEY, env.LLM_PROVIDER_TIMEOUT_MS))],
+      ["kimi", trackLlm(new KimiProvider(env.KIMI_API_KEY, env.LLM_PROVIDER_TIMEOUT_MS))],
     ]));
   const rawTts = new FishAudioProvider(env.FISH_AUDIO_API_KEY, fetch, env.PROVIDER_TIMEOUT_MS, env.FISH_AUDIO_REFERENCE_ID);
   const trackedTts = usage ? new TrackedTTSProvider(rawTts, usage) : rawTts;

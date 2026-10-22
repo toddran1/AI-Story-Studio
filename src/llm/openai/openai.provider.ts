@@ -14,7 +14,7 @@ export class OpenAIProvider implements LLMProvider {
   readonly supportsImageInputs = true;
   readonly name = "openai" as const;
   private readonly client: OpenAI;
-  constructor(private readonly apiKey?: string, timeoutMs = 120_000) {
+  constructor(private readonly apiKey?: string, private readonly timeoutMs = 120_000) {
     this.client = new OpenAI({ apiKey: apiKey ?? "missing", timeout: timeoutMs, maxRetries: 0 });
   }
 
@@ -26,6 +26,7 @@ export class OpenAIProvider implements LLMProvider {
 
   async generateText(request: LLMRequest) {
     await this.validateConfiguration();
+    const startedAt = Date.now();
     try {
       const response = await this.client.responses.create({
         model: request.model,
@@ -52,12 +53,13 @@ export class OpenAIProvider implements LLMProvider {
       };
     } catch (error) {
       if (error instanceof ConfigurationError) throw error;
-      throw toOpenAiProviderError(error, "OpenAI Responses API request failed", request.model);
+      throw toOpenAiProviderError(error, "OpenAI Responses API request failed", request.model, { timeoutMs: this.timeoutMs, elapsedMs: Date.now() - startedAt });
     }
   }
 
   async generateStructured<T>(request: StructuredLLMRequest<T>) {
     await this.validateConfiguration();
+    const startedAt = Date.now();
     try {
       const format = toOpenAiTextFormat(request.schema, request.schemaName);
       const response = await this.client.responses.create({
@@ -112,7 +114,7 @@ export class OpenAIProvider implements LLMProvider {
     } catch (error) {
       if (error instanceof ConfigurationError) throw error;
       if (error instanceof ProviderError) throw error;
-      throw toOpenAiProviderError(error, "OpenAI structured Responses API request failed", request.model);
+      throw toOpenAiProviderError(error, "OpenAI structured Responses API request failed", request.model, { timeoutMs: this.timeoutMs, elapsedMs: Date.now() - startedAt });
     }
   }
 }
@@ -190,18 +192,19 @@ export function extractOpenAiErrorInfo(error: unknown) {
   const type = typeof err.type === "string" ? err.type : undefined;
   const param = typeof err.param === "string" ? err.param : undefined;
   const headers = err.headers as Record<string, unknown> | undefined;
+  const headerRequestId = headers instanceof Headers ? headers.get("x-request-id") : headers?.["x-request-id"];
   const requestId = typeof err.request_id === "string"
     ? err.request_id
     : typeof err.requestId === "string"
     ? err.requestId
-    : typeof headers?.["x-request-id"] === "string"
-    ? headers["x-request-id"]
+    : typeof headerRequestId === "string"
+    ? headerRequestId
     : undefined;
   const providerMessage = typeof err.message === "string" ? err.message : undefined;
   return { status, code, type, param, requestId, providerMessage };
 }
 
-export function toOpenAiProviderError(error: unknown, fallbackSummary: string, model: string): ProviderError {
+export function toOpenAiProviderError(error: unknown, fallbackSummary: string, model: string, timing?: { timeoutMs: number; elapsedMs: number }): ProviderError {
   const info = extractOpenAiErrorInfo(error);
   const status = info.status;
   const code = info.code;
@@ -224,10 +227,12 @@ export function toOpenAiProviderError(error: unknown, fallbackSummary: string, m
     category = "structured_output_error";
     retryable = false;
     summary = `OpenAI structured-output request rejected: ${providerMessage}`;
-  } else if (status === 408 || status === 504 || /timeout/i.test(providerMessage)) {
+  } else if (status === 408 || status === 504 || /timed?\s*out|timeout/i.test(providerMessage) || (error instanceof Error && error.name === "APIConnectionTimeoutError")) {
     category = "timeout";
     retryable = true;
-    summary = `OpenAI request timed out: ${providerMessage}`;
+    const deadline = timing ? ` (client deadline ${timing.timeoutMs / 1000}s; elapsed ${(timing.elapsedMs / 1000).toFixed(1)}s)` : "";
+    const details = [status !== undefined ? `HTTP ${status}` : undefined, code ? `code=${code}` : undefined, info.type ? `type=${info.type}` : undefined, info.param ? `param=${info.param}` : undefined, requestId ? `request ID=${requestId}` : undefined].filter(Boolean).join("; ");
+    summary = `OpenAI request timed out${deadline}: ${providerMessage}. ${status === undefined ? "No HTTP error response was received; the SDK did not provide an API error body. The underlying server outcome is unknown." : "The API returned a timeout response."}${details ? ` Details: ${details}.` : ""}`;
   } else if (status && status >= 500) {
     category = "provider_unavailable";
     retryable = true;
