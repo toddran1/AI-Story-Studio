@@ -93,6 +93,7 @@ const additionalDetailFields = {
     ["faceShape", "Face Structure / Features"], ["facialHair", "Facial Hair"],
     ["scars", "Scars"], ["tattoos", "Tattoos"],
     ["shoes", "Shoes"], ["accessories", "Accessories"],
+    ["conditionalAppearance", "Conditional appearance / activation rules"],
     ["equipment", "Equipment"], ["additionalAppearanceNotes", "Additional Appearance Notes"],
   ],
   location: [
@@ -117,6 +118,7 @@ function AdditionalDetailFields({ section, profile, onChange }: {
 }) {
   const details = profile[section] as Record<string, string | undefined> | undefined;
   return <div className="form-grid-2col">
+    {section === "character" && <p className="hint-text">Save normal physical traits separately from conditional appearance. Describe skill triggers and their visible changes under activation rules. Clothing and equipment are defaults; the current narrative and scene continuity determine what is worn or visible.</p>}
     {additionalDetailFields[section].map(([key, label]) => {
       const path = `${section}.${key}`;
       const multiline = ["faceShape", "additionalAppearanceNotes", "environmentDescription", "recurringLandmarks", "distinguishingFeatures", "accessories", "equipment", "ornamentation"].includes(key);
@@ -783,7 +785,7 @@ export function VisualProfileModal({
                       />
                     </div>
                     <div>
-                      <label>Eye Color</label>
+                      <label>Eye Color (normal / inactive)</label>
                       <input
                         type="text"
                         value={profile.character?.eyeColor || ""}

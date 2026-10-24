@@ -180,6 +180,7 @@ export type CharacterVisualDetails = {
   accessories?: string;
   weapons?: string;
   equipment?: string;
+  conditionalAppearance?: string;
   additionalAppearanceNotes?: string;
 };
 
@@ -432,6 +433,9 @@ export type VisualCharacterState = {
   wardrobe?: string;
   equipment?: string;
   carriedItems?: string[];
+  activeAbilities?: string[];
+  visibleEquipment?: string[];
+  concealedItems?: string[];
   injuries?: string;
   condition?: string;
   transformation?: string;

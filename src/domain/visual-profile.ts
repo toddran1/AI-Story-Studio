@@ -99,6 +99,7 @@ export const characterVisualDetailsSchema = z.object({
   accessories: z.string().trim().max(1000).optional(),
   weapons: z.string().trim().max(1000).optional(),
   equipment: z.string().trim().max(1000).optional(),
+  conditionalAppearance: z.string().trim().max(5000).optional(),
   additionalAppearanceNotes: z.string().trim().max(5000).optional(),
 }).default({});
 export type CharacterVisualDetails = z.infer<typeof characterVisualDetailsSchema>;

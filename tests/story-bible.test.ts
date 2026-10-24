@@ -5,7 +5,7 @@ import { contextBeforeChapter, mergeStoryBible, normalizeStoryBibleUpdate } from
 
 describe("Story Bible extraction prompt", () => {
   it("covers every schema bucket, relationships, translation terms, and narration-input caveats", () => {
-    expect(STORY_BIBLE_PROMPT_VERSION).toBe("8-creature-template-identity");
+    expect(STORY_BIBLE_PROMPT_VERSION).toBe("9-conditional-visual-identity");
     expect(storyBibleInstructions).toContain("visualObservations");
     expect(storyBibleInstructions).toContain("Death alone never establishes a skeletal or undead form");
     for (const bucket of ["characters", "locations", "factions", "abilities", "items", "classes", "ranks", "creatures", "systemTerms"]) expect(storyBibleInstructions).toContain(bucket);

@@ -55,7 +55,7 @@ describe("shared summary visual planning", () => {
     await planScenes(provider, story.pipeline.scenePlanner, { chapter: 1, narration: "Original chapter narration", durationSeconds: 22, bible: emptyStoryBible(), settings: story.scenes });
     expect(calls[1]!.schemaName).toBe("chapter_scene_plan");
     expect(calls[1]!.input).not.toContain("SUPPORTING CANONICAL SUMMARY");
-    expect(calls[1]!.instructions).not.toContain("recap");
+    expect(calls[1]!.instructions).not.toContain("Set appearanceChapter");
   });
 
   it("shares manifest metadata without assigning summaries a fake chapter", () => {

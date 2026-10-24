@@ -1,3 +1,4 @@
+import { normalizeCharacterAppearance, REFERENCE_BASELINE_POLICY } from "./appearance-policy.js";
 import { referenceFigureRequirement } from "./figure-guidance.js";
 import { CHARACTER_DESIGN_GUIDANCE, CHARACTER_DESIGN_VERSION, characterDesignContext } from "./character-design.js";
 import { prepareReferenceSheetIdentity, IDENTITY_TRANSFORMATION_INSTRUCTION } from "./reference-identity.js";
@@ -116,6 +117,7 @@ export async function updateVisualProfile(
   const now = new Date().toISOString();
 
   let next: VisualEntityProfile;
+  if (patch.character) patch = { ...patch, character: normalizeCharacterAppearance(patch.character) };
   if (existing) {
     const isNowApproved = patch.status === "approved" && existing.status !== "approved";
     next = visualProfileSchema.parse({
@@ -397,7 +399,7 @@ export async function generateStyleSheet(
   ].filter(Boolean);
 
   // Layer 2: persistent entity visual canon (never scene-specific state).
-  const character = profile.visualType === "character" ? profile.character : undefined;
+  const character = profile.visualType === "character" ? normalizeCharacterAppearance(profile.character) : undefined;
   const entityDetails: string[] = [
     `ENTITY: ${entity.canonicalName} (${profile.visualType})`,
     profile.visualPrompt ? `SUBJECT VISUAL PROMPT: ${profile.visualPrompt}` : "",
@@ -408,7 +410,8 @@ export async function generateStyleSheet(
     character?.build ? `BUILD / PHYSIQUE: ${character.build}` : "",
     character?.skinTone ? `SKIN TONE: ${character.skinTone}` : "",
     character?.faceShape ? `FACE SHAPE: ${character.faceShape}` : "",
-    character?.eyeColor ? `EYES: ${character.eyeColor}` : "",
+    character?.conditionalAppearance ? `CONDITIONAL APPEARANCE RULES (inactive unless explicitly requested): ${character.conditionalAppearance}` : "",
+    character?.eyeColor ? `NORMAL INACTIVE EYES: ${character.eyeColor}` : "",
     character?.hairColor || character?.hairstyle
       ? `HAIR: ${[character.hairColor, character.hairstyle].filter(Boolean).join(", ")}`
       : "",
@@ -462,7 +465,7 @@ export async function generateStyleSheet(
     entityDetails.join("\n"),
     paletteGuidance,
     referenceRequirements.join("\n"),
-  ].filter(Boolean).join("\n\n"), profile.visualType === "character" ? CHARACTER_DESIGN_GUIDANCE + "\nOTHER CAST DESIGNS (comparison only): " + JSON.stringify(castDesigns) : "", identity.images.length ? IDENTITY_TRANSFORMATION_INSTRUCTION : "", referenceFigureRequirement(character, story.artwork.adultContent)].filter(Boolean).join("\n\n");
+  ].filter(Boolean).join("\n\n"), profile.visualType === "character" ? REFERENCE_BASELINE_POLICY + "\n" + CHARACTER_DESIGN_GUIDANCE + "\nOTHER CAST DESIGNS (comparison only): " + JSON.stringify(castDesigns) : "", identity.images.length ? IDENTITY_TRANSFORMATION_INSTRUCTION : "", referenceFigureRequirement(character, story.artwork.adultContent)].filter(Boolean).join("\n\n");
 
   // Combined negative prompt
   const negativePromptParts = [

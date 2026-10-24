@@ -10,7 +10,7 @@ import { tokenizeNarration } from "../alignment/quality.js";
 import { withRetry } from "../batch/retry.js";
 import { retryConfigSchema } from "../batch/types.js";
 
-export async function planScenes(provider: LLMProvider, config: StageModelConfig, input: { chapter: number; title?: string; narration: string; durationSeconds: number; bible: StoryBible; settings: SceneSettings; subtitles?: string; visualContinuity?: string }) {
+export async function planScenes(provider: LLMProvider, config: StageModelConfig, input: { chapter: number; title?: string; narration: string; durationSeconds: number; bible: StoryBible; settings: SceneSettings; subtitles?: string; visualContinuity?: string; visualProfileContext?: string }) {
   const target = Math.max(1, Math.min(input.settings.maximumScenesPerChapter, Math.round(input.durationSeconds / input.settings.targetDurationSeconds)));
   return planVisualScenes(provider, config, {
     ...input, sourceType: "chapter", sourceId: String(input.chapter), targetSceneCount: target,
@@ -23,6 +23,7 @@ export type VisualPlanningInput = {
   narration: string; durationSeconds: number; bible: StoryBible;
   settings: SceneSettings; targetSceneCount: number; subtitles?: string;
   visualContinuity?: string;
+  visualProfileContext?: string;
   canonicalSummary?: string; sourceChapters?: number[];
   namingIdentities?: Array<{ entityId: string; canonicalName: string; originalName?: string; narrationNames: string[] }>;
   visualDirectionContext?: string;
@@ -37,14 +38,16 @@ export async function planVisualScenes(provider: LLMProvider, config: StageModel
   }
   await provider.validateConfiguration();
   const summary = input.sourceType === "summary";
+  const profileContext = input.visualProfileContext ? `\n\nVISUAL IDENTITY AND CONDITIONAL RULES (baseline defaults, not scene visibility):\n${input.visualProfileContext}` : "";
   const context = summary ? `\n\nSUMMARY ID: ${input.sourceId}\nSOURCE CHAPTERS: ${JSON.stringify(input.sourceChapters ?? [])}\nSUPPORTING CANONICAL SUMMARY:\n${input.canonicalSummary ?? "Unavailable"}\nCANONICAL / LOCALIZED IDENTITY MAP:\n${JSON.stringify(input.namingIdentities ?? [])}` : "";
   const generate = () => provider.generateStructured({ model: config.model,
-    instructions: scenePlannerInstructions + (summary ? "\nPlan only the events in the final recap narration, not every event in its source chapters. Use semantic visual beats first; the target scene count is pacing guidance, not permission to omit the ending. Localized full/short names refer to the same canonical entity in the identity map. Use that entity's supported visual traits. Supporting canonical context must never expand or rewrite the narration. For each summary scene provide zero-based narrationStartWord (inclusive) and narrationEndWord (exclusive) using the supplied narration word array. Cover every word exactly once in chronological order." : "") + (input.visualDirectionContext ? "\nRespect the supplied saved visual-direction settings and manual overrides as editorial constraints. Do not contradict or erase them; generated visual beats and prompts should work within them." : ""),
-    input: `${input.sourceLabel}\nAUDIO DURATION: ${input.durationSeconds.toFixed(3)} seconds\nTARGET SCENE COUNT: approximately ${input.targetSceneCount}\nSCENE DURATION GUIDANCE: ${input.settings.minimumDurationSeconds}-${input.settings.maximumDurationSeconds} seconds\n\nCANONICAL STORY BIBLE:\n${JSON.stringify(input.bible, null, 2)}${context}${input.visualDirectionContext ? `\n\nSAVED VISUAL DIRECTION (editorial constraints):\n${input.visualDirectionContext}` : ""}${input.visualContinuity ? `\n\nPREVIOUS VISUAL CONTINUITY (inherited temporary state — current narration is authoritative):\n${input.visualContinuity}` : ""}${summary ? `\nNARRATION WORDS (zero-indexed):\n${JSON.stringify(tokenizeNarration(input.narration))}` : ""}\n\nOPTIONAL SUBTITLE TIMING:\n${input.subtitles ?? "Unavailable"}\n\nFINAL NARRATION:\n${input.narration}`,
+    instructions: scenePlannerInstructions + (summary ? "\nPlan only the events in the final recap narration, not every event in its source chapters. Use semantic visual beats first; the target scene count is pacing guidance, not permission to omit the ending. Localized full/short names refer to the same canonical entity in the identity map. Use that entity's supported visual traits. Supporting canonical context must never expand or rewrite the narration. For each summary scene set appearanceChapter to the actual source chapter of the depicted beat when supported; otherwise leave it null. Respect approved appearance-era boundaries; never use a later transformation or costume for an earlier beat. Emit a flashback transition when moving backward in time. For each summary scene provide zero-based narrationStartWord (inclusive) and narrationEndWord (exclusive) using the supplied narration word array. Cover every word exactly once in chronological order." : "") + (input.visualDirectionContext ? "\nRespect the supplied saved visual-direction settings and manual overrides as editorial constraints. Do not contradict or erase them; generated visual beats and prompts should work within them." : ""),
+    input: `${input.sourceLabel}\nAUDIO DURATION: ${input.durationSeconds.toFixed(3)} seconds\nTARGET SCENE COUNT: approximately ${input.targetSceneCount}\nSCENE DURATION GUIDANCE: ${input.settings.minimumDurationSeconds}-${input.settings.maximumDurationSeconds} seconds\n\nCANONICAL STORY BIBLE:\n${JSON.stringify(input.bible, null, 2)}${context}${profileContext}${input.visualDirectionContext ? `\n\nSAVED VISUAL DIRECTION (editorial constraints):\n${input.visualDirectionContext}` : ""}${input.visualContinuity ? `\n\nPREVIOUS VISUAL CONTINUITY (inherited temporary state — current narration is authoritative):\n${input.visualContinuity}` : ""}${summary ? `\nNARRATION WORDS (zero-indexed):\n${JSON.stringify(tokenizeNarration(input.narration))}` : ""}\n\nOPTIONAL SUBTITLE TIMING:\n${input.subtitles ?? "Unavailable"}\n\nFINAL NARRATION:\n${input.narration}`,
     schemaName: summary ? "summary_scene_plan" : "chapter_scene_plan", schema: summary ? summaryPlannedScenesSchema : plannedScenesSchema });
   const result = await (summary ? withRetry(generate, retryConfigSchema.parse({})) : generate());
   const normalizedNarration = input.narration.replace(/\s+/g, " ").toLocaleLowerCase();
   for (const scene of result.value.scenes) {
+    if (scene.appearanceChapter && summary && !input.sourceChapters?.includes(scene.appearanceChapter)) throw new Error("Summary scene appearanceChapter must belong to its source chapters");
     if (!scene.creatureGroups) continue;
     const ids = new Set<string>();
     scene.creatureGroups = scene.creatureGroups.filter(group => {

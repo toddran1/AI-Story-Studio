@@ -74,7 +74,7 @@ export const extractedTimelineEventSchema = z.object({
 });
 
 export const visualEvidenceFieldSchema = z.enum([
-  "character.apparentAge", "character.gender", "character.height", "character.build", "character.skinTone", "character.faceShape", "character.eyeColor", "character.hairColor", "character.hairstyle", "character.facialHair", "character.distinguishingFeatures", "character.scars", "character.tattoos", "character.defaultOutfit", "character.shoes", "character.accessories", "character.weapons", "character.equipment", "character.additionalAppearanceNotes",
+  "character.apparentAge", "character.gender", "character.height", "character.build", "character.skinTone", "character.faceShape", "character.eyeColor", "character.hairColor", "character.hairstyle", "character.facialHair", "character.distinguishingFeatures", "character.scars", "character.tattoos", "character.defaultOutfit", "character.shoes", "character.accessories", "character.weapons", "character.equipment", "character.conditionalAppearance", "character.additionalAppearanceNotes",
   "location.environmentDescription", "location.architecture", "location.terrain", "location.vegetation", "location.weatherTendencies", "location.lighting", "location.atmosphere", "location.colorPalette", "location.recurringLandmarks", "location.canonicalEnvironmentPrompt",
   "creature.species", "creature.scale", "creature.anatomy", "creature.coloration", "creature.eyes", "creature.armorFur", "creature.distinguishingFeatures", "creature.sizeRelativeToHuman", "creature.canonicalCreaturePrompt",
   "item.shape", "item.materials", "item.dimensions", "item.color", "item.ornamentation", "item.wearDamage", "item.magicalEffects", "item.canonicalObjectPrompt",
@@ -84,6 +84,7 @@ export const extractedVisualObservationSchema = z.object({
   value: z.string().trim().min(1).max(1000), chapter: z.number().int().positive(),
   confidence: z.number().min(0).max(1), persistence: z.enum(["persistent", "changed", "temporary"]),
   excerpt: z.string().trim().min(1).max(500),
+  condition: z.string().trim().min(1).max(300).optional(),
 });
 export type ExtractedVisualObservation = z.infer<typeof extractedVisualObservationSchema>;
 export const visualEvidenceSchema = z.object({
@@ -92,6 +93,7 @@ export const visualEvidenceSchema = z.object({
   chapter: z.number().int().positive(), lastObservedChapter: z.number().int().positive(),
   confidence: z.number().min(0).max(1), persistence: extractedVisualObservationSchema.shape.persistence,
   status: z.enum(["current", "historical", "conflict", "temporary"]),
+  condition: z.string().trim().min(1).max(300).optional(),
   source: z.enum(["source_text", "story_bible", "manual"]),
   provenance: z.array(z.object({ chapter: z.number().int().positive(), excerpt: z.string().trim().min(1).max(500), confidence: z.number().min(0).max(1) })).min(1),
 });

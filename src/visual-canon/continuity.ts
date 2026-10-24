@@ -138,6 +138,19 @@ export function resolveVisualContinuity(options: {
   const perScene: ResolvedSceneContinuity[] = [];
   for (let index = 0; index < options.scenes.length; index++) {
     const scene = options.scenes[index]!;
+    const previousChapter = options.scenes[index - 1]?.appearanceChapter;
+    const goesBack = scene.appearanceChapter !== undefined && previousChapter !== undefined && scene.appearanceChapter < previousChapter;
+    if (scene.visualChanges?.transition === "flashback" || goesBack) {
+      current.characters = []; current.objects = []; delete current.environment; delete current.spatial;
+      factSource.clear();
+      decisions.push({ kind: "dropped", summary: `Historical scene ${scene.id}: later visual state is not carried backward`, provenance: "current_narration" });
+    } else if (scene.visualChanges?.transition === "time_jump") {
+      for (const character of current.characters) {
+        delete character.activeAbilities; delete character.appearanceDelta; delete character.transformation; delete character.visibleEmotionalState;
+      }
+      delete current.environment; delete current.spatial;
+      decisions.push({ kind: "dropped", summary: `Time jump at ${scene.id}: transient effects must be established again`, provenance: "current_narration" });
+    }
     const startState = cloneState(current);
     const factProvenance: Record<string, VisualContinuityFactProvenance> = {};
     for (const character of startState.characters) factProvenance[`characters.${character.name}`] = factSource.get(`characters.${character.name}`) ?? "previous_scene";
@@ -241,7 +254,10 @@ export function renderContinuityForPlanner(state: VisualContinuityState, maxChar
   for (const character of state.characters) {
     const parts = [
       character.wardrobe && `wardrobe: ${character.wardrobe}`,
-      character.equipment && `equipment: ${character.equipment}`,
+      character.activeAbilities !== undefined && `active abilities: ${character.activeAbilities.join(", ") || "none (inactive baseline)"}`,
+      character.visibleEquipment !== undefined && `visible equipment: ${character.visibleEquipment.join(", ") || "none"}`,
+      character.concealedItems?.length && `concealed/stored (do not display): ${character.concealedItems.join(", ")}`,
+      character.equipment && `equipment possession (visibility must be established): ${character.equipment}`,
       character.carriedItems?.length && `carrying: ${character.carriedItems.join(", ")}`,
       character.injuries && `injuries: ${character.injuries}`,
       character.condition && `condition: ${character.condition}`,
@@ -264,13 +280,17 @@ export function renderContinuityForPlanner(state: VisualContinuityState, maxChar
 }
 
 /** Bounded per-scene continuity block for artwork prompts. */
-export function renderSceneContinuity(resolved: ResolvedSceneContinuity, maxCharacters = 1200): string | undefined {
+export function renderSceneContinuity(resolved: ResolvedSceneContinuity, maxCharacters = 2400): string | undefined {
   const lines: string[] = [];
-  const stateText = renderContinuityForPlanner(resolved.startState, maxCharacters);
-  if (stateText !== "No prior visual continuity state.") lines.push(`STATE AT SCENE START:\n${stateText}`);
+  const stateText = renderContinuityForPlanner(resolved.endState, maxCharacters);
+  if (stateText !== "No prior visual continuity state.") lines.push(`RESOLVED CURRENT FRAME STATE (after scene changes and manual overrides):\n${stateText}`);
   if (resolved.changes) {
     const notes: string[] = [];
-    for (const delta of resolved.changes.characters ?? []) notes.push(`${delta.name}: ${delta.op}${delta.set ? ` (${Object.entries(delta.set).map(([key, value]) => `${key}: ${Array.isArray(value) ? value.join(", ") : value}`).join("; ")})` : ""}`);
+    if (resolved.changes.transition) notes.push(`Narrative time: ${resolved.changes.transition}`);
+    for (const delta of resolved.changes.characters ?? []) {
+      if (delta.clear?.length) notes.push(`${delta.name}: explicitly cleared ${delta.clear.join(", ")} — do not restore those features from a reference or earlier scene`);
+      notes.push(`${delta.name}: ${delta.op}${delta.set ? ` (${Object.entries(delta.set).map(([key, value]) => `${key}: ${Array.isArray(value) ? value.join(", ") : value}`).join("; ")})` : ""}`);
+    }
     if (resolved.changes.environment?.set) notes.push(`environment: ${Object.entries(resolved.changes.environment.set).map(([key, value]) => `${key}: ${value}`).join("; ")}`);
     for (const delta of resolved.changes.objects ?? []) notes.push(`object ${delta.name}: ${delta.op}`);
     if (resolved.changes.note) notes.push(resolved.changes.note);

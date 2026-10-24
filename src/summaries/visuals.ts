@@ -197,15 +197,15 @@ export class SummaryVisualService {
     const continuityScenes = await Promise.all(scenes.filter((scene) => !scene.disabled).map(async (scene) => {
       const approvedId = scene.artwork.approvedVersionId;
       const approved = scene.artwork.versions?.find((version) => version.id === approvedId && version.review === "approved");
-      if (!approved) return { id: scene.id, location: scene.location, visualChanges: scene.visualChanges, contentFingerprint: sceneContentFingerprint(scene) };
+      if (!approved) return { id: scene.id, appearanceChapter: scene.overrides?.appearanceChapter, location: scene.location, visualChanges: scene.visualChanges, contentFingerprint: sceneContentFingerprint(scene) };
       const imagePath = paths.sceneVersionImage(scene.id, approved.versionNumber);
       const actual = await validPngFingerprint(imagePath).catch(() => undefined);
-      if (!actual || actual !== approved.imageFingerprint) return { id: scene.id, location: scene.location, visualChanges: scene.visualChanges, contentFingerprint: sceneContentFingerprint(scene),
+      if (!actual || actual !== approved.imageFingerprint) return { id: scene.id, appearanceChapter: scene.overrides?.appearanceChapter, location: scene.location, visualChanges: scene.visualChanges, contentFingerprint: sceneContentFingerprint(scene),
         // Preserve the attempted identity for diagnostic provenance. imageInput
         // will verify it again before sending and will fingerprint text-only if
         // the file is missing, damaged, or unreadable.
         approvedArtwork: { versionId: approved.id, versionNumber: approved.versionNumber, imageFingerprint: approved.imageFingerprint } };
-      return { id: scene.id, location: scene.location, visualChanges: scene.visualChanges, contentFingerprint: sceneContentFingerprint(scene),
+      return { id: scene.id, appearanceChapter: scene.overrides?.appearanceChapter, location: scene.location, visualChanges: scene.visualChanges, contentFingerprint: sceneContentFingerprint(scene),
         approvedArtwork: { versionId: approved.id, versionNumber: approved.versionNumber, imageFingerprint: actual } };
     }));
     const manualOverrides = await this.loadSceneContinuityOverlay(slug, id);

@@ -100,10 +100,10 @@ describe("Milestone 21: Visual Canon Backend Consistency & Asset Safety Hardenin
     expect((await getStoryBible(tempDir, slug)).canonicalEntities.find((item) => item.id === idTarget)?.type).toBe("location");
   });
 
-  it("applies a complete character Visual Profile proposal with all 22 supported fields", async () => {
+  it("applies a complete character Visual Profile proposal with all 23 supported fields", async () => {
     const operations = new StudioOperations(tempDir, loadEnvironment({}));
     const inspection = await operations.inspectVisualProfile(slug, idTarget);
-    expect(inspection.eligibleFields).toHaveLength(22);
+    expect(inspection.eligibleFields).toHaveLength(23);
     const values = Object.fromEntries(inspection.eligibleFields.map((field) => [field, field === "character.apparentAge" ? "28" : field === "character.gender" ? "female" : `Suggested ${field}`]));
 
     const updated = await operations.applyVisualProfileProposal(slug, idTarget, {

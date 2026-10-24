@@ -1,3 +1,4 @@
+import { isConditionalVisualObservation } from "../visual-canon/appearance-policy.js";
 import type { CanonicalEntity, ExtractedVisualObservation } from "../domain/story-bible.js";
 import { fingerprint } from "../utils/hash.js";
 export { resolveEntityVisualEvidence } from "./visual-evidence-resolution.js";
@@ -14,11 +15,12 @@ export function normalizeVisualValue(field: string, value: string): string {
 }
 
 export function mergeEntityVisualEvidence(entity: CanonicalEntity, observation: ExtractedVisualObservation, chapter: number): void {
+  if (isConditionalVisualObservation(observation)) observation = { ...observation, persistence: "temporary" };
   const records = entity.visualEvidence ??= [];
   const normalizedValue = normalizeVisualValue(observation.field, observation.value);
   const provenance = { chapter, excerpt: observation.excerpt, confidence: observation.confidence };
   const latestChange = Math.max(0, ...records.filter((item) => item.field === observation.field && item.persistence === "changed" && item.chapter <= chapter).map((item) => item.chapter));
-  const matching = records.find((item) => item.field === observation.field && item.normalizedValue === normalizedValue && item.persistence === observation.persistence && (observation.persistence === "temporary" ? item.chapter === chapter : item.chapter >= latestChange && item.status !== "historical"));
+  const matching = records.find((item) => item.field === observation.field && item.normalizedValue === normalizedValue && item.condition === observation.condition && item.persistence === observation.persistence && (observation.persistence === "temporary" ? item.chapter === chapter : item.chapter >= latestChange && item.status !== "historical"));
   if (matching) {
     matching.lastObservedChapter = Math.max(matching.lastObservedChapter, chapter);
     matching.confidence = Math.min(1, matching.confidence + (1 - matching.confidence) * observation.confidence * 0.5);
@@ -32,10 +34,11 @@ export function mergeEntityVisualEvidence(entity: CanonicalEntity, observation: 
   }
   const conflict = observation.persistence === "persistent" && records.some((item) => item.field === observation.field && item.chapter >= latestChange && item.status === "conflict");
   records.push({
-    id: `ve_${fingerprint({ entityId: entity.id, field: observation.field, normalizedValue, chapter, persistence: observation.persistence }).slice(0, 24)}`,
+    id: `ve_${fingerprint({ entityId: entity.id, field: observation.field, normalizedValue, chapter, condition: observation.condition, persistence: observation.persistence }).slice(0, 24)}`,
     field: observation.field, value: observation.value, normalizedValue, chapter, lastObservedChapter: chapter,
     confidence: observation.confidence, persistence: observation.persistence,
     status: observation.persistence === "temporary" ? "temporary" : conflict ? "conflict" : "current",
+    ...(observation.condition ? { condition: observation.condition } : {}),
     source: "source_text", provenance: [provenance],
   });
 }

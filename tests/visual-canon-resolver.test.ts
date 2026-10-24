@@ -223,7 +223,7 @@ describe("Visual Canon Prompt Resolver", () => {
 
     expect(resolved.prompt).toContain("Age: nineteen");
     expect(resolved.prompt).toContain("Hair: black, long tied hair");
-    expect(resolved.prompt).toContain("Default weapons (overridable by current scene): signature sword");
+    expect(resolved.prompt).toContain("Owned weapons (not drawn or visible unless current action requires them): signature sword");
     expect(resolved.prompt).toContain("Scene override attire: ceremonial white robe");
     expect(resolved.prompt).toContain("shirtless and bleeding from a chest wound");
     expect(resolved.prompt).toContain("remains bloodied with torn-away clothing");
@@ -447,10 +447,10 @@ describe("Visual Canon Prompt Resolver", () => {
     });
 
     it("serializes figure traits for female characters only when adultContent is enabled", () => {
-      expect(resolve(femaleProfile("larger"), matureStory).prompt).toContain("Figure: very curvaceous with an especially full bust, hips, and big round butt that pokes out from a side angle view. Breast size should be a minimum of a DDD cup or F cup.");
-      expect(resolve(femaleProfile("normal"), matureStory).prompt).toContain("Figure: curvaceous with a full bust, hips, and big round butt that pokes out from a side angle view. Breast size should be a minimum of a DD cup or E cup.");
+      expect(resolve(femaleProfile("larger"), matureStory).prompt).toContain("Figure: exaggerated very curvaceous with an especially full bust, hips, and big round butt that pokes out from a side angle view. Breast size should be a minimum of a DDD cup or F cup.");
+      expect(resolve(femaleProfile("normal"), matureStory).prompt).toContain("Figure: curvaceous with a full bust, hips, and round butt that pokes out from a side angle view. Breast size should be a minimum of a D cup.");
       expect(resolve(femaleProfile("smaller"), matureStory).prompt).not.toContain("Figure:");
-      expect(resolve(femaleProfile(), matureStory).prompt).not.toContain("Figure:");
+      expect(resolve(femaleProfile(), matureStory).prompt).toContain("Figure: curvaceous with a full bust");
       expect(resolve(femaleProfile("larger")).prompt).not.toContain("Figure:");
     });
 

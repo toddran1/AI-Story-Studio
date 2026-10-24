@@ -1,3 +1,5 @@
+import { NARRATIVE_APPEARANCE_POLICY, visualPlanningContext } from "../visual-canon/appearance-policy.js";
+import { loadVisualProfiles } from "../visual-canon/profiles.js";
 import { prepareCreatureForms } from "../visual-canon/creature-forms.js";
 import { writeArtworkOutputManifest } from "../artwork/output-index-revision.js";
 import { readFile } from "node:fs/promises";
@@ -46,14 +48,15 @@ export async function planStoredScenes(options: { root: string; story: Story; ch
   const audioDurationSeconds = chapter.audio.durationSeconds;
   const narration = (await readTextIfExists(paths.narration))!; const audioFileFingerprint = await streamedFileFingerprint(paths.audio);
   const fullBible = await rebuildStoryBibleBeforeChapter(options.root, options.story.slug, options.chapter + 1); const bible = retrieveRelevantContext(fullBible, narration, options.chapter + 1, { recentSummaryCount: options.story.context.recentChapterSummaries }); const config = options.story.pipeline.scenePlanner;
+  const visualProfileContext = visualPlanningContext(await loadVisualProfiles(options.root, options.story.slug), bible, options.chapter);
   const previousContinuity = await resolvePreviousVisualContinuity(options.root, options.story.slug, options.chapter); const continuityOverlay = await loadVisualContinuityOverlay(options.root, options.story.slug, options.chapter);
   const continuityInput = previousContinuity || continuityOverlay.entries.length ? fingerprint({ handoff: previousContinuity?.stateFingerprint ?? "none", overlay: visualContinuityOverlayFingerprint(continuityOverlay) }) : "none";
-  const inputFingerprint = scenePlanningFingerprint(fingerprint(narration), fingerprint(bible), audioFileFingerprint, options.story.scenes, config.provider, config.model, continuityInput);
+  const inputFingerprint = scenePlanningFingerprint(fingerprint(narration), fingerprint({ bible, visualProfileContext }), audioFileFingerprint, options.story.scenes, config.provider, config.model, continuityInput);
   const cachedRaw = await readJsonIfExists<SceneManifest>(paths.scenesManifest); const cached = cachedRaw ? sceneManifestSchema.safeParse(cachedRaw) : undefined;
   if (!options.force && cached?.success && cached.data.planningFingerprint === inputFingerprint && chapter.stages.scenePlanning.status === "complete") { await persistChapterVisualContinuity({ root: options.root, slug: options.story.slug, chapter: options.chapter, manifest: cached.data }); return { manifest: cached.data, reused: true, warnings }; }
   const started = Date.now(); chapter.stages.scenePlanning = { status: "running", provider: config.provider, model: config.model, promptVersion: SCENE_PLANNER_PROMPT_VERSION, fingerprint: inputFingerprint, startedAt: new Date().toISOString() }; await persistChapter(paths.chapterMeta, chapter);
   try {
-    const result = await withRetry(() => planScenes(options.provider, config, { chapter: options.chapter, title: chapter.translatedTitle ?? chapter.originalTitle, narration, durationSeconds: audioDurationSeconds, bible, settings: options.story.scenes, visualContinuity: previousContinuity ? renderContinuityForPlanner(previousContinuity.state) : undefined }), retryConfigSchema.parse({}));
+    const result = await withRetry(() => planScenes(options.provider, config, { chapter: options.chapter, title: chapter.translatedTitle ?? chapter.originalTitle, narration, durationSeconds: audioDurationSeconds, bible, settings: options.story.scenes, visualProfileContext, visualContinuity: previousContinuity ? renderContinuityForPlanner(previousContinuity.state) : undefined }), retryConfigSchema.parse({}));
     const scenes = normalizeSceneTiming(result.value.scenes.map((scene) => ({
       ...scene,
       location: scene.location ?? undefined,
@@ -171,6 +174,7 @@ export async function previewStoredSceneRegeneration(options: { root: string; st
   const current = sceneVisualSnapshot(scene);
   const visualDirectionContext = JSON.stringify({
     storyArtDirection: artDirection,
+    visualProfiles: visualPlanningContext(await loadVisualProfiles(options.root, options.story.slug), context, options.chapter),
     direction: scene.direction, overrides: scene.overrides, creatureGroups: scene.creatureGroups, visualChanges: scene.visualChanges, continuityState,
   });
   let proposed: typeof current;
@@ -179,7 +183,7 @@ export async function previewStoredSceneRegeneration(options: { root: string; st
     const result = await options.provider.generateStructured({ model: config.model,
       schemaName: "chapter_scene_image_prompt_proposal",
       schema: z.object({ visualPrompt: z.string().trim().min(1).max(8000) }).strict(),
-      instructions: "Rewrite only the image prompt for this saved chapter scene. Keep the visual beat, characters, location, importance, narration timing, identities, and saved art direction unchanged. Honor references, wardrobe, negative prompt, and continuity as editorial constraints. Return only visualPrompt.",
+      instructions: NARRATIVE_APPEARANCE_POLICY + "\nRewrite only the image prompt for this saved chapter scene. Keep the visual beat, characters, location, importance, narration timing, identities, and saved art direction unchanged. Honor references, wardrobe, negative prompt, and continuity as editorial constraints. Return only visualPrompt.",
       input: JSON.stringify({ scene: current, visualDirectionContext, sceneNarration: scene.narrationText ?? scene.summary, chapterContext: narration.slice(0, 8000), canonicalEntities: context.canonicalEntities.map((entity) => ({ id: entity.id, name: entity.canonicalName, description: entity.description })) }),
     });
     proposed = { ...current, visualPrompt: result.value.visualPrompt };

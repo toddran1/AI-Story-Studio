@@ -1,3 +1,6 @@
+import { NARRATIVE_APPEARANCE_POLICY, visualPlanningContext } from "../visual-canon/appearance-policy.js";
+import { loadVisualProfiles } from "../visual-canon/profiles.js";
+import { SCENE_PLANNER_PROMPT_VERSION } from "../scenes/prompts.js";
 import { storyPronunciationPolicy } from "../tts/pronunciation-dictionary.js";
 import { prepareCreatureForms } from "../visual-canon/creature-forms.js";
 import { randomUUID } from "node:crypto";
@@ -166,7 +169,8 @@ export class SummaryMediaService {
     const estimate = estimateScenePacing(summary.narration.text, pacing, measuredDuration);
     const identities = input.context.canonicalEntities.map((entity) => ({ entityId: entity.id, canonicalName: entity.canonicalName,
       originalName: entity.originalName, narrationNames: [entity.localizedNaming?.fullName, entity.localizedNaming?.shortName, entity.preferredNarrationName].filter((value): value is string => Boolean(value)) }));
-    const inputFingerprint = fingerprint({ version: "summary-scenes-v2-creature-groups", narration: summary.narration.text, context: input.context,
+    const visualProfileContext = visualPlanningContext(await loadVisualProfiles(this.root, slug), input.context, Math.max(...summary.chapters));
+    const inputFingerprint = fingerprint({ version: SCENE_PLANNER_PROMPT_VERSION, visualProfileContext, narration: summary.narration.text, context: input.context,
       identities, estimate, pacing, config: input.story.pipeline.scenePlanner, settings: input.story.scenes });
     if (!force && summary.scenes?.status === "current" && summary.scenes.inputFingerprint === inputFingerprint && summary.scenePlan) return summary;
     if (!force && summary.scenePlan?.manuallyEdited) throw new Error("Manual scenes require explicit regeneration to replace them");
@@ -178,13 +182,13 @@ export class SummaryMediaService {
       const planned = await planVisualScenes(this.llms.forStage(config), config, { sourceType: "summary", sourceId: id,
         sourceLabel: `SUMMARY: ${summary.title}`, sourceChapters: summary.chapters, canonicalSummary: summary.text,
         narration: summary.narration.text, durationSeconds: estimate.durationSeconds, targetSceneCount: estimate.sceneCount,
-        bible: input.context, settings: input.story.scenes, namingIdentities: identities });
+        bible: input.context, settings: input.story.scenes, visualProfileContext, namingIdentities: identities });
       const now = new Date().toISOString();
       summary.scenePlan = { version: 1, sourceType: "summary", sourceId: id, sourceChapters: summary.chapters,
         durationSeconds: estimate.durationSeconds, timingMethod: "estimated", planningFingerprint: inputFingerprint,
-        planner: { provider: config.provider, model: config.model, promptVersion: "scene-planner-v4-creature-groups" },
+        planner: { provider: config.provider, model: config.model, promptVersion: SCENE_PLANNER_PROMPT_VERSION },
         manualRevision: 0, manuallyEdited: false, createdAt: summary.scenePlan?.createdAt ?? now, updatedAt: now,
-        scenes: bindNarrationSpans(normalizeProductionSceneTiming(planned.value.scenes.map((s) => ({ ...s, location: s.location ?? undefined, creatureGroups: s.creatureGroups ?? undefined, visualChanges: normalizeVisualContinuityChange(s.visualChanges) })), estimate.durationSeconds), summary.narration.text).map((scene) => ({ ...scene,
+        scenes: bindNarrationSpans(normalizeProductionSceneTiming(planned.value.scenes.map((s) => ({ ...s, overrides: s.appearanceChapter ? { appearanceChapter: s.appearanceChapter, wardrobeOverrides: {} } : undefined, location: s.location ?? undefined, creatureGroups: s.creatureGroups ?? undefined, visualChanges: normalizeVisualContinuityChange(s.visualChanges) })), estimate.durationSeconds), summary.narration.text).map((scene) => ({ ...scene,
           visualType: "image", entityIds: resolveVisualEntities(scene.characters, input.context.canonicalEntities).map((entity) => entity.id) })) };
       // Retain image provenance atomically with the new plan. A restart between
       // planning and artwork must never discard protected/approved image metadata.
@@ -220,7 +224,7 @@ export class SummaryMediaService {
       const result = await provider.generateStructured({ model: config.model,
         schemaName: "summary_scene_image_prompt_proposal",
         schema: z.object({ visualPrompt: z.string().trim().min(1).max(8000) }).strict(),
-        instructions: "Rewrite only the image prompt for this saved summary scene. Keep its visual beat, characters, location, importance, narration coverage, timing, and identity unchanged. Treat saved visual direction and manual overrides as editorial constraints, not suggestions. Describe the same moment with clear composition and scene state. Return only visualPrompt.",
+        instructions: NARRATIVE_APPEARANCE_POLICY + "\nRewrite only the image prompt for this saved summary scene. Keep its visual beat, characters, location, importance, narration coverage, timing, and identity unchanged. Treat saved visual direction and manual overrides as editorial constraints, not suggestions. Describe the same moment with clear composition and scene state. Return only visualPrompt.",
         input: JSON.stringify({ scene: current, visualDirectionContext, narration: scene.narrationText ?? scene.summary,
           canonicalSummary: summary.text, canonicalEntities: input.context.canonicalEntities.map((entity) => ({ id: entity.id, name: entity.canonicalName, description: entity.description })) }),
       });

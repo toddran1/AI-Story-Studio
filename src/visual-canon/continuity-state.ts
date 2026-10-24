@@ -22,6 +22,9 @@ export const visualCharacterStateSchema = z.object({
   wardrobe: bounded(300).optional(),
   equipment: bounded(300).optional(),
   carriedItems: z.array(bounded(120)).max(10).optional(),
+  activeAbilities: z.array(bounded(200)).max(10).optional(),
+  visibleEquipment: z.array(bounded(200)).max(10).optional(),
+  concealedItems: z.array(bounded(200)).max(10).optional(),
   injuries: bounded(300).optional(),
   condition: bounded(300).optional(),
   transformation: bounded(300).optional(),
@@ -63,6 +66,7 @@ const environmentStateFields = Object.keys(visualEnvironmentStateSchema.shape);
 
 /** Structured, current-narration-derived transition emitted by the scene planner. */
 export const visualContinuityChangeSchema = z.object({
+  transition: z.enum(["continuous", "time_jump", "flashback"]).optional(),
   characters: z.array(z.object({
     name: bounded(200),
     entityId: bounded(100).optional(),
@@ -88,6 +92,9 @@ const nullishCharacterPatch = z.object({
   wardrobe: bounded(300).nullish(),
   equipment: bounded(300).nullish(),
   carriedItems: z.array(bounded(120)).max(10).nullish(),
+  activeAbilities: z.array(bounded(200)).max(10).nullish(),
+  visibleEquipment: z.array(bounded(200)).max(10).nullish(),
+  concealedItems: z.array(bounded(200)).max(10).nullish(),
   injuries: bounded(300).nullish(),
   condition: bounded(300).nullish(),
   transformation: bounded(300).nullish(),
@@ -108,6 +115,7 @@ const nullishEnvironmentPatch = z.object({
  * be required-or-nullable, so optionality is expressed with null here and
  * normalized back into the canonical change shape at the boundary. */
 export const visualContinuityChangeInputSchema = z.object({
+  transition: z.enum(["continuous", "time_jump", "flashback"]).nullish(),
   characters: z.array(z.object({
     name: bounded(200),
     entityId: bounded(100).nullish(),
@@ -222,6 +230,7 @@ export type ResolvedVisualContinuity = {
 
 export type ContinuitySceneInput = {
   id: string;
+  appearanceChapter?: number;
   location?: string;
   visualChanges?: VisualContinuityChange;
   approvedArtwork?: { versionId: string; versionNumber: number; imageFingerprint: string };

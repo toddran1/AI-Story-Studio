@@ -1,3 +1,4 @@
+import { NARRATIVE_APPEARANCE_POLICY, normalizeCharacterAppearance } from "./appearance-policy.js";
 import { characterFigureTrait } from "./figure-guidance.js";
 import { FALLBACK_CHARACTER_DESIGN_GUIDANCE, MATURE_FALLBACK_FEMALE_GUIDANCE } from "./character-design.js";
 import { matchingIndividualCreatureEra } from "./creature-look.js";
@@ -79,7 +80,7 @@ export function normalizeSceneOverridesForFingerprint(raw: SceneOverrides | unde
  * are evidence for this one image, never a reason to mutate the profile.
  */
 export const SCENE_STATE_PRIORITY_INSTRUCTION =
-  "SCENE-STATE PRIORITY: Preserve Story Bible identity and approved Visual Profile traits such as face, age, build, hair, eyes, and permanent distinguishing features. Treat profile attire, footwear, accessories, weapons, and equipment as defaults only. Current visual continuity, the current scene, scene direction, and explicit scene overrides take precedence for temporary clothing, injuries, blood, dirt, damage, equipment, pose, expression, and environmental effects. Do not infer a change from an omitted detail.";
+  NARRATIVE_APPEARANCE_POLICY + "\nSCENE-STATE PRIORITY: Preserve Story Bible identity and approved Visual Profile traits such as face, age, build, hair, eyes, and permanent distinguishing features. Treat profile attire, footwear, accessories, weapons, and equipment as defaults only. Current visual continuity, the current scene, scene direction, and explicit scene overrides take precedence for temporary clothing, injuries, blood, dirt, damage, equipment, pose, expression, and environmental effects. Do not infer a change from an omitted detail.";
 
 // export const MATURE_ARTWORK_STYLING =
 //   "MATURE CHARACTER STYLING: Clearly adult female characters have a seductive, alluring look with curvaceous figures, full busts and shapely hips. Keep it tasteful — alluring and elegant, never explicit or nude. Depict blood, injuries, and battle violence when the scene calls for it.";
@@ -217,6 +218,8 @@ export function resolveVisualCanonPrompt(options: {
     const enforceForms = useVisualProfile && entity.visualProfilePolicy?.mode !== "skip" && !options.allowUnprofiledEntityIds?.includes(entityId);
     const savedProfile = enforceForms ? visualProfiles[entityId] : undefined;
     const individualEra = group ? matchingIndividualCreatureEra(savedProfile, entity, group, overrides.appearanceChapter ?? options.chapter, overrides.appearanceEraOverrides?.[entityId] ?? overrides.appearanceEraOverrides?.[entity.canonicalName]) : undefined;
+    const conditionalEvidence = resolveEntityVisualEvidence(entity, overrides.appearanceChapter ?? options.chapter ?? Number.MAX_SAFE_INTEGER).conditional;
+    if (conditionalEvidence.length) entityCanonLines.push(`CONDITIONAL VISUAL RULES [${entity.canonicalName}] — only when triggered in this frame: ${conditionalEvidence.slice(-6).map(item => `${item.field}: ${item.value}${item.condition ? `; trigger: ${item.condition}` : ""}; source chapter ${item.chapter}`).join(" | ")}`);
     const groupLabel = group ? `${group.count ?? ((savedProfile?.creatureIdentity ?? entity.visualIdentityKind) === "individual" ? 1 : "Unspecified number of")} ${group.label} [group ${group.id}; state ${group.state}]` : entity.canonicalName;
     const forms = savedProfile?.creatureForms?.filter(form => form.status === "approved" && form.state === group?.state) ?? [];
     const selectedForm = group && !individualEra ? group.formId ? forms.find(form => form.id === group.formId) : forms.length === 1 ? forms[0] : undefined : undefined;
@@ -259,7 +262,7 @@ export function resolveVisualCanonPrompt(options: {
       const traits: string[] = [];
 
       if (profile.visualType === "character" && profile.character) {
-        const c = profile.character;
+        const c = normalizeCharacterAppearance(profile.character)!;
         const figureTrait = characterFigureTrait(c, story.artwork.adultContent);
         const details = [
           c.apparentAge && `Age: ${c.apparentAge}`,
@@ -267,6 +270,7 @@ export function resolveVisualCanonPrompt(options: {
           c.height && `Height: ${c.height}`,
           c.build && `Build: ${c.build}`,
           figureTrait,
+          c.conditionalAppearance && `CONDITIONAL APPEARANCE RULES (not active by default): ${c.conditionalAppearance}`,
           c.skinTone && `Skin tone: ${c.skinTone}`,
           c.faceShape && `Face shape: ${c.faceShape}`,
           c.hairColor && c.hairstyle ? `Hair: ${c.hairColor}, ${c.hairstyle}` : c.hairColor ? `Hair: ${c.hairColor}` : c.hairstyle ? `Hair: ${c.hairstyle}` : undefined,
@@ -284,8 +288,8 @@ export function resolveVisualCanonPrompt(options: {
         // above. Only consult mixed text if no structured identity is present;
         // do not try to regex-edit prose and risk corrupting identity details.
         if (preserveWardrobeEquipment) {
-          if (profile.visualPrompt) traits.push(profile.visualPrompt);
-          else if (profile.appearance) traits.push(profile.appearance);
+          if (profile.visualPrompt) traits.push(`REFERENCE DESIGN CONTEXT (identity only; clothing, props and effects require current-scene support): ${profile.visualPrompt}`);
+          else if (profile.appearance) traits.push(`REFERENCE DESIGN CONTEXT (identity only): ${profile.appearance}`);
         } else if (!details && (profile.visualPrompt || profile.appearance)) {
           const legacyDescription = profile.visualPrompt || profile.appearance;
           if (!legacyCharacterTextLooksLikePresentation(legacyDescription)) {
@@ -296,16 +300,16 @@ export function resolveVisualCanonPrompt(options: {
         if (wardrobeOverride) traits.push(`Scene override attire: ${wardrobeOverride}`);
         else if (preserveWardrobeEquipment && c.defaultOutfit) traits.push(`Default attire (overridable by current scene): ${c.defaultOutfit}`);
         if (preserveWardrobeEquipment && c.shoes) traits.push(`Default footwear (overridable by current scene): ${c.shoes}`);
-        if (preserveWardrobeEquipment && c.accessories) traits.push(`Default accessories (overridable by current scene): ${c.accessories}`);
-        if (preserveWardrobeEquipment && c.weapons) traits.push(`Default weapons (overridable by current scene): ${c.weapons}`);
-        if (preserveWardrobeEquipment && c.equipment) traits.push(`Default equipment (overridable by current scene): ${c.equipment}`);
+        if (preserveWardrobeEquipment && c.accessories) traits.push(`Available accessories (not visible unless currently worn): ${c.accessories}`);
+        if (preserveWardrobeEquipment && c.weapons) traits.push(`Owned weapons (not drawn or visible unless current action requires them): ${c.weapons}`);
+        if (preserveWardrobeEquipment && c.equipment) traits.push(`Available equipment (not automatically visible): ${c.equipment}`);
       } else if (profile.visualType === "location" && profile.location) {
         if (profile.visualPrompt) traits.push(profile.visualPrompt);
         else if (profile.appearance) traits.push(profile.appearance);
         const l = profile.location;
         if (l.canonicalEnvironmentPrompt) traits.push(l.canonicalEnvironmentPrompt);
         if (l.architecture) traits.push(`Architecture: ${l.architecture}`);
-        if (l.lighting) traits.push(`Lighting: ${l.lighting}`);
+        if (l.lighting) traits.push(`Typical location lighting (current scene time takes precedence): ${l.lighting}`);
         if (l.colorPalette) traits.push(`Palette: ${l.colorPalette}`);
       } else if (profile.visualType === "creature" && profile.creature) {
         if (profile.visualPrompt) traits.push(profile.visualPrompt);
@@ -372,7 +376,7 @@ export function resolveVisualCanonPrompt(options: {
         manual.length ? `MANUAL VISUAL DECISIONS: ${manual.join("; ")}` : "",
         persistent.length ? `PERSISTENT IDENTITY: ${lines(persistent).join("; ")}` : "",
         changing.length ? `CURRENT CHAPTER VISUAL STATE: ${lines(changing).join("; ")}` : "",
-        evidence.temporary.length || visualContinuity ? `SCENE-SPECIFIC STATE: ${evidence.temporary.map((item) => `${item.field}: ${item.value}`).join("; ")}${visualContinuity ? "; follow current visual continuity and scene overrides below" : ""}` : "",
+        evidence.temporary.length || visualContinuity ? `CHAPTER OBSERVATIONS (apply only if this exact scene depicts the observation, never merely because it shares the chapter): ${evidence.temporary.map((item) => `${item.field}: ${item.value}`).join("; ")}${visualContinuity ? "; follow current visual continuity and scene overrides below" : ""}` : "",
         "UNKNOWN/UNSPECIFIED: Do not borrow another character's reference identity for details absent from this entity's evidence.",
       ].filter(Boolean).join("\n");
       const desc = `${namePrefix}${visualDescription ? `: ${visualDescription}` : ""}${fallbackContext ? `\n${fallbackContext}` : ""}`;
@@ -439,6 +443,7 @@ export function resolveVisualCanonPrompt(options: {
 
   // Layer 3: Scene Content
   promptParts.push(`SCENE BEAT: ${scene.visualPrompt}`);
+  if (scene.narrationText?.trim()) promptParts.push(`EXACT NARRATED FRAME CONTEXT (authoritative for clothing, visibility and skill activation): ${scene.narrationText.slice(0, 8000)}`);
   if (scene.summary) {
     promptParts.push(`NARRATIVE CONTEXT: ${scene.summary}`);
   }

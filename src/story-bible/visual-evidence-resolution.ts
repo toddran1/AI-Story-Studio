@@ -1,15 +1,22 @@
+import { isConditionalVisualObservation } from "../visual-canon/appearance-policy.js";
 import type { CanonicalEntity, VisualEvidence } from "../domain/story-bible.js";
 
-export type ResolvedVisualEvidence = { values: Record<string, VisualEvidence>; conflicts: Record<string, VisualEvidence[]>; temporary: VisualEvidence[] };
+export type ResolvedVisualEvidence = { values: Record<string, VisualEvidence>; conflicts: Record<string, VisualEvidence[]>; temporary: VisualEvidence[]; conditional: VisualEvidence[] };
 
 /** Resolve an entity at a historical chapter without mutating its evidence. */
 export function resolveEntityVisualEvidence(entity: CanonicalEntity, chapter: number): ResolvedVisualEvidence {
   const byField = new Map<string, VisualEvidence[]>();
   const temporary: VisualEvidence[] = [];
+  const conditional: VisualEvidence[] = [];
   const decisions = entity.visualEvidenceDecisions ?? [];
   for (const item of entity.visualEvidence ?? []) {
     if (item.chapter > chapter) continue;
     if (decisions.some((decision) => decision.action === "dismiss" && decision.evidenceId === item.id)) continue;
+    if (isConditionalVisualObservation(item)) {
+      conditional.push(item);
+      if (item.chapter === chapter) temporary.push(item);
+      continue;
+    }
     if (item.persistence === "temporary") {
       if (item.chapter === chapter) temporary.push(item);
       continue;
@@ -37,5 +44,5 @@ export function resolveEntityVisualEvidence(entity: CanonicalEntity, chapter: nu
     }
     values[field] = current.sort((left, right) => right.lastObservedChapter - left.lastObservedChapter || right.confidence - left.confidence)[0]!;
   }
-  return { values, conflicts, temporary };
+  return { values, conflicts, temporary, conditional };
 }

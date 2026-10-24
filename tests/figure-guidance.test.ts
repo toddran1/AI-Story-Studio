@@ -15,3 +15,13 @@ it("excludes minors, disabled mature styling, males and smaller figure settings"
   expect(characterFigureTrait({ ...character, figure: "smaller" }, true)).toBeUndefined();
   expect(characterFigureTrait({ ...character, apparentAge: undefined }, true)).toContain("Figure:");
 });
+
+it("applies the displayed normal default to saved female profiles without a figure selection", () => {
+  const character = { gender: "female", apparentAge: "20", build: "Petite, compact build." };
+  expect(characterFigureTrait(character, true)).toBe(characterFigureTrait({ ...character, figure: "normal" }, true));
+  expect(referenceFigureRequirement(character, true)).toContain("REQUIRED EDITORIAL FIGURE — normal:");
+  expect(referenceFigureRequirement(character, true)).toContain("DD cup or E cup");
+  expect(referenceFigureRequirement({ ...character, figure: "smaller" }, true)).toBeUndefined();
+  expect(referenceFigureRequirement({ ...character, apparentAge: "16" }, true)).toBeUndefined();
+  expect(referenceFigureRequirement(character, false)).toBeUndefined();
+});

@@ -239,6 +239,7 @@ export const plannedSceneSchema = z.object({
   visualPrompt: z.string().trim().min(1).max(8000), importance: sceneImportanceSchema.default("standard"),
   creatureGroups: z.array(sceneCreatureGroupSchema).max(30).nullish(),
   visualChanges: visualContinuityChangeInputSchema.nullish(),
+  appearanceChapter: z.number().int().positive().nullish(),
 });
 export const plannedScenesSchema = z.object({ scenes: z.array(plannedSceneSchema).min(1).max(100) });
 export const summaryPlannedScenesSchema = z.object({ scenes: z.array(plannedSceneSchema.extend({
