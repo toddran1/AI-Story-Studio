@@ -1,7 +1,7 @@
 import { ChapterValidation, FetchedNovelChapter } from "./novel-provider.js";
 
 const BLOCKED = [
-  /正在验证浏览器|正在驗證瀏覽器|安全验证|安全驗證|checking your browser|cloudflare|captcha|challenge=/iu,
+  /正在验证浏览器|正在驗證瀏覽器|安全验证|安全驗證|checking your browser|cloudflare(?!insights\.com)|captcha|challenge=/iu,
   /access denied|request blocked|访问过于频繁|訪問過於頻繁/iu,
 ];
 const LOCKED = [/isChapterLock\s*["']?\s*:\s*true/iu, /会员登录|會員登錄|登录后阅读|登入後閱讀|扫码下载.*全文|VIP章节|付费章节|订阅后阅读/iu];

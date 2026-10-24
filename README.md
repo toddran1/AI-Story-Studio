@@ -667,6 +667,12 @@ npm run story:voice -- preview --story undead-disaster --text "Test narration"
 
 `story:queue` requires `DATABASE_URL` and a migrated durable queue. Destructive project deletion requires `--confirm` with the exact story title; deleted projects move to the recoverable project trash.
 
+### Xiaoshuo.com.tw imports
+
+繁體小說網 (`xiaoshuo.com.tw`, provider ID `xiaoshuo`) supports direct HTTPS book and chapter URLs, chapter-directory inspection, ranged imports, source refresh/update, and full TXT acquisition. In **Import/update chapters → Web range**, paste a book URL such as `https://www.xiaoshuo.com.tw/886340/`, then choose individual chapter pages or full TXT download and preview the requested range before importing. The adapter also works through the existing CLI source commands and alternate-source retrieval. The site's HTML and TXT use legacy GBK encoding; both are decoded before chapter validation, preserving numeric values such as `196/10000`.
+
+The provider is listed as **URL ONLY** in novel search because a working public search endpoint has not been verified. Full TXT is downloaded once per inspection and split by numbered headings; each selected chapter still passes the existing completeness and identity checks. Importing a different edition uses the existing preview and source-conflict safeguards.
+
 ## Verification
 
 ```sh

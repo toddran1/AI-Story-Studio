@@ -235,7 +235,10 @@ async function readLimitedText(response: Response, limit: number): Promise<strin
   const bytes = await readLimitedBytes(response, limit);
   if (!bytes.length) return "";
   const declared = /charset\s*=\s*["']?([^;"'\s]+)/i.exec(response.headers.get("content-type") ?? "")?.[1]?.toLowerCase();
-  const encoding = declared === "gb2312" || declared === "gbk" ? "gb18030" : declared ?? "utf-8";
+  const prefix = new TextDecoder("latin1").decode(bytes.subarray(0, 8192));
+  const metaCharset = /<meta\b[^>]*charset\s*=\s*["']?([^;"'\s/>]+)/i.exec(prefix)?.[1]?.toLowerCase();
+  const charset = declared ?? (bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf ? "utf-8" : metaCharset);
+  const encoding = charset === "gb2312" || charset === "gbk" ? "gb18030" : charset ?? "utf-8";
   try { return new TextDecoder(encoding).decode(bytes); } catch { return new TextDecoder().decode(bytes); }
 }
 async function readLimitedBytes(response: Response, limit: number): Promise<Uint8Array> {

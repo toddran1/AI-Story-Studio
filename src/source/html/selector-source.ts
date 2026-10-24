@@ -129,5 +129,5 @@ function internalPaths(html: string, base: string, pattern: RegExp) { const $ = 
 function absolute(value: string | undefined, base: string) { if (!value) return undefined; try { return new URL(value.startsWith("//") ? `https:${value}` : value, base).href; } catch { return undefined; } }
 function explicitChapterNumber(title?: string) { const match = title ? /第\s*(\d+)\s*(?:章|话|話|节|節)/u.exec(title) : undefined; return match ? Number(match[1]) : undefined; }
 function dedupe(values: string[]) { return values.filter((value, index) => index === 0 || value !== values[index - 1]); }
-function assertPage(html: string, provider: string) { if (/captcha|cloudflare|正在验证|安全验证|checking your browser|challenge=/iu.test(html)) throw new Error(`${provider} requires an authorized browser challenge before access`); }
-function isChallengePage(html: string) { return /captcha|cloudflare|正在验证|安全验证|checking your browser|challenge=/iu.test(html); }
+function assertPage(html: string, provider: string) { if (/captcha|cloudflare(?!insights\.com)|正在验证|安全验证|checking your browser|challenge=/iu.test(html)) throw new Error(`${provider} requires an authorized browser challenge before access`); }
+function isChallengePage(html: string) { return /captcha|cloudflare(?!insights\.com)|正在验证|安全验证|checking your browser|challenge=/iu.test(html); }

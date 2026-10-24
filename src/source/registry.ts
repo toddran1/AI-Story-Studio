@@ -7,6 +7,7 @@ import { TxtSource } from "./txt-source.js";
 import { FanqieSource } from "./fanqie/fanqie-source.js";
 import { Ixdzs8Source } from "./ixdzs8/ixdzs8-source.js";
 import { ShuhaigeSource } from "./shuhaige/shuhaige-source.js";
+import { XiaoshuoSource } from "./xiaoshuo/xiaoshuo-source.js";
 import { SourceType, StorySourceProvider } from "./types.js";
 import { WebHttpClient, WebHttpError } from "./web/http-client.js";
 import { NovelProviderId, NovelSearchResult, NovelSourceProvider } from "./novel-provider.js";
@@ -19,7 +20,7 @@ export class SourceProviderRegistry {
   private readonly breaker: ProviderCircuitBreaker;
   constructor(providers?: StorySourceProvider[], webClient?: WebHttpClient, breaker = new ProviderCircuitBreaker()) {
     this.breaker = breaker;
-    const configured = providers ?? [new TxtSource(), new EpubSource(), new DocxSource(), new FanqieSource(webClient), new Ixdzs8Source(webClient), new ShuhaigeSource(webClient), new WfxsSource(webClient), ...builtinSelectorSources(webClient)];
+    const configured = providers ?? [new TxtSource(), new EpubSource(), new DocxSource(), new FanqieSource(webClient), new Ixdzs8Source(webClient), new ShuhaigeSource(webClient), new XiaoshuoSource(webClient), new WfxsSource(webClient), ...builtinSelectorSources(webClient)];
     for (const provider of configured) {
       if (isNovelProvider(provider)) this.novelProviders.set(provider.id, provider);
       if (provider.type !== "web" || !this.providers.has("web")) this.providers.set(provider.type, provider);

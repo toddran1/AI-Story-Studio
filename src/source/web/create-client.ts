@@ -13,6 +13,7 @@ export function createWebHttpClient(root: string, env: Environment) {
       "fanqienovel.com", "www.fanqienovel.com", "ixdzs8.com", "www.ixdzs8.com", "*.ixdzs8.com", "shuhaige.net", "www.shuhaige.net", "m.shuhaige.net", "*.shuhaige.net",
       "biquge5.com", "www.biquge5.com", "fsshu.com", "www.fsshu.com", "xbiquge345.com", "www.xbiquge345.com",
       "m.wfxs.tw", "tianyabooks.com", "www.tianyabooks.com",
+      "xiaoshuo.com.tw", "www.xiaoshuo.com.tw",
     ], cache: env.WEB_CACHE_DIR ? new FileHttpCache(resolve(root, env.WEB_CACHE_DIR)) : undefined,
     cookieStore: new FileCookieStore(resolve(root, env.WEB_CACHE_DIR ?? "cache/web", "../cookies")),
   });
