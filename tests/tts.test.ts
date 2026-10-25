@@ -4,8 +4,38 @@ import { castQuotedDialogue, prepareFishMultiSpeakerChunks } from "../src/tts/fi
 import { splitForTTS, splitOpeningSentenceForTTSRepair } from "../src/tts/split-text.js";
 import { normalizeSpeechText } from "../src/tts/speech-normalization.js";
 import { TTSRequest } from "../src/tts/types.js";
+import { attachInlineLaughter } from "../src/tts/fish/speech-normalizer.js";
 
 describe("Fish TTS", () => {
+  it.each([
+    '“[laughing]”, [calm] unable to contain his excitement,',
+    '"[laughing]!"... [calm] unable to contain his excitement,',
+    '‘ [laughing]… ’ — [calm] unable to contain his excitement,',
+    '「[laughing]！」；[calm] unable to contain his excitement,',
+    '『[laughing]』： unable to contain his excitement,',
+    '«[laughing]»; [calm] unable to contain his excitement,',
+    '[soft] “[laughing]...”?! [calm] unable to contain his excitement,',
+    '[laughing], [calm] unable to contain his excitement,',
+  ])("cleans laughter punctuation: %s", input => {
+    const expected = "[laughing] unable to contain his excitement,";
+    expect(attachInlineLaughter(input)).toBe(expected);
+    expect(attachInlineLaughter(expected)).toBe(expected);
+  });
+
+  it.each(['“[laughing] Big talk!” [calm] He turned.', '“[laughing]”\n\n[calm] He turned.', '“[laughing]” [angry] Big talk!', '“[laughing]”'])('preserves meaningful dialogue and separate reactions: %s', input => {
+    expect(attachInlineLaughter(input)).toBe(input);
+  });
+
+  it.each([false, true])("attaches inline laughter without a calm reset (exact chunk: %s)", async exactChunk => {
+    const fetcher = vi.fn(async (_url: unknown, _init?: RequestInit) => new Response(new Uint8Array([1, 2, 3]), { status: 200 }));
+    const provider = new FishAudioProvider("test-key", fetcher as typeof fetch);
+    await provider.synthesize({ text: '“[laughing]”, [calm] unable to contain his excitement, Asher laughed out loud.\n\n“[laughing]”\n\nA separate paragraph.', exactChunk, singleAttempt: true, model: "s2.1-pro-free", voiceMode: "same-voice-dialogue", deliveryIntensity: "restrained", speed: 1, format: "mp3", sampleRate: 44100, bitrate: 128, normalize: true, maxCharsPerRequest: 1750 });
+    const body = JSON.parse(String(fetcher.mock.calls[0]?.[1]?.body));
+    expect(body.text).toContain("[laughing] unable to contain his excitement, Asher laughed out loud.");
+    expect(body.text).toContain('“[laughing]”\n');
+    expect(body.text).toContain("A separate paragraph.");
+  });
+
   it("speaks unknown panel values without interpreting question marks", () => {
     const text = "Name: ???】\n\n【Quality: ???】\n\n【Description: ???】";
     for (const spoken of [normalizeSpeechText(text, "en-US").text, normalizeFishSpeechText(text, "s2.1-pro-free")]) {
@@ -235,7 +265,7 @@ describe("Fish TTS", () => {
     await provider.synthesize({ text: "**Important:** *whisper this.* [sad] 2 * 2", model: "s2.1-pro", speed: 1, format: "mp3", sampleRate: 44100, bitrate: 128, normalize: true, maxCharsPerRequest: 500 });
     const body = JSON.parse(String((fetcher.mock.calls[0]?.[1] as RequestInit).body));
     expect(body.text).toBe("Important: whisper this. [sad] 2 * 2");
-    expect(provider.inputNormalizationVersion).toBe("fish-speech-normalization-v41-unknown-fields");
+    expect(provider.inputNormalizationVersion).toBe("fish-speech-normalization-v43-laughter-punctuation");
   });
 
   it("does not turn profanity into the literal word bleep inside Fish", async () => {

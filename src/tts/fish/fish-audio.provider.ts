@@ -6,7 +6,7 @@ import { ConfigurationError, ProviderError } from "../../pipeline/errors.js";
 import { TTSProvider } from "../provider.js";
 import { TTSRequest, safeProgress } from "../types.js";
 import { splitForTTS } from "../split-text.js";
-import { normalizeFishSpeechText } from "./speech-normalizer.js";
+import { normalizeFishSpeechText, attachInlineLaughter } from "./speech-normalizer.js";
 import { castQuotedDialogue, directQuotedDialogue, prepareFishMultiSpeakerChunks } from "./dialogue-casting.js";
 import { isFishS2Model } from "./control-cues.js";
 import { normalizeUnknownFieldValues } from "../speech-normalization.js";
@@ -55,8 +55,8 @@ export class FishAudioProvider implements TTSProvider {
     } = {},
   ) {
     this.inputNormalizationVersion = speechOptions.tskRendering === "direction"
-      ? "fish-speech-normalization-v41-unknown-fields-tsk-direction"
-      : "fish-speech-normalization-v41-unknown-fields";
+      ? "fish-speech-normalization-v43-laughter-punctuation-tsk-direction"
+      : "fish-speech-normalization-v43-laughter-punctuation";
   }
 
   resolveReferenceId(referenceId?: string): string | undefined {
@@ -81,7 +81,7 @@ export class FishAudioProvider implements TTSProvider {
       : (() => {
           const speechText = normalizeFishSpeechText(adaptPronunciationText(request.text, request.pronunciation ?? [], this.pronunciationCapabilities), request.model, this.speechOptions);
           if (!speechText) throw new ProviderError("Fish Audio narration is empty after speech normalization");
-          const meaningfulText = stripEmptyDialogueLines(speechText);
+          const meaningfulText = attachInlineLaughter(stripEmptyDialogueLines(speechText));
           if (!meaningfulText) throw new ProviderError("Fish Audio narration is empty after removing empty dialogue");
           const castText = multiSpeaker ? castQuotedDialogue(meaningfulText) : directedSingleVoice ? directQuotedDialogue(meaningfulText) : meaningfulText;
           let prepared = multiSpeaker
@@ -121,7 +121,7 @@ export class FishAudioProvider implements TTSProvider {
       // Saved exact chunks can contain empty dialogue left after profanity was
       // replaced by a tone. Clean only the wire input so their stored boundaries
       // remain usable for segment regeneration and censor reassembly.
-      const meaningfulText = normalizeUnknownFieldValues(stripEmptyDialogueLines(text));
+      const meaningfulText = attachInlineLaughter(normalizeUnknownFieldValues(stripEmptyDialogueLines(text)));
       if (!meaningfulText) throw new ProviderError("Fish Audio segment contains only empty dialogue");
       const wireText = renderFishPronunciationDictionary(meaningfulText, request.pronunciationDictionary, request.model, request.pronunciationProtectedTerms);
       const currentChunk = index + 1;

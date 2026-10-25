@@ -4,6 +4,16 @@ import { disambiguateFishS2Brackets, isFishS2Model } from "./control-cues.js";
 import { stripFishLeadingHehe, normalizeUnknownFieldValues, normalizeDecimalPercentages, normalizeStructuredSpeechBlock, normalizeSystemMetadataText, speakInteger, stripStandaloneEllipsisLines } from "../speech-normalization.js";
 import { scanVocalizations } from "../vocalizations.js";
 
+/** Keep a quoted laughter reaction attached to its same-line narration. */
+export function attachInlineLaughter(text: string): string {
+  const closing: Record<string, string> = { '"': '"', "“": "”", "'": "'", "‘": "’", "「": "」", "『": "』", "«": "»" };
+  // Only cue-only quotations qualify. Never consume dialogue words or cross
+  // a newline; punctuation belongs to the performed reaction, not spoken text.
+  const quoted = text.replace(/(?:\[soft\][ \t]*)?(["“'‘「『«])[ \t]*[,.!?;:…，。！？；：—–-]*[ \t]*(\[(?:laughing|chuckle)\])[ \t]*[,.!?;:…，。！？；：—–-]*[ \t]*(["”'’」』»])[ \t]*[,.!?;:…，。！？；：—–-]*[ \t]*(?:\[calm\][ \t]*)?(?=\p{L})/gu,
+    (match, open: string, cue: string, close: string) => closing[open] === close ? `${cue} ` : match);
+  return quoted.replace(/(\[(?:laughing|chuckle)\])[ \t]*[,.!?;:…，。！？；：—–-]*[ \t]*(?:\[calm\][ \t]*)?(?=\p{L})/gu, "$1 ");
+}
+
 const TITLE_REPLACEMENTS: ReadonlyArray<readonly [RegExp, string]> = [
   [/\bMr\.(?=\s+\p{L})/gu, "Mister"],
   [/\bMrs\.(?=\s+\p{L})/gu, "Missus"],
