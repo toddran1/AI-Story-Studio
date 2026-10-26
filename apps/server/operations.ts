@@ -1,3 +1,7 @@
+import { MotionAssetService } from "../../src/video/motion-service.js";
+import { FfmpegMotionTools } from "../../src/video/motion-tools.js";
+import { loadMotionAssets } from "../../src/video/motion-assets.js";
+import type { MotionClipProvider } from "../../src/video/motion-assets.js";
 import { rankVisualReferences } from "../../src/visual-canon/reference-selection.js";
 import { imageStoryboardInputSchema, imageScopeSchema, imageAutomationSchema, ImageRunBudget, ImageBudgetExceeded, explainAppearance, storyboardFlags } from "../../src/scenes/image-workbench.js";
 import { artworkRepairSchema } from "../../src/artwork/repair.js";
@@ -219,7 +223,7 @@ const artworkJobSchema = z.object({ from: z.number().int().positive(), to: z.num
 const productionInputSchema = z.object({ from: z.number().int().positive(), to: z.number().int().positive(), profile: z.string().optional(), outputs: z.array(productionOutputSchema).min(1).optional(), artwork: z.boolean().optional(), repairQa: z.boolean().optional(), alignment: z.boolean().optional(), refresh: z.boolean().default(false), dryRun: z.boolean().default(false), force: productionForceSchema.optional(), audiobookFormat: z.enum(["mp3", "m4b"]).optional(), maxProviderBudgetUsd: z.number().positive().max(1_000_000).optional() }).strict().refine((value) => value.to >= value.from, { message: "Range end must be at or after range start" });
 
 type InspectionRecord = { inspection: SourceInspection; temporaryDirectory?: string; createdAt: number; bytes: number };
-export type OperationsDependencies = { pipeline?: ChapterProcessor; preview?: PreviewRunner; registry?: SourceProviderRegistry; webHttp?: WebHttpClient; browserVerification?: BrowserVerificationFactory; llm?: LLMRouter; audio?: AudioMasteringProcessor; audiobook?: AudiobookProcessor; video?: VideoProcessor; videoExport?: VideoExportProcessor; scenePlanner?: LLMProvider; image?: ImageProviderSource; tts?: TTSProvider | TTSProviderRouter; censor?: CensorAudioService; alignment?: AlignmentEngine; speechTranscriber?: SpeechTranscriber; queue?: ProductionQueueService; usage?: PostgresUsageRepository };
+export type OperationsDependencies = { motionClipProvider?: MotionClipProvider; motionTools?: FfmpegMotionTools; pipeline?: ChapterProcessor; preview?: PreviewRunner; registry?: SourceProviderRegistry; webHttp?: WebHttpClient; browserVerification?: BrowserVerificationFactory; llm?: LLMRouter; audio?: AudioMasteringProcessor; audiobook?: AudiobookProcessor; video?: VideoProcessor; videoExport?: VideoExportProcessor; scenePlanner?: LLMProvider; image?: ImageProviderSource; tts?: TTSProvider | TTSProviderRouter; censor?: CensorAudioService; alignment?: AlignmentEngine; speechTranscriber?: SpeechTranscriber; queue?: ProductionQueueService; usage?: PostgresUsageRepository };
 
 async function attemptRollback(
   phase: string,
@@ -271,7 +275,10 @@ export class StudioOperations {
   readonly queue?: ProductionQueueService; readonly usage?: PostgresUsageRepository;
   private readonly webHttp: WebHttpClient; private readonly browserVerification: BrowserVerificationFactory;
   private verificationSession?: BrowserVerificationSession; private verificationUrl?: string;
+  private readonly motionClipProvider?: MotionClipProvider;
+  private readonly motionTools?: FfmpegMotionTools;
   constructor(public readonly root: string, private readonly env: Environment, public readonly jobs = new JobManager(), dependencies: OperationsDependencies = {}) {
+    this.motionClipProvider = dependencies.motionClipProvider; this.motionTools = dependencies.motionTools;
     this.jobs.configureErrorHistory(root);
     this.usage = dependencies.usage; const runtime = createPipelineRuntime(env, this.usage); this.runtime = runtime; this.llm = dependencies.llm ?? runtime.router; this.pipeline = dependencies.pipeline ?? runtime.pipeline; this.censor = dependencies.censor ?? runtime.censor ?? new FfmpegCensorAudioService(); this.preview = dependencies.preview ?? new PreviewRunner(this.llm, runtime.tts, this.censor);
     this.webHttp = dependencies.webHttp ?? createWebHttpClient(root, env);
@@ -2419,6 +2426,51 @@ export class StudioOperations {
       await invalidateChapterStatusDerivedReads(this.root, slug); return { status: "completed", sourceVersionId: input.repair.sourceVersionId };
     }), { ...input, operation: "image-repair" }, "visualWorkflow");
   }
+  private motionAssets() {
+    return new MotionAssetService(this.root, (slug, target) => this.artworkCheckInputs(slug, target), story => this.llm.forStage(story.pipeline.qa), this.motionTools, this.motionClipProvider);
+  }
+  async listSceneMotion(slug: string, raw: unknown) { slugSchema.parse(slug); return this.motionAssets().list(slug, visualSceneSelectionSchema.parse(raw)); }
+  async importSceneMotion(slug: string, raw: unknown, data: Buffer) {
+    slugSchema.parse(slug); const target = visualSceneSelectionSchema.parse(raw);
+    return this.jobs.createDurable(this.visualJobsDirectory(), slug, control => withStoryLock(this.root, slug, "import scene motion", async () => {
+      let stopped = false; control.setPause(() => { stopped = true; }); if (stopped) return { status: "paused" };
+      control.update({ stage: "motion-import", label: target.sceneId });
+      const asset = await this.motionAssets().importClip(slug, target, data); return { status: stopped ? "paused" : "completed", asset };
+    }), { operation: "motion-import", target }, "visualWorkflow");
+  }
+  async createSceneParallax(slug: string, raw: unknown) {
+    slugSchema.parse(slug); const input = z.object({ target: visualSceneSelectionSchema, background: z.string().min(1).max(21_000_000), foreground: z.string().min(1).max(21_000_000), durationSeconds: z.number().min(1).max(12).default(4) }).strict().parse(raw);
+    return this.jobs.createDurable(this.visualJobsDirectory(), slug, control => withStoryLock(this.root, slug, "create scene parallax", async () => {
+      let stopped = false; control.setPause(() => { stopped = true; }); if (stopped) return { status: "paused" };
+      control.update({ stage: "motion-parallax", label: input.target.sceneId });
+      const asset = await this.motionAssets().parallax(slug, input.target, Buffer.from(input.background, "base64"), Buffer.from(input.foreground, "base64"), input.durationSeconds); return { status: stopped ? "paused" : "completed", asset };
+    }), { operation: "motion-parallax", target: input.target }, "visualWorkflow");
+  }
+  async planSceneMotion(slug: string, raw: unknown) {
+    slugSchema.parse(slug); const input = z.object({ target: visualSceneSelectionSchema, generation: z.unknown() }).strict().parse(raw);
+    return this.motionAssets().planGeneration(slug, input.target, input.generation);
+  }
+  async generateSceneMotion(slug: string, raw: unknown) {
+    slugSchema.parse(slug); const input = z.object({ target: visualSceneSelectionSchema, generation: z.unknown(), planFingerprint: z.string().min(1) }).strict().parse(raw);
+    return this.jobs.createDurable(this.visualJobsDirectory(), slug, control => withStoryLock(this.root, slug, "generate scene motion", async () => {
+      let stopped = false; control.setPause(() => { stopped = true; });
+      control.update({ stage: "motion-generation", label: input.target.sceneId });
+      return this.motionAssets().generate(slug, input.target, input.generation, input.planFingerprint, () => stopped);
+    }), { operation: "motion-generation", ...input }, "visualWorkflow");
+  }
+  async checkSceneMotion(slug: string, raw: unknown) {
+    slugSchema.parse(slug); const input = z.object({ target: visualSceneSelectionSchema, id: z.string().min(1), force: z.boolean().default(false) }).strict().parse(raw);
+    return this.jobs.createDurable(this.visualJobsDirectory(), slug, control => withStoryLock(this.root, slug, "check scene motion", () => {
+      let stopped = false; control.setPause(() => { stopped = true; });
+      return this.motionAssets().check(slug, input.target, input.id, () => stopped, value => control.update(value as Record<string, unknown>), input.force);
+    }), { operation: "motion-check", ...input }, "visualWorkflow");
+  }
+  async selectSceneMotion(slug: string, raw: unknown) {
+    slugSchema.parse(slug); const input = z.object({ target: visualSceneSelectionSchema, id: z.string().min(1).optional() }).strict().parse(raw);
+    return withStoryLock(this.root, slug, "select scene motion", async () => { const result = await this.motionAssets().select(slug, input.target, input.id); await invalidateChapterStatusDerivedReads(this.root, slug); return result; });
+  }
+  async sceneMotionFile(slug: string, raw: unknown, id: string) { slugSchema.parse(slug); return this.motionAssets().file(slug, visualSceneSelectionSchema.parse(raw), id); }
+
   async imageDraftReport(slug: string) { slugSchema.parse(slug); return await readJsonIfExists(join(storyPaths(this.root, slug, 1).story, "image-draft-latest.json")) ?? null; }
 
   async imageCorrectionImpact(slug: string, entityId: string) {
@@ -2426,7 +2478,8 @@ export class StudioOperations {
     const profile = (await loadVisualProfiles(this.root, slug))[entityId];
     const references = (profile?.references ?? []).map(ref => ({ id: ref.id, approved: ref.approved, role: ref.role, generatedFromRevision: ref.provenance?.profileRevision, currentRevision: profile?.revision, needsReview: ref.source !== "uploaded" && ref.provenance?.profileRevision !== profile?.revision }));
     const videos = [...new Map(scenes.map(row => [row.chapter ? `chapter:${row.chapter}` : `summary:${row.summaryId}`, { chapter: row.chapter, summaryId: row.summaryId, label: row.source, action: "Re-render after approving replacement artwork" }])).values()];
-    return { references, videos, scenes, steps: ["Review affected identity, outfit and location references; retain or replace deliberately.", "Preview regeneration for selected scenes; protected artwork receives candidates only when included.", "Review continuity checks and approve replacement artwork.", "Re-render affected chapter/summary videos, then rebuild dependent video exports."] };
+    const motion = (await mapLimit(scenes, 8, async scene => { const assets = await loadMotionAssets(this.root, slug, { chapter: scene.chapter, summaryId: scene.summaryId, sceneId: scene.sceneId }); return assets.assets.map(asset => ({ sceneId: scene.sceneId, label: scene.source, id: asset.id, kind: asset.kind, selected: assets.selectedId === asset.id })); })).flat();
+    return { references, videos, scenes, motion, steps: ["Review affected identity, outfit and location references; retain or replace deliberately.", "Preview regeneration for selected scenes; protected artwork receives candidates only when included.", "Review continuity checks and approve replacement artwork.", "Recheck affected motion clips or create new clips from replacement starting artwork; approve deliberately.", "Re-render affected chapter/summary videos, then rebuild dependent video exports."] };
   }
   private async artworkCheckInputs(slug: string, raw: unknown, resolvedPreview?: Awaited<ReturnType<StudioOperations["previewSceneVisuals"]>>) {
     const input = artworkVisualCheckTargetSchema.parse(raw);
@@ -2449,7 +2502,7 @@ export class StudioOperations {
     const expected = JSON.stringify({ expectedDesign: preview.resolvedEntities.map(entity => ({ entityId: entity.entityId, name: entity.name, description: entity.description, visualPrompt: entity.visualPrompt })), resolvedFrame: preview.prompt, scene: { narration: scene.narrationText, summary: scene.summary, prompt: scene.visualPrompt, creatureGroups: scene.creatureGroups, direction: scene.direction, overrides: scene.overrides }, referenceLabels: selected.map((image,index) => ({ image: index+2, entity: image.entityName, referenceId: image.referenceId })) }).slice(0,64_000);
     const refFingerprints = selected.map(image => references.referenceFingerprints[references.images.indexOf(image)]!);
     const targetFingerprint = visualCheckTargetFingerprint(expected, refFingerprints, story.pipeline.qa);
-    return { input, story, checkPath: `${imagePath}.visual-check.json`, imageFingerprint: target.fingerprint, targetFingerprint, expected, images: [target.image, ...selected.map(image => ({ data: image.data, mimeType: image.mimeType as "image/png" | "image/jpeg" | "image/webp" }))] };
+    return { input, story, scene, imagePath, checkPath: `${imagePath}.visual-check.json`, imageFingerprint: target.fingerprint, targetFingerprint, expected, images: [target.image, ...selected.map(image => ({ data: image.data, mimeType: image.mimeType as "image/png" | "image/jpeg" | "image/webp" }))] };
   }
   async getArtworkVisualCheck(slug: string, raw: unknown, resolvedPreview?: Awaited<ReturnType<StudioOperations["previewSceneVisuals"]>>) {
     slugSchema.parse(slug); const context = await this.artworkCheckInputs(slug, raw, resolvedPreview);

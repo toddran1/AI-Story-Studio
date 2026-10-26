@@ -1,7 +1,7 @@
 import { CommandRunner, runCommand } from "../audio/ffmpeg.js";
 import { VideoError } from "../pipeline/errors.js";
 
-export const VIDEO_PROCESSOR_VERSION = "ffmpeg-video-presentation-v2";
+export const VIDEO_PROCESSOR_VERSION = "ffmpeg-video-scene-aware-v3";
 export type VideoProbe = { durationSeconds: number; videoCodec: string; audioCodec: string; width: number; height: number; container: string };
 export class FfmpegVideoTools {
   constructor(readonly ffmpegPath = process.env.FFMPEG_PATH || "ffmpeg", readonly ffprobePath = process.env.FFPROBE_PATH || "ffprobe", private readonly runner: CommandRunner = runCommand) {}

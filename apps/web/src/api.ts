@@ -102,7 +102,7 @@ export type AudioSettings = { loudnessTarget: number; truePeak: number; segmentG
 export type SubtitleSettings = { maxCharactersPerLine: number; maxLines: number; minimumDurationSeconds: number; maximumDurationSeconds: number };
 export type VideoResolution = "720p" | "1080p" | "1440p" | "2160p";
 export type VideoTransitionMode = "cut" | "dissolve" | "fade_black" | "slide";
-export type VideoMotionMode = "still" | "zoom_in" | "zoom_out" | "pan_left" | "pan_right" | "pan_up" | "pan_down" | "auto_subtle";
+export type VideoMotionMode = "still" | "zoom_in" | "zoom_out" | "pan_left" | "pan_right" | "pan_up" | "pan_down" | "auto_subtle" | "scene_aware";
 export type VideoSettings = { width: number; height: number; fps: 24 | 25 | 30 | 60; codec: "libx264"; quality: number; subtitleMode: "none" | "burn" | "soft" | "both"; subtitleStyle: "default" | "large" | "minimal"; backgroundMode: "cover" | "gradient" | "kenBurns"; introDurationSeconds: number; resolution?: VideoResolution; transition: { mode: VideoTransitionMode; durationSeconds: number }; motion: { mode: VideoMotionMode; intensity: "subtle" | "normal" } };
 export type SceneSettings = { targetDurationSeconds: number; minimumDurationSeconds: number; maximumDurationSeconds: number; maximumScenesPerChapter: number };
 export type ArtworkOutputResolution = "native" | "720p" | "1080p" | "1440p" | "2160p";
@@ -500,7 +500,7 @@ export type Scene = {
   overrides?: SceneOverrides;
   visualChanges?: VisualContinuityChange;
   sequence?: import("zod").infer<typeof import("../../../src/scenes/sequence.js").sceneSequenceSchema>;
-  videoTreatment?: { motion?: VideoMotionMode | "story_default"; transitionOut?: { mode?: VideoTransitionMode | "story_default"; durationSeconds?: number } };
+  videoTreatment?: { framing?: { fit: "contain" | "cover"; focusX: number; focusY: number }; motion?: VideoMotionMode | "story_default"; transitionOut?: { mode?: VideoTransitionMode | "story_default"; durationSeconds?: number } };
   continuity?: SceneContinuity;
 };
 

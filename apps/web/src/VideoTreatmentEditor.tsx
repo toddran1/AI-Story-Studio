@@ -1,15 +1,18 @@
+import { MotionAssetPanel } from "./MotionAssetPanel.js";
 import type { Scene } from "../../../src/scenes/types.js";
 import { cleanVideoTreatment } from "./VideoTimelineEditor.js";
 
 type Treatment = NonNullable<Scene["videoTreatment"]>;
-const motionChoices = [["story_default", "Story default"], ["auto_subtle", "Auto subtle"], ["still", "Still"], ["zoom_in", "Zoom in"], ["zoom_out", "Zoom out"], ["pan_left", "Pan left"], ["pan_right", "Pan right"], ["pan_up", "Pan up"], ["pan_down", "Pan down"]] as const;
+const motionChoices = [["story_default", "Story default"], ["auto_subtle", "Auto subtle"], ["scene_aware", "Scene aware · context & safe framing"], ["still", "Still"], ["zoom_in", "Zoom in"], ["zoom_out", "Zoom out"], ["pan_left", "Pan left"], ["pan_right", "Pan right"], ["pan_up", "Pan up"], ["pan_down", "Pan down"]] as const;
 const transitionChoices = [["story_default", "Story default"], ["cut", "Cut"], ["dissolve", "Dissolve"], ["fade_black", "Fade through black"], ["slide", "Slide"]] as const;
 
-export function VideoTreatmentEditor({ scene, hasNext, disabled, onChange }: { scene: Scene; hasNext: boolean; disabled?: boolean; onChange: (value: Treatment | undefined) => void }) {
+export function VideoTreatmentEditor({ scene, hasNext, disabled, onChange, slug, chapter, summaryId, motionDisabled, onMotionChanged }: { onMotionChanged?: () => void; slug?: string; chapter?: number; summaryId?: string; motionDisabled?: boolean; scene: Scene; hasNext: boolean; disabled?: boolean; onChange: (value: Treatment | undefined) => void }) {
   const treatment = scene.videoTreatment ?? {};
   return <details className="video-treatment-editor"><summary>Video treatment</summary><div className="video-treatment-fields">
     <label>Motion<select disabled={disabled} value={treatment.motion ?? "story_default"} onChange={(event) => onChange(cleanVideoTreatment({ ...treatment, motion: event.target.value as Treatment["motion"] }))}>{motionChoices.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
     <label>Transition to next scene<select disabled={disabled || !hasNext} value={hasNext ? treatment.transitionOut?.mode ?? "story_default" : "story_default"} onChange={(event) => onChange(cleanVideoTreatment({ ...treatment, transitionOut: { ...treatment.transitionOut, mode: event.target.value as NonNullable<Treatment["transitionOut"]>["mode"] } }))}>{transitionChoices.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
     <label>Duration override · seconds<input disabled={disabled || !hasNext} type="number" min="0" max="2" step="0.05" placeholder="Story default" value={hasNext ? treatment.transitionOut?.durationSeconds ?? "" : ""} onChange={(event) => onChange(cleanVideoTreatment({ ...treatment, transitionOut: { ...treatment.transitionOut, durationSeconds: event.target.value === "" ? undefined : Math.min(2, Math.max(0, Number(event.target.value))) } }))} /></label>
-  </div>{!hasNext && <small>The final enabled scene has no outgoing transition.</small>}</details>;
+    <label>Framing<select disabled={disabled} value={treatment.framing?.fit ?? "default"} onChange={e => onChange(cleanVideoTreatment({ ...treatment, framing: e.target.value === "default" ? undefined : { fit: e.target.value as "contain" | "cover", focusX: treatment.framing?.focusX ?? .5, focusY: treatment.framing?.focusY ?? .5 } }))}><option value="default">Automatic · scene-aware preserves the full artwork</option><option value="contain">Keep full artwork visible</option><option value="cover">Fill canvas · crop edges</option></select></label>
+    {treatment.framing?.fit === "cover" && (["focusX", "focusY"] as const).map(key => <label key={key}>{key === "focusX" ? "Horizontal" : "Vertical"} focus<input type="range" min={0} max={1} step={.05} disabled={disabled} value={treatment.framing![key]} onChange={e => onChange(cleanVideoTreatment({ ...treatment, framing: { ...treatment.framing!, [key]: Number(e.target.value) } }))}/></label>)}
+  </div>{slug && (chapter || summaryId) && <MotionAssetPanel slug={slug} chapter={chapter} summaryId={summaryId} scene={scene} disabled={disabled || motionDisabled} onChange={onMotionChanged}/>}{!hasNext && <small>The final enabled scene has no outgoing transition.</small>}</details>;
 }

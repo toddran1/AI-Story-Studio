@@ -55,8 +55,8 @@ export class FishAudioProvider implements TTSProvider {
     } = {},
   ) {
     this.inputNormalizationVersion = speechOptions.tskRendering === "direction"
-      ? "fish-speech-normalization-v43-laughter-punctuation-tsk-direction"
-      : "fish-speech-normalization-v43-laughter-punctuation";
+      ? "fish-speech-normalization-v44-prose-boundaries-tsk-direction"
+      : "fish-speech-normalization-v44-prose-boundaries";
   }
 
   resolveReferenceId(referenceId?: string): string | undefined {
@@ -123,7 +123,12 @@ export class FishAudioProvider implements TTSProvider {
       // remain usable for segment regeneration and censor reassembly.
       const meaningfulText = attachInlineLaughter(normalizeUnknownFieldValues(stripEmptyDialogueLines(text)));
       if (!meaningfulText) throw new ProviderError("Fish Audio segment contains only empty dialogue");
-      const wireText = renderFishPronunciationDictionary(meaningfulText, request.pronunciationDictionary, request.model, request.pronunciationProtectedTerms);
+      // Blank lines between prose can provoke an invented vocal reaction in
+      // Fish. Change only the transport text, after segmentation, so saved
+      // segment indices and censor reassembly remain stable. Quoted dialogue
+      // and explicit cue/speaker boundaries are left intact.
+      const flowingProse = meaningfulText.replace(/(?<=[\p{L}\p{N}.!?…。！？,;:])[ \t]*\r?\n(?:[ \t]*\r?\n)+[ \t]*(?=\p{L})/gu, " ");
+      const wireText = renderFishPronunciationDictionary(flowingProse, request.pronunciationDictionary, request.model, request.pronunciationProtectedTerms);
       const currentChunk = index + 1;
       const totalChunks = chunks.length;
       const chunkStem = String(currentChunk).padStart(4, "0");

@@ -7,6 +7,16 @@ import { TTSRequest } from "../src/tts/types.js";
 import { attachInlineLaughter } from "../src/tts/fish/speech-normalizer.js";
 
 describe("Fish TTS", () => {
+  it.each([false, true])("joins prose paragraphs only in Fish transport (exact chunk: %s)", async exactChunk => {
+    const fetcher = vi.fn(async (_url: unknown, _init?: RequestInit) => new Response(new Uint8Array([1, 2, 3]), { status: 200 }));
+    const provider = new FishAudioProvider("test-key", fetcher as typeof fetch);
+    const text = "Their side had the upper hand for now, so they still had a chance to escape!\n\nAs for the Mo family group, no matter how you looked at it, they were doomed!";
+    const result = await provider.synthesize({ text, exactChunk, singleAttempt: true, model: "s2.1-pro-free", speed: 1, format: "mp3", sampleRate: 44100, bitrate: 128, normalize: true, maxCharsPerRequest: 1750 });
+    const body = JSON.parse(String(fetcher.mock.calls[0]?.[1]?.body));
+    expect(body.text).toBe(text.replace("\n\n", " "));
+    expect(result.segmentTexts?.[0]).toBe(text);
+  });
+
   it.each([
     '“[laughing]”, [calm] unable to contain his excitement,',
     '"[laughing]!"... [calm] unable to contain his excitement,',
@@ -200,7 +210,7 @@ describe("Fish TTS", () => {
     const text = "Without any increase in difficulty, perhaps the level of this [Land of Bones] should have been 20, not 30!\n\nAfter all, the [Ancient Battlefield] he opened with a Bronze Key last time was only Level 20. Since both keys were Bronze, their levels should have been the same.\n\nAsher strode forward and gathered all the loot that had dropped.";
     await new FishAudioProvider("test-key", fetcher as typeof fetch).synthesize({ text, model: "s2.1-pro-free", speed: 1, format: "mp3", sampleRate: 44100, bitrate: 192, normalize: true, maxCharsPerRequest: 3000 });
     expect(posted).toHaveLength(1);
-    expect(posted[0]).toContain("20, not thirty.\n\nAfter all,");
+    expect(posted[0]).toContain("20, not thirty. After all,");
     expect(posted[0]).not.toContain("30!");
     expect(normalizeFishSpeechText('“Level 30!”\n\nAfter all, he shouted.', "s2-pro")).toContain('“Level 30!”');
     expect(normalizeFishSpeechText("He won!\n\nAfter all, he trained.", "s2-pro")).toContain("He won!");
@@ -265,7 +275,7 @@ describe("Fish TTS", () => {
     await provider.synthesize({ text: "**Important:** *whisper this.* [sad] 2 * 2", model: "s2.1-pro", speed: 1, format: "mp3", sampleRate: 44100, bitrate: 128, normalize: true, maxCharsPerRequest: 500 });
     const body = JSON.parse(String((fetcher.mock.calls[0]?.[1] as RequestInit).body));
     expect(body.text).toBe("Important: whisper this. [sad] 2 * 2");
-    expect(provider.inputNormalizationVersion).toBe("fish-speech-normalization-v43-laughter-punctuation");
+    expect(provider.inputNormalizationVersion).toBe("fish-speech-normalization-v44-prose-boundaries");
   });
 
   it("does not turn profanity into the literal word bleep inside Fish", async () => {
@@ -408,7 +418,7 @@ describe("Fish TTS", () => {
     const provider = new FishAudioProvider("test-key", fetcher as typeof fetch);
     const result = await provider.synthesize({ text: "[sad] 【Level: Level 50 (EXP/)】 [Level 50] [pause]", model: "s2-pro", speed: 1, format: "mp3", sampleRate: 44100, bitrate: 128, normalize: true, maxCharsPerRequest: 500 });
     expect(posted[0]).toBe("[sad] Level: Level fifty. E X P. Level 50 [pause]");
-    expect(result.segmentTexts).toEqual(posted);
+    expect(result.segmentTexts!.map(text => text.replace(/\n\n/g, " "))).toEqual(posted);
   });
 
   it("posts stable leading dialogue punctuation and performed vocalization cues", async () => {
@@ -527,13 +537,13 @@ describe("Fish TTS", () => {
     await expect(json.synthesize(request)).rejects.toThrow(/unexpected content type/);
   });
 
-  it("exposes the exact posted chunk texts as segmentTexts aligned with segments", async () => {
+  it("preserves prepared segment boundaries while posting flowing prose", async () => {
     const posted: string[] = [];
     const fetcher = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => { posted.push(JSON.parse(String(init?.body)).text); return new Response(new Uint8Array([1, 2, 3]), { status: 200, headers: { "content-type": "audio/mpeg" } }); });
     const provider = new FishAudioProvider("test-key", fetcher as typeof fetch);
     const result = await provider.synthesize({ text: "Sentence one. ".repeat(120), model: "s2-pro", speed: 1, format: "mp3", sampleRate: 44100, bitrate: 128, normalize: true, maxCharsPerRequest: 500 });
     expect(result.segments.length).toBeGreaterThan(1);
-    expect(result.segmentTexts).toEqual(posted);
+    expect(result.segmentTexts!.map(text => text.replace(/\n\n/g, " "))).toEqual(posted);
     expect(result.segmentTexts).toHaveLength(result.segments.length);
   });
 

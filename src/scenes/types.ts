@@ -31,6 +31,7 @@ export const artworkSettingsSchema = z.object({
 export const artworkReviewSchema = z.enum(["unreviewed", "approved", "rejected", "needs-regeneration"]);
 export const sceneImportanceSchema = z.enum(["transition", "standard", "major"]);
 export const sceneVideoTreatmentSchema = z.object({
+  framing: z.object({ fit: z.enum(["contain", "cover"]).default("contain"), focusX: z.number().min(0).max(1).default(.5), focusY: z.number().min(0).max(1).default(.5) }).optional(),
   motion: z.union([videoMotionModeSchema, z.literal("story_default")]).optional(),
   transitionOut: z.object({ mode: z.union([videoTransitionModeSchema, z.literal("story_default")]).optional(), durationSeconds: z.number().min(0).max(2).optional() }).optional(),
 });

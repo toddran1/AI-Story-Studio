@@ -1,6 +1,7 @@
 import type { VideoSettings } from "./config.js";
 
 export const videoPresentationPresets = {
+  continuity: { label: "Scene aware", description: "Contextual camera movement with full-artwork framing.", motion: { mode: "scene_aware", intensity: "subtle" }, transition: { mode: "dissolve", durationSeconds: 0.5 } },
   audiobook_subtle: { label: "Audiobook / Subtle", description: "Restrained image movement with gentle dissolves.", motion: { mode: "auto_subtle", intensity: "subtle" }, transition: { mode: "dissolve", durationSeconds: 0.5 } },
   cinematic: { label: "Cinematic", description: "Measured camera movement and dramatic fades.", motion: { mode: "auto_subtle", intensity: "normal" }, transition: { mode: "fade_black", durationSeconds: 0.6 } },
   manga_dynamic: { label: "Manga / Dynamic", description: "Quicker dissolves and more energetic movement.", motion: { mode: "auto_subtle", intensity: "normal" }, transition: { mode: "dissolve", durationSeconds: 0.35 } },

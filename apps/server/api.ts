@@ -457,6 +457,22 @@ export function createApiHandler(operations: StudioOperations) {
       if (visualCheckMatch && request.method === "POST") return send(response, visualCheckMatch[2] === "start" ? 202 : 200, await (visualCheckMatch[2] === "start" ? operations.startArtworkVisualCheck(visualCheckMatch[1]!, await jsonBody(request)) : operations.getArtworkVisualCheck(visualCheckMatch[1]!, await jsonBody(request))));
       const referencePlanMatch = /^\/api\/stories\/([a-z0-9-]+)\/visual-workflow\/references\/(plan|start)$/.exec(url.pathname);
       if (referencePlanMatch && request.method === "POST") return send(response, referencePlanMatch[2] === "start" ? 202 : 200, await (referencePlanMatch[2] === "start" ? operations.startVisualReferences(referencePlanMatch[1]!, await jsonBody(request)) : operations.planVisualReferences(referencePlanMatch[1]!, await jsonBody(request))));
+      const motionMatch = /^\/api\/stories\/([a-z0-9-]+)\/video-workflow\/motion\/(list|import|parallax|plan|generate|check|select|file)$/.exec(url.pathname);
+      if (motionMatch) {
+        const slug = motionMatch[1]!, action = motionMatch[2]!;
+        if (action === "file" && request.method === "GET") {
+          const target = { sceneId: url.searchParams.get("sceneId"), ...(url.searchParams.has("chapter") ? { chapter: Number(url.searchParams.get("chapter")) } : { summaryId: url.searchParams.get("summaryId") }) };
+          return sendFile(request, response, await operations.sceneMotionFile(slug, target, url.searchParams.get("id") ?? ""), "video/mp4");
+        }
+        if (action === "import" && request.method === "POST") {
+          const header = request.headers["x-motion-target"]; if (typeof header !== "string" || header.length > 1000) throw new HttpError("Motion upload requires X-Motion-Target", 400);
+          return send(response, 202, await operations.importSceneMotion(slug, JSON.parse(decodeURIComponent(header)), await body(request, 100 * 1024 * 1024)));
+        }
+        if (request.method === "POST" && !["import", "file"].includes(action)) {
+          const input = await jsonBody(request, action === "parallax" ? 43 * 1024 * 1024 : undefined);
+          return send(response, ["parallax", "generate", "check"].includes(action) ? 202 : 200, await (action === "list" ? operations.listSceneMotion(slug, input) : action === "parallax" ? operations.createSceneParallax(slug, input) : action === "plan" ? operations.planSceneMotion(slug, input) : action === "generate" ? operations.generateSceneMotion(slug, input) : action === "check" ? operations.checkSceneMotion(slug, input) : operations.selectSceneMotion(slug, input)));
+        }
+      }
       const workflowMatch = /^\/api\/stories\/([a-z0-9-]+)\/visual-workflow$/.exec(url.pathname);
       if (workflowMatch && request.method === "GET") return send(response, 200, await operations.visualWorkflow(workflowMatch[1]!));
       const visualPreviewMatch = /^\/api\/stories\/([a-z0-9-]+)\/visual-workflow\/preview$/.exec(url.pathname);

@@ -290,7 +290,7 @@ describe("voice preview with quality guard", () => {
     await persistChapterTtsQuality({ root, story, chapter: 1, maxRetries: 0, transcriber: "fake", report: { version: 1, status: "unverified", retried: 0, segments: [{ index: 0, expectedText: generated.segmentTexts![0]!, status: "unverified", issues: [], attempts: [], finalAttempt: 1 }] } });
     await regenerateStoredChapterTtsSegment({ root, story, chapter: 1, segment: 0, provider: fish, maxRetries: 0 });
     expect(bodies).toHaveLength(3);
-    expect(bodies.map(body => body.text)).toEqual(Array(3).fill(generated.segmentTexts![0]));
+    expect(bodies.map(body => body.text)).toEqual(Array(3).fill(generated.segmentTexts![0]!.replace(/\n\n(?=\p{L})/gu, " ")));
     expect(bodies.every(body => body.sample_rate === 32000 && body.mp3_bitrate === 64 && body.normalize === false)).toBe(true);
     expect(bodies[0].features).toEqual(["quality-guard"]);
     expect(bodies[2].features).toEqual(["quality-guard"]);

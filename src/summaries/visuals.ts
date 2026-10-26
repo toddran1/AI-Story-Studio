@@ -1,3 +1,5 @@
+import { selectedMotionAsset } from "../video/motion-assets.js";
+import { sceneMotionContext } from "../video/scene-motion.js";
 import { artworkRepairSchema, prepareArtworkRepair } from "../artwork/repair.js";
 import { prepareCreatureForms } from "../visual-canon/creature-forms.js";
 import { invalidateSummaryReads } from "./read-revision.js";
@@ -300,7 +302,7 @@ export class SummaryVisualService {
       }),
     };
   }
-  private videoFingerprint(summary: StorySummary, settings: unknown) { return fingerprint({ version: "summary-video-v2", audio: summary.audio?.outputFingerprint, scenes: summary.scenePlan?.scenes.filter((scene) => !scene.disabled).map((scene) => ({ id: scene.id, start: scene.startSeconds, end: scene.endSeconds, image: scene.artwork.imageFingerprint, review: scene.artwork.review, videoTreatment: scene.videoTreatment })), settings, alignment: (settings as { subtitleMode?: string }).subtitleMode === "none" ? undefined : summary.alignment?.inputFingerprint, renderer: this.renderer.version }); }
+  private videoFingerprint(summary: StorySummary, settings: unknown, motionAssets?: Array<readonly [string, { fingerprint: string; id: string; durationSeconds: number } | undefined]>) { return fingerprint({ selectedMotion: motionAssets?.filter(([,asset]) => asset).map(([id, asset]) => ({ scene: id, fingerprint: asset!.fingerprint, id: asset!.id, durationSeconds: asset!.durationSeconds })), version: "summary-video-v2", audio: summary.audio?.outputFingerprint, scenes: summary.scenePlan?.scenes.filter((scene) => !scene.disabled).map((scene) => ({ id: scene.id, start: scene.startSeconds, end: scene.endSeconds, image: scene.artwork.imageFingerprint, review: scene.artwork.review, videoTreatment: scene.videoTreatment, motionContext: sceneMotionContext(scene) })), settings, alignment: (settings as { subtitleMode?: string }).subtitleMode === "none" ? undefined : summary.alignment?.inputFingerprint, renderer: this.renderer.version }); }
   private async sceneArtworkFreshness(slug: string, summary: StorySummary) {
     const paths = this.paths(slug, summary.id);
     const [continuity, context] = await Promise.all([this.sceneContinuity(slug, summary.id, summary.scenePlan?.scenes ?? []), this.context(slug)]);
@@ -324,8 +326,12 @@ export class SummaryVisualService {
     const { story } = await this.context(slug);
     const settings = { ...resolveVideoSettings(story.video), ...(summary.video?.subtitleMode ? { subtitleMode: summary.video.subtitleMode } : {}), introDurationSeconds: 0 };
     if (summary.video?.status === "current" || summary.video?.status === "stale") {
-      const videoCurrent = summary.audio?.status === "current" && summary.scenes?.status === "current" && intact &&
-        summary.video.inputFingerprint === this.videoFingerprint(summary, settings) && summary.video.outputFingerprint === await fileFingerprint(paths.video);
+      let motionAssets: Array<readonly [string, Awaited<ReturnType<typeof selectedMotionAsset>>]> | undefined;
+      let motionIntact = true;
+      try { motionAssets = await Promise.all((summary.scenePlan?.scenes ?? []).filter(scene => !scene.disabled).map(async scene => [scene.id, await selectedMotionAsset(this.root, slug, { summaryId: summary.id, sceneId: scene.id }, scene)] as const)); }
+      catch { motionIntact = false; }
+      const videoCurrent = motionIntact && summary.audio?.status === "current" && summary.scenes?.status === "current" && intact &&
+        summary.video.inputFingerprint === this.videoFingerprint(summary, settings, motionAssets) && summary.video.outputFingerprint === await fileFingerprint(paths.video);
       summary.video.status = videoCurrent ? "current" : "stale";
     }
     if (persist && (before.artwork !== summary.artwork?.status || before.video !== summary.video?.status)) await this.save(slug, summary);
@@ -937,7 +943,8 @@ export class SummaryVisualService {
       }
     }
     const settings = { ...resolveVideoSettings(story.video), ...(subtitleMode ? { subtitleMode } : {}), introDurationSeconds: 0 };
-    const inputFingerprint = this.videoFingerprint(summary, settings);
+    const motionAssets = new Map(await Promise.all(scenes.map(async scene => [scene.id, await selectedMotionAsset(this.root, slug, { summaryId: id, sceneId: scene.id }, scene)] as const)));
+    const inputFingerprint = this.videoFingerprint(summary, settings, [...motionAssets]);
     if (!force && summary.video?.status === "current" && summary.video.inputFingerprint === inputFingerprint) return summary;
     let subtitles: string | undefined;
     if (settings.subtitleMode !== "none") {
@@ -961,7 +968,7 @@ export class SummaryVisualService {
         const asset = await resolveBestProductionAssetForPaths({ story, version: backing, originalPath, productionPath });
         if (await validPngFingerprint(asset.path) === asset.fingerprint) path = asset.path;
       }
-      return { path, durationSeconds: scene.endSeconds - scene.startSeconds, videoTreatment: scene.videoTreatment };
+      return { path, durationSeconds: scene.endSeconds - scene.startSeconds, videoTreatment: scene.videoTreatment, motionContext: sceneMotionContext(scene), clip: motionAssets.get(scene.id) };
     }));
 
     const staging = join(paths.directory, `video-${randomUUID()}.mp4`);

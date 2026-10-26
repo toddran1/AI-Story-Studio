@@ -1,3 +1,5 @@
+import { motionAssetBinding, motionAssetPaths, newMotionAssetId, saveMotionAssets } from "../src/video/motion-assets.js";
+import { visualCheckSchema, VISUAL_CHECK_CATEGORIES } from "../src/artwork/visual-check.js";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -60,6 +62,20 @@ describe("summary visual production", () => {
   });
   afterEach(async () => { await rm(root, { recursive: true, force: true }); });
   const produce = () => visuals.produce("demo-story", id, { pacing: "custom", sceneCount: 2 });
+  it("renders selected summary motion, keeps its reuse fingerprint current, and detects deselection", async () => {
+    await produce(); await visuals.reviewArtwork("demo-story",id,"scene-001","approved");
+    await visuals.artwork("demo-story",id,{scenes:["scene-002"],force:true});
+    const summary=await visuals.get("demo-story",id), scene=summary.scenePlan!.scenes[0]!, target={summaryId:id,sceneId:scene.id};
+    const binding=await motionAssetBinding(root,"demo-story",target,scene), assetId=newMotionAssetId(), paths=motionAssetPaths(root,"demo-story",target,assetId);
+    await atomicWrite(paths.video,"0000ftypfake-summary-motion");
+    const samples=["sample-0","sample-1","sample-2"];
+    const checks=samples.map(imageFingerprint=>visualCheckSchema.parse({summary:"Matches",...Object.fromEntries(VISUAL_CHECK_CATEGORIES.map(category=>[category,{status:"match",observation:"Matches"}])),checkedAt:new Date().toISOString(),imageFingerprint,targetFingerprint:"checked-frame",promptVersion:"fake",provider:"openai",model:"fake"}));
+    const asset={id:assetId,kind:"clip" as const,origin:"import" as const,createdAt:new Date().toISOString(),binding,checkedBinding:binding,sourceFingerprint:scene.artwork.imageFingerprint!,sampleFingerprints:samples,outputFingerprint:(await fileFingerprint(paths.video))!,durationSeconds:4,width:1920,height:1080,review:"approved" as const,checks};
+    await saveMotionAssets(root,"demo-story",target,{version:1,selectedId:assetId,assets:[asset]});
+    render.mockClear();await visuals.video("demo-story",id,{force:true});expect(render.mock.calls[0]?.[0].sceneArtwork[0].clip?.path).toContain(assetId);
+    expect((await visuals.get("demo-story",id)).video?.status).toBe("current");await visuals.video("demo-story",id);expect(render).toHaveBeenCalledTimes(1);
+    await saveMotionAssets(root,"demo-story",target,{version:1,assets:[asset]});expect((await visuals.get("demo-story",id)).video?.status).toBe("stale");await visuals.video("demo-story",id);expect(render).toHaveBeenCalledTimes(2);expect(render.mock.calls[1]?.[0].sceneArtwork[0].clip).toBeUndefined();
+  });
   it("loads a saved recap with a full artwork provider prompt over 12000 characters", async () => {
     await produce();
     await visuals.artwork("demo-story", id, { scenes: ["scene-001"] });
