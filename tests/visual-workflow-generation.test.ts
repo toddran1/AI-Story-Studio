@@ -1,3 +1,6 @@
+import { generateStoredArtwork, backingArtworkVersion } from "../src/artwork/generator.js";
+import { fingerprint } from "../src/utils/hash.js";
+import { VISUAL_CHECK_CATEGORIES } from "../src/artwork/visual-check.js";
 import { describe, expect, it, vi } from "vitest";
 import { mkdtemp, rm, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -13,7 +16,7 @@ import { chapterSchema } from "../src/domain/chapter.js";
 import { visualProfileSchema } from "../src/domain/visual-profile.js";
 import { sceneManifestSchema, sceneSchema } from "../src/scenes/types.js";
 import { atomicWrite, atomicWriteJson } from "../src/storage/atomic-write.js";
-import { storyPaths, sceneVersionImagePath } from "../src/storage/paths.js";
+import { storyPaths, sceneImagePath, sceneVersionImagePath } from "../src/storage/paths.js";
 import { addVisualReferenceImage, loadVisualProfiles, saveVisualProfiles, generateStyleSheet } from "../src/visual-canon/profiles.js";
 import { planReferenceBatch, runReferenceBatch } from "../src/visual-canon/reference-batch.js";
 import { visualCheckResponseSchema } from "../src/artwork/visual-check.js";
@@ -153,4 +156,145 @@ describe("visual workflow generation", () => {
       release(); await vi.waitFor(() => expect(jobs.get(job.id)?.status).toBe("completed")); await jobs.flushDurable();
     } finally { release?.(); await rm(root, { recursive: true, force: true }); }
   });
+  it("builds a source-backed storyboard without calling image or QA providers", async () => {
+    const f = await fixture(); try {
+      f.profile.creatureForms![0]!.status = "approved"; await saveVisualProfiles(f.root, f.story.slug, { [id]: f.profile });
+      f.manifest.scenes[0]!.narrationText = "The goblins rose under moonlight.";
+      f.manifest.scenes[0]!.visualChanges = { environment: { set: { timeOfDay: "night" } } };
+      await atomicWriteJson(f.paths.scenesManifest, f.manifest);
+      const images = new Images(); const operations = new StudioOperations(f.root, loadEnvironment({}), undefined, { image: images });
+      const board = await operations.imageStoryboard(f.story.slug, { chapters: [1] });
+      expect(board.rows).toHaveLength(1);
+      expect(board.rows[0]).toMatchObject({ status: "unchecked", protected: true, needsAttention: true });
+      expect(board.rows[0]!.facts).toEqual(expect.arrayContaining([expect.objectContaining({ field: "timeOfDay", value: "night", passage: "The goblins rose under moonlight." })]));
+      expect(board.rows[0]!.check?.sourceFingerprint).toBeTruthy();
+      expect(images.requests).toHaveLength(0);
+    } finally { await rm(f.root, { recursive: true, force: true }); }
+  });
+  it("repairs an exact source frame into a new version while retaining the approved production image", async () => {
+    const f = await fixture(); try {
+      f.profile.creatureForms![0]!.status = "approved"; await saveVisualProfiles(f.root, f.story.slug, { [id]: f.profile });
+      const images = new Images(); const operations = new StudioOperations(f.root, loadEnvironment({}), undefined, { image: images });
+      const target = { chapter: 1, sceneId: f.scene.id };
+      const context = await operations.getArtworkVisualCheck(f.story.slug, target);
+      const input = { target, repair: { sourceVersionId: "v1", instruction: "Remove the sword; preserve the goblin faces and scene composition." }, sourceFingerprint: context.sourceFingerprint };
+      const rejected = await operations.startImageRepair(f.story.slug, { ...input, sourceFingerprint: "changed" });
+      expect((await finish(operations, rejected.id)).status).toBe("failed"); expect(images.requests).toHaveLength(0);
+      const job = await operations.startImageRepair(f.story.slug, input);
+      expect((await finish(operations, job.id)).status).toBe("completed");
+      expect(images.requests[0]?.referenceImages?.[0]?.data).toEqual(PNG);
+      expect(images.requests[0]?.prompt).toContain("TARGETED REPAIR");
+      expect(images.requests[0]?.prompt).toContain("Remove the sword");
+      const manifest = sceneManifestSchema.parse(JSON.parse(await readFile(f.paths.scenesManifest, "utf8")));
+      expect(manifest.scenes[0]?.artwork.approvedVersionId).toBe("v1");
+      expect(manifest.scenes[0]?.artwork.versions).toHaveLength(2);
+      expect(manifest.scenes[0]?.artwork.versions[1]?.provenance?.repair).toMatchObject(input.repair);
+      expect(await readFile(sceneVersionImagePath(f.root, f.story.slug, 1, f.scene.id, 1))).toEqual(PNG);
+    } finally { await rm(f.root, { recursive: true, force: true }); }
+  });
+  it("automatically checks protected artwork, reuses the check, and never regenerates the approved frame", async () => {
+    const f = await fixture(); try {
+      f.profile.creatureForms![0]!.status = "approved"; await saveVisualProfiles(f.root, f.story.slug, { [id]: f.profile });
+      let checks = 0;
+      const llm: LLMProvider = { name: "openai", supportsImageInputs: true, async validateConfiguration() {}, async generateText() { throw new Error("Not used"); }, async generateStructured(request) { checks++; return { value: request.schema.parse({ summary: "Matches the current frame", ...Object.fromEntries(VISUAL_CHECK_CATEGORIES.map(category => [category, { status: "match", observation: "Matches supported visible facts" }])) }) }; } };
+      const images = new Images(); const operations = new StudioOperations(f.root, loadEnvironment({}), undefined, { image: images, llm: new LLMRouter(new Map([["openai", llm]])) });
+      const input = { scope: { chapters: [1] }, budgetUsd: 1, maxRequests: 2, checkAllowanceUsd: .25 };
+      const plan = await operations.planImageAutomation(f.story.slug, input);
+      const job = await operations.startImageAutomation(f.story.slug, { ...input, planFingerprint: plan.fingerprint });
+      const done = await finish(operations, job.id);
+      expect(done.status, JSON.stringify(done.error)).toBe("completed");
+      expect(done.result).toMatchObject({ status: "completed", reservedUsd: .25, requests: 1, outcomes: [{ status: "ready" }] });
+      const next = await operations.planImageAutomation(f.story.slug, input);
+      const repeated = await operations.startImageAutomation(f.story.slug, { ...input, planFingerprint: next.fingerprint });
+      expect((await finish(operations, repeated.id)).result).toMatchObject({ requests: 0 });
+      expect(images.requests).toHaveLength(0); expect(checks).toBe(1);
+    } finally { await rm(f.root, { recursive: true, force: true }); }
+  });
+  it("stops before a paid check when the reserved-cost limit is exhausted", async () => {
+    const f = await fixture(); try {
+      f.profile.creatureForms![0]!.status = "approved"; await saveVisualProfiles(f.root, f.story.slug, { [id]: f.profile });
+      let checks = 0;
+      const llm: LLMProvider = { name: "openai", supportsImageInputs: true, async validateConfiguration() {}, async generateText() { throw new Error("Not used"); }, async generateStructured() { checks++; throw new Error("Must not run"); } };
+      const operations = new StudioOperations(f.root, loadEnvironment({}), undefined, { llm: new LLMRouter(new Map([["openai", llm]])) });
+      const input = { scope: { chapters: [1] }, budgetUsd: .1, checkAllowanceUsd: .25 };
+      const plan = await operations.planImageAutomation(f.story.slug, input);
+      const job = await operations.startImageAutomation(f.story.slug, { ...input, planFingerprint: plan.fingerprint });
+      expect((await finish(operations, job.id)).result).toMatchObject({ status: "budget_reached", requests: 0, reservedUsd: 0 });
+      expect(checks).toBe(0);
+    } finally { await rm(f.root, { recursive: true, force: true }); }
+  });
+
+  it("generates and checks a draft, performs only the bounded repair, and leaves the unresolved mismatch for review", async () => {
+    const f = await fixture(); try {
+      f.profile.creatureForms![0]!.status = "approved"; await saveVisualProfiles(f.root, f.story.slug, { [id]: f.profile });
+      delete f.manifest.scenes[0]!.artwork.approvedVersionId; f.manifest.scenes[0]!.artwork.review = "needs-regeneration"; f.manifest.scenes[0]!.artwork.versions[0]!.review = "unreviewed";
+      await atomicWriteJson(f.paths.scenesManifest,f.manifest);
+      let checks=0;
+      const llm: LLMProvider = { name:"openai",supportsImageInputs:true,async validateConfiguration(){},async generateText(){throw new Error("Not used");},async generateStructured(request){checks++;return {value:request.schema.parse({summary:"Sword should be absent",...Object.fromEntries(VISUAL_CHECK_CATEGORIES.map(category=>[category,{status:category==="equipment"?"mismatch":"match",observation:category==="equipment"?"An extra sword is visible":"Matches"}]))})};} };
+      const images = new Images(); const operations = new StudioOperations(f.root,loadEnvironment({}),undefined,{image:images,llm:new LLMRouter(new Map([["openai",llm]]))});
+      const input={scope:{chapters:[1]},budgetUsd:5,maxRepairs:1}; const plan=await operations.planImageAutomation(f.story.slug,input);
+      const job=await operations.startImageAutomation(f.story.slug,{...input,planFingerprint:plan.fingerprint}); const done=await finish(operations,job.id);
+      expect(done.result,JSON.stringify(done.result)).toMatchObject({status:"completed_with_exceptions",requests:4,outcomes:[{status:"mismatch",repairs:1}]});
+      expect(images.requests).toHaveLength(2); expect(checks).toBe(2);
+      expect(images.requests[1]?.prompt).toContain("TARGETED REPAIR");
+      const manifest=sceneManifestSchema.parse(JSON.parse(await readFile(f.paths.scenesManifest,"utf8")));
+      expect(manifest.scenes[0]?.artwork.approvedVersionId).toBeUndefined(); expect(manifest.scenes[0]?.artwork.versions).toHaveLength(3);
+    }finally{await rm(f.root,{recursive:true,force:true});}
+  });
+
+  it("repairs a corrupt review cache instead of permanently blocking a fresh check", async () => {
+    const f=await fixture();try{
+      f.profile.creatureForms![0]!.status="approved";await saveVisualProfiles(f.root,f.story.slug,{[id]:f.profile});
+      let calls=0;const llm:LLMProvider={name:"openai",supportsImageInputs:true,async validateConfiguration(){},async generateText(){throw new Error("Not used");},async generateStructured(request){calls++;return {value:request.schema.parse({summary:"Matches",...Object.fromEntries(VISUAL_CHECK_CATEGORIES.map(c=>[c,{status:"match",observation:"Matches"}]))})};}};
+      const operations=new StudioOperations(f.root,loadEnvironment({}),undefined,{llm:new LLMRouter(new Map([["openai",llm]]))});
+      await atomicWrite(`${sceneVersionImagePath(f.root,f.story.slug,1,f.scene.id,1)}.visual-check.json`,"{ invalid");
+      const target={chapter:1,sceneId:f.scene.id};expect((await operations.getArtworkVisualCheck(f.story.slug,target)).check).toBeNull();
+      const job=await operations.startArtworkVisualCheck(f.story.slug,{target});expect((await finish(operations,job.id)).status).toBe("completed");expect(calls).toBe(1);
+    }finally{await rm(f.root,{recursive:true,force:true});}
+  });
+  it("honors a pause after generation before issuing the next QA request", async () => {
+    const f=await fixture();try{
+      f.profile.creatureForms![0]!.status="approved";await saveVisualProfiles(f.root,f.story.slug,{[id]:f.profile});
+      delete f.manifest.scenes[0]!.artwork.approvedVersionId;f.manifest.scenes[0]!.artwork.review="needs-regeneration";await atomicWriteJson(f.paths.scenesManifest,f.manifest);
+      let checks=0;let jobId="";const llm:LLMProvider={name:"openai",supportsImageInputs:true,async validateConfiguration(){},async generateText(){throw new Error("Not used");},async generateStructured(){checks++;throw new Error("QA must not run after pause");}};
+      const images=new Images();const operations=new StudioOperations(f.root,loadEnvironment({}),undefined,{image:images,llm:new LLMRouter(new Map([["openai",llm]]))});
+      const generate=images.generate.bind(images);images.generate=async request=>{const result=await generate(request);operations.jobs.pause(jobId);return result;};
+      const input={scope:{chapters:[1]}};const plan=await operations.planImageAutomation(f.story.slug,input);const job=await operations.startImageAutomation(f.story.slug,{...input,planFingerprint:plan.fingerprint});jobId=job.id;
+      const done=await finish(operations,job.id);expect(done.result).toMatchObject({status:"paused",requests:1});expect(checks).toBe(0);expect(images.requests).toHaveLength(1);
+    }finally{await rm(f.root,{recursive:true,force:true});}
+  });
+  it("paginates the storyboard without resolving or reading every frame", async () => {
+    const f=await fixture();try{
+      f.profile.creatureForms![0]!.status="approved";await saveVisualProfiles(f.root,f.story.slug,{[id]:f.profile});
+      f.manifest.scenes=[1,2,3].map(n=>{const scene=structuredClone(f.scene);scene.id=`scene-${String(n).padStart(3,"0")}`;scene.artwork.versions.forEach(v=>{v.sceneId=scene.id;});return scene;});await atomicWriteJson(f.paths.scenesManifest,f.manifest);
+      const operations=new StudioOperations(f.root,loadEnvironment({}));const preview=vi.spyOn(operations,"previewSceneVisuals");
+      const board=await operations.imageStoryboard(f.story.slug,{chapters:[1],offset:1,limit:1});
+      expect(board).toMatchObject({totalRows:3,offset:1,hasMore:true});expect(board.rows.map(r=>r.scene.id)).toEqual(["scene-002"]);expect(preview).toHaveBeenCalledTimes(1);
+    }finally{await rm(f.root,{recursive:true,force:true});}
+  });
+
+  it("retains manually accepted production art without an approved-version ID when creating a repair", async () => {
+    const f=await fixture();try{
+      f.profile.creatureForms![0]!.status="approved";await saveVisualProfiles(f.root,f.story.slug,{[id]:f.profile});
+      const art=f.manifest.scenes[0]!.artwork;delete art.approvedVersionId;art.review="unreviewed";art.manuallyEdited=true;art.imageFingerprint=fingerprint(PNG.toString("base64"));art.versions[0]!.imageFingerprint=art.imageFingerprint;
+      await atomicWriteJson(f.paths.scenesManifest,f.manifest);await atomicWrite(sceneImagePath(f.root,f.story.slug,1,f.scene.id),PNG);
+      const images=new Images();const operations=new StudioOperations(f.root,loadEnvironment({}),undefined,{image:images});const target={chapter:1,sceneId:f.scene.id};const check=await operations.getArtworkVisualCheck(f.story.slug,target);
+      const job=await operations.startImageRepair(f.story.slug,{target,repair:{sourceVersionId:"v1",instruction:"Remove the sword"},sourceFingerprint:check.sourceFingerprint});
+      expect((await finish(operations,job.id)).status).toBe("completed");
+      const saved=sceneManifestSchema.parse(JSON.parse(await readFile(f.paths.scenesManifest,"utf8"))).scenes[0]!;
+      expect(saved.artwork.versions).toHaveLength(2);expect(saved.artwork.manuallyEdited).toBe(true);expect(backingArtworkVersion(saved)?.id).toBe("v1");
+      expect(await readFile(sceneImagePath(f.root,f.story.slug,1,f.scene.id))).toEqual(PNG);
+    }finally{await rm(f.root,{recursive:true,force:true});}
+  });
+  it("backs up a legacy original before generating its first replacement", async () => {
+    const f=await fixture();try{
+      f.profile.creatureForms![0]!.status="approved";await saveVisualProfiles(f.root,f.story.slug,{[id]:f.profile});
+      const art=f.manifest.scenes[0]!.artwork;art.versions=[];delete art.approvedVersionId;art.review="unreviewed";art.imageFingerprint=fingerprint(PNG.toString("base64"));
+      await atomicWriteJson(f.paths.scenesManifest,f.manifest);await atomicWrite(sceneImagePath(f.root,f.story.slug,1,f.scene.id),PNG);
+      const images=new Images();await generateStoredArtwork({root:f.root,story:f.story,chapter:1,provider:images,force:true});
+      expect(await readFile(sceneVersionImagePath(f.root,f.story.slug,1,f.scene.id,1))).toEqual(PNG);
+      expect(await readFile(sceneImagePath(f.root,f.story.slug,1,f.scene.id))).toEqual(PNG2);
+    }finally{await rm(f.root,{recursive:true,force:true});}
+  });
+
 });

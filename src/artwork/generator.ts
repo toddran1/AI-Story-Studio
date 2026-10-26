@@ -1,3 +1,5 @@
+import { prepareArtworkRepair, type ArtworkRepair } from "./repair.js";
+import { rankVisualReferences } from "../visual-canon/reference-selection.js";
 import { writeArtworkOutputManifest } from "./output-index-revision.js";
 import { readFile, stat } from "node:fs/promises";
 import { Chapter, chapterSchema } from "../domain/chapter.js";
@@ -96,6 +98,7 @@ export async function generateStoredArtwork(options: {
   sceneId?: string;
   sceneIds?: string[];
   force?: boolean;
+  repair?: ArtworkRepair;
   dryRun?: boolean;
   /** Explicit, one-request fallback; never persisted by generation itself. */
   allowUnprofiledEntityIds?: string[];
@@ -143,13 +146,14 @@ export async function generateStoredArtwork(options: {
   const continuityByScene = new Map(continuity.resolved.perScene.map((entry) => [entry.sceneId, entry]));
 
   // Migrate any legacy scenes without versions array
+  const legacyMigrations = new Set<string>();
   for (const scene of enabledScenes) {
     if (scene.artwork.status === "complete" && (!scene.artwork.versions || scene.artwork.versions.length === 0)) {
       const v1: ArtworkVersion = {
         id: "v1",
         versionNumber: 1,
         sceneId: scene.id,
-        imagePath: `${scene.id}.png`,
+        imagePath: `${scene.id}-v1.png`,
         imageFingerprint: scene.artwork.imageFingerprint ?? "",
         createdAt: scene.artwork.generatedAt ?? new Date().toISOString(),
         provider: scene.artwork.provider ?? options.story.artwork.provider,
@@ -167,6 +171,7 @@ export async function generateStoredArtwork(options: {
         review: scene.artwork.review ?? "unreviewed",
       };
       scene.artwork.versions = [v1];
+      legacyMigrations.add(scene.id);
       if (scene.artwork.review === "approved") {
         scene.artwork.approvedVersionId = "v1";
       }
@@ -182,6 +187,7 @@ export async function generateStoredArtwork(options: {
   const selected = enabledProductionScenes(requestedScenes);
   if (skippedDisabledSceneIds.length) warnings.push(`Skipped disabled scene${skippedDisabledSceneIds.length === 1 ? "" : "s"}: ${skippedDisabledSceneIds.join(", ")}`);
 
+  if (options.repair && (!options.sceneId || options.sceneIds)) throw new ArtworkError("Targeted repair requires exactly one scene");
   const candidates: Array<{
     scene: Scene;
     prompt: string;
@@ -205,6 +211,7 @@ export async function generateStoredArtwork(options: {
       artDirection: activePreset,
       visualProfiles,
       visualContinuity: continuityText,
+      frameState: sceneContinuity?.endState,
       allowUnprofiledEntityIds: options.allowUnprofiledEntityIds,
       chapter: options.chapter,
     });
@@ -234,7 +241,7 @@ export async function generateStoredArtwork(options: {
       scene.artwork.status !== "complete" ||
       !validFile ||
       scene.artwork.fingerprint !== inputFingerprint ||
-      scene.artwork.review === "needs-regeneration";
+      ["needs-regeneration", "rejected"].includes(scene.artwork.review);
 
     if (needs) {
       candidates.push({ scene, prompt: resolved.prompt, resolved, refs, continuityReference: sceneContinuity?.referenceDecision, loadedReferences, inputFingerprint });
@@ -264,11 +271,24 @@ export async function generateStoredArtwork(options: {
       enabled: enabledScenes.length,
       selected: selected.length,
       imagesToGenerate: candidates.length,
+      candidateFingerprints: candidates.map(item => ({ sceneId: item.scene.id, inputFingerprint: item.inputFingerprint })),
       sceneIds: candidates.map((item) => item.scene.id),
       skippedDisabledSceneIds,
       warnings,
       preflight,
     };
+  }
+
+  // Preserve legacy originals before any candidate can replace the canonical
+  // image. Dry runs above remain read-only.
+  for (const scene of enabledScenes.filter(scene => legacyMigrations.has(scene.id))) {
+    const path = sceneVersionImagePath(options.root,options.story.slug,options.chapter,scene.id,1);
+    const source = sceneImagePath(options.root,options.story.slug,options.chapter,scene.id);
+    const actual = await validPngFingerprint(source);
+    if (actual && actual === scene.artwork.imageFingerprint) {
+      if (!(await exists(path))) await atomicWrite(path,await readFile(source));
+      else if (await validPngFingerprint(path) !== actual) throw new ArtworkError(`Legacy original conflicts with saved version 1 for ${scene.id}; retain both files and review before generating.`);
+    }
   }
 
   // Derivative freshness is per-version: scenes whose ORIGINALS are reused
@@ -297,7 +317,7 @@ export async function generateStoredArtwork(options: {
   }
 
   if (!candidates.length) {
-    const remaining = options.sceneId || options.sceneIds ? await generateStoredArtwork({ ...options, sceneId: undefined, sceneIds: undefined, force: false, dryRun: true, onProgress: undefined }) : undefined;
+    const remaining = options.sceneId || options.sceneIds ? await generateStoredArtwork({ ...options, sceneId: undefined, sceneIds: undefined, force: false, repair: undefined, dryRun: true, onProgress: undefined }) : undefined;
     const allGenerated = enabledScenes.every((scene) => scene.artwork.status === "complete");
     if (options.dryRun) return { dryRun: true as const, chapter: options.chapter, provider: options.story.artwork.provider, model: options.story.artwork.model, planned: manifest.scenes.length, enabled: enabledScenes.length, selected: selected.length, imagesToGenerate: 0, sceneIds: [], skippedDisabledSceneIds, warnings, preflight };
     chapter.stages.artwork = {
@@ -331,7 +351,7 @@ export async function generateStoredArtwork(options: {
 
   for (let index = 0; index < candidates.length; index++) {
     const item = candidates[index]!;
-    const retainedArtwork = item.scene.artwork.status === "complete" && item.scene.artwork.approvedVersionId ? structuredClone(item.scene.artwork) : undefined;
+    const retainedArtwork = item.scene.artwork.status === "complete" && (item.scene.artwork.approvedVersionId || item.scene.artwork.manuallyEdited || item.scene.artwork.review === "approved") ? structuredClone(item.scene.artwork) : undefined;
     item.scene.artwork = retainedArtwork ? { ...item.scene.artwork, error: undefined } : {
       ...item.scene.artwork,
       status: "running",
@@ -353,10 +373,17 @@ export async function generateStoredArtwork(options: {
 
     try {
       const references = item.loadedReferences;
-      const providerPrompt = [item.prompt, referenceAssignmentPrompt(item.resolved, references.images), references.images.length ? REFERENCE_USAGE_INSTRUCTION : "", mixedCastIdentityPrompt(item.resolved, references.images)].filter(Boolean).join("\n\n");
+      let providerPrompt = [item.prompt, referenceAssignmentPrompt(item.resolved, references.images), references.images.length ? REFERENCE_USAGE_INSTRUCTION : "", mixedCastIdentityPrompt(item.resolved, references.images)].filter(Boolean).join("\n\n");
+      let referenceImages = references.images;
+      if (options.repair) {
+        const version = item.scene.artwork.versions.find(v => v.id === options.repair!.sourceVersionId);
+        if (!version) throw new ArtworkError("Repair source artwork version was not found");
+        const repair = await prepareArtworkRepair(options.story, options.provider, sceneVersionImagePath(options.root, options.story.slug, options.chapter, item.scene.id, version.versionNumber), options.repair, referenceImages, item.prompt);
+        providerPrompt = repair.prompt; referenceImages = repair.references;
+      }
       const result = await generateSceneImage(options.provider, options.story, providerPrompt, {
         negativePrompt: item.resolved.negativePrompt || undefined,
-        referenceImages: references.images,
+        referenceImages,
       });
       const imageFingerprint = fingerprint(result.data.toString("base64"));
       const returnedDimensions = result.width && result.height ? { width: result.width, height: result.height } : imageDimensions(result.data);
@@ -405,6 +432,7 @@ export async function generateStoredArtwork(options: {
           ? { original: { ...returnedDimensions, fingerprint: imageFingerprint, provider: options.provider.name, model: options.story.artwork.model } }
           : {}),
         provenance: {
+          ...(options.repair ? { repair: options.repair } : {}),
           referencesUsed: references.mode,
           referenceImageCount: references.images.length,
           availableReferenceCount: references.available,
@@ -426,8 +454,8 @@ export async function generateStoredArtwork(options: {
       item.scene.artwork.versions = [...existingVersions, newVersion];
       item.scene.artwork.status = "complete";
 
-      // If no version is approved yet, keep standard scene image updated for preview
-      if (!item.scene.artwork.approvedVersionId) {
+      // Accepted manual or approved production artwork stays selected.
+      if (!retainedArtwork) {
         const asset = await bestProductionAsset(options.root, options.story, options.chapter, item.scene.id, newVersion);
         const standardImagePath = sceneImagePath(options.root, options.story.slug, options.chapter, item.scene.id);
         await atomicWrite(standardImagePath, await readFile(asset.path));
@@ -482,7 +510,7 @@ export async function generateStoredArtwork(options: {
   // A selected-scene job must not mark the whole chapter current while other
   // scenes still have changed inputs. Reuse the same provider-free candidate
   // calculation used by Estimate Images, after the selected images are saved.
-  const remaining = options.sceneId || options.sceneIds ? await generateStoredArtwork({ ...options, sceneId: undefined, sceneIds: undefined, force: false, dryRun: true, onProgress: undefined }) : undefined;
+  const remaining = options.sceneId || options.sceneIds ? await generateStoredArtwork({ ...options, sceneId: undefined, sceneIds: undefined, force: false, repair: undefined, dryRun: true, onProgress: undefined }) : undefined;
   chapter.stages.artwork = {
     ...chapter.stages.artwork,
     status: allGenerated && (!remaining || remaining.imagesToGenerate === 0) ? "complete" : "pending",
@@ -758,11 +786,11 @@ export type VisualProfileReferencePayload = {
 
 /** Shared, approved-only Visual Profile reference loader. Summary artwork uses
  * the same reference eligibility and byte limits as chapter artwork. */
-export async function loadApprovedVisualProfileReferences(root: string, story: Story, resolved: ResolvedSceneVisualPrompt, options: { imageInputsSupported?: boolean } = {}): Promise<VisualProfileReferencePayload> {
+export async function loadApprovedVisualProfileReferences(root: string, story: Story, resolved: ResolvedSceneVisualPrompt, options: { imageInputsSupported?: boolean; maxImages?: number } = {}): Promise<VisualProfileReferencePayload> {
   const byEntity: Array<Array<{ reference: VisualReferenceImage; entityName: string }>> = [];
   for (const entity of resolved.resolvedEntities) {
     if (!entity.hasApprovedProfile || !entity.useVisualProfile) continue;
-    const refs = (entity.references ?? []).filter((ref) => ref.approved).sort((left, right) => Number(right.role === "primary_reference") - Number(left.role === "primary_reference")).map((reference) => ({ reference, entityName: entity.name }));
+    const refs = rankVisualReferences(entity.references ?? [], resolved.referenceContextByEntity?.[entity.entityId] ?? resolved.referenceContext).filter(row => row.eligible).map(row => row.reference).map((reference) => ({ reference, entityName: entity.name }));
     if (refs.length) byEntity.push(refs);
   }
   // Give each visible entity a chance to contribute its primary reference
@@ -783,7 +811,7 @@ export async function loadApprovedVisualProfileReferences(root: string, story: S
   const referenceFingerprints: string[] = [];
   let totalBytes = 0;
   for (const { reference: ref, entityName } of wanted) {
-    if (images.length >= MAX_REFERENCE_IMAGES) break;
+    if (images.length >= Math.min(MAX_REFERENCE_IMAGES, options.maxImages ?? MAX_REFERENCE_IMAGES)) break;
     // Multiple portraits of one profiled character can dominate an image-edit
     // request and be cloned onto an unprofiled cast member. Keep the first
     // successfully loaded approved reference per owner in mixed scenes.
@@ -814,7 +842,7 @@ export async function loadApprovedVisualProfileReferences(root: string, story: S
  * in the prompt and provenance records the text-only fallback. A missing or
  * unreadable continuity image is skipped — generation never fails on it. */
 async function loadSceneReferenceImages(root: string, story: Story, resolved: ResolvedSceneVisualPrompt, continuityDecision?: VisualContinuityReferenceDecision, chapter?: number): Promise<SceneReferencePayload> {
-  const canonicalReferences = await loadApprovedVisualProfileReferences(root, story, resolved);
+  const canonicalReferences = await loadApprovedVisualProfileReferences(root, story, resolved, { maxImages: continuityDecision?.used && resolved.resolvedEntities.filter(e => e.references?.some(r => r.approved)).length < MAX_REFERENCE_IMAGES ? MAX_REFERENCE_IMAGES - 1 : MAX_REFERENCE_IMAGES });
   const continuityReference: ContinuityReferenceProvenance = continuityDecision
     ? { kind: continuityDecision.kind, used: false, reason: continuityDecision.reason }
     : { kind: "none", used: false };
@@ -835,6 +863,7 @@ async function loadSceneReferenceImages(root: string, story: Story, resolved: Re
       const data = await readFile(path);
       if (!data.length || data.length > MAX_REFERENCE_IMAGE_BYTES || totalBytes + data.length > MAX_REFERENCE_TOTAL_BYTES) throw new Error("continuity reference exceeds reference image budget");
       validatePng(data);
+      if (continuityDecision.imageFingerprint && fingerprint(data.toString("base64")) !== continuityDecision.imageFingerprint) throw new Error("continuity image fingerprint changed");
       images.push({ data, mimeType: "image/png", role: continuityDecision.kind, sourceKind: "continuity" });
       continuityReference.used = true;
     } catch {
@@ -893,8 +922,11 @@ export function backingArtworkVersion(scene: Scene): ArtworkVersion | undefined 
   const versions = scene.artwork.versions ?? [];
   if (!versions.length) return undefined;
   if (scene.artwork.approvedVersionId) {
-    const approved = versions.find((version) => version.id === scene.artwork.approvedVersionId);
-    if (approved) return approved;
+    // A dangling approval must not silently promote a different candidate.
+    return versions.find((version) => version.id === scene.artwork.approvedVersionId);
+  }
+  if (scene.artwork.manuallyEdited || scene.artwork.review === "approved") {
+    return scene.artwork.imageFingerprint ? versions.find(version => version.imageFingerprint === scene.artwork.imageFingerprint || version.upscale?.outputFingerprint === scene.artwork.imageFingerprint) : undefined;
   }
   return versions[versions.length - 1];
 }

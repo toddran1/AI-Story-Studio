@@ -459,4 +459,11 @@ describe("Visual Canon Prompt Resolver", () => {
       expect(resolve(femaleProfile("larger", ""), matureStory).prompt).not.toContain("Figure:");
     });
   });
+  it("selects references from the resolved manual frame rather than reactivating planner deltas", () => {
+    const scene={...baseScene,visualChanges:{characters:[{name:"Li Chen",op:"update" as const,set:{activeAbilities:["Blood vision"],wardrobe:"battle armor",visibleEquipment:["sword"]}}]}};
+    const resolved=resolveVisualCanonPrompt({scene,story,bible,artDirection:artDirection!,visualProfiles:{},frameState:{characters:[{name:"Li Chen",wardrobe:"plain robe",activeAbilities:[],visibleEquipment:[]}],environment:{description:"Kitchen"},objects:[]}});
+    expect(resolved.referenceContextByEntity?.[entityId1]).toMatchObject({wardrobe:"plain robe",activeAbilities:[],visibleEquipment:[],activeState:false,location:"Kitchen"});
+    expect(resolved.referenceContext?.location).toBe("Kitchen");
+  });
+
 });

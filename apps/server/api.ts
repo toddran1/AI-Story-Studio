@@ -445,6 +445,12 @@ export function createApiHandler(operations: StudioOperations) {
       if (scenesChapterMatch && request.method === "GET") return send(response, 200, await getScenesChapter(operations.root, scenesChapterMatch[1]!, chapterParam(scenesChapterMatch[2]!)));
       const scenesDashboardMatch = /^\/api\/stories\/([a-z0-9-]+)\/scenes$/.exec(url.pathname);
       if (scenesDashboardMatch && request.method === "GET") return send(response, 200, await getScenesDashboard(operations.root, scenesDashboardMatch[1]!, optionalInteger(url.searchParams.get("chapter"))));
+      const imageWorkbenchMatch = /^\/api\/stories\/([a-z0-9-]+)\/visual-workflow\/images\/(storyboard|plan|start|repair|report)$/.exec(url.pathname);
+      if (imageWorkbenchMatch) {
+        const slug = imageWorkbenchMatch[1]!; const action = imageWorkbenchMatch[2]!;
+        if (action === "report" && request.method === "GET") return send(response, 200, await operations.imageDraftReport(slug));
+        if (request.method === "POST") { const body = await jsonBody(request); return send(response, ["start", "repair"].includes(action) ? 202 : 200, await (action === "storyboard" ? operations.imageStoryboard(slug, body) : action === "plan" ? operations.planImageAutomation(slug, body) : action === "start" ? operations.startImageAutomation(slug, body) : operations.startImageRepair(slug, body))); }
+      }
       const regenerationPlanMatch = /^\/api\/stories\/([a-z0-9-]+)\/visual-workflow\/regeneration\/(plan|start)$/.exec(url.pathname);
       if (regenerationPlanMatch && request.method === "POST") return send(response, regenerationPlanMatch[2] === "start" ? 202 : 200, await (regenerationPlanMatch[2] === "start" ? operations.startVisualRegeneration(regenerationPlanMatch[1]!, await jsonBody(request)) : operations.planVisualRegeneration(regenerationPlanMatch[1]!, await jsonBody(request))));
       const visualCheckMatch = /^\/api\/stories\/([a-z0-9-]+)\/visual-workflow\/check\/(inspect|start)$/.exec(url.pathname);
@@ -455,6 +461,8 @@ export function createApiHandler(operations: StudioOperations) {
       if (workflowMatch && request.method === "GET") return send(response, 200, await operations.visualWorkflow(workflowMatch[1]!));
       const visualPreviewMatch = /^\/api\/stories\/([a-z0-9-]+)\/visual-workflow\/preview$/.exec(url.pathname);
       if (visualPreviewMatch && request.method === "POST") return send(response, 200, await operations.previewSceneVisuals(visualPreviewMatch[1]!, await jsonBody(request)));
+      const correctionImpactMatch = /^\/api\/stories\/([a-z0-9-]+)\/visual-profiles\/(ent_[a-f0-9]{24})\/correction-impact$/.exec(url.pathname);
+      if (correctionImpactMatch && request.method === "GET") return send(response, 200, await operations.imageCorrectionImpact(correctionImpactMatch[1]!, correctionImpactMatch[2]!));
       const visualImpactMatch = /^\/api\/stories\/([a-z0-9-]+)\/visual-profiles\/(ent_[a-f0-9]{24})\/impact$/.exec(url.pathname);
       if (visualImpactMatch && request.method === "GET") return send(response, 200, await operations.visualImpact(visualImpactMatch[1]!, visualImpactMatch[2]!));
       const visualProfilesMatch = /^\/api\/stories\/([a-z0-9-]+)\/visual-profiles$/.exec(url.pathname);

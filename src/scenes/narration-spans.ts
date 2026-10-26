@@ -50,3 +50,18 @@ export function timeNarrationScenes(scenes: Scene[], duration: number, words?: A
   validateSceneCoverage(timed, duration);
   return { scenes: timed, timingMethod: usable ? "aligned" as const : "estimated" as const };
 }
+
+/** Chapter stills follow spoken beat boundaries when a current alignment is
+ * available. Fall back to bounded word-weighted pacing, never stale timings. */
+export function timeChapterNarrationScenes(scenes: Scene[], duration: number, settings: import("./types.js").SceneSettings, words?: AlignedWord[], preferWordWeights = true) {
+  const lastWord = scenes.at(-1)?.narrationEndWord;
+  const usable = Boolean(lastWord && words?.length === lastWord && words.every((word,index) => word.end > word.start && word.end <= duration && (!index || word.start >= words[index-1]!.end)));
+  if (usable) {
+    const aligned = scenes.map((scene,index) => ({ ...scene, startSeconds: index ? words![scene.narrationStartWord!]!.start : 0, endSeconds: index === scenes.length-1 ? duration : words![scenes[index+1]!.narrationStartWord!]!.start }));
+    try { validateSceneCoverage(aligned,duration,settings); return aligned; } catch { /* The requested minimum/maximum still duration remains authoritative. */ }
+  }
+  if (!preferWordWeights) return scenes;
+  const durations = boundedDurations(scenes.map(s => Math.max(1,(s.narrationEndWord ?? 1)-(s.narrationStartWord ?? 0))),duration,Math.min(duration,settings.minimumDurationSeconds),settings.maximumDurationSeconds);
+  let cursor=0;
+  return scenes.map((scene,index) => { const start=cursor; cursor=index===scenes.length-1?duration:cursor+durations[index]!; return { ...scene,startSeconds:Math.round(start * 1000) / 1000,endSeconds:Math.round(cursor * 1000) / 1000 }; });
+}

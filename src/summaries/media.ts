@@ -1,3 +1,4 @@
+import { groupVisualSequences, normalizeSequence } from "../scenes/sequence.js";
 import { NARRATIVE_APPEARANCE_POLICY, visualPlanningContext } from "../visual-canon/appearance-policy.js";
 import { loadVisualProfiles } from "../visual-canon/profiles.js";
 import { SCENE_PLANNER_PROMPT_VERSION } from "../scenes/prompts.js";
@@ -188,7 +189,7 @@ export class SummaryMediaService {
         durationSeconds: estimate.durationSeconds, timingMethod: "estimated", planningFingerprint: inputFingerprint,
         planner: { provider: config.provider, model: config.model, promptVersion: SCENE_PLANNER_PROMPT_VERSION },
         manualRevision: 0, manuallyEdited: false, createdAt: summary.scenePlan?.createdAt ?? now, updatedAt: now,
-        scenes: bindNarrationSpans(normalizeProductionSceneTiming(planned.value.scenes.map((s) => ({ ...s, overrides: s.appearanceChapter ? { appearanceChapter: s.appearanceChapter, wardrobeOverrides: {} } : undefined, location: s.location ?? undefined, creatureGroups: s.creatureGroups ?? undefined, visualChanges: normalizeVisualContinuityChange(s.visualChanges) })), estimate.durationSeconds), summary.narration.text).map((scene) => ({ ...scene,
+        scenes: groupVisualSequences(bindNarrationSpans(normalizeProductionSceneTiming(planned.value.scenes.map((s) => ({ ...s, sequence: normalizeSequence(s.sequence), narrationStartWord: s.narrationStartWord ?? undefined, narrationEndWord: s.narrationEndWord ?? undefined, overrides: s.appearanceChapter ? { appearanceChapter: s.appearanceChapter, wardrobeOverrides: {} } : undefined, location: s.location ?? undefined, creatureGroups: s.creatureGroups ?? undefined, visualChanges: normalizeVisualContinuityChange(s.visualChanges) })), estimate.durationSeconds), summary.narration.text)).map((scene) => ({ ...scene,
           visualType: "image", entityIds: resolveVisualEntities(scene.characters, input.context.canonicalEntities).map((entity) => entity.id) })) };
       // Retain image provenance atomically with the new plan. A restart between
       // planning and artwork must never discard protected/approved image metadata.

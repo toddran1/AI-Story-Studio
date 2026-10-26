@@ -1,3 +1,4 @@
+import { normalizeSequence } from "./sequence.js";
 import { resolveVisualEntities } from "./identity.js";
 import { resolveVisualEntityType } from "../visual-canon/fields.js";
 import { StageModelConfig, providerHasCapability } from "../domain/provider.js";
@@ -47,6 +48,7 @@ export async function planVisualScenes(provider: LLMProvider, config: StageModel
   const result = await (summary ? withRetry(generate, retryConfigSchema.parse({})) : generate());
   const normalizedNarration = input.narration.replace(/\s+/g, " ").toLocaleLowerCase();
   for (const scene of result.value.scenes) {
+    scene.sequence = normalizeSequence(scene.sequence);
     if (scene.appearanceChapter && summary && !input.sourceChapters?.includes(scene.appearanceChapter)) throw new Error("Summary scene appearanceChapter must belong to its source chapters");
     if (!scene.creatureGroups) continue;
     const ids = new Set<string>();

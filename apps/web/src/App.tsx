@@ -1,3 +1,4 @@
+import { ImageWorkbench } from "./ImageWorkbench.js";
 import { AudioRegeneration } from "./AudioRegeneration.js";
 import { ArtworkVisualCheck } from "./ArtworkVisualCheck.js";
 import { VisualReviewQueue } from "./VisualReviewQueue.js";
@@ -3551,6 +3552,7 @@ export function ScenesPage({ slug, onJob, navigate, initialData }: { slug: strin
             />
           )}
 
+          <ImageWorkbench slug={slug} chapter={data.manifest.chapter} disabled={hasUnsavedSceneChanges} onRefresh={() => { void load(data.manifest!.chapter); }} />
           <SceneFilmstrip scenes={draft} imageFor={(scene) => scene.imageUrl} statusFor={(scene) => getSceneProductionState(scene, chapterArtworkCurrent).label} onSelect={(scene) => document.getElementById(scene.id)?.scrollIntoView({ behavior: "smooth" })} />
 
           <div className="scene-reel-head">

@@ -148,12 +148,15 @@ export function normalizeVisualContinuityChange(raw: unknown): VisualContinuityC
   return parsed.success ? parsed.data : undefined;
 }
 
+export const visualContinuitySourceFactSchema = z.object({ subject: bounded(300), field: bounded(100), chapter: z.number().int().positive(), sceneId: z.string().regex(/^scene-\d{3}$/), passage: bounded(8000), valueFingerprint: bounded(100) });
 export const visualContinuityHandoffSchema = z.object({
   version: z.literal(1),
   chapter: z.number().int().positive(),
   state: visualContinuityStateSchema,
   source: z.object({ chapter: z.number().int().positive(), sceneId: z.string().regex(/^scene-\d{3}$/) }),
   stateFingerprint: z.string().min(1),
+  sourceFacts: z.record(z.string(), visualContinuitySourceFactSchema).optional(),
+  inputFingerprint: z.string().min(1).optional(),
   referenceArtwork: z.object({
     sceneId: z.string().regex(/^scene-\d{3}$/),
     versionId: z.string().min(1),
@@ -213,7 +216,7 @@ export type ResolvedSceneContinuity = {
   endState: VisualContinuityState;
   factProvenance: Record<string, VisualContinuityFactProvenance>;
   referenceDecision?: VisualContinuityReferenceDecision;
-  manualOverride?: { note?: string; usePreviousReference?: "prefer" | "avoid"; revision: number; stale: boolean };
+  manualOverride?: { fields?: string[]; note?: string; usePreviousReference?: "prefer" | "avoid"; revision: number; stale: boolean };
 };
 
 /**
@@ -229,6 +232,7 @@ export type ResolvedVisualContinuity = {
 };
 
 export type ContinuitySceneInput = {
+  sequence?: { id?: string; axis?: string; positions: Array<{ name: string; position: string; facing: string; movement?: string }> };
   id: string;
   appearanceChapter?: number;
   location?: string;

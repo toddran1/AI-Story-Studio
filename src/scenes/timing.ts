@@ -8,9 +8,8 @@ export function normalizeSceneTiming(raw: Array<Pick<Scene, "summary" | "startSe
   const maximumUseful = Math.max(1, Math.floor(durationSeconds / settings.minimumDurationSeconds));
   if (minimumRequired > settings.maximumScenesPerChapter) throw new SceneError(`Chapter duration requires at least ${minimumRequired} scenes, above the configured maximum of ${settings.maximumScenesPerChapter}`);
   if (raw.length < minimumRequired) throw new SceneError(`Scene planner returned ${raw.length} scene(s), but at least ${minimumRequired} are required to stay within the ${settings.maximumDurationSeconds}-second maximum`);
-  const idealCount = Math.max(minimumRequired, Math.min(maximumUseful, Math.round(durationSeconds / settings.targetDurationSeconds)));
-  const count = Math.min(raw.length, settings.maximumScenesPerChapter, idealCount);
-  const selected = raw.slice(0, count); const weights = selected.map((scene) => Math.max(.1, scene.endSeconds - scene.startSeconds));
+  if (raw.length > Math.min(maximumUseful, settings.maximumScenesPerChapter)) throw new SceneError("Scene plan contains too many beats for the configured minimum duration; adjust pacing or combine beats explicitly instead of discarding the ending");
+  const selected = raw; const weights = selected.map((scene) => scene.narrationStartWord !== undefined && scene.narrationEndWord !== undefined ? Math.max(1, scene.narrationEndWord - scene.narrationStartWord) : Math.max(.1, scene.endSeconds - scene.startSeconds));
   const durations = boundedDurations(weights, durationSeconds, settings.minimumDurationSeconds, settings.maximumDurationSeconds); let cursor = 0;
   return selected.map((scene, index) => {
     const endSeconds = index === selected.length - 1 ? durationSeconds : Math.min(durationSeconds, cursor + durations[index]!);

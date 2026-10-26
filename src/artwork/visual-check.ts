@@ -1,3 +1,4 @@
+import { readJsonIfExists } from "../storage/story-files.js";
 import { visualSceneSelectionSchema } from "../visual-canon/regeneration-selection.js";
 import { z } from "zod";
 import { readFile, stat } from "node:fs/promises";
@@ -10,9 +11,26 @@ import { VISUAL_CHECK_INSTRUCTIONS, VISUAL_CHECK_PROMPT_VERSION } from "./visual
 
 export const artworkVisualCheckTargetSchema = visualSceneSelectionSchema.safeExtend({ versionId: z.string().min(1).max(200).optional() });
 const finding = z.object({ status: z.enum(["match", "mismatch", "uncertain", "not_applicable"]), observation: z.string().min(1).max(1200) });
-export const visualCheckResponseSchema = z.object({ summary: z.string().min(1).max(2000), identity: finding, creatureForm: finding, count: finding, signatureFeatures: finding, composition: finding });
+export const VISUAL_CHECK_CATEGORIES = ["identity", "creatureForm", "count", "signatureFeatures", "composition", "wardrobe", "eyesAndAbilities", "equipment", "injuries", "setting", "spatialContinuity"] as const;
+const unknownFinding = () => ({ status: "uncertain" as const, observation: "This category was not checked by the older review. Run a current check." });
+export const visualCheckResponseSchema = z.object({ summary: z.string().min(1).max(2000), identity: finding, creatureForm: finding, count: finding, signatureFeatures: finding, composition: finding,
+  wardrobe: finding.default(unknownFinding), eyesAndAbilities: finding.default(unknownFinding), equipment: finding.default(unknownFinding), injuries: finding.default(unknownFinding), setting: finding.default(unknownFinding), spatialContinuity: finding.default(unknownFinding),
+});
+export function visualCheckFindings(check: VisualCheck) { return VISUAL_CHECK_CATEGORIES.map(category => ({ category, ...check[category] })); }
+export function visualCheckOutcome(check: VisualCheck) {
+  const findings = visualCheckFindings(check);
+  return findings.some(f => f.status === "mismatch") ? "mismatch" as const : findings.some(f => f.status === "uncertain") ? "uncertain" as const : findings.some(f => f.status === "match") ? "ready" as const : "uncertain" as const;
+}
 export const visualCheckSchema = visualCheckResponseSchema.extend({ checkedAt: z.string().datetime(), imageFingerprint: z.string(), targetFingerprint: z.string(), promptVersion: z.string(), provider: z.string(), model: z.string(), requestId: z.string().optional() });
 export type VisualCheck = z.infer<typeof visualCheckSchema>;
+/** A damaged derivative review may be recomputed; genuine filesystem errors
+ * still propagate so an unreadable disk is not mistaken for a cache miss. */
+export async function readCachedVisualCheck(path: string): Promise<VisualCheck | undefined> {
+  let raw: unknown;
+  try { raw = await readJsonIfExists(path); } catch (error) { if (error instanceof SyntaxError) return undefined; throw error; }
+  const parsed = visualCheckSchema.safeParse(raw);
+  return parsed.success ? parsed.data : undefined;
+}
 export const MAX_CHECK_IMAGE_BYTES = 16 * 1024 * 1024;
 export async function readVisualCheckImage(path: string): Promise<{ image: LLMImageInput; fingerprint: string }> {
   const size = (await stat(path)).size;

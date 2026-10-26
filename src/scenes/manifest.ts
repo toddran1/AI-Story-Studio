@@ -1,3 +1,6 @@
+import { alignmentArtifactSchema } from "../alignment/types.js";
+import { groupVisualSequences, normalizeSequence } from "./sequence.js";
+import { bindNarrationSpans, timeChapterNarrationScenes } from "./narration-spans.js";
 import { NARRATIVE_APPEARANCE_POLICY, visualPlanningContext } from "../visual-canon/appearance-policy.js";
 import { loadVisualProfiles } from "../visual-canon/profiles.js";
 import { prepareCreatureForms } from "../visual-canon/creature-forms.js";
@@ -51,19 +54,24 @@ export async function planStoredScenes(options: { root: string; story: Story; ch
   const visualProfileContext = visualPlanningContext(await loadVisualProfiles(options.root, options.story.slug), bible, options.chapter);
   const previousContinuity = await resolvePreviousVisualContinuity(options.root, options.story.slug, options.chapter); const continuityOverlay = await loadVisualContinuityOverlay(options.root, options.story.slug, options.chapter);
   const continuityInput = previousContinuity || continuityOverlay.entries.length ? fingerprint({ handoff: previousContinuity?.stateFingerprint ?? "none", overlay: visualContinuityOverlayFingerprint(continuityOverlay) }) : "none";
-  const inputFingerprint = scenePlanningFingerprint(fingerprint(narration), fingerprint({ bible, visualProfileContext }), audioFileFingerprint, options.story.scenes, config.provider, config.model, continuityInput);
+  const alignment = alignmentArtifactSchema.safeParse(await readJsonIfExists(paths.alignment));
+  const aligned = alignment.success && alignment.data.mode === "aligned" && alignment.data.audioFingerprint === audioFileFingerprint && alignment.data.narrationFingerprint === fingerprint(narration) ? alignment.data : undefined;
+  const spokenTiming = aligned?.words.slice(0, 10000).map((word, index) => `${index}: ${word.start.toFixed(2)}-${word.end.toFixed(2)} ${word.text}`).join("\n");
+  const inputFingerprint = scenePlanningFingerprint(fingerprint(narration), fingerprint({ bible, visualProfileContext, spokenTiming }), audioFileFingerprint, options.story.scenes, config.provider, config.model, continuityInput);
   const cachedRaw = await readJsonIfExists<SceneManifest>(paths.scenesManifest); const cached = cachedRaw ? sceneManifestSchema.safeParse(cachedRaw) : undefined;
   if (!options.force && cached?.success && cached.data.planningFingerprint === inputFingerprint && chapter.stages.scenePlanning.status === "complete") { await persistChapterVisualContinuity({ root: options.root, slug: options.story.slug, chapter: options.chapter, manifest: cached.data }); return { manifest: cached.data, reused: true, warnings }; }
   const started = Date.now(); chapter.stages.scenePlanning = { status: "running", provider: config.provider, model: config.model, promptVersion: SCENE_PLANNER_PROMPT_VERSION, fingerprint: inputFingerprint, startedAt: new Date().toISOString() }; await persistChapter(paths.chapterMeta, chapter);
   try {
-    const result = await withRetry(() => planScenes(options.provider, config, { chapter: options.chapter, title: chapter.translatedTitle ?? chapter.originalTitle, narration, durationSeconds: audioDurationSeconds, bible, settings: options.story.scenes, visualProfileContext, visualContinuity: previousContinuity ? renderContinuityForPlanner(previousContinuity.state) : undefined }), retryConfigSchema.parse({}));
-    const scenes = normalizeSceneTiming(result.value.scenes.map((scene) => ({
+    const result = await withRetry(() => planScenes(options.provider, config, { chapter: options.chapter, title: chapter.translatedTitle ?? chapter.originalTitle, narration, durationSeconds: audioDurationSeconds, bible, settings: options.story.scenes, subtitles: spokenTiming, visualProfileContext, visualContinuity: previousContinuity ? renderContinuityForPlanner(previousContinuity.state) : undefined }), retryConfigSchema.parse({}));
+    const scenes = groupVisualSequences(timeChapterNarrationScenes(bindNarrationSpans(normalizeSceneTiming(result.value.scenes.map((scene) => ({
       ...scene,
+      sequence: normalizeSequence(scene.sequence),
+      narrationStartWord: scene.narrationStartWord ?? undefined, narrationEndWord: scene.narrationEndWord ?? undefined,
       location: scene.location ?? undefined,
       creatureGroups: scene.creatureGroups ?? undefined,
       visualChanges: normalizeVisualContinuityChange(scene.visualChanges),
       entityIds: resolveVisualEntities(scene.characters, fullBible.canonicalEntities).map((e) => e.id),
-    })), audioDurationSeconds, options.story.scenes);
+    })), audioDurationSeconds, options.story.scenes), narration), audioDurationSeconds, options.story.scenes, aligned?.words, result.value.scenes.every(scene => scene.narrationStartWord != null && scene.narrationEndWord != null)));
     const previousById = new Map(cached?.success ? cached.data.scenes.map((scene) => [scene.id, scene]) : []);
     for (const scene of scenes) { const previous = previousById.get(scene.id); if (!previous) continue; scene.videoTreatment = previous.videoTreatment; if (fingerprint(sceneArtworkContentState(previous)) === fingerprint(sceneArtworkContentState(scene))) scene.artwork = previous.artwork; }
     validateSceneCoverage(scenes, audioDurationSeconds, options.story.scenes);

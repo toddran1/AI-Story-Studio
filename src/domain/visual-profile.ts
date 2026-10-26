@@ -1,3 +1,4 @@
+import { referenceApplicabilitySchema } from "../visual-canon/reference-selection.js";
 import { z } from "zod";
 
 export const visualRoleSchema = z.enum([
@@ -37,6 +38,7 @@ export const visualReferenceImageSchema = z.object({
   /** A candidate may supersede a previous primary reference without deleting
    * it. This gives visual review an auditable reference lineage. */
   replacesReferenceId: z.string().min(1).optional(),
+  applicability: referenceApplicabilitySchema.optional(),
 });
 export type VisualReferenceImage = z.infer<typeof visualReferenceImageSchema>;
 

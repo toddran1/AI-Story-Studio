@@ -16,6 +16,7 @@ export function sceneEditableState(scene: Scene) {
     direction: scene.direction,
     overrides: scene.overrides,
     visualChanges: scene.visualChanges,
+    ...(scene.sequence ? { sequence: scene.sequence } : {}),
   };
 }
 

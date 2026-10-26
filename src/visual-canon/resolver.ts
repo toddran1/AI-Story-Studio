@@ -1,3 +1,5 @@
+import { referenceContext } from "./reference-selection.js";
+import { sequencePrompt } from "../scenes/sequence.js";
 import { NARRATIVE_APPEARANCE_POLICY, normalizeCharacterAppearance } from "./appearance-policy.js";
 import { characterFigureTrait } from "./figure-guidance.js";
 import { FALLBACK_CHARACTER_DESIGN_GUIDANCE, MATURE_FALLBACK_FEMALE_GUIDANCE } from "./character-design.js";
@@ -38,6 +40,8 @@ export type ResolvedSceneVisualPrompt = {
   resolvedPromptFingerprint: string;
   visualContinuityFingerprint?: string;
   resolvedEntities: ResolvedEntityCanon[];
+  referenceContextByEntity?: Record<string, import("./reference-selection.js").ReferenceContext>;
+  referenceContext?: import("./reference-selection.js").ReferenceContext;
 };
 
 /** Fingerprint the effective direction rather than the serialized shape. The
@@ -190,6 +194,7 @@ export function resolveVisualCanonPrompt(options: {
   artDirection: ArtDirectionPreset;
   visualProfiles: Record<string, VisualEntityProfile>;
   visualContinuity?: string;
+  frameState?: import("./continuity-state.js").VisualContinuityState;
   chapter?: number;
   allowUnprofiledEntityIds?: readonly string[];
 }): ResolvedSceneVisualPrompt {
@@ -442,6 +447,8 @@ export function resolveVisualCanonPrompt(options: {
   }
 
   // Layer 3: Scene Content
+  if (scene.sequence) promptParts.push(sequencePrompt(scene));
+  promptParts.push(`NAMED ON-SCREEN CAST: ${scene.characters.length ? scene.characters.join(", ") : "No named characters established"}. Do not add other named people solely because they appear in inherited continuity or reference images. Depict additional crowds or creature groups only when the scene establishes them.`);
   promptParts.push(`SCENE BEAT: ${scene.visualPrompt}`);
   if (scene.narrationText?.trim()) promptParts.push(`EXACT NARRATED FRAME CONTEXT (authoritative for clothing, visibility and skill activation): ${scene.narrationText.slice(0, 8000)}`);
   if (scene.summary) {
@@ -537,5 +544,28 @@ export function resolveVisualCanonPrompt(options: {
     resolvedPromptFingerprint,
     ...(visualContinuityFingerprint ? { visualContinuityFingerprint } : {}),
     resolvedEntities,
+    referenceContextByEntity: Object.fromEntries(resolvedEntities.map(entity => {
+      const line = visualContinuity?.split("\n").find(line => line === `- ${entity.name}` || line.startsWith(`- ${entity.name} —`));
+      const delta = scene.visualChanges?.characters?.find(c => c.entityId === entity.entityId || c.name === entity.name)?.set;
+      const state = options.frameState?.characters.find(c => c.entityId === entity.entityId || c.name === entity.name || resolveVisualEntities([c.name], bible.canonicalEntities).some(e => e.id === entity.entityId));
+      // Resolved state already includes clears and manual overrides. Never
+      // reintroduce a raw planner delta after those decisions were applied.
+      const facts = options.frameState !== undefined ? state : line !== undefined ? {
+        wardrobe: /wardrobe: ([^;\n]+)/i.exec(line)?.[1],
+        activeAbilities: /active abilities: ([^;\n]+)/i.exec(line)?.[1]?.split(",").map(s => s.trim()).filter(s => !s.startsWith("none")),
+        transformation: /transformation: ([^;\n]+)/i.exec(line)?.[1],
+        visibleEquipment: /visible equipment: ([^;\n]+)/i.exec(line)?.[1]?.split(",").map(s => s.trim()).filter(s => s !== "none"),
+      } : delta;
+      const base = referenceContext(scene, options.chapter);
+      const directedTime = scene.direction?.timeEnvironment && !["interior","custom"].includes(scene.direction.timeEnvironment) ? scene.direction.timeEnvironment : undefined;
+      return [entity.entityId, { ...base,
+        location: options.frameState?.environment?.description ?? base.location,
+        wardrobe: scene.overrides?.wardrobeOverrides?.[entity.entityId] ?? scene.overrides?.wardrobeOverrides?.[entity.name] ?? facts?.wardrobe,
+        activeAbilities: facts?.activeAbilities, transformation: facts?.transformation, visibleEquipment: facts?.visibleEquipment,
+        activeState: Boolean(facts?.activeAbilities?.length || facts?.transformation),
+        timeOfDay: directedTime ?? options.frameState?.environment?.timeOfDay ?? base.timeOfDay ?? /time: ([^;\n]+)/i.exec(visualContinuity ?? "")?.[1],
+      }];
+    })),
+    referenceContext: { ...referenceContext(scene, options.chapter), location: options.frameState?.environment?.description ?? scene.location, ...(options.visualContinuity ? { text: `${scene.narrationText ?? scene.summary}\n${options.visualContinuity}`, activeState: /Active abilities: (?!none)[^\n]+/i.test(options.visualContinuity), wardrobe: options.visualContinuity, timeOfDay: scene.direction?.timeEnvironment ?? /time: ([^;\n]+)/i.exec(options.visualContinuity)?.[1] } : {}) },
   };
 }

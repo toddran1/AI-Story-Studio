@@ -140,6 +140,7 @@ export type VisualReferenceImage = {
   prompt?: string;
   provenance?: Record<string, unknown>;
   replacesReferenceId?: string;
+  applicability?: { fromChapter?: number; toChapter?: number; wardrobe?: string; timeOfDay?: string; locationVariant?: string; activationTrigger?: string; state?: "baseline" | "activated" | "transformed" };
   imageUrl?: string;
 };
 export type VisualFieldProvenance = { source: "source_text" | "story_bible" | "continuity" | "approved_artwork" | "ai_generated" | "user_edit" | "manual_override"; locked: boolean; provider?: string; model?: string; generatedAt?: string; contextFingerprint?: string };
@@ -498,6 +499,7 @@ export type Scene = {
   direction?: SceneDirection;
   overrides?: SceneOverrides;
   visualChanges?: VisualContinuityChange;
+  sequence?: import("zod").infer<typeof import("../../../src/scenes/sequence.js").sceneSequenceSchema>;
   videoTreatment?: { motion?: VideoMotionMode | "story_default"; transitionOut?: { mode?: VideoTransitionMode | "story_default"; durationSeconds?: number } };
   continuity?: SceneContinuity;
 };

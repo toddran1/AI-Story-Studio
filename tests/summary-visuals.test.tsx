@@ -371,15 +371,15 @@ describe("summary visual production", () => {
     await changeApprovedPreviousImage();
     expect((await visuals.sceneArtworkGrounding("demo-story", id))[1]).toMatchObject({ status: "stale" });
   });
-  it("does not fingerprint the unused previous image when reference count is full, preserving provenance", async () => {
+  it("reserves a reference slot for a continuous approved frame before secondary profile references", async () => {
     await prepareContinuityArtwork("gpt-image-2.5-flare", 4);
     const before = await summaries.get("demo-story", id);
     expect(before.scenePlan!.scenes[1]!.artwork.versions!.at(-1)!.provenance).toMatchObject({
-      continuityReference: { kind: "previous-scene", used: false, sourceSceneId: "scene-001", reason: expect.stringContaining("count budget") },
+      continuityReference: { kind: "previous-scene", used: true, sourceSceneId: "scene-001", reason: expect.stringContaining("continuous") },
     });
     expect((await visuals.sceneArtworkGrounding("demo-story", id))[1]).toMatchObject({ status: "current" });
     await changeApprovedPreviousImage(true);
-    expect((await visuals.sceneArtworkGrounding("demo-story", id))[1]).toMatchObject({ status: "current" });
+    expect((await visuals.sceneArtworkGrounding("demo-story", id))[1]).toMatchObject({ status: "stale" });
   });
   it("does not fingerprint the unused previous image when the reference byte budget is full", async () => {
     const fullBudgetReferences = Array.from({ length: 3 }, () => Buffer.alloc(8 * 1024 * 1024, 7));
@@ -848,4 +848,24 @@ describe("summary visual production", () => {
     const currentPanel = renderToStaticMarkup(<SummaryVideoPanel {...props} summary={await visuals.get("demo-story", id)} />);
     expect(button(currentPanel, "Produce summary video")).not.toContain("disabled");
   });
+  it("allocates summary artwork versions above the highest retained number without overwriting an existing original", async () => {
+    const summary=await produce();const stored=await summaries.get("demo-story",id);const scene=stored.scenePlan!.scenes[0]!;
+    const retained={...structuredClone(scene.artwork.versions[0]!),id:"v3",versionNumber:3,imagePath:`${scene.id}-v3.png`};scene.artwork.versions.push(retained);
+    const path=visuals.paths("demo-story",id).sceneVersionImage(scene.id,3);await atomicWrite(path,PNG);await atomicWriteJson(summaryPath(root,"demo-story",id),stored);
+    const updated=await visuals.artwork("demo-story",id,{force:true,scenes:[scene.id]});
+    expect(("summary" in updated?updated.summary:updated).scenePlan!.scenes[0]!.artwork.versions.at(-1)?.id).toBe("v4");
+    expect(await readFile(path)).toEqual(PNG);
+  });
+
+  it("keeps manually accepted summary art selected while adding a replacement candidate", async () => {
+    await produce();const stored=await summaries.get("demo-story",id);const scene=stored.scenePlan!.scenes[0]!;delete scene.artwork.approvedVersionId;scene.artwork.manuallyEdited=true;
+    const before=await readFile(visuals.paths("demo-story",id).image(scene.id));await atomicWriteJson(summaryPath(root,"demo-story",id),stored);
+    images.generate.mockResolvedValueOnce({data:pngWithDims(2,1),mimeType:"image/png"});
+    const result=await visuals.artwork("demo-story",id,{force:true,scenes:[scene.id]});
+    const summary="summary" in result?result.summary:result;
+    expect(summary.scenePlan!.scenes[0]!.artwork.versions).toHaveLength(2);
+    expect(summary.scenePlan!.scenes[0]!.artwork.manuallyEdited).toBe(true);
+    expect(await readFile(visuals.paths("demo-story",id).image(scene.id))).toEqual(before);
+  });
+
 });

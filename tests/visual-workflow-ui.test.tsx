@@ -1,3 +1,4 @@
+import { ImageWorkbench } from "../apps/web/src/ImageWorkbench.js";
 /** @vitest-environment jsdom */
 import { act } from "react";
 import { createRoot } from "react-dom/client";
@@ -81,4 +82,22 @@ it("clears a selection when refreshed evidence requires review", async () => {
   expect(radio.checked).toBe(false);
   expect(radio.disabled).toBe(true);
   expect([...host.querySelectorAll("button")].find(button => button.textContent === "Approve sheet and design")!.disabled).toBe(true);
+});
+
+it("loads the newly selected chapter and ignores an old scope's late preview", async () => {
+  let finishPreview!: (value: Response)=>void;
+  const calls: Array<{url:string;body?:any}>=[];
+  vi.stubGlobal("fetch",vi.fn(async (url,init)=>{
+    const body=init?.body?JSON.parse(String(init.body)):undefined;calls.push({url:String(url),body});
+    if(String(url).endsWith("/plan"))return new Promise<Response>(resolve=>{finishPreview=resolve;});
+    if(String(url).endsWith("/report"))return json(null);
+    return json({rows:[],missingPlans:[],offset:body?.offset??0,limit:40,totalRows:0,hasMore:false});
+  }));
+  await act(async()=>root.render(<ImageWorkbench slug="scope-race" chapter={1}/>));
+  await act(async()=>{const details=host.querySelector("details")!;details.open=true;details.dispatchEvent(new Event("toggle"));});
+  await act(async()=>{[...host.querySelectorAll("button")].find(b=>b.textContent==="Preview image run")!.click();});
+  await act(async()=>root.render(<ImageWorkbench slug="scope-race" chapter={2}/>));
+  await act(async()=>{finishPreview(json({input:{scope:{chapters:[1]}},blocked:[],sceneCount:1,protectedCount:0,minimumImages:1,missingPlans:[],provider:"fake",model:"fake",qaProvider:"fake",qaModel:"fake",budgetUsd:10,maxRequests:50,allowanceNote:"fake"}));});
+  expect(calls.filter(c=>c.url.endsWith("/storyboard")).at(-1)?.body.chapters).toEqual([2]);
+  expect([...host.querySelectorAll("button")].some(b=>b.textContent==="Start image draft")).toBe(false);
 });

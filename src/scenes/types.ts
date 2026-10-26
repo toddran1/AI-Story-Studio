@@ -1,3 +1,4 @@
+import { sceneSequenceSchema, sceneSequenceInputSchema } from "./sequence.js";
 import { z } from "zod";
 import { visualContinuityChangeInputSchema, visualContinuityChangeSchema } from "../visual-canon/continuity-state.js";
 import { artworkOutputResolutionSchema, artworkUpscalingModeSchema, upscalerEngineSchema } from "../artwork/resolution.js";
@@ -212,6 +213,7 @@ export const sceneSchema = z.object({
   direction: sceneDirectionSchema.optional(),
   overrides: sceneOverridesSchema.optional(),
   visualChanges: visualContinuityChangeSchema.optional(),
+  sequence: sceneSequenceSchema.optional(),
   videoTreatment: sceneVideoTreatmentSchema.optional(),
 }).refine((value) => value.endSeconds > value.startSeconds, { message: "Scene end must be after its start" }).refine(value => new Set(value.creatureGroups?.map(group => group.id)).size === (value.creatureGroups?.length ?? 0), { message: "Creature group IDs must be unique within a scene" });
 
@@ -240,6 +242,8 @@ export const plannedSceneSchema = z.object({
   creatureGroups: z.array(sceneCreatureGroupSchema).max(30).nullish(),
   visualChanges: visualContinuityChangeInputSchema.nullish(),
   appearanceChapter: z.number().int().positive().nullish(),
+  sequence: sceneSequenceInputSchema.nullish(),
+  narrationStartWord: z.number().int().nonnegative().nullish(), narrationEndWord: z.number().int().positive().nullish(),
 });
 export const plannedScenesSchema = z.object({ scenes: z.array(plannedSceneSchema).min(1).max(100) });
 export const summaryPlannedScenesSchema = z.object({ scenes: z.array(plannedSceneSchema.extend({
