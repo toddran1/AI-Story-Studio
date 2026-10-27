@@ -56,6 +56,7 @@ export class GeminiImageProvider implements ImageProvider {
 
 function decodeGeminiImageResponse(response: {
   responseId?: string;
+  usageMetadata?: { promptTokenCount?: number; candidatesTokenCount?: number; thoughtsTokenCount?: number; cachedContentTokenCount?: number; candidatesTokensDetails?: Array<{ modality?: unknown; tokenCount?: number }> };
   promptFeedback?: { blockReason?: unknown; blockReasonMessage?: string };
   candidates?: Array<{ finishReason?: unknown; content?: { parts?: Array<{ text?: string; inlineData?: { mimeType?: string; data?: string } }> } }>;
 }): ImageGenerationResult {
@@ -75,7 +76,9 @@ function decodeGeminiImageResponse(response: {
   if (!raw) throw new ArtworkError("Gemini returned no image data");
   const data = Buffer.from(raw, "base64");
   if (!data.length) throw new ArtworkError("Gemini returned an empty image");
-  return { data, mimeType: "image/png", requestId };
+  const usage = response.usageMetadata;
+  const imageDetails = usage?.candidatesTokensDetails?.filter(item => item.modality === "IMAGE");
+  return { data, mimeType: "image/png", requestId, ...(usage ? { usage: { inputTokens: usage.promptTokenCount, inputTextTokens: usage.promptTokenCount, inputImageTokens: 0, cachedInputTokens: usage.cachedContentTokenCount, reasoningTokens: usage.thoughtsTokenCount, outputTokens: usage.candidatesTokenCount === undefined ? undefined : usage.candidatesTokenCount + (usage.thoughtsTokenCount ?? 0), outputImageTokens: imageDetails?.length ? imageDetails.reduce((sum, item) => sum + (item.tokenCount ?? 0), 0) : undefined } } : {}) };
 }
 
 function toGeminiImageProviderError(error: unknown, model: string): ProviderError {

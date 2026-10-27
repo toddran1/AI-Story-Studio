@@ -414,7 +414,7 @@ describe("TTS Reliability & Cost Hardening (Tests 26–35)", () => {
 
   // Test 31: S2.1-Pro Pricing Support
   describe("Test 31: S2.1-Pro Pricing Support", () => {
-    it("returns pricing snapshot for s2.1-pro and s2.1-pro-free alias with $15/1M UTF-8 bytes", () => {
+    it("prices paid s2.1-pro separately from the free model", () => {
       const proSnapshot = pricingFor("fish", "s2.1-pro");
       expect(proSnapshot).toBeDefined();
       expect(proSnapshot?.basis).toBe("utf8_bytes");
@@ -424,7 +424,8 @@ describe("TTS Reliability & Cost Hardening (Tests 26–35)", () => {
 
       const freeSnapshot = pricingFor("fish", "s2.1-pro-free");
       expect(freeSnapshot).toBeDefined();
-      expect(freeSnapshot).toEqual(proSnapshot);
+      expect(freeSnapshot?.utf8BytesPerMillion).toBe(0);
+      expect(calculateCost(freeSnapshot, { inputUtf8Bytes: 1_000_000 })).toBe(0);
 
       // 1,000,000 bytes at $15/1M bytes = $15.00
       const cost1M = calculateCost(proSnapshot, { inputUtf8Bytes: 1_000_000 });

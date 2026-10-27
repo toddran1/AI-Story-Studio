@@ -38,7 +38,7 @@ export class OpenAIImageProvider implements ImageProvider {
           size: request.size,
           quality: request.quality,
         });
-        return decode(response.data?.[0]);
+        return { ...decode(response.data?.[0]), ...imageUsage(response) };
       }
       const response = await this.client.images.generate({
         model: request.model,
@@ -49,7 +49,7 @@ export class OpenAIImageProvider implements ImageProvider {
         output_format: request.outputFormat,
         moderation: "low",
       });
-      return decode(response.data?.[0]);
+      return { ...decode(response.data?.[0]), ...imageUsage(response) };
     } catch (error) {
       if (error instanceof ConfigurationError || error instanceof ArtworkError) throw error;
       throw toOpenAiProviderError(error, "OpenAI image generation request failed", request.model);
@@ -62,4 +62,10 @@ function decode(image: { b64_json?: string | null; revised_prompt?: string | nul
   const data = Buffer.from(image.b64_json, "base64");
   if (!data.length) throw new ArtworkError("OpenAI returned an empty image");
   return { data, mimeType: "image/png", revisedPrompt: image.revised_prompt ?? undefined };
+}
+
+/** Retain provider-reported billing data for both generation and reference edits. */
+function imageUsage(response: { usage?: { input_tokens?: number; output_tokens?: number; input_tokens_details?: { text_tokens?: number; image_tokens?: number; cached_tokens?: number; cached_tokens_details?: { text_tokens?: number; image_tokens?: number } } }; _request_id?: string | null }) {
+  const usage = response.usage, details = usage?.input_tokens_details;
+  return { requestId: response._request_id ?? undefined, ...(usage ? { usage: { inputTokens: usage.input_tokens, outputTokens: usage.output_tokens, inputTextTokens: details?.text_tokens, inputImageTokens: details?.image_tokens, cachedInputTokens: details?.cached_tokens, cachedTextTokens: details?.cached_tokens_details?.text_tokens, cachedImageTokens: details?.cached_tokens_details?.image_tokens } } : {}) };
 }

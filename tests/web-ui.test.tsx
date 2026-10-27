@@ -2171,9 +2171,9 @@ describe("TTS quality guard UI", () => {
       expect(appTsx).not.toContain('className="pagination"');
       expect(appTsx).not.toContain('className="localization-pagination"');
       expect(appTsx).not.toContain('className="queue-mini-pages"');
-      expect(appTsx.match(/<Pagination\b/g)?.length).toBe(19);
+      expect(appTsx.match(/<Pagination\b/g)?.length).toBe(20);
       expect(appTsx.match(/<Pagination[^>]*position="top"/g)?.length).toBe(9);
-      expect(appTsx.match(/<Pagination[^>]*position="bottom"/g)?.length).toBe(10);
+      expect(appTsx.match(/<Pagination[^>]*position="bottom"/g)?.length).toBe(11);
 
       // NamesLocalizationPage.tsx has no hand-written <div className="localization-pagination">
       // NamesLocalizationPage.tsx: exactly 1 top Pagination and 1 bottom Pagination

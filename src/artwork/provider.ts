@@ -16,7 +16,7 @@ export type ImageGenerationRequest = {
   outputFormat: "png";
   referenceImages?: ImageReferenceImage[];
 };
-export type ImageGenerationResult = { data: Buffer; mimeType: "image/png"; revisedPrompt?: string; requestId?: string; width?: number; height?: number };
+export type ImageGenerationResult = { data: Buffer; mimeType: "image/png"; revisedPrompt?: string; requestId?: string; width?: number; height?: number; usage?: { inputTokens?: number; outputTokens?: number; inputTextTokens?: number; inputImageTokens?: number; cachedInputTokens?: number; cachedTextTokens?: number; cachedImageTokens?: number; outputImageTokens?: number; reasoningTokens?: number } };
 
 /** A native generation tier a provider model can produce, ordered ascending. */
 export type ImageNativeTier = { label: string; width: number; height: number };

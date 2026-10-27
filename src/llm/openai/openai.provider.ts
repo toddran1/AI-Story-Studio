@@ -28,6 +28,7 @@ export class OpenAIProvider implements LLMProvider {
   async generateText(request: LLMRequest) {
     await this.validateConfiguration();
     validateModelEffort(this.name, request.model, request.effort);
+    let observedUsage: import("../types.js").LLMUsage | undefined;
     const startedAt = Date.now();
     try {
       const response = await this.client.responses.create({
@@ -37,6 +38,7 @@ export class OpenAIProvider implements LLMProvider {
         input: openAiRequestInput(request),
         store: false,
       });
+      observedUsage = { requestId: response.id, inputTokens: response.usage?.input_tokens, outputTokens: response.usage?.output_tokens, cachedTokens: response.usage?.input_tokens_details?.cached_tokens, reasoningTokens: response.usage?.output_tokens_details?.reasoning_tokens, cacheWriteTokens: response.usage?.input_tokens_details?.cache_write_tokens, serviceTier: response.service_tier ?? undefined };
       if (!response.output_text?.trim()) {
         throw new ProviderError("OpenAI returned no output text", {
           provider: "openai",
@@ -51,18 +53,24 @@ export class OpenAIProvider implements LLMProvider {
           inputTokens: response.usage?.input_tokens,
           outputTokens: response.usage?.output_tokens,
           cachedTokens: response.usage?.input_tokens_details?.cached_tokens,
+          reasoningTokens: response.usage?.output_tokens_details?.reasoning_tokens,
+          cacheWriteTokens: response.usage?.input_tokens_details?.cache_write_tokens,
+          serviceTier: response.service_tier ?? undefined,
           requestId: response.id,
         },
       };
     } catch (error) {
       if (error instanceof ConfigurationError) throw error;
-      throw toOpenAiProviderError(error, "OpenAI Responses API request failed", request.model, { timeoutMs: this.timeoutMs, elapsedMs: Date.now() - startedAt });
+      const wrapped = toOpenAiProviderError(error, "OpenAI Responses API request failed", request.model, { timeoutMs: this.timeoutMs, elapsedMs: Date.now() - startedAt });
+      wrapped.usage = observedUsage;
+      throw wrapped;
     }
   }
 
   async generateStructured<T>(request: StructuredLLMRequest<T>) {
     await this.validateConfiguration();
     validateModelEffort(this.name, request.model, request.effort);
+    let observedUsage: import("../types.js").LLMUsage | undefined;
     const startedAt = Date.now();
     try {
       const format = toOpenAiTextFormat(request.schema, request.schemaName);
@@ -74,6 +82,7 @@ export class OpenAIProvider implements LLMProvider {
         store: false,
         text: { format },
       });
+      observedUsage = { requestId: response.id, inputTokens: response.usage?.input_tokens, outputTokens: response.usage?.output_tokens, cachedTokens: response.usage?.input_tokens_details?.cached_tokens, reasoningTokens: response.usage?.output_tokens_details?.reasoning_tokens, cacheWriteTokens: response.usage?.input_tokens_details?.cache_write_tokens, serviceTier: response.service_tier ?? undefined };
       if (!response.output_text?.trim()) {
         throw new ProviderError("OpenAI returned no structured output", {
           provider: "openai",
@@ -113,13 +122,21 @@ export class OpenAIProvider implements LLMProvider {
           inputTokens: response.usage?.input_tokens,
           outputTokens: response.usage?.output_tokens,
           cachedTokens: response.usage?.input_tokens_details?.cached_tokens,
+          reasoningTokens: response.usage?.output_tokens_details?.reasoning_tokens,
+          cacheWriteTokens: response.usage?.input_tokens_details?.cache_write_tokens,
+          serviceTier: response.service_tier ?? undefined,
           requestId: response.id,
         },
       };
     } catch (error) {
       if (error instanceof ConfigurationError) throw error;
-      if (error instanceof ProviderError) throw error;
-      throw toOpenAiProviderError(error, "OpenAI structured Responses API request failed", request.model, { timeoutMs: this.timeoutMs, elapsedMs: Date.now() - startedAt });
+      if (error instanceof ProviderError) {
+        error.usage = observedUsage ?? error.usage;
+        throw error;
+      }
+      const wrapped = toOpenAiProviderError(error, "OpenAI structured Responses API request failed", request.model, { timeoutMs: this.timeoutMs, elapsedMs: Date.now() - startedAt });
+      wrapped.usage = observedUsage;
+      throw wrapped;
     }
   }
 }

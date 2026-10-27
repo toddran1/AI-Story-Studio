@@ -14,15 +14,18 @@ const storage = new AsyncLocalStorage<Active>();
 export function withUsageScope<T>(scope: UsageScope, action: () => Promise<T>): Promise<T> { return storage.run({ scope, attempts: new Map() }, action); }
 
 function next(operation: string, model: string) { const active = storage.getStore(); if (!active) return undefined; const key = `${operation}:${model}`; const attempt = (active.attempts.get(key) ?? 0) + 1; active.attempts.set(key, attempt); return { ...active.scope, attempt }; }
-function category(error: unknown) { const value = error as { cause?: { status?: number }; name?: string }; const status = value.cause?.status; return status === 429 ? "rate_limit" : status && status >= 500 ? "transient" : value.name === "ConfigurationError" ? "configuration" : "provider"; }
+function category(error: unknown) { const value = error as { cause?: { status?: number }; name?: string }; const supplied = (error as { category?: string }).category; if (supplied) return supplied; const status = (error as { status?: number }).status ?? value.cause?.status; return status === 429 ? "rate_limit" : status && status >= 500 ? "transient" : value.name === "ConfigurationError" ? "configuration" : "provider"; }
 function base(scope: ReturnType<typeof next>, provider: string, model: string, operation: ProviderUsageRecord["operation"], attemptedAt: string, success: boolean, requestId?: string): Omit<ProviderUsageRecord, "id" | "idempotencyKey" | "completedAt" | "retry" | "costStatus"> {
   if (!scope) throw new Error("Missing usage scope");
   return { version: 1, ...scope, provider, model, operation, attemptedAt, success, requestId };
 }
 async function persist(sink: UsageSink, data: Omit<ProviderUsageRecord, "id" | "idempotencyKey" | "completedAt" | "retry" | "costStatus">) {
-  const pricing = pricingFor(data.provider, data.model, {quality:data.imageQuality,size:data.imageSize}); const costUsd = calculateCost(pricing, data); const completedAt = new Date().toISOString();
+  const pricing = pricingFor(data.provider, data.model, {quality:data.imageQuality,size:data.imageSize}); const unsupportedTier = data.serviceTier && !["default", "standard", "auto"].includes(data.serviceTier);
+  const rawCost = data.success || data.inputTokens !== undefined || data.outputTokens !== undefined ? calculateCost(pricing, data) : undefined;
+  const costUsd = unsupportedTier || (data.cacheWriteTokens ?? 0) > 0 ? undefined : rawCost;
+  const costUnavailableReason = costUsd !== undefined ? undefined : unsupportedTier ? "Service-tier pricing is not configured" : (data.cacheWriteTokens ?? 0) > 0 ? "Cache-write rate/retention was not reported" : !pricing ? "Model pricing is not in the catalog" : !data.success && data.inputTokens === undefined ? "Failed request; billable usage was not returned" : "Complete billable usage was not reported"; const completedAt = new Date().toISOString();
   const idempotencyKey = data.requestId ? `${data.provider}:${data.requestId}` : fingerprint({ scope: data.story, chapter: data.chapter, run: data.productionRunId, job: data.queueJobId, stage: data.stage, operation: data.operation, model: data.model, attempt: data.attempt, attemptedAt: data.attemptedAt });
-  await sink.record({ ...data, id: randomUUID(), idempotencyKey, completedAt, retry: data.attempt > 1, pricing: costUsd === undefined ? undefined : pricing, costUsd, costStatus: costUsd === undefined ? "unavailable" : "calculated" });
+  await sink.record({ ...data, id: randomUUID(), idempotencyKey, completedAt, durationMs: Math.max(0, Date.parse(completedAt) - Date.parse(data.attemptedAt)), retry: data.attempt > 1, pricing, costUnavailableReason, costUsd, costStatus: costUsd === undefined ? "unavailable" : "calculated" });
 }
 
 export class TrackedLLMProvider implements LLMProvider {
@@ -31,10 +34,10 @@ export class TrackedLLMProvider implements LLMProvider {
   validateConfiguration() { return this.inner.validateConfiguration(); }
   generateText(request: LLMRequest) { return this.run("llm_text", request, () => this.inner.generateText(request)); }
   generateStructured<T>(request: StructuredLLMRequest<T>) { return this.run("llm_structured", request, () => this.inner.generateStructured(request)); }
-  private async run<T extends { usage?: { inputTokens?: number; outputTokens?: number; cachedTokens?: number; requestId?: string } }>(operation: "llm_text" | "llm_structured", request: LLMRequest, action: () => Promise<T>) {
+  private async run<T extends { usage?: { inputTokens?: number; outputTokens?: number; cachedTokens?: number; reasoningTokens?: number; cacheWriteTokens?: number; serviceTier?: string; requestId?: string } }>(operation: "llm_text" | "llm_structured", request: LLMRequest, action: () => Promise<T>) {
     const scope = next(operation, request.model); if (!scope) return action(); const attemptedAt = new Date().toISOString();
-    try { const result = await action(); await persist(this.sink, { ...base(scope, this.name, request.model, operation, attemptedAt, true, result.usage?.requestId), inputTokens: result.usage?.inputTokens, cachedInputTokens: result.usage?.cachedTokens, outputTokens: result.usage?.outputTokens, inputCharacters: [...request.input].length, inputUtf8Bytes: Buffer.byteLength(request.input) }); return result; }
-    catch (error) { await persist(this.sink, { ...base(scope, this.name, request.model, operation, attemptedAt, false), inputCharacters: [...request.input].length, inputUtf8Bytes: Buffer.byteLength(request.input), errorCategory: category(error) }); throw error; }
+    try { const result = await action(); await persist(this.sink, { ...base(scope, this.name, request.model, operation, attemptedAt, true, result.usage?.requestId), inputTokens: result.usage?.inputTokens, cachedInputTokens: result.usage?.cachedTokens, outputTokens: result.usage?.outputTokens, reasoningTokens: result.usage?.reasoningTokens, cacheWriteTokens: result.usage?.cacheWriteTokens, effort: request.effort ?? "provider_default", serviceTier: result.usage?.serviceTier, inputCharacters: [...request.input].length, inputUtf8Bytes: Buffer.byteLength(request.input) }); return result; }
+    catch (error) { const reported = (error as { usage?: import("../llm/types.js").LLMUsage }).usage; await persist(this.sink, { ...base(scope, this.name, request.model, operation, attemptedAt, false, reported?.requestId ?? (error as { requestId?: string }).requestId), inputTokens: reported?.inputTokens, outputTokens: reported?.outputTokens, cachedInputTokens: reported?.cachedTokens, reasoningTokens: reported?.reasoningTokens, cacheWriteTokens: reported?.cacheWriteTokens, serviceTier: reported?.serviceTier, effort: request.effort ?? "provider_default", inputCharacters: [...request.input].length, inputUtf8Bytes: Buffer.byteLength(request.input), errorCategory: category(error) }); throw error; }
   }
 }
 
@@ -109,7 +112,7 @@ export class TrackedImageProvider implements ImageProvider {
   readonly name; readonly version; readonly capabilities; constructor(private readonly inner: ImageProvider, private readonly sink: UsageSink) { this.name = inner.name; this.version = inner.version; this.capabilities = inner.capabilities; }
   validateConfiguration() { return this.inner.validateConfiguration(); }
   async generate(request: ImageGenerationRequest): Promise<ImageGenerationResult> { const scope = next("image", request.model); if (!scope) return this.inner.generate(request); const attemptedAt = new Date().toISOString();
-    try { const result = await this.inner.generate(request); await persist(this.sink, { ...base(scope, this.name, request.model, "image", attemptedAt, true, result.requestId), inputCharacters: [...request.prompt].length, inputUtf8Bytes: Buffer.byteLength(request.prompt), outputBytes: result.data.byteLength, imageCount: 1, imageQuality: request.quality, imageSize: request.size }); return result; }
+    try { const result = await this.inner.generate(request); await persist(this.sink, { ...base(scope, this.name, request.model, "image", attemptedAt, true, result.requestId), inputCharacters: [...request.prompt].length, inputUtf8Bytes: Buffer.byteLength(request.prompt), ...result.usage, outputBytes: result.data.byteLength, imageCount: 1, imageQuality: request.quality, imageSize: request.size }); return result; }
     catch (error) { await persist(this.sink, { ...base(scope, this.name, request.model, "image", attemptedAt, false), inputCharacters: [...request.prompt].length, inputUtf8Bytes: Buffer.byteLength(request.prompt), imageCount: 0, imageQuality: request.quality, imageSize: request.size, errorCategory: category(error) }); throw error; }
   }
 }

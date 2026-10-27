@@ -3,6 +3,7 @@ export class AppError extends Error {
 }
 export class ConfigurationError extends AppError {}
 export class ProviderError extends AppError {
+  usage?: import("../llm/types.js").LLMUsage;
   readonly status?: number;
   readonly code?: string;
   readonly category?: string;

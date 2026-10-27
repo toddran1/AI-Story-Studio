@@ -363,3 +363,5 @@
 .model-fields select:disabled{opacity:.6;cursor:not-allowed}.global-settings .settings-ledger>section{align-self:start}
 .model-routing-row,.model-editor-with-effort{container-type:inline-size}
 @container(min-width:400px){.model-fields{grid-template-columns:90px minmax(100px,1fr) 140px}.model-field-effort{grid-column:auto}}
+.cost-record-details{margin-top:7px;font:10px var(--sans);white-space:normal;overflow-wrap:anywhere;color:var(--muted)}
+.cost-record-details summary{cursor:pointer;color:var(--violet-soft)}.cost-record-details small{display:block;margin-top:5px}.cost-record-details a{color:var(--violet-soft)}

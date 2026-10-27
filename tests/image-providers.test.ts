@@ -470,10 +470,10 @@ describe("artwork routing and provenance", () => {
 describe("image pricing", () => {
   it("prices the new image models and keeps legacy pricing intact", () => {
     expect(calculateCost(pricingFor("openai", "gpt-image-1", { quality: "medium", size: "1536x1024" }), { imageCount: 2 })).toBe(.126);
-    expect(calculateCost(pricingFor("openai", "gpt-image-2.5-flare", { quality: "medium", size: "1536x1024" }), { imageCount: 1 })).toBeCloseTo(.0315, 9);
-    expect(calculateCost(pricingFor("openai", "gpt-image-2.5-sunburst", { quality: "high", size: "1024x1024" }), { imageCount: 1 })).toBeCloseTo(.2505, 9);
-    expect(calculateCost(pricingFor("gemini", "gemini-3.1-flash-image", { quality: "medium", size: "1536x1024" }), { imageCount: 3 })).toBeCloseTo(.135, 9);
-    expect(calculateCost(pricingFor("gemini", "gemini-2.5-flash-image", { quality: "high", size: "1536x1024" }), { imageCount: 1 })).toBeCloseTo(.02, 9);
+    expect(calculateCost(pricingFor("openai", "gpt-image-2.5-flare", { quality: "medium", size: "1536x1024" }), { imageCount: 1 })).toBeUndefined();
+    expect(calculateCost(pricingFor("openai", "gpt-image-2.5-sunburst", { quality: "high", size: "1024x1024" }), { imageCount: 1 })).toBeUndefined();
+    expect(calculateCost(pricingFor("gemini", "gemini-3.1-flash-image", { quality: "medium", size: "1536x1024" }), { imageCount: 3 })).toBeUndefined();
+    expect(calculateCost(pricingFor("gemini", "gemini-2.5-flash-image", { quality: "high", size: "1536x1024" }), { imageCount: 1 })).toBeUndefined();
     expect(pricingFor("openai", "unknown-image-model", { quality: "low", size: "1024x1024" })).toBeUndefined();
   });
 });

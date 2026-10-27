@@ -20,16 +20,19 @@ export class GeminiProvider implements LLMProvider {
   async generateText(request: LLMRequest) {
     await this.validateConfiguration();
     validateModelEffort(this.name, request.model, request.effort);
+    let observedUsage: import("../types.js").LLMUsage | undefined;
     try {
       const interaction = await this.client.interactions.create({ model: request.model, ...(request.effort ? { generation_config: { thinking_level: request.effort } } : {}), input: geminiRequestInput(request, `${request.instructions}\n\n${request.input}`) });
+      observedUsage = usageFrom(interaction);
       if (!interaction.output_text?.trim()) throw new ProviderError("Gemini returned no output text");
       return { text: interaction.output_text, usage: usageFrom(interaction) };
-    } catch (error) { if (error instanceof ConfigurationError) throw error; throw new ProviderError("Gemini Interactions API request failed", { cause: error }); }
+    } catch (error) { if (error instanceof ConfigurationError) throw error; const wrapped = new ProviderError("Gemini Interactions API request failed", { cause: error, requestId: observedUsage?.requestId }); wrapped.usage = observedUsage; throw wrapped; }
   }
 
   async generateStructured<T>(request: StructuredLLMRequest<T>) {
     await this.validateConfiguration();
     validateModelEffort(this.name, request.model, request.effort);
+    let observedUsage: import("../types.js").LLMUsage | undefined;
     try {
       const input = `${request.instructions}\n\n${request.input}`;
       const providerSchema = geminiJsonSchema(request.schema);
@@ -53,6 +56,7 @@ export class GeminiProvider implements LLMProvider {
           response_format: { type: "text", mime_type: "application/json", schema: { type: "object" } },
         });
       }
+      observedUsage = usageFrom(interaction);
       if (!interaction.output_text?.trim()) throw new ProviderError("Gemini returned no structured output");
       const text = interaction.output_text;
       try {
@@ -61,7 +65,7 @@ export class GeminiProvider implements LLMProvider {
         const excerpt = text.length > 300 ? `${text.slice(0, 300)}…` : text;
         throw new ProviderError(`Gemini structured output did not match the expected shape. Raw output excerpt: ${excerpt}`, { cause: error });
       }
-    } catch (error) { if (error instanceof ConfigurationError) throw error; throw new ProviderError("Gemini structured Interactions API request failed", { cause: error }); }
+    } catch (error) { if (error instanceof ConfigurationError) throw error; const wrapped = new ProviderError("Gemini structured Interactions API request failed", { cause: error, requestId: observedUsage?.requestId }); wrapped.usage = observedUsage; throw wrapped; }
   }
 }
 
@@ -136,11 +140,13 @@ function sanitizeGeminiSchema(value: unknown): unknown {
       : sanitizeGeminiSchema(child)]));
 }
 
-function usageFrom(interaction: { id: string; usage?: { total_input_tokens?: number; total_output_tokens?: number; total_cached_tokens?: number } }) {
+function usageFrom(interaction: { id: string; usage?: { total_input_tokens?: number; total_output_tokens?: number; total_cached_tokens?: number; total_thought_tokens?: number } }) {
   return {
     requestId: interaction.id,
     inputTokens: interaction.usage?.total_input_tokens,
-    outputTokens: interaction.usage?.total_output_tokens,
+    // Interactions thoughts are separate from output, unlike OpenAI Responses.
+    outputTokens: interaction.usage?.total_output_tokens === undefined ? undefined : interaction.usage.total_output_tokens + (interaction.usage.total_thought_tokens ?? 0),
+    reasoningTokens: interaction.usage?.total_thought_tokens,
     cachedTokens: interaction.usage?.total_cached_tokens,
   };
 }

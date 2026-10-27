@@ -2,7 +2,8 @@ import { z } from "zod";
 
 export const pricingSnapshotSchema = z.object({
   catalogVersion: z.string(), priceId: z.string(), effectiveFrom: z.string(), currency: z.literal("USD"), sourceUrl: z.url(),
-  basis: z.enum(["tokens", "utf8_bytes", "image"]), inputPerMillion: z.number().nonnegative().optional(), cachedInputPerMillion: z.number().nonnegative().optional(),
+  basis: z.enum(["tokens", "utf8_bytes", "image", "image_tokens"]), inputPerMillion: z.number().nonnegative().optional(), cachedInputPerMillion: z.number().nonnegative().optional(),
+  outputTextPerMillion: z.number().nonnegative().optional(), inputImagePerMillion: z.number().nonnegative().optional(), cachedImageInputPerMillion: z.number().nonnegative().optional(), verifiedAt: z.string().optional(), validUntil: z.string().optional(),
   outputPerMillion: z.number().nonnegative().optional(), utf8BytesPerMillion: z.number().nonnegative().optional(), imagePrice: z.number().nonnegative().optional(),
 }).strict();
 export type PricingSnapshot = z.infer<typeof pricingSnapshotSchema>;
@@ -12,6 +13,9 @@ export const providerUsageRecordSchema = z.object({
   productionRunId: z.string().optional(), queueJobId: z.string().optional(), stage: z.string().min(1), provider: z.string().min(1), model: z.string().min(1),
   operation: z.enum(["llm_text", "llm_structured", "tts", "image"]), attemptedAt: z.string(), completedAt: z.string(), attempt: z.number().int().positive(),
   inputTokens: z.number().int().nonnegative().optional(), cachedInputTokens: z.number().int().nonnegative().optional(), outputTokens: z.number().int().nonnegative().optional(),
+  cacheWriteTokens: z.number().int().nonnegative().optional(), costUnavailableReason: z.string().optional(),
+  outputImageTokens: z.number().int().nonnegative().optional(),
+  effort: z.string().optional(), reasoningTokens: z.number().int().nonnegative().optional(), inputTextTokens: z.number().int().nonnegative().optional(), inputImageTokens: z.number().int().nonnegative().optional(), cachedTextTokens: z.number().int().nonnegative().optional(), cachedImageTokens: z.number().int().nonnegative().optional(), durationMs: z.number().nonnegative().optional(), serviceTier: z.string().optional(),
   inputCharacters: z.number().int().nonnegative().optional(), inputUtf8Bytes: z.number().int().nonnegative().optional(), outputBytes: z.number().int().nonnegative().optional(),
   providerRequests: z.number().int().nonnegative().optional(),
   audioDurationSeconds: z.number().nonnegative().optional(), imageCount: z.number().int().nonnegative().optional(), imageQuality: z.string().optional(), imageSize: z.string().optional(),
@@ -23,4 +27,4 @@ export type ProviderUsageRecord = z.infer<typeof providerUsageRecordSchema>;
 export type UsageScope = { story: string; chapter?: number; productionRunId?: string; queueJobId?: string; stage: string };
 export interface UsageSink { record(record: ProviderUsageRecord): Promise<void>; }
 
-export type CostFilters = { story?: string; chapterFrom?: number; chapterTo?: number; productionRunId?: string; queueJobId?: string; stage?: string; provider?: string; model?: string; fromDate?: string; toDate?: string; page?: number; pageSize?: number };
+export type CostFilters = { story?: string; chapterFrom?: number; chapterTo?: number; productionRunId?: string; queueJobId?: string; stage?: string; provider?: string; model?: string; effort?: string; fromDate?: string; toDate?: string; page?: number; pageSize?: number };
