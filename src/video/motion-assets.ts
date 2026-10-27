@@ -1,3 +1,4 @@
+import { MOTION_SAMPLE_VERSION } from "./motion-tools.js";
 import { z } from "zod";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
@@ -31,6 +32,7 @@ export const motionAssetSchema = z.object({
   outputFingerprint: z.string().min(1), durationSeconds: z.number().min(1).max(12),
   width: z.number().int().positive().max(3840), height: z.number().int().positive().max(2160),
   review: z.enum(["unreviewed", "approved", "rejected"]).default("unreviewed"),
+  samplingVersion: z.string().optional(),
   checks: z.array(visualCheckSchema).max(3).default([]), checkedBinding: z.string().optional(),
   provider: z.string().optional(), model: z.string().optional(), instruction: z.string().max(2000).optional(),
 });
@@ -81,7 +83,7 @@ export async function motionAssetBinding(root: string, slug: string, target: Mot
   return fingerprint({ version: "motion-binding-v1", scene: sceneArtworkContentState(scene), narration: scene.narrationText, source: scene.artwork.imageFingerprint, resolved: resolved.resolvedPromptFingerprint });
 }
 export function motionAssetReady(asset: MotionAsset, binding: string) {
-  return asset.review === "approved" && asset.binding === binding && asset.checkedBinding === binding && asset.checks.length === 3 && asset.checks.every((check, index) => check.imageFingerprint === asset.sampleFingerprints[index] && visualCheckOutcome(check) === "ready");
+  return asset.samplingVersion === MOTION_SAMPLE_VERSION && asset.review === "approved" && asset.binding === binding && asset.checkedBinding === binding && asset.checks.length === 3 && asset.checks.every((check, index) => check.imageFingerprint === asset.sampleFingerprints[index] && visualCheckOutcome(check) === "ready");
 }
 export async function selectedMotionAsset(root: string, slug: string, target: MotionTarget, scene: Scene) {
   const manifest = await loadMotionAssets(root, slug, target);

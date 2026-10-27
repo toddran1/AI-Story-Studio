@@ -1,3 +1,4 @@
+import { stageModelConfigSchema } from "../domain/provider.js";
 import { randomUUID } from "node:crypto";
 import { createReadStream, createWriteStream } from "node:fs";
 import { once } from "node:events";
@@ -29,7 +30,7 @@ export type Activity = { id: string; type: string; message: string; at: string }
 const activitySchema = z.array(z.object({ id: z.string(), type: z.string(), message: z.string(), at: z.string() })).default([]);
 export const cleanupKindSchema = z.enum(["voicePreviews", "abPreviews", "oldProductionManifests", "artwork", "chapterVideo", "exports"]);
 
-export const globalSettingsSchema = z.object({ defaultSourceLanguage: z.string().min(2), defaultOutputLanguage: z.string().min(2), defaultProductionProfile: z.enum(["audio", "audiobook", "story-video", "everything"]), translation: modelSchema(), narration: modelSchema(), qa: modelSchema(), storyBible: modelSchema(), scenePlanner: modelSchema(), tts: z.object({ provider: ttsProviderNameSchema, model: z.string().min(1), referenceId: z.string().optional() }) });
+export const globalSettingsSchema = z.object({ defaultSourceLanguage: z.string().min(2), defaultOutputLanguage: z.string().min(2), defaultProductionProfile: z.enum(["audio", "audiobook", "story-video", "everything"]), translation: stageModelConfigSchema, narration: stageModelConfigSchema, qa: stageModelConfigSchema, storyBible: stageModelConfigSchema, scenePlanner: stageModelConfigSchema, tts: z.object({ provider: ttsProviderNameSchema, model: z.string().min(1), referenceId: z.string().optional() }) });
 export type GlobalSettings = z.infer<typeof globalSettingsSchema>;
 
 export async function loadGlobalSettings(root: string, env: Environment): Promise<GlobalSettings> { const raw = await readJsonIfExists<Record<string, unknown>>(globalSettingsPath(root)); const defaults = { defaultSourceLanguage: "zh-CN", defaultOutputLanguage: "en-US", defaultProductionProfile: "audiobook" as const, translation: { provider: "gemini" as const, model: env.GEMINI_DEFAULT_MODEL }, narration: { provider: "openai" as const, model: env.OPENAI_DEFAULT_MODEL }, qa: { provider: "openai" as const, model: env.OPENAI_DEFAULT_MODEL }, storyBible: { provider: "gemini" as const, model: env.GEMINI_DEFAULT_MODEL }, scenePlanner: { provider: "openai" as const, model: env.OPENAI_DEFAULT_MODEL }, tts: { provider: "fish" as const, model: env.FISH_AUDIO_MODEL, referenceId: env.FISH_AUDIO_REFERENCE_ID } }; return globalSettingsSchema.parse(raw ? { ...defaults, ...raw } : defaults); }
@@ -123,7 +124,6 @@ export async function invalidateStoryForConfigChange(root: string, slug: string,
 export function slugify(value: string) { return value.normalize("NFKD").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 80) || "untitled-story"; }
 export function backupPath(root: string, id: string) { if (!/^[a-f0-9-]{36}$/.test(id)) throw new Error("Invalid backup ID"); return join(root, ".ai-story-studio", "backups", `${id}.zip`); }
 
-function modelSchema() { return z.object({ provider: z.enum(["openai", "gemini", "kimi"]), model: z.string().min(1) }); }
 function globalSettingsPath(root: string) { return join(root, ".ai-story-studio", "settings.json"); }
 function activityPath(root: string, slug: string) { return join(storyPaths(root, slug, 1).story, "activity.json"); }
 async function uniqueSlug(root: string, requested: string) { const base = safeSlugSchema.parse(slugify(requested)); if (!(await exists(storyPaths(root, base, 1).story))) return base; for (let i = 2; i < 10_000; i++) { const value = `${base}-${i}`; if (!(await exists(storyPaths(root, value, 1).story))) return value; } throw new Error("Unable to allocate a unique story slug"); }

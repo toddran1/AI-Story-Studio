@@ -91,6 +91,13 @@ export function resolvePronunciations(text: string, entities: readonly Canonical
         const preferred = entity.preferredNarrationName?.toLocaleLowerCase() === name.toLocaleLowerCase() && name.toLocaleLowerCase() !== entity.canonicalName.toLocaleLowerCase();
         let pronunciation = entity.pronunciation ?? { mode: "automatic" as const };
         const shortName = entity.localizedNaming?.shortName;
+        // Composite localized aliases such as "Old Asher" retain their address
+        // words. Let the nested short-name occurrence carry its own hint instead
+        // of replacing the entire alias with the full-name pronunciation.
+        if (pronunciation.mode === "custom" && shortName && !localized && !preferred) {
+          const escapedShort = shortName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+          if (new RegExp(`(?<![\\p{L}\\p{N}])${escapedShort}(?![\\p{L}\\p{N}])`, "iu").test(name)) continue;
+        }
         if (pronunciation.mode === "custom" && shortName?.toLocaleLowerCase() === name.toLocaleLowerCase()) {
           const fullName = entity.localizedNaming?.fullName ?? entity.preferredNarrationName;
           const roots = fullName?.trim().split(/\s+/) ?? [];

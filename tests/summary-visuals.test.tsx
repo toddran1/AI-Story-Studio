@@ -1,3 +1,4 @@
+import { MOTION_SAMPLE_VERSION } from "../src/video/motion-tools.js";
 import { motionAssetBinding, motionAssetPaths, newMotionAssetId, saveMotionAssets } from "../src/video/motion-assets.js";
 import { visualCheckSchema, VISUAL_CHECK_CATEGORIES } from "../src/artwork/visual-check.js";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
@@ -70,7 +71,7 @@ describe("summary visual production", () => {
     await atomicWrite(paths.video,"0000ftypfake-summary-motion");
     const samples=["sample-0","sample-1","sample-2"];
     const checks=samples.map(imageFingerprint=>visualCheckSchema.parse({summary:"Matches",...Object.fromEntries(VISUAL_CHECK_CATEGORIES.map(category=>[category,{status:"match",observation:"Matches"}])),checkedAt:new Date().toISOString(),imageFingerprint,targetFingerprint:"checked-frame",promptVersion:"fake",provider:"openai",model:"fake"}));
-    const asset={id:assetId,kind:"clip" as const,origin:"import" as const,createdAt:new Date().toISOString(),binding,checkedBinding:binding,sourceFingerprint:scene.artwork.imageFingerprint!,sampleFingerprints:samples,outputFingerprint:(await fileFingerprint(paths.video))!,durationSeconds:4,width:1920,height:1080,review:"approved" as const,checks};
+    const asset={id:assetId,kind:"clip" as const,origin:"import" as const,createdAt:new Date().toISOString(),binding,checkedBinding:binding,sourceFingerprint:scene.artwork.imageFingerprint!,sampleFingerprints:samples,samplingVersion:MOTION_SAMPLE_VERSION,outputFingerprint:(await fileFingerprint(paths.video))!,durationSeconds:4,width:1920,height:1080,review:"approved" as const,checks};
     await saveMotionAssets(root,"demo-story",target,{version:1,selectedId:assetId,assets:[asset]});
     render.mockClear();await visuals.video("demo-story",id,{force:true});expect(render.mock.calls[0]?.[0].sceneArtwork[0].clip?.path).toContain(assetId);
     expect((await visuals.get("demo-story",id)).video?.status).toBe("current");await visuals.video("demo-story",id);expect(render).toHaveBeenCalledTimes(1);
@@ -663,6 +664,21 @@ describe("summary visual production", () => {
     expect(applied.scenePlan!.scenes[0]!.artwork.versions).toEqual(original.artwork.versions); expect(applied.scenePlan!.scenes[0]!.direction).toMatchObject(direction); expect(applied.scenePlan!.scenes[0]!.overrides).toMatchObject(overrides);
     expect(applied.scenePlan!.scenes[0]!.videoTreatment).toEqual({ motion: "pan_right" });
     expect((await visuals.sceneArtworkGrounding("demo-story", id))[0]!.status).toBe("stale");
+  });
+  it("does not roll back a committed summary video when completion reporting fails",async()=>{
+    await produce();
+    render.mockImplementationOnce(async(input:any,output:string,settings:any)=>{await atomicWrite(output,"new-summary-video");return {durationSeconds:input.audioDurationSeconds,width:settings.width,height:settings.height,videoCodec:"h264",audioCodec:"aac",container:"mp4"};});
+    await expect(visuals.video("demo-story",id,{force:true},event=>{if(event.type === "summary.video.completed") throw new Error("observer failed");})).rejects.toThrow("observer failed");
+    const stored=await summaries.get("demo-story",id);expect(stored.video?.status).toBe("current");expect(stored.video?.outputFingerprint).toBe(await fileFingerprint(visuals.paths("demo-story",id).video));
+  });
+  it("clears a generating summary video when starting reporting fails",async()=>{
+    await produce();await expect(visuals.video("demo-story",id,{force:true},()=>{throw new Error("observer failed");})).rejects.toThrow("observer failed");
+    expect((await summaries.get("demo-story",id)).video?.status).toBe("stale");
+  });
+  it("retains the summary video when a replacement render is empty",async()=>{
+    await produce();const path=join(summaryMediaPaths(root,"demo-story",id).directory,"video.mp4"),previous=await readFile(path),metadata=(await summaries.get("demo-story",id)).video;
+    render.mockImplementationOnce(async(input:any,output:string,settings:any)=>{await atomicWrite(output,Buffer.alloc(0));return {durationSeconds:input.audioDurationSeconds,width:settings.width,height:settings.height,videoCodec:"h264",audioCodec:"aac",container:"mp4"};});
+    await expect(visuals.video("demo-story",id,{force:true})).rejects.toThrow("empty");expect(await readFile(path)).toEqual(previous);expect((await summaries.get("demo-story",id)).video?.outputFingerprint).toBe(metadata?.outputFingerprint);
   });
   it("surfaces image/video failures, preserves successful work and rejects mismatched video duration", async () => {
     await media.audio("demo-story", id); await visuals.scenes("demo-story", id, { sceneCount: 2 }); images.generate.mockRejectedValueOnce(new Error("invalid image response"));

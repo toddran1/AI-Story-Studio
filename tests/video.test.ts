@@ -1,7 +1,7 @@
 import { summaryPath } from "../src/summaries/service.js";
 import { summarySchema } from "../src/summaries/types.js";
 import { fileFingerprint } from "../src/utils/file-fingerprint.js";
-import { mkdtemp, readFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -36,6 +36,36 @@ describe("chapter video", () => {
   it("uses compact burned captions and omits subtitles when disabled", () => { const story = testStory(); const input = { audio: "audio.mp3", subtitles: "subtitles.srt", storyTitle: "Book", chapterLabel: "Chapter 1", chapterTitle: "Opening", audioDurationSeconds: 10 }; const burned = buildVideoArgs(input, "video.mp4", { ...story.video, subtitleMode: "burn" }).join(" "); expect(burned).toContain("FontSize=12"); expect(burned).toContain("MarginV=14"); const disabled = buildVideoArgs(input, "video.mp4", { ...story.video, subtitleMode: "none" }).join(" "); expect(disabled).not.toContain("subtitles=filename="); expect(disabled).not.toContain("mov_text"); });
   it("validates ffprobe video streams, codec, resolution, and duration", async () => { const tools = new FfmpegVideoTools("ffmpeg", "ffprobe", async () => ({ stdout: JSON.stringify({ format: { duration: "13", format_name: "mp4" }, streams: [{ codec_type: "video", codec_name: "h264", width: 1920, height: 1080 }, { codec_type: "audio", codec_name: "aac" }] }), stderr: "" })); await expect(tools.probe("video.mp4")).resolves.toMatchObject({ videoCodec: "h264", audioCodec: "aac", width: 1920 }); expect(() => validateChapterVideo({ durationSeconds: 13, videoCodec: "h264", audioCodec: "aac", width: 720, height: 480, container: "mp4" }, testStory().video, 13)).toThrow("Expected 1920x1080"); });
   it("reuses video fingerprints and video settings invalidate no upstream stage", async () => { const { root, story } = await fixture(); await generateStoredSubtitles({ root, story, chapter: 1 }); const processor = new FakeVideo(); const first = await renderStoredChapterVideo({ root, story, chapter: 1, processor }); const second = await renderStoredChapterVideo({ root, story, chapter: 1, processor }); expect(first.reused).toBe(false); expect(second.reused).toBe(true); const changed = { ...story, video: { ...story.video, quality: 24 } }; await renderStoredChapterVideo({ root, story: changed, chapter: 1, processor }); expect(processor.calls).toBe(2); const metadata = chapterSchema.parse(JSON.parse(await readFile(storyPaths(root, story.slug, 1).chapterMeta, "utf8"))); expect(metadata.stages.tts.status).toBe("complete"); expect(metadata.stages.audioMastering.status).toBe("complete"); expect(videoFingerprint("a", "s", "b", story.video, "t")).not.toBe(videoFingerprint("a", "s", "b", changed.video, "t")); });
+  it("refreshes an intro title when the book title changes",async()=>{
+    const {root,story}=await fixture();try{await generateStoredSubtitles({root,story,chapter:1});const processor=new FakeVideo();await renderStoredChapterVideo({root,story,chapter:1,processor});
+      const renamed={...story,title:"A renamed book"};expect((await renderStoredChapterVideo({root,story:renamed,chapter:1,processor})).reused).toBe(false);expect(processor.calls).toBe(2);
+      const withoutIntro={...story.video,introDurationSeconds:0};expect(videoFingerprint("a","s","b",withoutIntro,"Chapter","Old")).toBe(videoFingerprint("a","s","b",withoutIntro,"Chapter","New"));
+    }finally{await rm(root,{recursive:true,force:true});}
+  });
+  it("keeps committed metadata when a completion observer fails", async () => {
+    const {root,story}=await fixture();try {
+      await generateStoredSubtitles({root,story,chapter:1}); const processor=new FakeVideo();
+      await renderStoredChapterVideo({root,story,chapter:1,processor});
+      await expect(renderStoredChapterVideo({root,story,chapter:1,processor,force:true,onEvent(event){if(event.status === "completed") throw new Error("observer failed");}})).rejects.toThrow("observer failed");
+      const paths=storyPaths(root,story.slug,1), chapter=chapterSchema.parse(JSON.parse(await readFile(paths.chapterMeta,"utf8")));
+      expect(chapter.stages.video.status).toBe("complete");expect(chapter.stages.video.outputFingerprint).toBe(await fileFingerprint(paths.video));
+      expect((await renderStoredChapterVideo({root,story,chapter:1,processor})).reused).toBe(true);
+    } finally {await rm(root,{recursive:true,force:true});}
+  });
+  it("restores chapter state when a starting observer fails", async () => {
+    const {root,story}=await fixture();try {
+      await generateStoredSubtitles({root,story,chapter:1});const processor=new FakeVideo();
+      await expect(renderStoredChapterVideo({root,story,chapter:1,processor,onEvent(){throw new Error("observer failed");}})).rejects.toThrow("observer failed");
+      expect(processor.calls).toBe(0);const chapter=chapterSchema.parse(JSON.parse(await readFile(storyPaths(root,story.slug,1).chapterMeta,"utf8")));expect(chapter.stages.video.status).toBe("failed");
+    } finally {await rm(root,{recursive:true,force:true});}
+  });
+  it("keeps the previous chapter file and metadata when a replacement renderer returns an empty file",async()=>{
+    const {root,story}=await fixture();try{await generateStoredSubtitles({root,story,chapter:1});await renderStoredChapterVideo({root,story,chapter:1,processor:new FakeVideo()});
+      const paths=storyPaths(root,story.slug,1),previous=await readFile(paths.video),metadata=chapterSchema.parse(JSON.parse(await readFile(paths.chapterMeta,"utf8")));
+      const empty:VideoProcessor={version:"empty",async render(input,output,settings){await atomicWrite(output,Buffer.alloc(0));return {durationSeconds:input.audioDurationSeconds+settings.introDurationSeconds,width:settings.width,height:settings.height,videoCodec:"h264",audioCodec:"aac",container:"mp4"};}};
+      await expect(renderStoredChapterVideo({root,story,chapter:1,processor:empty,force:true})).rejects.toThrow("empty");expect(await readFile(paths.video)).toEqual(previous);expect(chapterSchema.parse(JSON.parse(await readFile(paths.chapterMeta,"utf8"))).stages.video.outputFingerprint).toBe(metadata.stages.video.outputFingerprint);
+    }finally{await rm(root,{recursive:true,force:true});}
+  });
   it("keeps the previous chapter video when a presentation rerender fails", async () => {
     const { root, story } = await fixture();
     await generateStoredSubtitles({ root, story, chapter: 1 });

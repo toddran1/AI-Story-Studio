@@ -2460,9 +2460,10 @@ export class StudioOperations {
   }
   async checkSceneMotion(slug: string, raw: unknown) {
     slugSchema.parse(slug); const input = z.object({ target: visualSceneSelectionSchema, id: z.string().min(1), force: z.boolean().default(false) }).strict().parse(raw);
-    return this.jobs.createDurable(this.visualJobsDirectory(), slug, control => withStoryLock(this.root, slug, "check scene motion", () => {
+    return this.jobs.createDurable(this.visualJobsDirectory(), slug, control => withStoryLock(this.root, slug, "check scene motion", async () => {
       let stopped = false; control.setPause(() => { stopped = true; });
-      return this.motionAssets().check(slug, input.target, input.id, () => stopped, value => control.update(value as Record<string, unknown>), input.force);
+      try { return await this.motionAssets().check(slug, input.target, input.id, () => stopped, value => control.update(value as Record<string, unknown>), input.force); }
+      finally { await invalidateChapterStatusDerivedReads(this.root, slug); }
     }), { operation: "motion-check", ...input }, "visualWorkflow");
   }
   async selectSceneMotion(slug: string, raw: unknown) {

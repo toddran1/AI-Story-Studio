@@ -1,3 +1,4 @@
+import { validateModelEffort } from "../effort.js";
 import OpenAI from "openai";
 import { z } from "zod";
 import { LLMProvider } from "../provider.js";
@@ -17,9 +18,11 @@ export class KimiProvider implements LLMProvider {
   async generateText(request: LLMRequest) {
     if (request.images?.length) throw new ConfigurationError("This Kimi adapter does not support image inputs. Choose an image-capable QA provider for visual checks.");
     await this.validateConfiguration();
+    validateModelEffort(this.name, request.model, request.effort);
     try {
       const response = await this.client.chat.completions.create({
         model: request.model,
+        ...(request.effort ? { thinking: { type: request.effort } } : {}),
         messages: [
           { role: "system", content: request.instructions },
           { role: "user", content: request.input },
@@ -34,9 +37,11 @@ export class KimiProvider implements LLMProvider {
   async generateStructured<T>(request: StructuredLLMRequest<T>) {
     if (request.images?.length) throw new ConfigurationError("This Kimi adapter does not support image inputs. Choose an image-capable QA provider for visual checks.");
     await this.validateConfiguration();
+    validateModelEffort(this.name, request.model, request.effort);
     try {
       const response = await this.client.chat.completions.create({
         model: request.model,
+        ...(request.effort ? { thinking: { type: request.effort } } : {}),
         messages: [
           { role: "system", content: request.instructions },
           { role: "user", content: `${request.input}\n\n${jsonSchemaContract(request.schema)}` },

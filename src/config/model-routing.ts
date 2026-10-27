@@ -34,6 +34,7 @@ export type ResolvedModelRouting = {
   stage: ConfigurableAIStage;
   provider: LLMProviderName;
   model: string;
+  effort?: StageModelConfig["effort"];
   source: ModelRoutingSource;
   isOverride: boolean;
   ready: boolean;
@@ -85,7 +86,8 @@ export function resolveModelRouting(ctx: ModelRoutingContext): ResolvedModelRout
     if (
       globalConfig &&
       globalConfig.provider === storyConfig.provider &&
-      globalConfig.model === storyConfig.model
+      globalConfig.model === storyConfig.model &&
+      globalConfig.effort === storyConfig.effort
     ) {
       resolvedConfig = storyConfig;
       source = "application_default";
@@ -135,6 +137,7 @@ export function resolveModelRouting(ctx: ModelRoutingContext): ResolvedModelRout
     stage,
     provider,
     model,
+    ...(resolvedConfig.effort ? { effort: resolvedConfig.effort } : {}),
     source,
     isOverride,
     ready,

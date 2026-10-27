@@ -9,6 +9,13 @@ const entity = canonicalEntitySchema.parse({ id: "ent_123456789012345678901234",
   pronunciation: { mode: "automatic", sourceLanguage: "zh-CN", romanization: "Jiāng Yuè", phoneticHint: "Jyang Yweh", confidence: .9 } });
 
 describe("provider-neutral pronunciation foundation", () => {
+  it("preserves address words around a localized short name in custom aliases", () => {
+    const asher = canonicalEntitySchema.parse({ ...entity, aliases: ["Old Asher"], preferredNarrationName: "Asher Sterling", localizedNaming: { locale: "en-US", fullName: "Asher Sterling", shortName: "Asher", usageMode: "ai_contextual" }, aliasNarrationRules: [{ alias: "Old Su", behavior: "custom", replacement: "Old Asher" }], pronunciation: { mode: "custom", customPronunciation: "ASH-er Sterling" } });
+    const text = "Old Asher... Old Asher is still alive! Asher Sterling replied to Old Asher’s friend.";
+    expect(adaptPronunciationText(text, resolvePronunciations(text, [asher]), { phoneticText: true }))
+      .toBe("Old ASH-er... Old ASH-er is still alive! ASH-er Sterling replied to Old ASH-er’s friend.");
+  });
+
   it("reuses location roots and keeps translated place suffixes audible", () => {
     const location = { ...entity, type: "location" as const, canonicalName: "Jiangcheng City", originalName: "江城", aliases: [], pronunciation: { mode: "automatic" as const, phoneticHint: "Jyang cheng", confidence: .9 } };
     const text = "Jiangcheng City was quiet. Jiangcheng slept.";

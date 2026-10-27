@@ -1,3 +1,4 @@
+import { VisualWorkflowJob } from "../apps/web/src/VisualWorkflowJob.js";
 /** @vitest-environment jsdom */
 import { act } from "react";
 import { createRoot } from "react-dom/client";
@@ -37,4 +38,26 @@ it("keeps use-still available when a selected clip's source is missing",async()=
   vi.stubGlobal("fetch",vi.fn(async(url)=>{calls.push(String(url));return json({...list,selectedId:id,sourceError:"Starting image is missing",startingFrameApproved:false});}));
   await act(async()=>root.render(<MotionAssetPanel slug="test" chapter={1} scene={scene}/>));await openPanel();const button=[...host.querySelectorAll("button")].find(button=>button.textContent==="Use still artwork")!;
   expect(button.disabled).toBe(false);expect(host.textContent).toContain("Starting image is missing");await act(async()=>button.click());expect(calls.some(url=>url.endsWith("/select"))).toBe(true);
+});
+
+it("refreshes motion after a saved narrative edit on the same scene",async()=>{
+  let calls=0;vi.stubGlobal("fetch",vi.fn(async()=>json({...list,recommended:++calls===1})));
+  await act(async()=>root.render(<MotionAssetPanel slug="test" chapter={1} scene={scene}/>));await openPanel();expect(calls).toBe(1);
+  await act(async()=>root.render(<MotionAssetPanel slug="test" chapter={1} scene={{...scene,visualPrompt:"The hall burns"}}/>));expect(calls).toBe(2);expect(host.textContent).not.toContain("This scene is marked as a major moment");
+  expect(host.querySelector('input[type="number"]')?.getAttribute("value")).toBe("4");expect(host.textContent).toContain("Parallax duration");
+});
+it("does not run the old chapter's refresh callback after selection's delayed reload",async()=>{
+  let finish!:(response:Response)=>void;let lists=0;const changed=vi.fn();vi.stubGlobal("fetch",vi.fn(async(url)=>{
+    if(String(url).endsWith("/select"))return json({});
+    lists++;if(lists===2)return new Promise<Response>(resolve=>{finish=resolve;});
+    return json({...list,selectedId:"mov_12345678-1234-1234-1234-123456789abc"});
+  }));
+  await act(async()=>root.render(<MotionAssetPanel slug="test" chapter={1} scene={scene} onChange={changed}/>));await openPanel();
+  await act(async()=>[...host.querySelectorAll("button")].find(button=>button.textContent==="Use still artwork")!.click());
+  await act(async()=>root.render(<MotionAssetPanel slug="test" chapter={2} scene={scene} onChange={changed}/>));await act(async()=>finish(json(list)));expect(changed).not.toHaveBeenCalled();
+});
+
+it("shows completed sample reviews in the progress bar without requiring batch outcomes",async()=>{
+  const job={id:"job",story:"test",type:"visualWorkflow",status:"running",progress:{stage:"motion-check",index:2,completed:2,total:3}};
+  await act(async()=>root.render(<VisualWorkflowJob job={job as any}/>));expect(host.querySelector("progress")?.value).toBe(2);
 });

@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { modelEfforts } from "../llm/effort.js";
 import { pronunciationDictionarySchema } from "./pronunciation-dictionary.js";
 
 export const llmProviderNameSchema = z.enum(["openai", "gemini", "kimi"]);
@@ -28,6 +29,9 @@ export function providerHasCapability(provider: string, capability: ProviderCapa
 export const stageModelConfigSchema = z.object({
   provider: llmProviderNameSchema,
   model: z.string().min(1),
+  effort: z.enum(["none", "minimal", "low", "medium", "high", "xhigh", "max", "enabled", "disabled"]).optional(),
+}).superRefine((value, ctx) => {
+  if (value.effort !== undefined && !modelEfforts(value.provider, value.model).includes(value.effort)) ctx.addIssue({ code: "custom", path: ["effort"], message: `Unsupported effort for ${value.provider} model ${value.model}; choose Provider default or a supported level.` });
 });
 
 export const fishTtsStageConfigSchema = z.object({

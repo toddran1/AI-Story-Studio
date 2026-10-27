@@ -1,3 +1,4 @@
+import { ModelFields, effortLabel } from "./ModelFields.js";
 import { ImageWorkbench } from "./ImageWorkbench.js";
 import { AudioRegeneration } from "./AudioRegeneration.js";
 import { ArtworkVisualCheck } from "./ArtworkVisualCheck.js";
@@ -4269,6 +4270,7 @@ export function SettingsPage({ slug, onJob, initialStory, initialEffectiveRoutin
                         [key]: {
                           provider: routing?.provider ?? currentModel.provider,
                           model: routing?.model ?? currentModel.model,
+                          effort: routing ? routing.effort : currentModel.effort,
                         },
                       },
                     })
@@ -4279,10 +4281,11 @@ export function SettingsPage({ slug, onJob, initialStory, initialEffectiveRoutin
               )}
             </div>
             {isOverridden ? (
-              <ModelEditor label="" value={currentModel} onChange={(value) => model(key, value)} />
+              <ModelEditor label={pretty(key)} value={currentModel} onChange={(value) => model(key, value)} />
             ) : (
               <div className="inherited-routing-info">
                 <span className="mono">{routing ? `${routing.provider} · ${routing.model}` : `${currentModel.provider} · ${currentModel.model}`}</span>
+                <span className="inherited-effort">Effort · {effortLabel(routing ? routing.effort : currentModel.effort)}</span>
                 {routing && !routing.ready && <small className="field-note error">{routing.reason}</small>}
               </div>
             )}
@@ -4743,9 +4746,9 @@ export function JobConsole({ job, onUpdate, onClose, navigate, initialQaComparis
 
 function PresetEditor({ label, value, onChange }: { label: string; value: any; onChange: (value: any) => void }) { return <div className="preset"><span className="eyebrow">{label}</span>{(["translation", "narration", "qa"] as const).map((key) => <ModelEditor key={key} label={pretty(key)} value={value[key]} onChange={(next) => onChange({ ...value, [key]: next })} />)}</div>; }
 function ModelEditor({ label, value, onChange }: { label: string; value: Model; onChange: (value: Model) => void }) {
-  const modelListId = useId();
-  return <div className="model-editor">{label ? <label>{label}</label> : null}<select value={value.provider} onChange={(e) => onChange({ ...value, provider: e.target.value as Model["provider"] })}><option value="openai">OpenAI</option><option value="gemini">Gemini</option><option value="kimi">Kimi</option></select><input aria-label={`${label || "Model"} model ID`} list={value.provider === "openai" ? modelListId : undefined} value={value.model} onChange={(e) => onChange({ ...value, model: e.target.value })} />{value.provider === "openai" && <datalist id={modelListId}>{OPENAI_TEXT_MODELS.map((model) => <option key={model} value={model} />)}</datalist>}</div>;
+  return <div className="model-editor-with-effort">{label && <span className="eyebrow">{label}</span>}<ModelFields label={label || "Model"} value={value} onChange={onChange} /></div>;
 }
+
 function PreviewResult({ choice, result, onChoose }: { choice: "a" | "b"; result: any; onChoose: () => void }) { const qa = result[choice === "a" ? "qaA" : "qaB"]; return <article className="preview-result"><div className="preview-result-head"><span className="option-letter">{choice.toUpperCase()}</span><Status status={qa.status} label={`${Math.round(qa.score * 100)} score`} /></div><Manuscript title="Translation" text={result[choice === "a" ? "translationA" : "translationB"]} compact /><Manuscript title="Narration" text={result[choice === "a" ? "narrationA" : "narrationB"]} compact />{result[choice === "a" ? "audioA" : "audioB"] && <AudioDeck src={`/api/stories/${result.manifest.story}/previews/${result.manifest.id}/audio-${choice}`} title={`Option ${choice.toUpperCase()} sample`} />}<button className="button primary" onClick={onChoose}>Use option {choice.toUpperCase()}</button></article>; }
 function Manuscript({ title, text, compact, onCopyText = false }: { title: string; text?: string; compact?: boolean; onCopyText?: boolean }) { return <article className={`manuscript ${compact ? "compact" : ""}`}><header className="manuscript-header"><span>{title}</span><div className="manuscript-header-actions">{onCopyText && <CopyTextButton text={text ?? ""} description="Original chapter text" />}<small className="mono">{text?.split(/\s+/).filter(Boolean).length ?? 0} words</small></div></header><div>{text ? text.split(/\n\n+/).map((paragraph, index) => <p key={index}>{paragraph}</p>) : <p className="empty-line">This stage has not produced text yet.</p>}</div></article>; }
 function CopyTextButton({ text, description }: { text: string; description: string }) {

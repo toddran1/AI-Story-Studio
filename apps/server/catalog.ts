@@ -1,3 +1,4 @@
+import { stageModelConfigSchema } from "../../src/domain/provider.js";
 import { pronunciationDictionarySchema } from "../../src/domain/pronunciation-dictionary.js";
 import { readCurrentOriginal } from "../../src/source/current-original.js";
 import { summarySchema } from "../../src/summaries/types.js";
@@ -1065,11 +1066,11 @@ export const settingsUpdateSchema = z.object({
   qaMode: z.enum(["production", "thorough"]).optional(),
   qaPolicy: qaPolicySchema.unwrap().optional(),
   narrationSettings: z.object({ profanityMode: z.enum(["preserve", "soften-strong"]), bleepStrongProfanity: z.boolean().default(false), includeChapterTitle: z.boolean().optional(), speechNormalization: z.enum(["automatic", "enabled", "disabled"]).default("automatic"), timeSpeechMode: z.enum(["natural_12h", "natural_24h", "preserve"]).default("natural_12h"), speechAbbreviations: z.record(z.string().trim().regex(/^[A-Za-z][A-Za-z0-9-]{0,29}$/), z.string().trim().min(1).max(120)).default({}), speechVocalizations: z.object({ mode: z.enum(["automatic", "preserve", "disabled"]).default("automatic"), fallback: z.enum(["safe_normalize", "omit_unsupported", "preserve"]).default("safe_normalize") }).default({ mode: "automatic", fallback: "safe_normalize" }) }).optional(),
-  translation: z.object({ provider: z.enum(["openai", "gemini", "kimi"]), model: z.string().trim().min(1) }),
-  narration: z.object({ provider: z.enum(["openai", "gemini", "kimi"]), model: z.string().trim().min(1) }),
-  qa: z.object({ provider: z.enum(["openai", "gemini", "kimi"]), model: z.string().trim().min(1) }),
-  storyBible: z.object({ provider: z.enum(["openai", "gemini", "kimi"]), model: z.string().trim().min(1) }).optional(),
-  scenePlanner: z.object({ provider: z.enum(["openai", "gemini", "kimi"]), model: z.string().trim().min(1) }).optional(),
+  translation: stageModelConfigSchema,
+  narration: stageModelConfigSchema,
+  qa: stageModelConfigSchema,
+  storyBible: stageModelConfigSchema.optional(),
+  scenePlanner: stageModelConfigSchema.optional(),
   pipelineOverrides: z.record(z.string(), z.boolean()).optional(),
   tts: z.object({ provider: ttsProviderNameSchema.optional(), model: z.string().trim().min(1).optional(), referenceId: z.string().trim().optional(), secondaryReferenceId: z.string().trim().optional(),
     voiceMode: z.enum(["narrator-only", "same-voice-dialogue", "narrator-dialogue"]).optional(), deliveryIntensity: z.enum(["none", "restrained", "expressive"]).optional(), qualityGuard: z.boolean().optional(), qualityMode: z.enum(["off", "verify", "auto_repair"]).optional(), providerQualityGuard: z.boolean().optional(), speed: z.number().min(0.5).max(2),
@@ -1087,6 +1088,13 @@ export async function updateStorySettings(root: string, slug: string, input: unk
   slugSchema.parse(slug); const update = settingsUpdateSchema.parse(input); const paths = storyPaths(root, slug, 1);
   return withStoryLock(root, slug, "web settings update", async () => {
     const current = await loadStory(paths.storyConfig);
+    // Resetting a category copies the complete studio routing, including effort.
+    if (update.pipelineOverrides) {
+      const defaults = await loadGlobalSettings(root, loadEnvironment());
+      for (const key of ["translation", "narration", "qa", "storyBible", "scenePlanner"] as const) {
+        if (update.pipelineOverrides[key] === false) update[key] = defaults[key];
+      }
+    }
     const artwork = { ...current.artwork, ...update.artwork };
     if (!imageModelCompatible(artwork.provider, artwork.model)) artwork.model = defaultImageModel(artwork.provider);
     const story = storySchema.parse({ ...current, title: update.title, author: update.author || undefined, description: update.description, tags: update.tags, notes: update.notes, sourceLanguage: update.sourceLanguage, outputLanguage: update.outputLanguage,

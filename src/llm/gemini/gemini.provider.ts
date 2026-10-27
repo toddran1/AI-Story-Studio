@@ -1,3 +1,4 @@
+import { validateModelEffort } from "../effort.js";
 import { GoogleGenAI } from "@google/genai";
 import { z } from "zod";
 import { LLMProvider } from "../provider.js";
@@ -18,8 +19,9 @@ export class GeminiProvider implements LLMProvider {
 
   async generateText(request: LLMRequest) {
     await this.validateConfiguration();
+    validateModelEffort(this.name, request.model, request.effort);
     try {
-      const interaction = await this.client.interactions.create({ model: request.model, input: geminiRequestInput(request, `${request.instructions}\n\n${request.input}`) });
+      const interaction = await this.client.interactions.create({ model: request.model, ...(request.effort ? { generation_config: { thinking_level: request.effort } } : {}), input: geminiRequestInput(request, `${request.instructions}\n\n${request.input}`) });
       if (!interaction.output_text?.trim()) throw new ProviderError("Gemini returned no output text");
       return { text: interaction.output_text, usage: usageFrom(interaction) };
     } catch (error) { if (error instanceof ConfigurationError) throw error; throw new ProviderError("Gemini Interactions API request failed", { cause: error }); }
@@ -27,6 +29,7 @@ export class GeminiProvider implements LLMProvider {
 
   async generateStructured<T>(request: StructuredLLMRequest<T>) {
     await this.validateConfiguration();
+    validateModelEffort(this.name, request.model, request.effort);
     try {
       const input = `${request.instructions}\n\n${request.input}`;
       const providerSchema = geminiJsonSchema(request.schema);
@@ -35,7 +38,7 @@ export class GeminiProvider implements LLMProvider {
       let interaction;
       try {
         interaction = await this.client.interactions.create({
-          model: request.model,
+          model: request.model, ...(request.effort ? { generation_config: { thinking_level: request.effort } } : {}),
           input: geminiRequestInput(request, input),
           response_format: { type: "text", mime_type: "application/json", schema: responseSchema },
         });
@@ -45,7 +48,7 @@ export class GeminiProvider implements LLMProvider {
         // retry once with the complete contract in the prompt instead.
         if (useCompactSchema || !isGeminiSchemaRejection(error)) throw error;
         interaction = await this.client.interactions.create({
-          model: request.model,
+          model: request.model, ...(request.effort ? { generation_config: { thinking_level: request.effort } } : {}),
           input: geminiRequestInput(request, `${input}\n\n${compactSchemaContract(request.schema)}`),
           response_format: { type: "text", mime_type: "application/json", schema: { type: "object" } },
         });

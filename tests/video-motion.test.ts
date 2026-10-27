@@ -1,7 +1,7 @@
 import { renderStoredChapterVideo } from "../src/video/chapter-video.js";
 import { fileFingerprint } from "../src/utils/file-fingerprint.js";
 import { describe, it, expect } from "vitest";
-import { mkdtemp, rm, readFile } from "node:fs/promises";
+import { mkdtemp, rm, readFile, readdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { testStory } from "./helpers.js";
@@ -15,9 +15,9 @@ import { validPngFingerprint } from "../src/artwork/generator.js";
 import { buildVideoPresentationTimeline, buildSceneMotionFilter } from "../src/video/presentation.js";
 import { buildVideoArgs } from "../src/video/renderer.js";
 import { resolveSceneMotion, sceneMotionContext } from "../src/video/scene-motion.js";
-import { FfmpegMotionTools } from "../src/video/motion-tools.js";
+import { FfmpegMotionTools, MOTION_SAMPLE_VERSION } from "../src/video/motion-tools.js";
 import { MotionAssetService, type MotionContext } from "../src/video/motion-service.js";
-import { selectedMotionAsset, motionAssetPaths, motionAssetBinding, loadMotionAssets, type MotionClipProvider } from "../src/video/motion-assets.js";
+import { selectedMotionAsset, motionAssetPaths, motionAssetBinding, loadMotionAssets, saveMotionAssets, type MotionClipProvider } from "../src/video/motion-assets.js";
 import type { LLMProvider } from "../src/llm/provider.js";
 const PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64");
 const MP4 = Buffer.from("0000ftypfake-motion");
@@ -88,6 +88,12 @@ describe("selective motion candidates",()=>{
     expect((await renderStoredChapterVideo({root:f.root,story:f.story,chapter:1,processor})).reused).toBe(true);
     await f.service.select(f.story.slug,f.target);expect((await renderStoredChapterVideo({root:f.root,story:f.story,chapter:1,processor})).reused).toBe(false);expect(inputs[1]?.sceneArtwork?.[0]?.clip).toBeUndefined();expect(calls).toBe(2);
   }finally{await rm(f.root,{recursive:true,force:true});}});
+  it("removes unpublished media when candidate manifest validation fails",async()=>{const f=await fixture();try{
+    f.tools.normalize=async (_source,output,width,height)=>{await atomicWrite(output,MP4);return {durationSeconds:99,width,height};};
+    await expect(f.service.importClip(f.story.slug,f.target,MP4)).rejects.toThrow();
+    expect((await loadMotionAssets(f.root,f.story.slug,f.target)).assets).toHaveLength(0);
+    expect(await readdir(motionAssetPaths(f.root,f.story.slug,f.target).directory)).toEqual([]);
+  }finally{await rm(f.root,{recursive:true,force:true});}});
   it("requires source approval and rejects invalid MP4 uploads",async()=>{const f=await fixture();try{
     await expect(f.service.importClip(f.story.slug,f.target,Buffer.from("not MP4"))).rejects.toThrow("MP4");f.scene.artwork.review="unreviewed";await f.save();await expect(f.service.importClip(f.story.slug,f.target,MP4)).rejects.toThrow("human-approved");expect(f.tools.calls).toBe(0);
   }finally{await rm(f.root,{recursive:true,force:true});}});
@@ -99,6 +105,30 @@ describe("selective motion candidates",()=>{
     await atomicWrite(motionAssetPaths(f.root,f.story.slug,f.target,asset.id).video,"changed");await expect(selectedMotionAsset(f.root,f.story.slug,f.target,f.scene)).rejects.toThrow("damaged");
     await f.service.select(f.story.slug,f.target);expect(await selectedMotionAsset(f.root,f.story.slug,f.target,f.scene)).toBeUndefined();
   }finally{await rm(f.root,{recursive:true,force:true});}});
+  it("does not mix old samples into a paused forced recheck or retain its approval",async()=>{const f=await fixture();try{
+    const asset=await f.service.importClip(f.story.slug,f.target,MP4);await f.service.check(f.story.slug,f.target,asset.id,()=>false,()=>{});await f.service.select(f.story.slug,f.target,asset.id);
+    const paused=await f.service.check(f.story.slug,f.target,asset.id,()=>f.checks()===4,()=>{},true);expect(paused).toMatchObject({status:"paused",checked:1});
+    const pending=(await loadMotionAssets(f.root,f.story.slug,f.target)).assets[0]!;expect(pending.checks).toHaveLength(1);expect(pending.review).toBe("unreviewed");
+    const metadata=chapterSchema.parse(JSON.parse(await readFile(f.paths.chapterMeta,"utf8")));expect(metadata.stages.video.staleReason).toContain("needs review");
+    await expect(f.service.select(f.story.slug,f.target,asset.id)).rejects.toThrow("checks");
+    await f.service.check(f.story.slug,f.target,asset.id,()=>false,()=>{});expect(f.checks()).toBe(6);await f.service.select(f.story.slug,f.target,asset.id);
+  }finally{await rm(f.root,{recursive:true,force:true});}});
+  it("keeps approved motion usable when rendering derives timing from a different mastered duration",async()=>{const f=await fixture();try{
+    f.story.video.subtitleMode="none";await atomicWriteJson(f.paths.storyConfig,f.story);await atomicWrite(f.paths.audio,"mastered-audio");
+    const chapter=chapterSchema.parse(JSON.parse(await readFile(f.paths.chapterMeta,"utf8")));chapter.audio={durationSeconds:20,codec:"mp3",container:"mp3"};chapter.stages.audioMastering={status:"complete",outputFingerprint:await fileFingerprint(f.paths.audio)};await atomicWriteJson(f.paths.chapterMeta,chapter);
+    const asset=await f.service.importClip(f.story.slug,f.target,MP4);await f.service.check(f.story.slug,f.target,asset.id,()=>false,()=>{});await f.service.select(f.story.slug,f.target,asset.id);
+    let duration=0;const processor={version:"fake",async render(input:any,output:string,settings:any){duration=input.sceneArtwork[0].durationSeconds;expect(input.sceneArtwork[0].clip.path).toContain(asset.id);await atomicWrite(output,"video-retimed");return {durationSeconds:23,width:settings.width,height:settings.height,videoCodec:"h264",audioCodec:"aac",container:"mp4"};}};
+    await renderStoredChapterVideo({root:f.root,story:f.story,chapter:1,processor});expect(duration).toBe(20);expect(f.scene.endSeconds).toBe(10);
+  }finally{await rm(f.root,{recursive:true,force:true});}});
+  it("reports an altered starting file as unavailable before another local operation is attempted",async()=>{const f=await fixture();try{
+    const path=sceneImagePath(f.root,f.story.slug,1,f.scene.id);await atomicWrite(path,Buffer.concat([PNG,Buffer.from("altered")]));const listed=await f.service.list(f.story.slug,f.target);expect(listed.startingFrameApproved).toBe(false);expect(listed.sourceError).toContain("changed");
+  }finally{await rm(f.root,{recursive:true,force:true});}});
+  it("refreshes older cached sample sets before their approved clip can be reused",async()=>{const f=await fixture();try{
+    const asset=await f.service.importClip(f.story.slug,f.target,MP4);await f.service.check(f.story.slug,f.target,asset.id,()=>false,()=>{});await f.service.select(f.story.slug,f.target,asset.id);
+    const old=await loadMotionAssets(f.root,f.story.slug,f.target);delete old.assets[0]!.samplingVersion;await saveMotionAssets(f.root,f.story.slug,f.target,old);
+    expect((await f.service.list(f.story.slug,f.target)).assets[0]!.stale).toBe(true);await expect(selectedMotionAsset(f.root,f.story.slug,f.target,f.scene)).rejects.toThrow("current continuity");
+    await f.service.check(f.story.slug,f.target,asset.id,()=>false,()=>{});expect(f.checks()).toBe(6);expect((await loadMotionAssets(f.root,f.story.slug,f.target)).assets[0]?.samplingVersion).toBe(MOTION_SAMPLE_VERSION);await f.service.select(f.story.slug,f.target,asset.id);
+  }finally{await rm(f.root,{recursive:true,force:true});}});
   it("prevents approval of mismatches and pauses between paid checks",async()=>{const f=await fixture();try{
     const asset=await f.service.importClip(f.story.slug,f.target,MP4);const paused=await f.service.check(f.story.slug,f.target,asset.id,()=>f.checks()===1,()=>{});expect(paused).toMatchObject({status:"paused",checked:1});
     f.setMismatch(true);await f.service.check(f.story.slug,f.target,asset.id,()=>false,()=>{});expect(f.checks()).toBe(3);await expect(f.service.select(f.story.slug,f.target,asset.id)).rejects.toThrow("mismatches");
@@ -109,7 +139,7 @@ describe("selective motion candidates",()=>{
     f.scene.visualPrompt="A hall on fire";await f.save();expect((await f.service.list(f.story.slug,f.target)).assets[0]?.stale).toBe(true);await expect(selectedMotionAsset(f.root,f.story.slug,f.target,f.scene)).rejects.toThrow("current continuity");
   }finally{await rm(f.root,{recursive:true,force:true});}});
   it("does not rebind a clip to a different approved starting image",async()=>{const f=await fixture();try{
-    const asset=await f.service.importClip(f.story.slug,f.target,MP4);const imagePath=sceneImagePath(f.root,f.story.slug,1,f.scene.id);await atomicWrite(imagePath,Buffer.concat([PNG,Buffer.from("new-source")]));f.scene.artwork.imageFingerprint=await validPngFingerprint(imagePath);await f.save();await expect(f.service.check(f.story.slug,f.target,asset.id,()=>false,()=>{})).rejects.toThrow("starting image changed");expect(f.checks()).toBe(0);
+    const asset=await f.service.importClip(f.story.slug,f.target,MP4);const imagePath=sceneImagePath(f.root,f.story.slug,1,f.scene.id);await atomicWrite(imagePath,Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkWPjfDwAEfQHzx5tC9AAAAABJRU5ErkJggg==","base64"));f.scene.artwork.imageFingerprint=await validPngFingerprint(imagePath);expect(f.scene.artwork.imageFingerprint).toBeTruthy();await f.save();await expect(f.service.check(f.story.slug,f.target,asset.id,()=>false,()=>{})).rejects.toThrow("starting image changed");expect(f.checks()).toBe(0);
   }finally{await rm(f.root,{recursive:true,force:true});}});
   it("creates local parallax from aligned PNG layers and requires transparency",async()=>{const f=await fixture();try{
     const asset=await f.service.parallax(f.story.slug,f.target,PNG,PNG,4);expect(asset).toMatchObject({kind:"parallax",origin:"local",review:"unreviewed"});const opaque=Buffer.from(PNG);opaque[25]=2;await expect(f.service.parallax(f.story.slug,f.target,PNG,opaque,4)).rejects.toThrow("alpha channel");expect(f.checks()).toBe(0);

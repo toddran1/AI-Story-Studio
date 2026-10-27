@@ -1,4 +1,5 @@
 import OpenAI from "openai";
+import { validateModelEffort } from "../effort.js";
 import { zodTextFormat } from "openai/helpers/zod";
 import { z } from "zod";
 import { LLMProvider } from "../provider.js";
@@ -26,10 +27,12 @@ export class OpenAIProvider implements LLMProvider {
 
   async generateText(request: LLMRequest) {
     await this.validateConfiguration();
+    validateModelEffort(this.name, request.model, request.effort);
     const startedAt = Date.now();
     try {
       const response = await this.client.responses.create({
         model: request.model,
+        ...(request.effort ? { reasoning: { effort: request.effort as "none" | "low" | "medium" | "high" | "xhigh" | "max" } } : {}),
         instructions: request.instructions,
         input: openAiRequestInput(request),
         store: false,
@@ -59,11 +62,13 @@ export class OpenAIProvider implements LLMProvider {
 
   async generateStructured<T>(request: StructuredLLMRequest<T>) {
     await this.validateConfiguration();
+    validateModelEffort(this.name, request.model, request.effort);
     const startedAt = Date.now();
     try {
       const format = toOpenAiTextFormat(request.schema, request.schemaName);
       const response = await this.client.responses.create({
         model: request.model,
+        ...(request.effort ? { reasoning: { effort: request.effort as "none" | "low" | "medium" | "high" | "xhigh" | "max" } } : {}),
         instructions: request.instructions,
         input: openAiRequestInput(request),
         store: false,

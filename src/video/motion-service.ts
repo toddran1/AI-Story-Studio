@@ -16,7 +16,7 @@ import { fingerprint } from "../utils/hash.js";
 import { imageDimensions } from "../artwork/resolution.js";
 import { analyzeArtworkVisuals, readVisualCheckImage, visualCheckTargetFingerprint } from "../artwork/visual-check.js";
 import { resolveVideoSettings } from "./config.js";
-import { FfmpegMotionTools } from "./motion-tools.js";
+import { FfmpegMotionTools, MOTION_SAMPLE_VERSION } from "./motion-tools.js";
 import { loadMotionAssets, saveMotionAssets, motionAssetPaths, motionAssetBinding, motionAssetReady, motionAssetIdSchema, newMotionAssetId, type MotionTarget, type MotionClipProvider, type MotionAsset } from "./motion-assets.js";
 import { chapterSchema } from "../domain/chapter.js";
 import { summarySchema } from "../summaries/types.js";
@@ -31,16 +31,21 @@ export class MotionAssetService {
   private async source(slug: string, target: MotionTarget) {
     const context = await this.context(slug, target);
     if (context.scene.disabled || context.scene.artwork.review !== "approved") throw new Error("Motion requires an enabled scene with human-approved starting artwork.");
-    const approved = backingArtworkVersion(context.scene);
-    if (await validPngFingerprint(context.imagePath) !== (approved?.imageFingerprint ?? context.scene.artwork.imageFingerprint)) throw new Error("The approved starting image is missing or changed. Review the current artwork before making motion.");
+    await this.verifyStartingImage(context);
     return context;
+  }
+  private async verifyStartingImage(context: MotionContext) {
+    const approved = backingArtworkVersion(context.scene);
+    const expected = approved?.imageFingerprint ?? context.scene.artwork.imageFingerprint;
+    const actual = await validPngFingerprint(context.imagePath);
+    if (!expected || !actual || actual !== expected) throw new Error("The approved starting image is missing or changed. Review the current artwork before making motion.");
   }
   async list(slug: string, target: MotionTarget) {
     const manifest = await loadMotionAssets(this.root, slug, target);
     let context: MotionContext | undefined, binding: string | undefined, sourceError: string | undefined;
-    try { context = await this.context(slug, target); binding = await motionAssetBinding(this.root, slug, target, context.scene); }
+    try { context = await this.context(slug, target); if (context.scene.artwork.review === "approved") await this.verifyStartingImage(context); binding = await motionAssetBinding(this.root, slug, target, context.scene); }
     catch (error) { sourceError = error instanceof Error ? error.message : String(error); }
-    return { ...manifest, sourceError, provider: this.provider ? { name: this.provider.name, version: this.provider.version } : null, recommended: context?.scene.importance === "major" || context?.scene.sequence?.beat === "action", startingFrameApproved: Boolean(context && !context.scene.disabled && context.scene.artwork.review === "approved" && !sourceError), assets: await Promise.all(manifest.assets.map(async asset => ({ ...asset, stale: !binding || asset.binding !== binding || asset.sourceFingerprint !== context?.imageFingerprint, ready: Boolean(binding && motionAssetReady(asset, binding)), intact: await fileFingerprint(motionAssetPaths(this.root, slug, target, asset.id).video) === asset.outputFingerprint }))) };
+    return { ...manifest, sourceError, provider: this.provider ? { name: this.provider.name, version: this.provider.version } : null, recommended: context?.scene.importance === "major" || context?.scene.sequence?.beat === "action", startingFrameApproved: Boolean(context && !context.scene.disabled && context.scene.artwork.review === "approved" && !sourceError), assets: await Promise.all(manifest.assets.map(async asset => ({ ...asset, stale: asset.samplingVersion !== MOTION_SAMPLE_VERSION || !binding || asset.binding !== binding || asset.sourceFingerprint !== context?.imageFingerprint, ready: Boolean(binding && motionAssetReady(asset, binding)), intact: await fileFingerprint(motionAssetPaths(this.root, slug, target, asset.id).video) === asset.outputFingerprint }))) };
   }
   async planGeneration(slug: string, target: MotionTarget, raw: unknown) {
     const input = motionGenerationSchema.parse(raw); const context = await this.source(slug, target);
@@ -99,8 +104,13 @@ export class MotionAssetService {
       const frames = [0,1,2].map(i => join(directory, `${i}.png`)); await this.tools.frames(output, probe.durationSeconds, frames);
       await rename(output, paths.video);
       for (const [index, frame] of frames.entries()) await rename(frame, paths.frame(index));
-      const asset: MotionAsset = { id, kind, origin, binding, sourceFingerprint: context.imageFingerprint, outputFingerprint, sampleFingerprints: await Promise.all([0,1,2].map(async index => (await readVisualCheckImage(paths.frame(index))).fingerprint)), ...probe, review: "unreviewed", checks: [], createdAt: new Date().toISOString(), ...provenance };
+      const asset: MotionAsset = { id, kind, origin, binding, sourceFingerprint: context.imageFingerprint, outputFingerprint, samplingVersion: MOTION_SAMPLE_VERSION, sampleFingerprints: await Promise.all([0,1,2].map(async index => (await readVisualCheckImage(paths.frame(index))).fingerprint)), ...probe, review: "unreviewed", checks: [], createdAt: new Date().toISOString(), ...provenance };
       manifest.assets.push(asset); await saveMotionAssets(this.root, slug, target, manifest); return asset;
+    } catch (error) {
+      // Candidates are immutable and have unique IDs; an unpublished candidate
+      // must not leave media behind when sampling or manifest persistence fails.
+      await Promise.all([paths.video, ...[0,1,2].map(index => paths.frame(index))].map(path => rm(path, { force: true }).catch(() => undefined)));
+      throw error;
     } finally { await rm(directory, { recursive: true, force: true }); }
   }
   async check(slug: string, target: MotionTarget, rawId: string, stopped: () => boolean, progress: (value: unknown) => void, force = false) {
@@ -114,13 +124,18 @@ export class MotionAssetService {
       try { return (await readVisualCheckImage(paths.frame(index))).fingerprint === asset.sampleFingerprints[index]; }
       catch (error) { if ((error as NodeJS.ErrnoException).code && (error as NodeJS.ErrnoException).code !== "ENOENT") throw error; return false; }
     }));
-    if (samplesIntact.some(intact => !intact)) {
+    if (asset.samplingVersion !== MOTION_SAMPLE_VERSION || samplesIntact.some(intact => !intact)) {
       await this.tools.frames(paths.video, asset.durationSeconds, [0,1,2].map(index => paths.frame(index)));
       asset.sampleFingerprints = await Promise.all([0,1,2].map(async index => (await readVisualCheckImage(paths.frame(index))).fingerprint));
+      asset.samplingVersion = MOTION_SAMPLE_VERSION;
       asset.checks = []; asset.review = "unreviewed";
     }
-    if (asset.checkedBinding !== binding) { asset.checks = []; asset.review = "unreviewed"; }
+    if (force || asset.checkedBinding !== binding) { asset.checks = []; asset.review = "unreviewed"; }
     asset.checkedBinding = binding;
+    // Persist the reset before a request or pause can expose an apparently
+    // complete mixture of old checks and newly requested sample reviews.
+    await saveMotionAssets(this.root, slug, target, manifest);
+    if (manifest.selectedId === asset.id && asset.review !== "approved") await this.markVideoStale(slug, target, "Selected scene motion needs review");
     for (let index = 0; index < 3; index++) {
       if (stopped()) { await saveMotionAssets(this.root, slug, target, manifest); return { status: "paused", checked: asset.checks.length }; }
       const frame = await readVisualCheckImage(paths.frame(index));
@@ -138,7 +153,7 @@ export class MotionAssetService {
         asset.review = "unreviewed";
         await saveMotionAssets(this.root, slug, target, manifest);
       }
-      progress({ stage: "motion-check", index: index+1, total: 3 });
+      progress({ stage: "motion-check", index: index+1, completed: index+1, total: 3 });
     }
     asset.binding = binding; await saveMotionAssets(this.root, slug, target, manifest);
     return { status: "completed", asset };
@@ -156,15 +171,19 @@ export class MotionAssetService {
       asset.review = "approved"; manifest.selectedId = id;
     } else manifest.selectedId = undefined;
     await saveMotionAssets(this.root, slug, target, manifest);
+    await this.markVideoStale(slug, target, "Selected scene motion changed");
+    return manifest;
+  }
+  private async markVideoStale(slug: string, target: MotionTarget, reason: string) {
     if (target.chapter) {
       const paths = storyPaths(this.root, slug, target.chapter); const chapter = chapterSchema.parse(await readJsonIfExists(paths.chapterMeta));
-      chapter.stages.video.staleReason = "Selected scene motion changed"; chapter.updatedAt = new Date().toISOString(); await atomicWriteJson(paths.chapterMeta, chapter);
+      chapter.stages.video.staleReason = reason; chapter.updatedAt = new Date().toISOString(); await atomicWriteJson(paths.chapterMeta, chapter);
     } else {
       const path = `${summaryMediaPaths(this.root, slug, target.summaryId!).directory}.json`; const summary = summarySchema.parse(await readJsonIfExists(path));
       if (summary.video) summary.video.status = "stale"; summary.updatedAt = new Date().toISOString(); await atomicWriteJson(path, summary); await invalidateSummaryReads(this.root, slug);
     }
-    return manifest;
   }
+
   async file(slug: string, target: MotionTarget, rawId: string) {
     const id = motionAssetIdSchema.parse(rawId); const manifest = await loadMotionAssets(this.root, slug, target); const asset = manifest.assets.find(a => a.id === id);
     if (!asset) throw new Error("Motion candidate was not found."); const path = motionAssetPaths(this.root, slug, target, id).video;

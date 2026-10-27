@@ -31,3 +31,14 @@ it.skipIf(!available)("renders aligned transparent foreground and clean backgrou
     const tools=new FfmpegMotionTools();await tools.parallax(bg,fg,output,2,640,360);expect(await tools.probe(output)).toMatchObject({durationSeconds:2,width:640,height:360});
   }finally{await rm(directory,{recursive:true,force:true});}
 },30_000);
+
+it.skipIf(!available)("uses video duration rather than longer embedded audio and samples the actual final frame",async()=>{
+  const directory=await mkdtemp(join(tmpdir(),"motion-end-frame-"));try{
+    const raw=join(directory,"raw.mp4"),clip=join(directory,"clip.mp4"),frames=[0,1,2].map(index=>join(directory,`${index}.png`));
+    generate(["-f","lavfi","-i","color=c=red:s=160x90:r=24:d=2,drawbox=x=0:y=0:w=iw:h=ih:color=blue:t=fill:enable='eq(n,47)'","-f","lavfi","-i","sine=frequency=440:duration=20","-map","0:v:0","-map","1:a:0","-c:v","libx264","-c:a","aac",raw]);
+    const tools=new FfmpegMotionTools();expect((await tools.probe(raw)).durationSeconds).toBeCloseTo(2,2);
+    const normalized=await tools.normalize(raw,clip,640,360);expect(normalized.durationSeconds).toBeCloseTo(2,2);await tools.frames(clip,normalized.durationSeconds,frames);
+    const sample=spawnSync(ffmpeg,["-hide_banner","-loglevel","error","-i",frames[2]!,"-frames:v","1","-vf","scale=1:1","-pix_fmt","rgb24","-f","rawvideo","pipe:1"]);
+    expect(sample.status).toBe(0);expect(sample.stdout[2]).toBeGreaterThan(200);expect(sample.stdout[0]).toBeLessThan(50);
+  }finally{await rm(directory,{recursive:true,force:true});}
+},30_000);

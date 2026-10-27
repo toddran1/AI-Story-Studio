@@ -1,10 +1,11 @@
+import { commitRenderedVideo } from "../video/commit.js";
 import { selectedMotionAsset } from "../video/motion-assets.js";
 import { sceneMotionContext } from "../video/scene-motion.js";
 import { artworkRepairSchema, prepareArtworkRepair } from "../artwork/repair.js";
 import { prepareCreatureForms } from "../visual-canon/creature-forms.js";
 import { invalidateSummaryReads } from "./read-revision.js";
 import { randomUUID } from "node:crypto";
-import { readFile, rename, rm } from "node:fs/promises";
+import { readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { z } from "zod";
 import { loadStory } from "../config/load-config.js";
@@ -957,22 +958,22 @@ export class SummaryVisualService {
     const previousVideo = summary.video ? { ...summary.video } : undefined;
     summary.video = { ...summary.video, status: "generating", inputFingerprint, manuallyEdited: false, reviewRequired: false };
     await this.save(slug, summary);
-    progress?.({ type: "summary.video.started" });
-
-    const sceneArtwork = await Promise.all(scenes.map(async (scene) => {
-      const backing = backingArtworkVersion(scene);
-      let path = paths.image(scene.id);
-      if (backing) {
-        const originalPath = paths.sceneVersionImage(scene.id, backing.versionNumber);
-        const productionPath = paths.sceneVersionProductionImage(scene.id, backing.versionNumber);
-        const asset = await resolveBestProductionAssetForPaths({ story, version: backing, originalPath, productionPath });
-        if (await validPngFingerprint(asset.path) === asset.fingerprint) path = asset.path;
-      }
-      return { path, durationSeconds: scene.endSeconds - scene.startSeconds, videoTreatment: scene.videoTreatment, motionContext: sceneMotionContext(scene), clip: motionAssets.get(scene.id) };
-    }));
-
     const staging = join(paths.directory, `video-${randomUUID()}.mp4`);
+    let saved: StorySummary;
     try {
+      progress?.({ type: "summary.video.started" });
+      const sceneArtwork = await Promise.all(scenes.map(async (scene) => {
+        const backing = backingArtworkVersion(scene);
+        let path = paths.image(scene.id);
+        if (backing) {
+          const originalPath = paths.sceneVersionImage(scene.id, backing.versionNumber);
+          const productionPath = paths.sceneVersionProductionImage(scene.id, backing.versionNumber);
+          const asset = await resolveBestProductionAssetForPaths({ story, version: backing, originalPath, productionPath });
+          if (await validPngFingerprint(asset.path) === asset.fingerprint) path = asset.path;
+        }
+        return { path, durationSeconds: scene.endSeconds - scene.startSeconds, videoTreatment: scene.videoTreatment, motionContext: sceneMotionContext(scene), clip: motionAssets.get(scene.id) };
+      }));
+
       const probe = await this.renderer.render({
         audio: paths.audio,
         subtitles,
@@ -985,23 +986,24 @@ export class SummaryVisualService {
       if (Math.abs(probe.durationSeconds - summary.audio.durationSeconds) > Math.max(.25, 2 / settings.fps)) {
         throw new Error("Rendered summary video duration does not match mastered audio");
       }
-      await rename(staging, paths.video);
-      summary.video = {
-        status: "current",
-        inputFingerprint,
-        outputFingerprint: await fileFingerprint(paths.video),
-        durationSeconds: probe.durationSeconds,
-        width: probe.width,
-        height: probe.height,
-        sceneCount: scenes.length,
-        subtitleMode: settings.subtitleMode,
-        sourceFingerprint: summary.audio.outputFingerprint,
-        generatedAt: new Date().toISOString(),
-        manuallyEdited: false,
-        reviewRequired: false,
-      };
-      progress?.({ type: "summary.video.completed" });
-      return this.save(slug, summary);
+      const audioSourceFingerprint = summary.audio.outputFingerprint;
+      saved = await commitRenderedVideo(staging, paths.video, outputFingerprint => {
+        summary.video = {
+          status: "current",
+          inputFingerprint,
+          outputFingerprint,
+          durationSeconds: probe.durationSeconds,
+          width: probe.width,
+          height: probe.height,
+          sceneCount: scenes.length,
+          subtitleMode: settings.subtitleMode,
+          sourceFingerprint: audioSourceFingerprint,
+          generatedAt: new Date().toISOString(),
+          manuallyEdited: false,
+          reviewRequired: false,
+        };
+        return this.save(slug, summary);
+      });
     } catch (error) {
       summary.video = { ...previousVideo, status: previousVideo?.outputFingerprint ? "stale" : "failed", inputFingerprint: previousVideo?.inputFingerprint ?? inputFingerprint, manuallyEdited: previousVideo?.manuallyEdited ?? false, reviewRequired: previousVideo?.reviewRequired ?? false, error: error instanceof Error ? error.message : String(error) };
       await this.save(slug, summary);
@@ -1009,6 +1011,8 @@ export class SummaryVisualService {
     } finally {
       await rm(staging, { force: true }).catch(() => undefined);
     }
+    progress?.({ type: "summary.video.completed" });
+    return saved;
   }
   async produce(slug: string, id: string, raw: unknown = {}, progress?: SummaryVisualProgress, paused?: () => boolean) {
     const options = summaryProduceInputSchema.parse(raw);

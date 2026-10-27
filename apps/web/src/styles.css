@@ -346,3 +346,20 @@
 .job-progress-detailed{height:4px;background:#35343d;border-radius:4px;overflow:hidden}
 .job-progress-detailed span{display:block;height:100%;background:var(--violet);border-radius:inherit;transition:width .25s ease}
 .job-console .job-artwork-detail{line-height:1.5}
+
+/* Model controls share the production desk's quiet ledger rhythm. */
+.model-routing-row{padding:14px 0;border-bottom:1px solid var(--line);min-width:0}
+.model-routing-row:first-of-type{padding-top:0}.model-routing-row h4{font:500 15px var(--serif);margin:0 0 9px;color:var(--ink)}
+.model-fields{display:grid;grid-template-columns:minmax(85px,.7fr) minmax(120px,1.4fr);gap:9px;min-width:0}
+.model-fields label{display:grid;gap:5px;min-width:0;margin:0}.model-fields label>span{font:9px var(--mono);color:var(--muted);letter-spacing:.04em}
+.model-fields input,.model-fields select{width:100%;min-width:0;box-sizing:border-box;margin:0}
+.model-field-effort{grid-column:1/-1;padding-left:10px;border-left:2px solid var(--violet)}
+.model-effort-note{grid-column:1/-1;color:var(--muted);font-size:10px;line-height:1.5}
+.inherited-effort{display:block;margin-top:7px;font:10px var(--mono);color:var(--violet-soft)}
+.model-editor-with-effort{min-width:0}.model-editor-with-effort>.eyebrow{display:block;margin-bottom:8px}
+@media(max-width:420px){.model-fields{grid-template-columns:1fr}.model-field-effort{grid-column:1}}
+.model-fields input,.model-fields select{background:var(--void);color:var(--ink);border:1px solid var(--line-strong);border-radius:5px;padding:9px 10px;font:12px var(--sans);height:auto;min-height:36px}
+.model-fields input:focus-visible,.model-fields select:focus-visible{outline:2px solid var(--violet-soft);outline-offset:2px}
+.model-fields select:disabled{opacity:.6;cursor:not-allowed}.global-settings .settings-ledger>section{align-self:start}
+.model-routing-row,.model-editor-with-effort{container-type:inline-size}
+@container(min-width:400px){.model-fields{grid-template-columns:90px minmax(100px,1fr) 140px}.model-field-effort{grid-column:auto}}
