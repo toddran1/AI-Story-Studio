@@ -26,7 +26,7 @@ const makeIssues = (count: number, severity: "warn" | "fail" = "warn"): QaIssue[
     evidence: `Evidence for issue ${i + 1}`,
   }));
 
-const makeBadQa = (count = 5): QaResult => ({
+const makeBadQa = (count = 9): QaResult => ({
   status: "warn",
   score: 0.7,
   issues: makeIssues(count, "warn"),
@@ -82,7 +82,7 @@ describe("transactional QA auto-recovery", () => {
           return { value: request.schema.parse(makeGoodQa()), usage: { inputTokens: 10, outputTokens: 5 } };
         }
         // Run 2: bad QA triggering recovery
-        return { value: request.schema.parse(makeBadQa(5)), usage: { inputTokens: 10, outputTokens: 5 } };
+        return { value: request.schema.parse(makeBadQa(9)), usage: { inputTokens: 10, outputTokens: 5 } };
       }
       return originalGenerateStructured(request);
     };
@@ -118,7 +118,7 @@ describe("transactional QA auto-recovery", () => {
     metaBeforeRun2.stages.video = { status: "complete", outputFingerprint: "fp-vid-1" };
     await atomicWriteJson(paths.chapterMeta, metaBeforeRun2);
 
-    // Step 2: Force QA. QA will return 5 issues, trigger recovery, and recovery translation will throw!
+    // Step 2: Force QA. QA will return 9 issues, trigger recovery, and recovery translation will throw!
     await expect(
       pipeline.run({
         root,
@@ -167,7 +167,7 @@ describe("transactional QA auto-recovery", () => {
       "Initial translation 1", // Call 1
       "Initial narration 1",   // Call 2
       "Recovered translation 2", // Call 3 (recovery translation succeeds!)
-    ], makeBadQa(5));
+    ], makeBadQa(9));
 
     const originalGenerateText = llm.generateText.bind(llm);
     llm.generateText = async (request) => {
@@ -227,7 +227,7 @@ describe("transactional QA auto-recovery", () => {
         qaCallCount++;
         if (qaCallCount === 1) {
           // Pre-recovery QA call
-          return { value: request.schema.parse(makeBadQa(5)), usage: { inputTokens: 10, outputTokens: 5 } };
+          return { value: request.schema.parse(makeBadQa(9)), usage: { inputTokens: 10, outputTokens: 5 } };
         }
         // Recovery QA #2 throws an execution failure
         throw new Error("QA validation LLM endpoint connection reset");
@@ -295,7 +295,7 @@ describe("transactional QA auto-recovery", () => {
       if (request.schemaName === "chapter_qa") {
         qaCallCount++;
         if (qaCallCount === 1) {
-          return { value: request.schema.parse(makeBadQa(5)), usage: { inputTokens: 10, outputTokens: 5 } };
+          return { value: request.schema.parse(makeBadQa(9)), usage: { inputTokens: 10, outputTokens: 5 } };
         }
         return { value: request.schema.parse(persistentFailQa), usage: { inputTokens: 10, outputTokens: 5 } };
       }
@@ -345,7 +345,7 @@ describe("transactional QA auto-recovery", () => {
         if (qaCallCount === 1) {
           // Right before recovery snapshot is taken, delete narrationTts to simulate it not existing
           await rm(paths.narrationTts, { force: true });
-          return { value: request.schema.parse(makeBadQa(5)), usage: { inputTokens: 10, outputTokens: 5 } };
+          return { value: request.schema.parse(makeBadQa(9)), usage: { inputTokens: 10, outputTokens: 5 } };
         }
         throw new Error("QA validation crashed on attempt 2");
       }
@@ -384,7 +384,7 @@ describe("transactional QA auto-recovery", () => {
     const llm = new MockLLM("gemini", [
       "Initial translation 1",
       "Initial narration 1",
-    ], makeBadQa(5));
+    ], makeBadQa(9));
 
     const originalGenerateText = llm.generateText.bind(llm);
     llm.generateText = async (request) => {
@@ -462,7 +462,7 @@ describe("QA recovery stage scope", () => {
       if (request.schemaName === "chapter_qa") {
         qaCallCount++;
         if (qaCallCount === 1) {
-          return { value: request.schema.parse(makeBadQa(5)), usage: { inputTokens: 10, outputTokens: 5 } };
+          return { value: request.schema.parse(makeBadQa(9)), usage: { inputTokens: 10, outputTokens: 5 } };
         }
         qa2Completed = true;
         return { value: request.schema.parse(makeGoodQa()), usage: { inputTokens: 10, outputTokens: 5 } };
@@ -556,7 +556,7 @@ describe("QA recovery stage scope", () => {
       if (request.schemaName === "chapter_qa") {
         qaCallCount++;
         if (qaCallCount === 1) {
-          return { value: request.schema.parse(makeBadQa(5)), usage: { inputTokens: 10, outputTokens: 5 } };
+          return { value: request.schema.parse(makeBadQa(9)), usage: { inputTokens: 10, outputTokens: 5 } };
         }
         return { value: request.schema.parse(persistentFailQa), usage: { inputTokens: 10, outputTokens: 5 } };
       }
@@ -589,7 +589,7 @@ describe("QA recovery stage scope", () => {
     expect(chapterMeta.stages.audioMastering.status).toBe("pending");
   });
 
-  it("D. Selected-stage QA run: executes only translation, narration, and QA, without downstream execution", async () => {
+  it("D. Selected text-and-QA run: recovers without downstream execution", async () => {
     const root = await mkdtemp(join(tmpdir(), "qa-scope-d-"));
     const env = loadEnvironment({});
     const story = await createBlankStory(root, env, { title: "QA Story", slug: "qa-story" });
@@ -610,7 +610,7 @@ describe("QA recovery stage scope", () => {
       if (request.schemaName === "chapter_qa") {
         qaCallCount++;
         if (qaCallCount === 1) {
-          return { value: request.schema.parse(makeBadQa(5)), usage: { inputTokens: 10, outputTokens: 5 } };
+          return { value: request.schema.parse(makeBadQa(9)), usage: { inputTokens: 10, outputTokens: 5 } };
         }
         return { value: request.schema.parse(makeGoodQa()), usage: { inputTokens: 10, outputTokens: 5 } };
       }
@@ -637,7 +637,7 @@ describe("QA recovery stage scope", () => {
       story,
       chapter: 1,
       inputPath: paths.original,
-      executionStages: ["qa"],
+      executionStages: ["translation", "narration", "qa"],
     });
 
     expect(qaCallCount).toBe(2);
@@ -650,7 +650,7 @@ describe("QA recovery stage scope", () => {
     expect(result.stages.audioMastering.status).toBe("pending");
   });
 
-  it("E. One recovery only: does not trigger a second recovery attempt if QA #2 still has >4 issues", async () => {
+  it("E. One recovery only: does not trigger a second recovery attempt if QA #2 still has >8 issues", async () => {
     const root = await mkdtemp(join(tmpdir(), "qa-scope-e-"));
     const env = loadEnvironment({});
     const story = await createBlankStory(root, env, { title: "QA Story", slug: "qa-story" });
@@ -670,8 +670,8 @@ describe("QA recovery stage scope", () => {
     llm.generateStructured = async (request) => {
       if (request.schemaName === "chapter_qa") {
         qaCallCount++;
-        // Both QA 1 and QA 2 return 5 warn issues
-        return { value: request.schema.parse(makeBadQa(5)), usage: { inputTokens: 10, outputTokens: 5 } };
+        // Both QA 1 and QA 2 return 9 warn issues
+        return { value: request.schema.parse(makeBadQa(9)), usage: { inputTokens: 10, outputTokens: 5 } };
       }
       return originalGenerateStructured(request);
     };

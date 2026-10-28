@@ -72,11 +72,22 @@ describe("pipeline QA fresh execution and recovery", () => {
     expect(await readFile(ctx.paths.narration, "utf8")).toBe(narration);
   });
 
-  it("recovers once at five mixed issues and keeps the second QA result", async () => {
-    const ctx = await fixture([qaWithIssues(5, true), qaWithIssues(2)]);
+  it("does not auto-recover at the eight-finding threshold during pipeline QA", async () => {
+    const ctx = await fixture([qaWithIssues(8)]);
+    const english = await readFile(ctx.paths.english, "utf8");
+    const narration = await readFile(ctx.paths.narration, "utf8");
+    await ctx.pipeline.run({ root: ctx.root, story: ctx.story, chapter: 1, inputPath: ctx.input, force: "qa", stopAfter: "qa" });
+    expect(ctx.openai.qaCalls).toBe(1);
+    expect(ctx.gemini.calls).toHaveLength(1);
+    expect(await readFile(ctx.paths.english, "utf8")).toBe(english);
+    expect(await readFile(ctx.paths.narration, "utf8")).toBe(narration);
+  });
+
+  it("recovers once at nine mixed issues and keeps the second QA result", async () => {
+    const ctx = await fixture([qaWithIssues(9, true), qaWithIssues(2)]);
     await writeFile(ctx.paths.audioRaw, "keep", "utf8");
     const events: string[] = [];
-    const result = await ctx.pipeline.run({ root: ctx.root, story: ctx.story, chapter: 1, inputPath: ctx.input, executionStages: ["qa"], stopAfter: "qa", onStageEvent: (event) => {
+    const result = await ctx.pipeline.run({ root: ctx.root, story: ctx.story, chapter: 1, inputPath: ctx.input, force: "qa", stopAfter: "qa", onStageEvent: (event) => {
       if (event.status === "started" && !event.detail) events.push(event.stage);
     } });
     expect(events).toEqual(["qa", "translation", "narration", "qa"]);
@@ -91,10 +102,10 @@ describe("pipeline QA fresh execution and recovery", () => {
     expect(result.quality?.status).toBe("warn");
   });
 
-  it("preserves the one-time recovery when five critical QA issues are reported", async () => {
-    const ctx = await fixture([qaWithIssues(5, true, true), qaWithIssues(1)]);
+  it("preserves the one-time recovery when nine critical QA issues are reported", async () => {
+    const ctx = await fixture([qaWithIssues(9, true, true), qaWithIssues(1)]);
     const events: string[] = [];
-    await ctx.pipeline.run({ root: ctx.root, story: ctx.story, chapter: 1, inputPath: ctx.input, executionStages: ["qa"], stopAfter: "qa", onStageEvent: (event) => {
+    await ctx.pipeline.run({ root: ctx.root, story: ctx.story, chapter: 1, inputPath: ctx.input, force: "qa", stopAfter: "qa", onStageEvent: (event) => {
       if (event.status === "started" && !event.detail) events.push(event.stage);
     } });
     expect(events).toEqual(["qa", "translation", "narration", "qa"]);
@@ -103,20 +114,20 @@ describe("pipeline QA fresh execution and recovery", () => {
   });
 
   it("stops after the second QA and applies its failure gate", async () => {
-    const ctx = await fixture([qaWithIssues(6, true), qaWithIssues(8, true)]);
-    await expect(ctx.pipeline.run({ root: ctx.root, story: ctx.story, chapter: 1, inputPath: ctx.input, executionStages: ["qa"], stopAfter: "qa" })).rejects.toThrow("failed QA");
+    const ctx = await fixture([qaWithIssues(9, true), qaWithIssues(8, true)]);
+    await expect(ctx.pipeline.run({ root: ctx.root, story: ctx.story, chapter: 1, inputPath: ctx.input, force: "qa", stopAfter: "qa" })).rejects.toThrow("failed QA");
     expect(ctx.openai.qaCalls).toBe(2);
     expect(ctx.gemini.calls).toHaveLength(2);
     expect(qaStateSchema.parse(JSON.parse(await readFile(ctx.paths.qa, "utf8"))).findings).toHaveLength(8);
   });
 
   it("budgets recovery independently for each chapter", async () => {
-    const ctx = await fixture([qaWithIssues(2), qaWithIssues(5), qaWithIssues(1)]);
+    const ctx = await fixture([qaWithIssues(2), qaWithIssues(9), qaWithIssues(1)]);
     const secondInput = join(ctx.root, "chapter-two.txt");
     await writeFile(secondInput, "第二章\n\n林遥关上了门。", "utf8");
     await ctx.pipeline.run({ root: ctx.root, story: ctx.story, chapter: 2, inputPath: secondInput, stopAfter: "narration" });
-    await ctx.pipeline.run({ root: ctx.root, story: ctx.story, chapter: 1, inputPath: ctx.input, executionStages: ["qa"], stopAfter: "qa" });
-    await ctx.pipeline.run({ root: ctx.root, story: ctx.story, chapter: 2, inputPath: secondInput, executionStages: ["qa"], stopAfter: "qa" });
+    await ctx.pipeline.run({ root: ctx.root, story: ctx.story, chapter: 1, inputPath: ctx.input, force: "qa", stopAfter: "qa" });
+    await ctx.pipeline.run({ root: ctx.root, story: ctx.story, chapter: 2, inputPath: secondInput, force: "qa", stopAfter: "qa" });
     expect(ctx.openai.qaCalls).toBe(3);
     expect(qaStateSchema.parse(JSON.parse(await readFile(ctx.paths.qa, "utf8"))).findings).toHaveLength(2);
     expect(qaStateSchema.parse(JSON.parse(await readFile(storyPaths(ctx.root, ctx.story.slug, 2).qa, "utf8"))).findings).toHaveLength(1);

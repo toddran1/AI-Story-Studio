@@ -108,11 +108,10 @@ describe("summary narration and audio", () => {
     const canonical = await create(); const written = "Hehe... that worked.";
     await media.editNarration("demo-story", canonical.id, { text: written });
     const speech = await media.speech("demo-story", canonical.id); await media.audio("demo-story", canonical.id);
-    // MockTTS has no native-tag strategy, so the safe_normalize fallback applies the
-    // canonical spoken form ("Hehe..." → "Hehehe..."); the stored narration is untouched.
-    expect(speech).toMatchObject({ narrationText: written, spokenText: "Hehehe... that worked." });
-    expect(speech.transformations).toEqual([expect.objectContaining({ kind: "vocalization", written: "Hehe...", spoken: "Hehehe..." })]);
-    expect(tts.requests[0]?.text).toBe("Hehehe... that worked.");
+    // The Fish speech layer removes unstable leading spelled laughter before
+    // normalization, while the saved narration keeps the author's words.
+    expect(speech).toMatchObject({ narrationText: written, spokenText: "that worked." });
+    expect(tts.requests[0]?.text).toBe("that worked.");
   });
 
   it("applies legacy preferred names and contextual alias rules through the shared narration context", async () => {

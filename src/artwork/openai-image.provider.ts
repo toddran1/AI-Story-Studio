@@ -1,4 +1,5 @@
 import OpenAI, { toFile } from "openai";
+import { openAiTransport } from "../llm/openai/transport.js";
 import { ConfigurationError, ArtworkError } from "../pipeline/errors.js";
 import { toOpenAiProviderError } from "../llm/openai/openai.provider.js";
 import { ImageGenerationRequest, ImageGenerationResult, ImageProvider, ImageProviderCapabilities } from "./provider.js";
@@ -18,7 +19,7 @@ export class OpenAIImageProvider implements ImageProvider {
   };
   private readonly client: OpenAI;
   constructor(private readonly apiKey?: string, timeoutMs = 180_000, client?: OpenAI) {
-    this.client = client ?? new OpenAI({ apiKey: apiKey ?? "missing", timeout: timeoutMs, maxRetries: 0 });
+    this.client = client ?? new OpenAI({ ...openAiTransport, apiKey: apiKey ?? "missing", timeout: timeoutMs, maxRetries: 0 });
   }
   async validateConfiguration() { if (!this.apiKey) throw new ConfigurationError("Missing required OpenAI credential (OPENAI_API_KEY). Add it to .env."); }
   async generate(request: ImageGenerationRequest): Promise<ImageGenerationResult> {

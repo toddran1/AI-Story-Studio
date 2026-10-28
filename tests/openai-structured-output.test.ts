@@ -9,6 +9,8 @@ import {
   toOpenAiProviderError,
 } from "../src/llm/openai/openai.provider.js";
 import { ConfigurationError, ProviderError } from "../src/pipeline/errors.js";
+import { openAiTransport, OPENAI_CONNECT_TIMEOUT_MS } from "../src/llm/openai/transport.js";
+import { OpenAIImageProvider } from "../src/artwork/openai-image.provider.js";
 import { OPENAI_TEXT_MODELS } from "../src/llm/openai/models.js";
 import { storyBibleUpdateSchema } from "../src/domain/story-bible.js";
 
@@ -181,6 +183,36 @@ describe("OpenAIProvider execution & error diagnostics", () => {
     expect(error.message).toContain("No HTTP error response was received");
     expect(error.message).toContain("server outcome is unknown");
     expect(error.status).toBeUndefined();
+  });
+
+  it("shares an explicit connection transport while retaining SDK deadlines and retry limits", () => {
+    const providers = [new OpenAIProvider("fake", 300_000), new OpenAIImageProvider("fake", 180_000)];
+    expect(OPENAI_CONNECT_TIMEOUT_MS).toBe(30_000);
+    for (const [index, provider] of providers.entries()) {
+      const client = (provider as unknown as { client: { timeout: number; maxRetries: number; fetchOptions: unknown; fetch: unknown } }).client;
+      expect(client.timeout).toBe(index === 0 ? 300_000 : 180_000);
+      expect(client.maxRetries).toBe(0);
+      expect(client.fetchOptions).toEqual(openAiTransport.fetchOptions);
+      expect(client.fetch).toBe(openAiTransport.fetch);
+    }
+  });
+
+  it("distinguishes socket connection timeout from the overall request deadline", () => {
+    const socket = Object.assign(new Error("Connect Timeout Error (attempted address: api.openai.com:443, timeout: 10000ms)"), { code: "UND_ERR_CONNECT_TIMEOUT" });
+    const error = new Error("Request timed out.", { cause: new TypeError("fetch failed", { cause: socket }) });
+    const result = toOpenAiProviderError(error, "Failed", "test", { timeoutMs: 300_000, elapsedMs: 10_500 });
+    expect(result).toMatchObject({ category: "network_error", retryable: true, code: "UND_ERR_CONNECT_TIMEOUT" });
+    expect(result.message).toContain("OpenAI connection timed out after 10.5s");
+    expect(result.message).toContain("timeout: 10000ms");
+    expect(result.message).toContain("deadline (300s) was not the cause");
+    expect(result.message).not.toContain("server outcome is unknown");
+    expect(result.cause).toBe(error);
+  });
+
+  it("finds DNS failures inside aggregate connection errors", () => {
+    const dns = Object.assign(new Error("getaddrinfo ENOTFOUND api.openai.com"), { code: "ENOTFOUND" });
+    const error = new Error("Connection error", { cause: new AggregateError([dns]) });
+    expect(toOpenAiProviderError(error, "Failed", "test")).toMatchObject({ category: "network_error", code: "ENOTFOUND", retryable: true });
   });
 
   it("preserves API timeout details and native Headers request IDs", () => {

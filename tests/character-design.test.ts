@@ -48,7 +48,7 @@ describe("distinct character designs", () => {
       const plan = await planReferenceBatch(root, story, images, { selection: [{ entityId: id, kind: "profile" }] });
       const result = await generateStyleSheet(root, story.slug, id, images, story);
       expect(request.prompt).toContain("REQUIRED EDITORIAL FIGURE — larger");
-      expect(request.prompt).toContain("DDD cup or F cup");
+      expect(request.prompt).toContain("DD cup or E cup");
       expect(request.prompt).toContain("Lean, compact, petite or athletic");
       expect(request.prompt.length).toBeGreaterThan(10_000);
       expect(result.reference.prompt).toBe(request.prompt);

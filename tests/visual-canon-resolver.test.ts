@@ -447,8 +447,8 @@ describe("Visual Canon Prompt Resolver", () => {
     });
 
     it("serializes figure traits for female characters only when adultContent is enabled", () => {
-      expect(resolve(femaleProfile("larger"), matureStory).prompt).toContain("Figure: exaggerated very curvaceous with an especially full bust, hips, and big round butt that pokes out from a side angle view. Breast size should be a minimum of a DDD cup or F cup.");
-      expect(resolve(femaleProfile("normal"), matureStory).prompt).toContain("Figure: curvaceous with a full bust, hips, and round butt that pokes out from a side angle view. Breast size should be a minimum of a D cup.");
+      expect(resolve(femaleProfile("larger"), matureStory).prompt).toContain("Figure: exaggerated very curvaceous with an especially full bust, hips, and big round butt that pokes out from a side angle view. Breast size should be a minimum of a DD cup or E cup.");
+      expect(resolve(femaleProfile("normal"), matureStory).prompt).toContain("Figure: curvaceous with a full bust, hips, and rounded butt that pokes out from a side angle view. Breast size should be a minimum of a D cup.");
       expect(resolve(femaleProfile("smaller"), matureStory).prompt).not.toContain("Figure:");
       expect(resolve(femaleProfile(), matureStory).prompt).toContain("Figure: curvaceous with a full bust");
       expect(resolve(femaleProfile("larger")).prompt).not.toContain("Figure:");

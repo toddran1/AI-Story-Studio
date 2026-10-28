@@ -63,7 +63,7 @@ describe("visual workflow generation", () => {
     const f = await fixture(); try {
       const images = new Images(); images.failAt = 2;
       const input = { selection: [{ entityId: id, kind: "form", scopeId: "zombie" }, { entityId: id, kind: "form", scopeId: "skeleton" }] };
-      const plan = await planReferenceBatch(f.root, f.story, images, input); expect(plan.imageCount).toBe(2); expect(plan.estimatedCostUsd).toBeGreaterThan(0);
+      const plan = await planReferenceBatch(f.root, f.story, images, input); expect(plan.imageCount).toBe(2); expect(plan.estimatedCostUsd).toBeUndefined(); expect(plan.costNote).toContain("reported billable token usage");
       const result = await runReferenceBatch(f.root, f.story, images, plan, () => undefined);
       expect(result.status).toBe("completed_with_errors"); expect(result.outcomes.map(item => item.status)).toEqual(["generated", "failed"]);
       const retry = await planReferenceBatch(f.root, f.story, images, input); expect(retry.imageCount).toBe(1); expect(retry.entries[0]?.reuseReferenceId).toBe(result.outcomes[0]?.referenceId);

@@ -96,6 +96,8 @@ export type PipelineOptions = {
   qaRecoveryAttempted?: boolean;
 };
 
+const QA_AUTO_RECOVERY_THRESHOLD = 8;
+
 const pending = (): StageState => ({ status: "pending" });
 
 export class ChapterPipeline {
@@ -366,8 +368,8 @@ export class ChapterPipeline {
       if (JSON.stringify(chapter.quality) !== JSON.stringify(expectedQuality)) { chapter.quality = expectedQuality; await persist(); }
       if (qaResult && !options.qaRecoveryAttempted) {
         const issueCount = activeQaIssues(quality).filter((issue) => issue.severity === "warn" || issue.severity === "fail").length;
-        if (issueCount > 8) {
-          logger.info({ event: "pipeline.qa.auto_recovery", story: options.story.slug, chapter: options.chapter, issueCount, threshold: 4,
+        if (issueCount > QA_AUTO_RECOVERY_THRESHOLD) {
+          logger.info({ event: "pipeline.qa.auto_recovery", story: options.story.slug, chapter: options.chapter, issueCount, threshold: QA_AUTO_RECOVERY_THRESHOLD,
             detail: `QA found ${issueCount} issues. Regenerating Translation, Narration, and QA once.` });
           const [savedEnglish, savedNarration, savedNarrationTts, savedQa] = await Promise.all([
             readTextIfExists(paths.english),

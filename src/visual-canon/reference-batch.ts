@@ -57,7 +57,8 @@ export async function planReferenceBatch(root: string, story: Story, provider: I
   }
   const imageCount = entries.filter(entry => !entry.blockedReason && !entry.reuseReferenceId).length;
   const pricing = pricingFor(story.artwork.provider, story.artwork.model, story.artwork);
-  return { entries, force: input.force, fingerprint: fingerprint({ entries, artwork: story.artwork, direction, force: input.force }), imageCount, estimatedCostUsd: calculateCost(pricing, { imageCount }), costNote: "Estimate uses the studio pricing catalog for output images; reference input, checks and provider retries may add cost.", provider: story.artwork.provider, model: story.artwork.model };
+  const estimatedCostUsd = calculateCost(pricing, { imageCount });
+  return { entries, force: input.force, fingerprint: fingerprint({ entries, artwork: story.artwork, direction, force: input.force }), imageCount, estimatedCostUsd, costNote: estimatedCostUsd === undefined ? "Cost unavailable before generation: this model requires reported billable token usage or a verified catalog price. Reference input, checks and retries may add cost." : "Estimate uses the studio pricing catalog for output images; reference input, checks and provider retries may add cost.", provider: story.artwork.provider, model: story.artwork.model };
 }
 
 /** Caller holds the story lock. Every image is saved as an unapproved candidate. */

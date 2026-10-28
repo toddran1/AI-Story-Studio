@@ -1,4 +1,5 @@
 import OpenAI from "openai";
+import { openAiTransport } from "./transport.js";
 import { validateModelEffort } from "../effort.js";
 import { zodTextFormat } from "openai/helpers/zod";
 import { z } from "zod";
@@ -16,7 +17,7 @@ export class OpenAIProvider implements LLMProvider {
   readonly name = "openai" as const;
   private readonly client: OpenAI;
   constructor(private readonly apiKey?: string, private readonly timeoutMs = 120_000) {
-    this.client = new OpenAI({ apiKey: apiKey ?? "missing", timeout: timeoutMs, maxRetries: 0 });
+    this.client = new OpenAI({ ...openAiTransport, apiKey: apiKey ?? "missing", timeout: timeoutMs, maxRetries: 0 });
   }
 
   async validateConfiguration(): Promise<void> {
@@ -237,6 +238,15 @@ export function toOpenAiProviderError(error: unknown, fallbackSummary: string, m
   let retryable = false;
   let summary = fallbackSummary;
 
+  const connectionFailure = findConnectionFailure(error);
+  if (status === undefined && connectionFailure) {
+    const elapsed = timing ? ` after ${(timing.elapsedMs / 1000).toFixed(1)}s` : "";
+    const deadline = timing ? ` The overall request deadline (${timing.timeoutMs / 1000}s) was not the cause.` : "";
+    return new ProviderError(`OpenAI connection ${connectionFailure.code === "UND_ERR_CONNECT_TIMEOUT" ? "timed out" : "failed"}${elapsed}: ${connectionFailure.message.replace(/[.]+$/, "")}. The HTTP connection was not established; no API response was received.${deadline} Check network, VPN/proxy, or firewall connectivity before retrying.`, {
+      cause: error, code: connectionFailure.code, category: "network_error", provider: "openai", model, retryable: true,
+    });
+  }
+
   if (status === 401 || status === 403 || code === "invalid_api_key") {
     category = "authentication_error";
     retryable = false;
@@ -273,4 +283,20 @@ export function toOpenAiProviderError(error: unknown, fallbackSummary: string, m
     model,
     retryable,
   });
+}
+
+/** Prefer the concrete transport cause over the SDK's generic timeout wrapper. */
+function findConnectionFailure(error: unknown): { code: string; message: string } | undefined {
+  const seen = new Set<unknown>();
+  const pending: unknown[] = [error];
+  while (pending.length) {
+    const current = pending.shift();
+    if (!current || typeof current !== "object" || seen.has(current)) continue;
+    seen.add(current);
+    const value = current as { code?: unknown; message?: unknown; cause?: unknown; errors?: unknown[] };
+    if (typeof value.code === "string" && ["UND_ERR_CONNECT_TIMEOUT", "ENOTFOUND", "EAI_AGAIN", "ECONNREFUSED", "ENETUNREACH", "EHOSTUNREACH"].includes(value.code)) return { code: value.code, message: typeof value.message === "string" ? value.message : value.code };
+    pending.push(value.cause);
+    if (Array.isArray(value.errors)) pending.push(...value.errors);
+  }
+  return undefined;
 }

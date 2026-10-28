@@ -66,6 +66,7 @@
     "playwright-core": "^1.63.0",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
+    "undici": "7.29.1",
     "zod": "^4.0.0"
   },
   "devDependencies": {

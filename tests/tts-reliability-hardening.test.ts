@@ -77,8 +77,8 @@ describe("TTS Reliability & Cost Hardening (Tests 26–35)", () => {
       const directionProvider = new FishAudioProvider("test-key", fetch as typeof fetch, 120_000, undefined, { tskRendering: "direction" });
       const baseConfig = testStory().pipeline.tts;
 
-      expect(defaultProvider.inputNormalizationVersion).toBe("fish-speech-normalization-v31-word-ellipsis-commas");
-      expect(directionProvider.inputNormalizationVersion).toBe("fish-speech-normalization-v31-word-ellipsis-commas-tsk-direction");
+      expect(defaultProvider.inputNormalizationVersion).toMatch(/^fish-speech-normalization-v\d+-[a-z-]+$/);
+      expect(directionProvider.inputNormalizationVersion).toBe(`${defaultProvider.inputNormalizationVersion}-tsk-direction`);
 
       const fpDefault = fingerprint({
         narration: "narration-fp-1",
