@@ -9,6 +9,16 @@ const entity = canonicalEntitySchema.parse({ id: "ent_123456789012345678901234",
   pronunciation: { mode: "automatic", sourceLanguage: "zh-CN", romanization: "Jiāng Yuè", phoneticHint: "Jyang Yweh", confidence: .9 } });
 
 describe("provider-neutral pronunciation foundation", () => {
+  it.each([
+    ["Asher Sterling", "Asher", "Ash-er Sterling", "Friend Ash"],
+    ["Kyrie Lamb", "Kyrie", "Kyree Lamb", "Boss Ky"],
+  ])("does not expand custom nicknames with %s's full pronunciation", (fullName, shortName, hint, nickname) => {
+    const person = canonicalEntitySchema.parse({ ...entity, preferredNarrationName: fullName, localizedNaming: { locale: "en-US", fullName, shortName, usageMode: "ai_contextual" }, aliasNarrationRules: [{ alias: "Friend Su", behavior: "custom", replacement: nickname }], pronunciation: { mode: "custom", customPronunciation: hint } });
+    const text = `${nickname} greeted ${shortName}. ${fullName} waved.`;
+    expect(adaptPronunciationText(text, resolvePronunciations(text, [person]), { phoneticText: true }))
+      .toBe(`${nickname} greeted ${hint.split(" ")[0]}. ${hint} waved.`);
+  });
+
   it("preserves address words around a localized short name in custom aliases", () => {
     const asher = canonicalEntitySchema.parse({ ...entity, aliases: ["Old Asher"], preferredNarrationName: "Asher Sterling", localizedNaming: { locale: "en-US", fullName: "Asher Sterling", shortName: "Asher", usageMode: "ai_contextual" }, aliasNarrationRules: [{ alias: "Old Su", behavior: "custom", replacement: "Old Asher" }], pronunciation: { mode: "custom", customPronunciation: "ASH-er Sterling" } });
     const text = "Old Asher... Old Asher is still alive! Asher Sterling replied to Old Asher’s friend.";

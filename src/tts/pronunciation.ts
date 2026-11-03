@@ -91,6 +91,11 @@ export function resolvePronunciations(text: string, entities: readonly Canonical
         const preferred = entity.preferredNarrationName?.toLocaleLowerCase() === name.toLocaleLowerCase() && name.toLocaleLowerCase() !== entity.canonicalName.toLocaleLowerCase();
         let pronunciation = entity.pronunciation ?? { mode: "automatic" as const };
         const shortName = entity.localizedNaming?.shortName;
+        // A custom narration alias is an intentional wording choice, not an
+        // alternative spelling of the full name. Preserve nicknames such as
+        // "Boss Ky" and "Friend Ash"; a nested localized name, if present,
+        // resolves separately with the appropriate short-name pronunciation.
+        if (!localized && !preferred && entity.aliasNarrationRules.some(rule => rule.behavior === "custom" && rule.replacement?.toLocaleLowerCase() === name.toLocaleLowerCase())) continue;
         // Composite localized aliases such as "Old Asher" retain their address
         // words. Let the nested short-name occurrence carry its own hint instead
         // of replacing the entire alias with the full-name pronunciation.
