@@ -16,12 +16,13 @@ export function AudioRegeneration({ slug, onJob, watchJob }: { slug: string; onJ
   const [entry, setEntry] = useState(""); const [error, setError] = useState("");
   const [rebuild, setRebuild] = useState(true), [busy, setBusy] = useState(false);
   const [job, setJob] = useState<Job>(); const watcher = useRef<(() => void) | undefined>(undefined);
+  const submission = useRef(0);
   useActivityRefresh(slug, () => { setRevision(value => value + 1); setQualities({}); });
   const sorted = [...selections].sort((a,b) => a.chapter-b.chapter);
   const full = sorted.filter(row => !row.segments).length;
   const segments = sorted.reduce((sum,row) => sum + (row.segments?.length ?? 0),0);
   useEffect(() => { let cancelled = false; setRows(undefined); api<NonNullable<typeof rows>>(`/stories/${slug}/audio/chapters?page=${page}&pageSize=25`).then(value => { if (!cancelled) setRows(value); }).catch(error => { if (!cancelled) setError(String(error)); }); return () => { cancelled = true; }; }, [slug,page,revision]);
-  useEffect(() => () => watcher.current?.(), [slug]);
+  useEffect(() => () => { submission.current++; watcher.current?.(); }, [slug]);
   const selectFull = (chapter: number, selected: boolean) => setSelections(current => [...current.filter(row => row.chapter !== chapter), ...(selected ? [{ chapter }] : [])]);
   const selectSegment = (chapter: number, segment: number, selected: boolean) => setSelections(current => {
     const chosen = current.find(row => row.chapter === chapter)?.segments ?? [];
@@ -43,7 +44,7 @@ export function AudioRegeneration({ slug, onJob, watchJob }: { slug: string; onJ
       for (const token of entry.split(",").map(value => value.trim()).filter(Boolean)) {
         const match = /^(\d+)(?:\s*-\s*(\d+))?$/.exec(token); if (!match) throw new Error("Use chapter numbers or ranges, such as 310, 321-325.");
         const from = Number(match[1]), to = Number(match[2] ?? match[1]);
-        if (from < 1 || to < from || to-from > 1999) throw new Error("Choose a valid range of up to 2,000 chapters.");
+        if (!Number.isSafeInteger(from) || !Number.isSafeInteger(to) || from < 1 || to < from || to-from > 1999) throw new Error("Choose a valid range of up to 2,000 chapters.");
         for (let chapter=from; chapter<=to; chapter++) numbers.add(chapter);
       }
       if (!numbers.size || numbers.size > 2000) throw new Error("Enter 1–2,000 chapters.");
@@ -55,15 +56,18 @@ export function AudioRegeneration({ slug, onJob, watchJob }: { slug: string; onJ
     } catch (error) { setError(String(error)); } finally { setAdding(false); }
   };
   const run = async () => {
+    const ticket = ++submission.current;
     setBusy(true); setError("");
     try {
       const next = await post<Job>(`/stories/${slug}/jobs/audio-regeneration`, { selections: sorted, rebuildMasters: rebuild });
-      setJob(next); onJob(next); setBusy(false); watcher.current?.();
+      onJob(next); if (ticket !== submission.current) return;
+      setJob(next); setBusy(false); watcher.current?.();
       watcher.current = watchJob(next.id, next => {
-        setJob(next); onJob(next);
+        onJob(next); if (ticket !== submission.current) return;
+        setJob(next);
         if (["completed","failed","paused","cancelled"].includes(next.status)) { setBusy(false); setRevision(value => value+1); setQualities({}); if (next.error) setError(next.error); }
-      }, error => { setBusy(false); setError(String(error)); });
-    } catch (error) { setBusy(false); setError(String(error)); }
+      }, error => { if (ticket === submission.current) { setBusy(false); setError(String(error)); } });
+    } catch (error) { if (ticket === submission.current) { setBusy(false); setError(String(error)); } }
   };
   const progress = job?.progress as { chapter?: number; segment?: number; completed?: number; total?: number; phase?: string } | undefined;
   const result = job?.result as { results?: Result[] } | undefined;

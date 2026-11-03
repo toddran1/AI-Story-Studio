@@ -322,6 +322,54 @@ describe("web service layer", () => {
     expect(finished.status).toBe("completed"); expect((finished.result as any).summary.complete).toBe(1); expect((finished.result as any).options.continueOnError).toBe(true);
   });
 
+  it("keeps failed chapters in a paused stage batch's remaining selection", async()=>{
+    const {root,story}=await storyFixture(), jobs=new JobManager(), operations=new StudioOperations(root,env,jobs);
+    try {
+      const original=jobs.create("stageExecution",story.slug,async()=>({status:"paused",results:[{chapter:1,status:"failed"},{chapter:2,status:"completed"},{chapter:3,status:"reused"}]}),{chapters:[1,2,3,4],stages:["narration"],mode:"selected",continueOnError:true});
+      await waitForJob(jobs,original.id);
+      const next={...jobs.get(original.id)!,id:randomUUID(),status:"queued" as const};const start=vi.spyOn(operations,"startStageExecution").mockReturnValue(next);
+      await operations.retryJob(original.id);expect(start).toHaveBeenCalledWith(story.slug,expect.objectContaining({chapters:[1,4]}));
+    }finally{await operations.close();await rm(root,{recursive:true,force:true});}
+  });
+  it("reloads story settings after waiting for shared execution resources",async()=>{
+    const root=await mkdtemp(join(tmpdir(),"stage-wait-config-")), jobs=new JobManager(), titles:string[]=[];
+    const operations=new StudioOperations(root,env,jobs,{pipeline:{run:async options=>{titles.push(options.story.title);}}});
+    try {
+      const inspection=await operations.inspectSource({filename:"chapter.txt",file:Buffer.from("One"),chapter:1});const imported=await operations.importInspection("wait-config-story",inspection.id);
+      let runner!:Parameters<JobManager["create"]>[2];vi.spyOn(jobs,"create").mockImplementationOnce((type,story,run,payload)=>{runner=run;const now=new Date().toISOString();return {id:randomUUID(),type,story,payload,status:"queued",createdAt:now,updatedAt:now};});
+      operations.startStageExecution(imported.story.slug,{chapters:[1],stages:["translation"],mode:"prerequisites",force:true});
+      const result=await runner({update(){},setPause(){},async reserve(){await atomicWriteJson(storyPaths(root,imported.story.slug,1).storyConfig,{...imported.story,title:"Updated while waiting"});}});
+      expect(result).toHaveProperty("status","completed");expect(titles).toEqual(["Updated while waiting"]);
+    }finally{await operations.close();await rm(root,{recursive:true,force:true});}
+  });
+  it("keeps direct activity available when the production queue cannot be reached",async()=>{
+    const {root,story}=await storyFixture(), jobs=new JobManager();let release!:()=>void;const pending=new Promise<void>(resolve=>{release=resolve;});
+    const operations=new StudioOperations(root,env,jobs,{queue:{repository:{listJobs:vi.fn(async()=>{throw new Error("Database offline");})}} as any});
+    const job=jobs.create("audio",story.slug,async()=>pending,{chapter:1});
+    try{
+      const req=Object.assign(Readable.from([]),{method:"GET",url:"/api/jobs",headers:{host:"localhost:3000"}});let status=0;const chunks:Buffer[]=[];const res=Object.assign(new PassThrough(),{writeHead(code:number){status=code;}});res.on("data",chunk=>chunks.push(Buffer.from(chunk)));const done=new Promise<void>(resolve=>res.on("finish",resolve));
+      await createApiHandler(operations)(req as unknown as IncomingMessage,res as unknown as ServerResponse);await done;const body=JSON.parse(Buffer.concat(chunks).toString());
+      expect(status).toBe(200);expect(body.jobs).toEqual(expect.arrayContaining([expect.objectContaining({id:job.id})]));expect(body.warnings[0]).toContain("Direct jobs are still updating");
+    }finally{release();await vi.waitFor(()=>expect(jobs.get(job.id)?.status).toBe("completed"));await operations.close();await rm(root,{recursive:true,force:true});}
+  });
+  it("resumes a paused legacy batch without rerunning completed forced chapters",async()=>{
+    const root=await mkdtemp(join(tmpdir(),"batch-resume-paid-")),jobs=new JobManager();const calls:number[]=[];let original!:Job;let firstAttempt=true;
+    const operations=new StudioOperations(root,env,jobs,{pipeline:{run:async options=>{calls.push(options.chapter);if(options.chapter===2&&firstAttempt){firstAttempt=false;jobs.pause(original.id);throw new ConfigurationError("Needs review before retry");}}}});
+    try{
+      const inspection=await operations.inspectSource({files:[{name:"chapter-001.txt",text:"One"},{name:"chapter-002.txt",text:"Two"},{name:"chapter-003.txt",text:"Three"}]});const imported=await operations.importInspection("legacy-resume-story",inspection.id);
+      original=operations.startBatch(imported.story.slug,{from:1,to:3,force:"narration",continueOnError:true});const paused=await waitForJob(jobs,original.id);expect(paused.status).toBe("paused");expect(calls).toEqual([1,2]);
+      const resumed=await operations.retryJob(original.id) as Job;expect(resumed.scope?.chapters).toEqual([2,3]);expect((await waitForJob(jobs,resumed.id)).status).toBe("completed");expect(calls).toEqual([1,2,2,3]);
+    }finally{await operations.close();await rm(root,{recursive:true,force:true});}
+  });
+  it("includes older paused queue jobs beyond the recent-activity page",async()=>{
+    const {root}=await storyFixture();const oldId=randomUUID();const queueRow=(id:string)=>({id,story:"book",from:1,to:2,status:"paused",pauseRequested:true,cancelRequested:false,totalItems:2,completedItems:1,createdAt:"2026-01-01T00:00:00Z",updatedAt:"2026-01-01T00:00:00Z"});
+    const listJobs=vi.fn(async(options:any)=>({items:options.status==="paused"?[queueRow(options.page===1?"recent-paused":oldId)]:[],pages:options.status==="paused"?2:1}));
+    const operations=new StudioOperations(root,env,new JobManager(),{queue:{repository:{listJobs}} as any});
+    try{
+      const req=Object.assign(Readable.from([]),{method:"GET",url:"/api/jobs",headers:{host:"localhost:3000"}});let status=0;const chunks:Buffer[]=[];const res=Object.assign(new PassThrough(),{writeHead(code:number){status=code;}});res.on("data",chunk=>chunks.push(Buffer.from(chunk)));const done=new Promise<void>(resolve=>res.on("finish",resolve));
+      await createApiHandler(operations)(req as unknown as IncomingMessage,res as unknown as ServerResponse);await done;const body=JSON.parse(Buffer.concat(chunks).toString());expect(status).toBe(200);expect(body.jobs).toEqual(expect.arrayContaining([expect.objectContaining({id:`queue-${oldId}`,status:"paused"})]));expect(listJobs).toHaveBeenCalledWith(expect.objectContaining({status:"paused",page:2}));
+    }finally{await operations.close();await rm(root,{recursive:true,force:true});}
+  });
   it("reports chapter failures instead of completing a continuing stage batch", async () => {
     const root = await mkdtemp(join(tmpdir(), "story-stage-failures-")); const jobs = new JobManager();
     const operations = new StudioOperations(root, env, jobs, { pipeline: { run: async () => { throw new Error("QA did not pass"); } } });

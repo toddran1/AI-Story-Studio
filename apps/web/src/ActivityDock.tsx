@@ -6,26 +6,30 @@ export function useActivityJobs(initial?: Job) {
   const [jobs, setJobs] = useState<Job[]>(initial ? [initial] : []);
   const records = useRef(new Map<string, Job>(initial ? [[initial.id, initial]] : []));
   const [error, setError] = useState("");
+  const seen = useRef(new Set(initial ? [initial.id] : []));
   const startedAt = useRef(Date.now());
   const update = useCallback((next: Job) => {
-    const previous = records.current.get(next.id);
+    const previous = records.current.get(next.id); const known = seen.current.has(next.id);
     const previousTime = Date.parse(previous?.updatedAt ?? ""), nextTime = Date.parse(next.updatedAt ?? "");
     if (Number.isFinite(previousTime) && Number.isFinite(nextTime) && nextTime < previousTime) return;
     // Queue resume keeps the same job ID. Accept a newer resumed state while
     // ignoring delayed progress from before a terminal notification.
     if (previous && isTerminalJob(previous) && !isTerminalJob(next) && !(nextTime > previousTime)) return;
     if (JSON.stringify(previous) === JSON.stringify(next)) return;
-    records.current.set(next.id, next);
+    records.current.set(next.id, next); seen.current.add(next.id);
     if (records.current.size > 200) for (const [id, value] of records.current) { if (records.current.size <= 200) break; if (isTerminalJob(value) && id !== next.id) records.current.delete(id); }
     setJobs([...records.current.values()]);
-    if (isTerminalJob(next) && previous && !isTerminalJob(previous)) window.dispatchEvent(new CustomEvent("studio:job-finished", { detail: next }));
+    if (isTerminalJob(next) && (previous ? !isTerminalJob(previous) : !known && Date.parse(next.createdAt ?? "") >= startedAt.current)) window.dispatchEvent(new CustomEvent("studio:job-finished", { detail: next }));
   }, []);
   useEffect(() => {
     let active = true, timer: ReturnType<typeof setTimeout>;
     const poll = async () => {
-      try { const value = await api<{ jobs: Job[] }>("/jobs"); if (!active) return;
-        for (const job of value.jobs) if (!isTerminalJob(job) || job.status === "paused" || records.current.has(job.id) || Date.parse(job.createdAt ?? "") >= startedAt.current) update(job);
-        setError("");
+      try { const value = await api<{ jobs: Job[]; warnings?: string[] }>("/jobs"); if (!active) return;
+        for (const job of value.jobs) {
+          if (isTerminalJob(job) && seen.current.has(job.id) && !records.current.has(job.id)) continue;
+          if (!isTerminalJob(job) || job.status === "paused" || records.current.has(job.id) || Date.parse(job.createdAt ?? "") >= startedAt.current) update(job);
+        }
+        setError(value.warnings?.join(" ") ?? "");
       } catch (value) { if (active) setError(value instanceof Error ? value.message : String(value)); }
       if (active) timer = setTimeout(poll, 2000);
     };

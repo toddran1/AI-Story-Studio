@@ -32,7 +32,7 @@ import { basename, join, resolve } from "node:path";
 import { z } from "zod";
 import { BatchRunner, ChapterProcessor, ProgressEvent } from "../../src/batch/batch-runner.js";
 import { createBatchState } from "../../src/batch/batch-state.js";
-import { retryConfigSchema } from "../../src/batch/types.js";
+import { retryConfigSchema, batchStateSchema } from "../../src/batch/types.js";
 import { selectChapterNumbers, selectChapterRange } from "../../src/batch/range.js";
 import { Environment } from "../../src/config/env.js";
 import { defaultStory, loadStory } from "../../src/config/load-config.js";
@@ -171,7 +171,7 @@ const slugSchema = z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/);
 function summaryArtDirectionIdentity(value: SummaryArtDirectionOverride | undefined) {
   return value?.mode === "preset" ? { mode: value.mode, presetId: value.presetId } : value?.mode === "disabled" ? { mode: value.mode } : { mode: "story-default" };
 }
-const batchInputSchema = z.object({ from: z.number().int().positive().optional(), to: z.number().int().positive().optional(), force: z.enum(["translation", "narration", "qa", "story-bible", "continuity", "tts", "audio", "all"]).optional(), stage: batchStageSchema.optional(), mode: stageExecutionModeSchema.default("selected"), continueOnError: z.boolean().default(false) }).strict().refine((value) => !(value.stage && value.force), { message: "Choose either a manual stage or the legacy force stage, not both" });
+const batchInputSchema = z.object({ chapters: z.array(z.number().int().positive()).min(1).max(2000).optional(), from: z.number().int().positive().optional(), to: z.number().int().positive().optional(), force: z.enum(["translation", "narration", "qa", "story-bible", "continuity", "tts", "audio", "all"]).optional(), stage: batchStageSchema.optional(), mode: stageExecutionModeSchema.default("selected"), continueOnError: z.boolean().default(false) }).strict().refine((value) => !(value.stage && value.force), { message: "Choose either a manual stage or the legacy force stage, not both" });
 const qaRepairInputSchema = z.object({
   issueIndexes: z.array(z.number().int().nonnegative()).min(1).max(100).optional(),
   findingIds: z.array(z.string().regex(/^qaf_[a-f0-9]{24}$/)).min(1).max(100).optional(),
@@ -341,11 +341,19 @@ export class StudioOperations {
     return this.jobs.create("stageExecution", slug, async (control) => {
       const shutdown = new ShutdownController();
       control.setPause(() => shutdown.request());
-      const story = await loadStory(storyPaths(this.root, slug, 1).storyConfig); const imported = await loadImportedChapters(this.root, slug);
-      const selected = selectChapterNumbers(imported.chapters, input.chapters); const batchPlan = await planStageExecutionBatch({ root: this.root, story: slug, chapters: selected.map((chapter) => chapter.chapter), selectedStages: input.stages, mode: input.mode, force: input.force, executionPolicy: input.executionPolicy, storyConfig: story });
-      await control.reserve?.(jobOperationScope("stageExecution", { ...input, mode: "selected", stages: [...new Set(batchPlan.chapters.flatMap(chapter => chapter.runStages))] }));
+      let story = await loadStory(storyPaths(this.root, slug, 1).storyConfig); const imported = await loadImportedChapters(this.root, slug);
+      let selected = selectChapterNumbers(imported.chapters, input.chapters); let batchPlan = await planStageExecutionBatch({ root: this.root, story: slug, chapters: selected.map((chapter) => chapter.chapter), selectedStages: input.stages, mode: input.mode, force: input.force, executionPolicy: input.executionPolicy, storyConfig: story });
+      const reservedScope = jobOperationScope("stageExecution", { ...input, mode: "selected", stages: [...new Set(batchPlan.chapters.flatMap(chapter => chapter.runStages))] });
+      await control.reserve?.(reservedScope);
       if (shutdown.isRequested) return { status: "paused", results: [] };
       return withStoryLock(this.root, slug, "manual stage processing", async () => {
+      // Settings and source imports may change while a job waits in memory.
+      // Re-read them only after the filesystem lease has been acquired.
+      story = await loadStory(storyPaths(this.root, slug, 1).storyConfig);
+      selected = selectChapterNumbers((await loadImportedChapters(this.root, slug)).chapters, input.chapters);
+      batchPlan = await planStageExecutionBatch({ root: this.root, story: slug, chapters: selected.map(chapter => chapter.chapter), selectedStages: input.stages, mode: input.mode, force: input.force, executionPolicy: input.executionPolicy, storyConfig: story });
+      const currentScope = jobOperationScope("stageExecution", { ...input, mode: "selected", stages: [...new Set(batchPlan.chapters.flatMap(chapter => chapter.runStages))] });
+      if (currentScope.resources?.some(resource => !reservedScope.resources?.includes(resource))) throw new ConfigurationError("The execution plan changed while waiting and needs additional shared resources. Preview and retry the current plan.");
       if (input.expectedPlanFingerprint && input.expectedPlanFingerprint !== batchPlan.fingerprint) throw new ConfigurationError("The execution plan changed after preview. Preview the current plan before running it.");
       if (batchPlan.summary.operationCount === 0 && batchPlan.summary.blockedOperations === 0) throw new ConfigurationError("The execution plan contains no stages to run. Select stages that need work or enable regeneration, then preview again.");
       if (batchPlan.summary.blockedOperations) {
@@ -587,7 +595,7 @@ export class StudioOperations {
     slugSchema.parse(slug); const input = batchInputSchema.parse(raw);
     return this.jobs.create("batch", slug, async (control) => withStoryLock(this.root, slug, "web batch", async () => {
       const story = await loadStory(storyPaths(this.root, slug, 1).storyConfig); const imported = await loadImportedChapters(this.root, slug);
-      const selected = selectChapterRange(imported.chapters, input.from, input.to); const state = createBatchState({ root: this.root, story: slug, inputDirectory: imported.directory, chapters: selected, allowGaps: true, continueOnError: input.continueOnError, delayMs: 0, force: input.force, stopAfter: batchStopAfter(input.force), stage: input.stage, mode: input.mode });
+      const selected = input.chapters ? selectChapterNumbers(imported.chapters, input.chapters) : selectChapterRange(imported.chapters, input.from, input.to); const state = createBatchState({ root: this.root, story: slug, inputDirectory: imported.directory, chapters: selected, allowGaps: true, continueOnError: input.continueOnError, delayMs: 0, force: input.force, stopAfter: batchStopAfter(input.force), stage: input.stage, mode: input.mode });
       const shutdown = new ShutdownController(); control.setPause(() => shutdown.request());
       const processor: ChapterProcessor = input.stage ? { run: async (request) => {
         // Legacy /batch callers selected one stage as an explicit rerun action. Preserve that
@@ -2098,6 +2106,7 @@ export class StudioOperations {
           const completed = new Set(
             (Array.isArray((job.result as { results?: unknown }).results) ? (job.result as { results: unknown[] }).results : [])
               .flatMap((item) => item && typeof item === "object" && typeof (item as { chapter?: unknown }).chapter === "number"
+                && ["completed", "reused"].includes(String((item as { status?: unknown }).status))
                 ? [(item as { chapter: number }).chapter] : []),
           );
           return this.startStageExecution(job.story, { ...retryInput, chapters: retryInput.chapters.filter((chapter) => !completed.has(chapter)) });
@@ -2106,7 +2115,17 @@ export class StudioOperations {
       }
       case "scenes": return this.startScenes(job.story, job.payload ?? {});
       case "artwork": return this.startArtwork(job.story, job.payload ?? {});
-      case "batch": return this.startBatch(job.story, job.payload ?? {});
+      case "batch": {
+        const input = batchInputSchema.parse(job.payload ?? {});
+        if (job.status === "paused" && job.result && typeof job.result === "object") {
+          const checkpoint = batchStateSchema.safeParse(job.result);
+          if (!checkpoint.success) throw new ConfigurationError("This batch's saved progress cannot be read safely. Select the remaining chapters explicitly.");
+          const chapters = Object.entries(checkpoint.data.chapters).filter(([, value]) => !["complete", "skipped"].includes(value.status)).map(([chapter]) => Number(chapter)).sort((a, b) => a - b);
+          if (!chapters.length) throw new ConfigurationError("This batch has no remaining chapters to resume.");
+          return this.startBatch(job.story, { ...input, chapters });
+        }
+        return this.startBatch(job.story, input);
+      }
       case "audio": return this.startAudio(job.story, job.payload ?? {});
       case "audiobook": return this.startAudiobook(job.story, job.payload ?? {});
       case "subtitles": return this.startSubtitles(job.story, job.payload ?? {});

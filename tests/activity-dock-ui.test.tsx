@@ -1,3 +1,4 @@
+import { BatchProcessingPanel } from "../apps/web/src/BatchProcessingPanel.js";
 /** @vitest-environment jsdom */
 import { act } from "react";
 import { createRoot } from "react-dom/client";
@@ -30,7 +31,7 @@ it("keeps all job states when polling and emits one completion event without rem
     await act(async()=>{ mounts++; root.render(<Probe/>); }); expect(host.textContent).toContain("one:running"); expect(host.textContent).toContain("two:running");
     jobs=[{...first,status:"completed"}, second]; await act(async()=>{await vi.advanceTimersByTimeAsync(2000);}); expect(host.textContent).toContain("one:completed"); expect(host.textContent).toContain("two:running"); expect(finished).toHaveBeenCalledTimes(1);
     await act(async()=>update(first)); expect(host.textContent).toContain("one:completed"); expect(mounts).toBe(1);
-    jobs=[...jobs,{id:"fast",story:"c",status:"completed",type:"visualWorkflow",createdAt:new Date().toISOString()}]; await act(async()=>{await vi.advanceTimersByTimeAsync(2000);}); expect(host.textContent).toContain("fast:completed");
+    jobs=[...jobs,{id:"fast",story:"c",status:"completed",type:"visualWorkflow",createdAt:new Date().toISOString()}]; await act(async()=>{await vi.advanceTimersByTimeAsync(2000);}); expect(host.textContent).toContain("fast:completed"); expect(finished).toHaveBeenCalledTimes(2);
   } finally {window.removeEventListener("studio:job-finished",finished);}
 });
 it("preserves a chapter editor draft when an unrelated job completes", async () => {
@@ -58,4 +59,28 @@ it("hides simultaneous completions without losing either dismissal",async()=>{
   await act(async()=>root.render(<ActivityDock jobs={[first,second]} titles={{}} renderJob={(job,hide)=><button onClick={hide}>Hide {job.id}</button>}/>));
   await act(async()=>{for(const button of Array.from(host.querySelectorAll(".activity-card button"))) (button as HTMLButtonElement).click();});
   expect(host.querySelectorAll(".activity-card")).toHaveLength(0);
+});
+
+const batchPlan = (id:string, operations=1) => ({fingerprint:id.repeat(64),chapters:[],summary:{operationCount:operations,reusedCount:0,blockedOperations:0,chapterCount:1,mode:"selected",addedPrerequisites:[],providerOperations:{llm:operations,tts:0,images:0}}});
+const response = (value:unknown) => new Response(JSON.stringify(value),{headers:{"content-type":"application/json"}});
+const button = (text:string) => Array.from(host.querySelectorAll("button")).find(item=>item.textContent===text)!;
+it("keeps a newer selection's preview when an older batch completes",async()=>{
+  let watch!:(next:Job)=>void;const started:Job={id:"batch-a",type:"stageExecution",story:"a",status:"running"};
+  const props={slug:"a",onSelectionChange:vi.fn(),onSelectVisible:vi.fn(),onSelectMatching:vi.fn(),onSelectAll:vi.fn(),onJob:vi.fn(),watchJob:(_id:string,update:(next:Job)=>void)=>{watch=update;return ()=>{};}};
+  vi.stubGlobal("fetch",vi.fn(async(url:string,init?:RequestInit)=>response(String(url).endsWith("/plan") ? batchPlan(JSON.parse(String(init?.body)).chapters[0]===1?"a":"b",JSON.parse(String(init?.body)).chapters[0]===1?1:4) : started)));
+  await act(async()=>root.render(<BatchProcessingPanel {...props} selectedChapters={[1]}/>));
+  await act(async()=>host.querySelector<HTMLInputElement>('input[type="checkbox"]')!.click());
+  await act(async()=>button("Preview execution").click());await act(async()=>button("Run 1 operation").click());
+  await act(async()=>root.render(<BatchProcessingPanel {...props} selectedChapters={[2]}/>));await act(async()=>button("Preview execution").click());
+  expect(host.textContent).toContain("Plan bbbbbbbb ready");expect(host.textContent).toContain("1 planned operations");
+  await act(async()=>watch({...started,status:"completed",result:{summary:{completedChapters:1}}}));
+  expect(host.textContent).toContain("Plan bbbbbbbb ready");expect(button("Run 4 operations").disabled).toBe(false);expect(host.textContent).not.toContain("Batch complete");
+});
+it("ignores a delayed preview response for chapters that are no longer selected",async()=>{
+  let finish!:(value:Response)=>void;
+  const props={slug:"a",onSelectionChange:vi.fn(),onSelectVisible:vi.fn(),onSelectMatching:vi.fn(),onSelectAll:vi.fn(),onJob:vi.fn(),watchJob:()=>()=>{}};
+  vi.stubGlobal("fetch",vi.fn((_url:string,init?:RequestInit)=>JSON.parse(String(init?.body)).chapters[0]===1?new Promise<Response>(resolve=>{finish=resolve;}):Promise.resolve(response(batchPlan("b")))));
+  await act(async()=>root.render(<BatchProcessingPanel {...props} selectedChapters={[1]}/>));await act(async()=>host.querySelector<HTMLInputElement>('input[type="checkbox"]')!.click());await act(async()=>button("Preview execution").click());
+  await act(async()=>root.render(<BatchProcessingPanel {...props} selectedChapters={[2]}/>));await act(async()=>button("Preview execution").click());
+  await act(async()=>finish(response(batchPlan("a"))));expect(host.textContent).toContain("Plan bbbbbbbb ready");expect(host.textContent).not.toContain("Plan aaaaaaaa ready");
 });

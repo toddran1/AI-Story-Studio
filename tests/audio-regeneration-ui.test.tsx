@@ -49,3 +49,24 @@ describe("audio regeneration selection UI", () => {
  });
 
 });
+
+it.each(["9007199254740992","99999999999999999999999999999999"])("rejects unsafe chapter number %s before range expansion",async entry=>{
+  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT",true);const fetch=vi.fn(async()=>Response.json({items:[],page:1,pages:1,total:0}));vi.stubGlobal("fetch",fetch);
+  host=document.createElement("div");document.body.append(host);root=createRoot(host);await act(async()=>root!.render(<AudioRegeneration slug="test" onJob={()=>{}} watchJob={()=>()=>{}}/>));
+  const input=host.querySelector<HTMLInputElement>('.regen-tools input')!;
+  await act(async()=>{Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,"value")!.set!.call(input,entry);input.dispatchEvent(new Event("input",{bubbles:true}));});
+  await act(async()=>host!.querySelector<HTMLButtonElement>('.regen-tools > .button')!.click());expect(host.textContent).toContain("Choose a valid range");expect(fetch).toHaveBeenCalledTimes(1);
+});
+it("ignores an older audio job's callbacks while a newer submission is pending",async()=>{
+  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT",true);let count=0, finish!:(value:Response)=>void;const updates:Array<(job:any)=>void>=[],errors:Array<(error:unknown)=>void>=[];
+  const jobA={id:"job-a",story:"test",type:"audioRegeneration",status:"running"},jobB={...jobA,id:"job-b",status:"queued"};
+  vi.stubGlobal("fetch",vi.fn(async(_url:string,init?:RequestInit)=>init?.method==="POST"?(++count===1?Response.json(jobA):new Promise<Response>(resolve=>{finish=resolve;})):Response.json({items:[{chapter:1},{chapter:2}],page:1,pages:1,total:2})));
+  host=document.createElement("div");document.body.append(host);root=createRoot(host);await act(async()=>root!.render(<AudioRegeneration slug="test" onJob={()=>{}} watchJob={(_id,update,error)=>{updates.push(update);errors.push(error);return ()=>{};}}/>));
+  await act(async()=>host!.querySelector<HTMLInputElement>('.regen-chapter input')!.click());await act(async()=>host!.querySelector<HTMLButtonElement>('.regen-selection > .primary')!.click());
+  await act(async()=>{const choices=host!.querySelectorAll<HTMLInputElement>('.regen-chapter input');choices[0]!.click();choices[1]!.click();});
+  await act(async()=>host!.querySelector<HTMLButtonElement>('.regen-selection > .primary')!.click());
+  await act(async()=>{updates[0]!({...jobA,status:"completed"});errors[0]!(new Error("Old connection error"));});
+  expect(host.querySelector<HTMLButtonElement>('.regen-selection > .primary')!.disabled).toBe(true);expect(host.textContent).not.toContain("Old connection error");
+  await act(async()=>finish(Response.json(jobB)));await act(async()=>updates[0]!({...jobA,status:"failed",error:"Old job failed"}));
+  expect(host.querySelector('.regen-run b')!.textContent).toBe("queued");expect(host.textContent).not.toContain("Old job failed");
+});

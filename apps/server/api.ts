@@ -108,18 +108,21 @@ export function createApiHandler(operations: StudioOperations) {
       const backupDownload = /^\/api\/backups\/([a-f0-9-]{36})\.zip$/.exec(url.pathname);
       if (backupDownload && request.method === "GET") return sendFile(request, response, backupPath(operations.root, backupDownload[1]!), "application/zip");
       if (request.method === "GET" && url.pathname === "/api/jobs") {
-        const jobs = operations.jobs.list();
-        if (operations.queue) {
+        const jobs = operations.jobs.list(); const warnings: string[] = [];
+        if (operations.queue) { try {
           const repository = operations.queue.repository;
-          const pages = await Promise.all([undefined, "queued", "running"].map(async status => {
-            const first = await repository.listJobs({ page: 1, pageSize: 100, status: status as "queued" | "running" | undefined });
+          const pages = await Promise.all([undefined, "queued", "running", "paused"].map(async status => {
+            const first = await repository.listJobs({ page: 1, pageSize: 100, status: status as "queued" | "running" | "paused" | undefined });
             const items = [...first.items];
-            if (status) for (let page = 2; page <= first.pages; page++) items.push(...(await repository.listJobs({ page, pageSize: 100, status: status as "queued" | "running" })).items);
+            if (status) for (let page = 2; page <= first.pages; page++) items.push(...(await repository.listJobs({ page, pageSize: 100, status: status as "queued" | "running" | "paused" })).items);
             return items;
           }));
           jobs.push(...[...new Map(pages.flat().map(job => [job.id, job])).values()].map(queueActivity));
-        }
-        return send(response, 200, { jobs: jobs.map(job => publicJob(job, operations.root)) });
+        } catch (error) {
+          logger.warn({ error }, "Production queue activity could not be loaded");
+          warnings.push("Production queue activity is temporarily unavailable. Direct jobs are still updating.");
+        } }
+        return send(response, 200, { jobs: jobs.map(job => publicJob(job, operations.root)), ...(warnings.length ? { warnings } : {}) });
       }
       const errorHistoryMatch = /^\/api\/stories\/([a-z0-9]+(?:-[a-z0-9]+)*)\/job-errors$/.exec(url.pathname);
       if (errorHistoryMatch && request.method === "GET") {

@@ -1,5 +1,5 @@
 import { jobOperationScope, scopesConflict, type OperationScope } from "../../src/storage/operation-scope.js";
-import { withOperationScope } from "../../src/storage/story-lock.js";
+import { withOperationScope, OperationStoppedError } from "../../src/storage/story-lock.js";
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { createErrorDiagnostic, ErrorDiagnostic, errorDiagnosticSchema } from "../../src/errors/diagnostic.js";
@@ -136,6 +136,9 @@ export class JobManager {
       if (job.cancelRequested) { this.set(job, { status: "cancelled" }); return; }
       if (job.pauseRequested) { this.set(job, { status: "paused" }); return; }
       this.set(job, { status: "running" });
+      // Observers can request a stop synchronously on the running event.
+      if (job.cancelRequested) { this.set(job, { status: "cancelled" }); return; }
+      if (job.pauseRequested) { this.set(job, { status: "paused" }); return; }
       const result = await withOperationScope(job.story, job.scope ?? { all: true }, () => runner({
         update: (progress) => {
           this.set(job, { progress });
@@ -154,7 +157,11 @@ export class JobManager {
           if (gainedResources) { this.set(job, { status: "queued" }); await this.waitForResources(job); if (!job.cancelRequested && !job.pauseRequested) this.set(job, { status: "running" }); }
         },
         setPause: (handler) => { this.pauseHandlers.set(job.id, handler); if (this.pendingVisualPauses.delete(job.id)) handler(); },
-      }));
+      }), {
+        stopped: () => Boolean(job.pauseRequested || job.cancelRequested),
+        waiting: () => this.set(job, { status: "queued", progress: { type: "job.waiting", detail: "Waiting for shared story context or export work in another process." } }),
+        acquired: () => { if (!job.pauseRequested && !job.cancelRequested) this.set(job, { status: "running" }); },
+      });
       const finalFailures = failedResultDiagnostics(result);
       if (finalFailures.length) await this.recordFailure(job, finalFailures.at(-1)!.diagnostic, result);
       await this.errorWrites.get(job.id);
@@ -176,7 +183,10 @@ export class JobManager {
         }
         this.set(job, { status: "completed", result });
       }
-    } catch (error) { const diagnostic = createErrorDiagnostic(error); logFailure(job, diagnostic); await this.recordFailure(job, diagnostic); this.set(job, { status: "failed", error: diagnostic.summary, diagnostic }); }
+    } catch (error) {
+      if (error instanceof OperationStoppedError) this.set(job, { status: job.cancelRequested ? "cancelled" : "paused" });
+      else { const diagnostic = createErrorDiagnostic(error); logFailure(job, diagnostic); await this.recordFailure(job, diagnostic); this.set(job, { status: "failed", error: diagnostic.summary, diagnostic }); }
+    }
     finally {
       this.pauseHandlers.delete(job.id); this.pendingVisualPauses.delete(job.id); this.reservations.delete(job.id);
       this.events.delete(job.id); this.prune();

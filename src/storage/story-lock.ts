@@ -44,9 +44,11 @@ async function acquireExclusiveLock(root: string, slug: string, operation: strin
   };
 }
 
-const operationScope = new AsyncLocalStorage<{ slug: string; scope: OperationScope }>();
-export function withOperationScope<T>(slug: string, scope: OperationScope, action: () => Promise<T>) { return operationScope.run({ slug, scope }, action); }
-export class StoryLockConflictError extends Error {}
+type ScopeControl = { stopped?: () => boolean; waiting?: () => void; acquired?: () => void };
+const operationScope = new AsyncLocalStorage<{ slug: string; scope: OperationScope; control?: ScopeControl }>();
+export function withOperationScope<T>(slug: string, scope: OperationScope, action: () => Promise<T>, control?: ScopeControl) { return operationScope.run({ slug, scope, control }, action); }
+export class StoryLockConflictError extends Error { constructor(message: string, readonly sharedOnly = false) { super(message); } }
+export class OperationStoppedError extends Error { constructor() { super("Operation stopped before acquiring its story resources"); } }
 
 /** Admission is serialized across processes; leases retain chapter ownership
  * for the entire operation without holding the story-wide mutex. */
@@ -62,10 +64,21 @@ export async function acquireStoryLock(root: string, slug: string, operation: st
     for (const name of await readdir(directory)) {
       if (!name.endsWith(".json")) continue;
       const path = join(directory, name);
-      const owner = await readOwner(path) as (LockOwner & { scope?: OperationScope }) | undefined;
-      if (!owner) throw new StoryLockConflictError(`Story '${slug}' has an unreadable operation lock; inspect ${path} before retrying.`);
+      let owner: LockOwner & { scope?: OperationScope };
+      try { owner = JSON.parse(await readFile(path, "utf8")) as typeof owner; }
+      catch (error) {
+        // A lease can finish after readdir but before its owner is read.
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
+        if (error instanceof SyntaxError) throw new StoryLockConflictError(`Story '${slug}' has an unreadable operation lock; inspect ${path} before retrying.`);
+        throw error;
+      }
+      if (!owner || typeof owner !== "object") throw new StoryLockConflictError(`Story '${slug}' has an unreadable operation lock; inspect ${path} before retrying.`);
       if (!processIsRunning(owner.pid)) { await rm(path, { force: true }); continue; }
-      if (scopesConflict(scope, owner.scope ?? { all: true })) throw new StoryLockConflictError(`Story '${slug}' has overlapping work (${owner.operation}). Choose different chapters or wait for it to finish.`);
+      const otherScope = owner.scope ?? { all: true };
+      if (scopesConflict(scope, otherScope)) {
+        const sharedOnly = !scopesConflict({ ...scope, resources: [] }, { ...otherScope, resources: [] }) && Boolean(scope.resources?.some(resource => (resource === "context" || resource.startsWith("export:")) && otherScope.resources?.includes(resource)));
+        throw new StoryLockConflictError(`Story '${slug}' has overlapping work (${owner.operation}). Choose different chapters or wait for it to finish.`, sharedOnly);
+      }
     }
     if (scope.all) return await acquireExclusiveLock(root, slug, operation);
     const globalOwner = await readOwner(join(story, ".lock", "owner.json"));
@@ -77,10 +90,24 @@ export async function acquireStoryLock(root: string, slug: string, operation: st
 }
 
 export async function withStoryLock<T>(root: string, slug: string, operation: string, action: () => Promise<T>): Promise<T> {
-  const inherited = operationScope.getStore();
-  const release = await acquireStoryLock(root, slug, operation, inherited?.slug === slug ? inherited.scope : { all: true });
-  try { const result = await action(); await release(); return result; }
-  catch (error) { try { await release(); } catch { /* Preserve the operation failure. */ } throw error; }
+  const inherited = operationScope.getStore(); const control = inherited?.slug === slug ? inherited.control : undefined;
+  const scope = inherited?.slug === slug ? inherited.scope : { all: true };
+  let release: (() => Promise<void>) | undefined, waiting = false;
+  const deadline = Date.now() + 10 * 60_000;
+  while (!release) {
+    if (control?.stopped?.()) throw new OperationStoppedError();
+    try { release = await acquireStoryLock(root, slug, operation, scope); }
+    catch (error) {
+      if (!(error instanceof StoryLockConflictError) || !error.sharedOnly || Date.now() >= deadline) throw error;
+      if (!waiting) { waiting = true; control?.waiting?.(); }
+      await new Promise(resolve => setTimeout(resolve, 25));
+    }
+  }
+  try {
+    if (waiting) control?.acquired?.();
+    if (control?.stopped?.()) throw new OperationStoppedError();
+    const result = await action(); await release(); return result;
+  } catch (error) { try { await release(); } catch { /* Preserve the operation failure. */ } throw error; }
 }
 
 async function readOwner(path: string): Promise<LockOwner | undefined> {

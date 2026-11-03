@@ -42,11 +42,16 @@ export function BatchProcessingPanel(props: Props) {
   const [planning, setPlanning] = useState(false);
   const [running, setRunning] = useState(false);
   const [activeJob, setActiveJob] = useState<Job>();
+  const [activeOperationCount, setActiveOperationCount] = useState(0);
   const [result, setResult] = useState<any>();
   const watcher = useRef<(() => void) | undefined>(undefined);
+  const selectionKey = JSON.stringify({ slug: props.slug, chapters: props.selectedChapters, stages, mode, force, continueOnError });
+  const currentSelection = useRef(selectionKey); currentSelection.current = selectionKey;
+  const previewRequest = useRef(0), latestRun = useRef("");
+
   useEffect(() => () => watcher.current?.(), []);
   useEffect(() => { if (!editingExpression) setExpression(formatChapterSelection(props.selectedChapters)); }, [props.selectedChapters, editingExpression]);
-  useEffect(() => { setPreview(undefined); setResult(undefined); }, [props.selectedChapters, stages, mode, force, continueOnError]);
+  useEffect(() => { previewRequest.current++; setPlanning(false); setPreview(undefined); setResult(undefined); }, [selectionKey]);
 
   const updateExpression = (value: string) => {
     setExpression(value); setPreview(undefined); setResult(undefined);
@@ -56,22 +61,29 @@ export function BatchProcessingPanel(props: Props) {
   const chooseChapters = (action: () => void) => { setEditingExpression(false); setError(""); action(); };
   const request = () => ({ chapters: props.selectedChapters, stages, mode, force, continueOnError });
   const createPreview = async () => {
-    try { setPlanning(true); setError(""); setResult(undefined); setPreview(await post<StageExecutionBatchPlan>(`/stories/${props.slug}/stages/plan`, { ...request(), dryRun: true })); }
-    catch (value) { setPreview(undefined); setError(value instanceof Error ? value.message : String(value)); }
-    finally { setPlanning(false); }
+    const key = selectionKey, ticket = ++previewRequest.current;
+    const current = () => key === currentSelection.current && ticket === previewRequest.current;
+    try { setPlanning(true); setError(""); setResult(undefined); const next = await post<StageExecutionBatchPlan>(`/stories/${props.slug}/stages/plan`, { ...request(), dryRun: true }); if (current()) setPreview(next); }
+    catch (value) { if (current()) { setPreview(undefined); setError(value instanceof Error ? value.message : String(value)); } }
+    finally { if (current()) setPlanning(false); }
   };
   const run = async () => {
     if (!preview) return;
     try {
       setRunning(true); setError(""); setResult(undefined);
       const job = await post<Job>(`/stories/${props.slug}/stages/run`, { ...request(), expectedPlanFingerprint: preview.fingerprint });
-      props.onJob(job); setRunning(false); setActiveJob(job); watcher.current?.();
+      props.onJob(job); setRunning(false); setActiveJob(job); setActiveOperationCount(preview.summary.operationCount); latestRun.current = job.id; watcher.current?.();
       watcher.current = props.watchJob(job.id, (next) => {
-        props.onJob(next); setActiveJob(next);
-        if (next.status === "completed") { setRunning(false); setResult(next.result); setPreview(undefined); setActiveJob(undefined); }
-        else if (next.status === "failed") { setRunning(false); setResult(next.result); setError(next.error ?? "Stage execution failed"); setPreview(undefined); setActiveJob(undefined); }
-      }, (value) => { setRunning(false); setError(value instanceof Error ? value.message : String(value)); });
-    } catch (value) { setRunning(false); setError(value instanceof Error ? value.message : String(value)); }
+        props.onJob(next); if (latestRun.current !== next.id) return; setActiveJob(next);
+        if (["completed", "failed", "paused", "cancelled"].includes(next.status)) {
+          setActiveJob(undefined);
+          if (currentSelection.current === selectionKey) {
+            setResult(next.result); setPreview(undefined);
+            if (next.status === "failed") setError(next.error ?? "Stage execution failed");
+          }
+        }
+      }, (value) => { if (latestRun.current === job.id && currentSelection.current === selectionKey) setError(value instanceof Error ? value.message : String(value)); });
+    } catch (value) { setRunning(false); if (currentSelection.current === selectionKey) setError(value instanceof Error ? value.message : String(value)); }
   };
   const canPreview = props.selectedChapters.length > 0 && stages.length > 0 && !error && !planning && !running;
   const canRun = Boolean(preview && preview.summary.operationCount > 0 && preview.summary.blockedOperations === 0 && !running);
@@ -134,7 +146,7 @@ export function BatchProcessingPanel(props: Props) {
     </div>
     {error && <div className="batch-inline-error" role="alert">{error}</div>}
     {preview && <ExecutionPreview preview={preview} />}
-    {activeJob && <ActiveRun job={activeJob} operationCount={preview?.summary.operationCount ?? 0} />}
+    {activeJob && <ActiveRun job={activeJob} operationCount={activeOperationCount} />}
     {result && <CompletionSummary result={result} />}
   </section>;
 }

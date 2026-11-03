@@ -1,3 +1,4 @@
+import * as fs from "node:fs/promises";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -5,6 +6,10 @@ import { expect, it, vi } from "vitest";
 import { JobManager } from "../apps/server/job-manager.js";
 import { acquireStoryLock, withChapterLock, withOperationScope, withStoryLock } from "../src/storage/story-lock.js";
 import { jobOperationScope, scopesConflict } from "../src/storage/operation-scope.js";
+vi.mock("node:fs/promises", async importOriginal => {
+  const actual = await importOriginal<typeof import("node:fs/promises")>();
+  return { ...actual, readFile: vi.fn(actual.readFile) };
+});
 const deferred = () => { let resolve!: () => void; const promise = new Promise<void>(done => { resolve = done; }); return { promise, resolve }; };
 it("runs disjoint chapter jobs concurrently and rejects any overlapping selection", async () => {
   const jobs = new JobManager(), gate = deferred(), entered: number[] = [];
@@ -60,4 +65,29 @@ it("queues disjoint context batches in order while unrelated media runs", async 
   const media=jobs.create("audio","book",async()=>{calls.push("media");},{from:3,to:3});
   await vi.waitFor(()=>expect(calls).toEqual(["first","media"]));expect(jobs.get(second.id)?.status).toBe("queued");expect(jobs.get(media.id)?.status).toBe("completed");
   gate.resolve();await vi.waitFor(()=>expect(jobs.get(second.id)?.status).toBe("completed"));expect(jobs.get(first.id)?.status).toBe("completed");expect(calls).toEqual(["first","media","second"]);
+});
+
+it("does not treat a lease released during admission as a corrupt lock", async () => {
+  const root=await mkdtemp(join(tmpdir(),"lock-release-race-"));const release=await acquireStoryLock(root,"book","finishing",{chapters:[1]});
+  const directory=join(root,"stories","book",".operation-locks"), [name]=await fs.readdir(directory), path=join(directory,name!);const read=(await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises")).readFile;let interrupted=false;
+  const spy=vi.spyOn(fs,"readFile").mockImplementation((async (...args:any[])=>{if(String(args[0])===path&&!interrupted){interrupted=true;await release();}return (read as any)(...args);}) as typeof fs.readFile);
+  try { const next=await acquireStoryLock(root,"book","new chapter",{chapters:[2]});expect(interrupted).toBe(true);await next(); }
+  finally {spy.mockRestore();vi.mocked(fs.readFile).mockImplementation(read);await release();await rm(root,{recursive:true,force:true});}
+});
+it.each(["pause","cancel"] as const)("honors a %s requested by a running-state observer before invoking the runner",async action=>{
+  const jobs=new JobManager(), run=vi.fn(async()=>{});const job=jobs.create("voicePreview","book",run);
+  jobs.subscribe(job.id,next=>{if(next.status==="running")jobs[action](job.id);});
+  await vi.waitFor(()=>expect(jobs.get(job.id)?.status).toBe(action==="pause"?"paused":"cancelled"));expect(run).not.toHaveBeenCalled();
+});
+
+it("waits for another process's shared context and remains cancellable before doing work",async()=>{
+  const root=await mkdtemp(join(tmpdir(),"external-context-"));const release=await acquireStoryLock(root,"book","queue worker",{chapters:[1],resources:["context"]});
+  const jobs=new JobManager(), work=vi.fn(async()=>"processed");
+  try{
+    const job=jobs.create("stageExecution","book",()=>withStoryLock(root,"book","direct context",work),{chapters:[2],stages:["storyBible"],mode:"selected"});
+    await vi.waitFor(()=>expect(jobs.get(job.id)?.progress).toHaveProperty("type","job.waiting"));expect(jobs.get(job.id)?.status).toBe("queued");
+    jobs.cancel(job.id);await vi.waitFor(()=>expect(jobs.get(job.id)?.status).toBe("cancelled"));expect(work).not.toHaveBeenCalled();
+    const next=jobs.create("stageExecution","book",()=>withStoryLock(root,"book","direct context",work),{chapters:[2],stages:["storyBible"],mode:"selected"});
+    await vi.waitFor(()=>expect(jobs.get(next.id)?.progress).toHaveProperty("type","job.waiting"));await release();await vi.waitFor(()=>expect(jobs.get(next.id)?.status).toBe("completed"));expect(work).toHaveBeenCalledTimes(1);
+  }finally{await release();await rm(root,{recursive:true,force:true});}
 });
