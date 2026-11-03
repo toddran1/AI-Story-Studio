@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { formatChapterSelection, parseChapterSelection } from "../../../src/batch/range.js";
 import { BATCH_STAGES, STAGE_SELECTION_PRESETS, type BatchStage } from "../../../src/studio/stage-selection.js";
 import type { StageExecutionBatchPlan, StageExecutionMode } from "../../../src/studio/stage-execution.js";
-import { post, type Job } from "./api.js";
+import { api, post, type Job } from "./api.js";
 import { pretty } from "./format.js";
 
 type WatchJob = (id: string, onUpdate: (job: Job) => void | Promise<void>, onError: (error: unknown) => void) => () => void;
@@ -48,10 +48,11 @@ export function BatchProcessingPanel(props: Props) {
   const selectionKey = JSON.stringify({ slug: props.slug, chapters: props.selectedChapters, stages, mode, force, continueOnError });
   const currentSelection = useRef(selectionKey); currentSelection.current = selectionKey;
   const previewRequest = useRef(0), latestRun = useRef("");
+  const previewAbort = useRef<AbortController>();
 
-  useEffect(() => () => watcher.current?.(), []);
+  useEffect(() => () => { watcher.current?.(); previewRequest.current++; previewAbort.current?.abort(); }, []);
   useEffect(() => { if (!editingExpression) setExpression(formatChapterSelection(props.selectedChapters)); }, [props.selectedChapters, editingExpression]);
-  useEffect(() => { previewRequest.current++; setPlanning(false); setPreview(undefined); setResult(undefined); }, [selectionKey]);
+  useEffect(() => { previewRequest.current++; previewAbort.current?.abort(); previewAbort.current = undefined; setPlanning(false); setPreview(undefined); setResult(undefined); }, [selectionKey]);
 
   const updateExpression = (value: string) => {
     setExpression(value); setPreview(undefined); setResult(undefined);
@@ -60,12 +61,23 @@ export function BatchProcessingPanel(props: Props) {
   };
   const chooseChapters = (action: () => void) => { setEditingExpression(false); setError(""); action(); };
   const request = () => ({ chapters: props.selectedChapters, stages, mode, force, continueOnError });
+  const cancelPreview = () => { previewRequest.current++; previewAbort.current?.abort(); previewAbort.current = undefined; setPlanning(false); setPreview(undefined); setError(""); };
   const createPreview = async () => {
-    const key = selectionKey, ticket = ++previewRequest.current;
+    previewAbort.current?.abort();
+    const key = selectionKey, ticket = ++previewRequest.current, controller = new AbortController();
+    previewAbort.current = controller;
     const current = () => key === currentSelection.current && ticket === previewRequest.current;
-    try { setPlanning(true); setError(""); setResult(undefined); const next = await post<StageExecutionBatchPlan>(`/stories/${props.slug}/stages/plan`, { ...request(), dryRun: true }); if (current()) setPreview(next); }
-    catch (value) { if (current()) { setPreview(undefined); setError(value instanceof Error ? value.message : String(value)); } }
-    finally { if (current()) setPlanning(false); }
+    const timeout = setTimeout(() => {
+      if (!current()) return;
+      previewRequest.current++; controller.abort(); previewAbort.current = undefined;
+      setPlanning(false); setPreview(undefined); setError("The execution preview timed out. Running jobs are unaffected. Try Preview execution again.");
+    }, 60_000);
+    try {
+      setPlanning(true); setError(""); setResult(undefined);
+      const next = await api<StageExecutionBatchPlan>(`/stories/${props.slug}/stages/plan`, { method: "POST", body: JSON.stringify({ ...request(), dryRun: true }), signal: controller.signal });
+      if (current()) setPreview(next);
+    } catch (value) { if (current()) { setPreview(undefined); setError(value instanceof Error ? value.message : String(value)); } }
+    finally { clearTimeout(timeout); if (current()) { setPlanning(false); previewAbort.current = undefined; } }
   };
   const run = async () => {
     if (!preview) return;
@@ -85,8 +97,9 @@ export function BatchProcessingPanel(props: Props) {
       }, (value) => { if (latestRun.current === job.id && currentSelection.current === selectionKey) setError(value instanceof Error ? value.message : String(value)); });
     } catch (value) { setRunning(false); if (currentSelection.current === selectionKey) setError(value instanceof Error ? value.message : String(value)); }
   };
-  const canPreview = props.selectedChapters.length > 0 && stages.length > 0 && !error && !planning && !running;
-  const canRun = Boolean(preview && preview.summary.operationCount > 0 && preview.summary.blockedOperations === 0 && !running);
+  let expressionValid = true; try { parseChapterSelection(expression); } catch { expressionValid = false; }
+  const canPreview = props.selectedChapters.length > 0 && stages.length > 0 && expressionValid && !planning && !running;
+  const canRun = Boolean(preview && preview.summary.operationCount > 0 && preview.summary.blockedOperations === 0 && !planning && !running);
 
   return <section className="batch-workspace" aria-labelledby="batch-workspace-title">
     <header className="batch-workspace-header">
@@ -140,6 +153,7 @@ export function BatchProcessingPanel(props: Props) {
         <div className="batch-actions">
           <div className="batch-plan-status"><span className={preview ? "ready" : ""} />{preview ? `Plan ${preview.fingerprint.slice(0, 8)} ready` : "Preview required before running"}</div>
           <button className="button" disabled={!canPreview} onClick={() => void createPreview()}>{planning ? "Planning…" : "Preview execution"}</button>
+          {planning && <button type="button" className="button" title="Cancel this preview request; running jobs continue." onClick={cancelPreview}>Cancel preview</button>}
           <button className="button primary" disabled={!canRun} onClick={() => void run()}>{running ? "Running…" : preview ? `Run ${preview.summary.operationCount} operation${preview.summary.operationCount === 1 ? "" : "s"}` : "Run batch"}</button>
         </div>
       </section>

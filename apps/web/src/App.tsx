@@ -1,3 +1,4 @@
+import { watchJob } from "./job-watch.js";
 import { ActivityDock, useActivityJobs, activityJobForChapter, useActivityRefresh } from "./ActivityDock.js";
 import { ModelFields, effortLabel } from "./ModelFields.js";
 import { ImageWorkbench } from "./ImageWorkbench.js";
@@ -4548,7 +4549,7 @@ export function JobConsole({ job, onUpdate, onClose, navigate, initialQaComparis
 
   useEffect(() => {
     if (isTerminalJob(job) || job.payload?.queueJobId) return;
-    return watchJob(job.id, onUpdate, (value) => setActionError(message(value)));
+    return watchJob(job.id, next => { setActionError(""); onUpdate(next); }, (value) => setActionError(message(value)));
   }, [job.id]);
   const diagnostic: ErrorDiagnostic | undefined = job.diagnostic ?? job.progress?.diagnostic;
   const stage = diagnostic?.stage ?? job.progress?.stage ?? job.progress?.event?.stage ?? job.progress?.type?.replace("chapter.", "");
@@ -5185,17 +5186,4 @@ export function shouldRefreshAfterJob(previous: Job | undefined, next: Job) {
   // on completion discards that result before the page can render it.
   if (next.type === "voicePreview" || next.type === "entityLocalizationSuggestions" || next.type === "summary" || next.type === "visualWorkflow") return false;
   return isTerminalJob(next) && (previous?.id !== next.id || !isTerminalJob(previous));
-}
-function watchJob(id: string, onUpdate: (job: Job) => void | Promise<void>, onError: (error: unknown) => void, options: { maxFailures?: number } = {}) {
-  let stopped = false; let timer: number | undefined; let failures = 0; const source = new EventSource(`/api/jobs/${id}/events`);
-  const deliver = (job: Job) => { failures = 0; void Promise.resolve(onUpdate(job)).catch(onError); if (isTerminalJob(job)) stop(); };
-  const poll = async () => {
-    if (stopped) return;
-    try { const job = await api<Job>(`/jobs/${id}`); deliver(job); if (!isTerminalJob(job)) timer = window.setTimeout(poll, 1000); }
-    catch (error) { failures++; onError(error); if (options.maxFailures !== undefined && failures >= options.maxFailures) { stop(); return; } timer = window.setTimeout(poll, 2000); }
-  };
-  source.addEventListener("job", (event) => { try { deliver(JSON.parse((event as MessageEvent).data) as Job); } catch (error) { onError(error); } });
-  source.onerror = () => { if (stopped) return; source.close(); void poll(); };
-  function stop() { if (stopped) return; stopped = true; source.close(); if (timer !== undefined) clearTimeout(timer); }
-  return stop;
 }

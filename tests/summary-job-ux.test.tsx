@@ -430,6 +430,7 @@ describe("Summary Job UX — App Persistence & Route Hydration", () => {
     vi.stubGlobal("fetch", vi.fn(async (url: string) => {
       const urlStr = String(url);
       if (urlStr.endsWith("/jobs")) return new Response(JSON.stringify({ jobs: activeJobResponse.job ? [activeJobResponse.job] : [] }), { headers: { "content-type": "application/json" } });
+      if (urlStr.endsWith(`/jobs/${runningJob.id}`)) return Response.json(runningJob);
       if (urlStr.includes("/jobs/active")) {
         return new Response(JSON.stringify(activeJobResponse), { headers: { "content-type": "application/json" } });
       }

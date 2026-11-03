@@ -21,7 +21,6 @@ export function QueueStudioPage({ navigate }: { navigate: (path: string) => void
     } catch (value) { if (generation === requestGeneration.current) setError(message(value)); }
   };
   useEffect(() => { void load(); const timer = setInterval(() => void load(), 2_000); return () => clearInterval(timer); }, [page, itemPage, selected]);
-  useEffect(() => { if (!selected) return; const source = new EventSource(`/api/queue/jobs/${selected}/events`); source.addEventListener("job", () => void load()); source.onerror = () => source.close(); return () => source.close(); }, [selected, itemPage]);
   const select = (id: string) => { selectedRef.current = id; requestGeneration.current++; setSelected(id); setDetail(undefined); setItemPage(1); history.replaceState({}, "", `/queue?job=${id}`); };
   const control = async (jobId: string, action: string) => { try { await post(`/queue/jobs/${jobId}/${action}`, {}); await load(); } catch (value) { setError(message(value)); } };
   const counts = { queued: summary?.jobs?.queued ?? 0, running: summary?.jobs?.running ?? 0, completed: (summary?.jobs?.completed ?? 0) + (summary?.jobs?.completed_with_warnings ?? 0), warning: summary?.workItems?.warning ?? 0, "retry waiting": summary?.workItems?.retry_wait ?? 0, "needs review": summary?.workItems?.needs_review ?? 0, failed: summary?.workItems?.failed ?? 0 };

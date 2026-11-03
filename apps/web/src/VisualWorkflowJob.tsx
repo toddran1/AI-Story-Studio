@@ -1,3 +1,4 @@
+import { watchJob } from "./job-watch.js";
 import { useEffect, useRef, useState } from "react";
 import { api, post, type Job } from "./api.js";
 export function useVisualWorkflowJob(slug: string, channel: string, onFinished?: (job: Job) => void) {
@@ -6,12 +7,7 @@ export function useVisualWorkflowJob(slug: string, channel: string, onFinished?:
   useEffect(() => { let active = true; const request = ++sequence.current; setRecord(undefined); setError(""); const id = localStorage.getItem(key); if (id && /^[a-f0-9-]{36}$/.test(id)) api<Job>(`/jobs/${id}`).then(job => { if (active && request === sequence.current && job.story === slug && job.type === "visualWorkflow") setRecord({ key, job }); }).catch(error => { if (active) setError(String(error)); }); return () => { active = false; }; }, [key, slug]);
   useEffect(() => {
     if (!job || !["queued", "running"].includes(job.status)) return;
-    let active = true; let timer: ReturnType<typeof setTimeout> | undefined; let source: EventSource | undefined;
-    const update = (next: Job) => { if (active && next.id === job.id) setRecord({ key, job: next }); };
-    const poll = async () => { try { update(await api<Job>(`/jobs/${job.id}`)); } catch (error) { if (active) setError(String(error)); } if (active) timer = setTimeout(poll, 2000); };
-    if (typeof EventSource !== "undefined") { source = new EventSource(`/api/jobs/${job.id}/events`); source.addEventListener("job", event => { try { update(JSON.parse((event as MessageEvent).data)); } catch { setError("Unreadable job update."); } }); source.onerror = () => { source?.close(); if (!timer) void poll(); }; }
-    else void poll();
-    return () => { active = false; source?.close(); if (timer) clearTimeout(timer); };
+    return watchJob(job.id, next => { if (next.story === slug && next.type === "visualWorkflow") { setError(""); setRecord({ key, job: next }); } }, error => setError(String(error)));
   }, [job?.id, job?.status]);
   useEffect(() => { if (job && !["queued", "running"].includes(job.status) && finished.current !== job.id) { finished.current = job.id; callback.current?.(job); } }, [job]);
   const track = (next: Job) => { sequence.current++; localStorage.setItem(key, next.id); setError(""); setRecord({ key, job: next }); };

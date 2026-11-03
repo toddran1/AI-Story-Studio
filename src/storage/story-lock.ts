@@ -62,7 +62,9 @@ export async function acquireStoryLock(root: string, slug: string, operation: st
     const story = storyPaths(root, slug, 1).story, directory = join(story, ".operation-locks");
     await mkdir(directory, { recursive: true });
     for (const name of await readdir(directory)) {
-      if (!name.endsWith(".json")) continue;
+      // Only UUID leases belong to this protocol. External macOS volumes can
+      // also contain binary AppleDouble sidecars named ._<lease>.json.
+      if (!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}\.json$/i.test(name)) continue;
       const path = join(directory, name);
       let owner: LockOwner & { scope?: OperationScope };
       try { owner = JSON.parse(await readFile(path, "utf8")) as typeof owner; }

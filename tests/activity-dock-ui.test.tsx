@@ -84,3 +84,19 @@ it("ignores a delayed preview response for chapters that are no longer selected"
   await act(async()=>root.render(<BatchProcessingPanel {...props} selectedChapters={[2]}/>));await act(async()=>button("Preview execution").click());
   await act(async()=>finish(response(batchPlan("a"))));expect(host.textContent).toContain("Plan bbbbbbbb ready");expect(host.textContent).not.toContain("Plan aaaaaaaa ready");
 });
+
+it("times out a stalled preview and allows retry without affecting active jobs",async()=>{
+  vi.useFakeTimers();let signal:AbortSignal;
+  vi.stubGlobal("fetch",vi.fn((_url,init)=>{signal=init.signal;return new Promise(()=>{});}));
+  const props={slug:"a",selectedChapters:[1],onSelectionChange:vi.fn(),onSelectVisible:vi.fn(),onSelectMatching:vi.fn(),onSelectAll:vi.fn(),onJob:vi.fn(),watchJob:()=>()=>{}};
+  await act(async()=>root.render(<BatchProcessingPanel {...props}/>));await act(async()=>host.querySelector<HTMLInputElement>('input[type="checkbox"]')!.click());await act(async()=>button("Preview execution").click());
+  expect(button("Cancel preview")).toBeTruthy();await act(async()=>{await vi.advanceTimersByTimeAsync(60000);});
+  expect(signal!.aborted).toBe(true);expect(host.textContent).toContain("preview timed out");expect(button("Preview execution").disabled).toBe(false);expect(props.onJob).not.toHaveBeenCalled();
+});
+it("cancels only the pending preview and ignores a late response",async()=>{
+  let finish!:(value:Response)=>void;let signal:AbortSignal;
+  vi.stubGlobal("fetch",vi.fn((_url,init)=>{signal=init.signal;return new Promise<Response>(resolve=>{finish=resolve;});}));
+  const props={slug:"a",selectedChapters:[1],onSelectionChange:vi.fn(),onSelectVisible:vi.fn(),onSelectMatching:vi.fn(),onSelectAll:vi.fn(),onJob:vi.fn(),watchJob:()=>()=>{}};
+  await act(async()=>root.render(<BatchProcessingPanel {...props}/>));await act(async()=>host.querySelector<HTMLInputElement>('input[type="checkbox"]')!.click());await act(async()=>button("Preview execution").click());await act(async()=>button("Cancel preview").click());
+  expect(signal!.aborted).toBe(true);expect(button("Preview execution").disabled).toBe(false);await act(async()=>finish(response(batchPlan("a"))));expect(host.textContent).not.toContain("Plan aaaaaaaa ready");expect(props.onJob).not.toHaveBeenCalled();
+});
