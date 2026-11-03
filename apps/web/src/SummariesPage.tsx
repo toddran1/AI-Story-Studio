@@ -1,3 +1,4 @@
+import { useActivityRefresh } from "./ActivityDock.js";
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { api, del, isTerminalJob, Job, post, put, StorySummary } from "./api.js";
 import "./summary-styles.css";
@@ -114,6 +115,13 @@ export function SummariesPage({ slug, onJob, activeJob }: Props) {
       window.dispatchEvent(new CustomEvent("summary-produce-blocked", { detail: currentJob.result }));
     }
   }, [currentJob?.status, currentJob?.result]);
+
+  useActivityRefresh(slug, finished => {
+    if (!isSummaryRelatedJob(finished)) return;
+    void loadList();
+    const intent = completionIntents.current.get(finished.id);
+    if (intent) { completionIntents.current.delete(finished.id); void intent.handleTerminal(finished); }
+  });
 
   const lastCompletedJobId = useRef<string | undefined>(
     currentJob?.status === "completed" ? currentJob.id : undefined,

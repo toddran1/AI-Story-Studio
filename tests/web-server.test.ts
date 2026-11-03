@@ -1,3 +1,4 @@
+import { withStoryLock } from "../src/storage/story-lock.js";
 import { randomUUID } from "node:crypto";
 import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -59,6 +60,23 @@ async function storyFixture() {
 }
 
 describe("web service layer", () => {
+  it("saves a different chapter while context and media jobs run, and rejects an overlapping edit", async () => {
+    const {root,story}=await storyFixture(); const jobs=new JobManager(), operations=new StudioOperations(root,env,jobs);
+    let finish!:()=>void;const gate=new Promise<void>(resolve=>{finish=resolve;});let entered=0;
+    try {
+      const now=new Date().toISOString();
+      for(const chapter of [1,2,3]) await atomicWriteJson(storyPaths(root,story.slug,chapter).chapterMeta,chapterSchema.parse({chapter,sourceLanguage:"zh-CN",outputLanguage:"en-US",counts:{originalCharacters:0,englishWords:0,narrationWords:0},createdAt:now,updatedAt:now,stages:Object.fromEntries(["ingestion","translation","narration","qa","storyBible","tts"].map(stage=>[stage,{status:"pending"}]))}));
+      const context=jobs.create("stageExecution",story.slug,()=>withStoryLock(root,story.slug,"context batch",async()=>{entered++;await gate;}),{chapters:[2],stages:["storyBible"],mode:"selected"});
+      const audio=jobs.create("audio",story.slug,()=>withStoryLock(root,story.slug,"audio",async()=>{entered++;await gate;}),{from:3,to:3});
+      await vi.waitFor(()=>expect(entered).toBe(2));
+      await expect(operations.editChapterText(story.slug,1,{field:"narration",text:"A manually corrected passage."})).resolves.toHaveProperty("invalidated");
+      expect(await readFile(storyPaths(root,story.slug,1).narration,"utf8")).toBe("A manually corrected passage.");
+      const conflict=await operations.editChapterText(story.slug,2,{field:"translation",text:"Do not overwrite running work."}).catch(error=>error);
+      expect(statusFor(conflict)).toBe(409); expect(conflict.message).toContain("overlapping");
+      finish();await vi.waitFor(()=>expect(jobs.get(context.id)?.status).toBe("completed"));expect(jobs.get(audio.id)?.status).toBe("completed");
+    } finally {finish();await operations.close();await rm(root,{recursive:true,force:true});}
+  });
+
   it("returns the updated profile and new reference from a visual reference upload", async () => {
     const { root, story, paths } = await storyFixture();
     const entityId = "ent_0123456789abcdef01234567";
@@ -685,7 +703,7 @@ describe("web service layer", () => {
     const jobNew: Job = { id: "22222222-2222-4222-8222-222222222222", type: "production", story: story.slug, status: "running", createdAt: "2026-09-18T11:00:00.000Z", updatedAt: "2026-09-18T11:00:00.000Z" };
     (jobs as any).jobs.set(jobOld.id, jobOld);
     (jobs as any).jobs.set(jobNew.id, jobNew);
-    (jobs as any).activeStories.delete(story.slug);
+    (jobs as any).reservations.clear();
     expect(jobs.getActiveForStory(story.slug)?.id).toBe(jobNew.id);
 
     await operations.close();

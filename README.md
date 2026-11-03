@@ -451,6 +451,14 @@ npm run web
 
 Open [http://localhost:3000](http://localhost:3000). The server binds to `127.0.0.1` by default and keeps all provider credentials server-side. Set `WEB_PORT` if port 3000 is already in use.
 
+### Concurrent work and activity
+
+Jobs reserve their selected chapters, so audio, video, scene work, and text actions can run alongside work on different chapters—even within the same book. Editing another chapter remains available. Overlapping chapter selections are rejected before provider work begins. Each batch still processes its chapters in ascending order. Jobs that share cumulative Story Bible/context state or the same export files wait in order; unrelated media continues. Imports, deletion, settings, and other book-wide mutations retain exclusive protection.
+
+The **Activity** dock follows you across pages, tabs, and books. It shows direct jobs and durable production-queue jobs with book/chapter labels, progress, diagnostics, and existing retry/resume controls. Minimize a card, hide an activity, collapse the dock, or use **Show all** to restore hidden work. Hiding never stops a job. Pause and cancel stop remaining work at the next supported safe boundary, preserving completed artifacts and allowing an in-flight request to finish. Reloading the browser reconnects to server jobs; interrupted durable jobs remain paused after a server restart and are never replayed automatically.
+
+Background completions refresh dashboard data without remounting the editor or discarding unsaved chapter text and scene drafts.
+
 The studio provides:
 
 - A story shelf with import, processing, and QA status

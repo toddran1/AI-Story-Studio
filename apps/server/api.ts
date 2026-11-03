@@ -1,3 +1,4 @@
+import { queueActivity } from "./activity-jobs.js";
 import { usageCsv } from "../../src/cost/export.js";
 import { subscriptionProcessing } from "../../src/cost/subscription-processing.js";
 import { getChapterStatusReadRevision } from "../../src/studio/chapter-status-revision.js";
@@ -16,7 +17,7 @@ import { deleteMusicTrack, getMusicTrack, importMusicTrack, listMusicTracks, mus
 import { backgroundMusicSettingsSchema } from "../../src/music/types.js";
 import { chapterMusicExportPath, chapterMusicExportManifestSchema } from "../../src/music/chapter-export.js";
 import { atomicWriteJson } from "../../src/storage/atomic-write.js";
-import { withStoryLock } from "../../src/storage/story-lock.js";
+import { withStoryLock, StoryLockConflictError } from "../../src/storage/story-lock.js";
 import { getAudioDashboard, getAudioSummary, getAudioChapterPage, getCanonicalEntitiesPage, getCanonicalEntityAudit, getCanonicalEntityDetail, getCanonicalEntityHistory, getCanonicalEntityUsage, getChapter, getChapterPage, getContinuityReview, getContinuityPage, getContinuitySummary, getMinorReferencesPage, getOutputsLibrary, getOutputsSummary, getOutputsPage, outputGroupSchema, getQaDashboard, getQaPage, getQaSummary, qaStatusFilterSchema, getScenesDashboard, getScenesIndex, getScenesIndexRow, getScenesChapter, getStoryBibleView, getStoryDashboard, getProductionStatus, getStoryOverview, getSummariesContext, getStoryBibleHealth, getStoryBibleReview, getStoryBibleReviewSummary, getSuppressedCanonicalEntities, getVideoDashboard, getVideoSummary, getVideoChapterPage, listStories, updateStorySettings, chapterFilterSchema, entityReadinessFilterSchema, bibleReviewKindSchema, bibleReviewStatusSchema } from "./catalog.js";
 import { JobConflictError } from "./job-manager.js";
 import { listJobErrors } from "./job-error-history.js";
@@ -106,7 +107,20 @@ export function createApiHandler(operations: StudioOperations) {
       if (request.method === "POST" && url.pathname === "/api/backups/restore") { const upload = await receiveUpload(request, operations.root, 4 * 1024 * 1024 * 1024); try { return send(response, 201, await operations.restoreBackup(upload)); } finally { await rm(upload, { force: true }); } }
       const backupDownload = /^\/api\/backups\/([a-f0-9-]{36})\.zip$/.exec(url.pathname);
       if (backupDownload && request.method === "GET") return sendFile(request, response, backupPath(operations.root, backupDownload[1]!), "application/zip");
-      if (request.method === "GET" && url.pathname === "/api/jobs") return send(response, 200, { jobs: operations.jobs.list().map((job) => publicJob(job, operations.root)) });
+      if (request.method === "GET" && url.pathname === "/api/jobs") {
+        const jobs = operations.jobs.list();
+        if (operations.queue) {
+          const repository = operations.queue.repository;
+          const pages = await Promise.all([undefined, "queued", "running"].map(async status => {
+            const first = await repository.listJobs({ page: 1, pageSize: 100, status: status as "queued" | "running" | undefined });
+            const items = [...first.items];
+            if (status) for (let page = 2; page <= first.pages; page++) items.push(...(await repository.listJobs({ page, pageSize: 100, status: status as "queued" | "running" })).items);
+            return items;
+          }));
+          jobs.push(...[...new Map(pages.flat().map(job => [job.id, job])).values()].map(queueActivity));
+        }
+        return send(response, 200, { jobs: jobs.map(job => publicJob(job, operations.root)) });
+      }
       const errorHistoryMatch = /^\/api\/stories\/([a-z0-9]+(?:-[a-z0-9]+)*)\/job-errors$/.exec(url.pathname);
       if (errorHistoryMatch && request.method === "GET") {
         const limit = z.coerce.number().int().min(1).max(500).parse(url.searchParams.get("limit") ?? "100");
@@ -129,6 +143,8 @@ export function createApiHandler(operations: StudioOperations) {
       if (jobMatch && request.method === "GET") { const job = operations.jobs.get(jobMatch[1]!); if (!job) return send(response, 404, { error: "Job not found" }); return send(response, 200, publicJob(job, operations.root)); }
       const retryMatch = /^\/api\/jobs\/([a-f0-9-]+)\/retry$/.exec(url.pathname);
       if (retryMatch && request.method === "POST") return send(response, 202, publicJob(await operations.retryJob(retryMatch[1]!), operations.root));
+      const cancelMatch = /^\/api\/jobs\/([a-f0-9-]+)\/cancel$/.exec(url.pathname);
+      if (cancelMatch && request.method === "POST") return operations.jobs.cancel(cancelMatch[1]!) ? send(response, 202, { status: "cancel_requested" }) : send(response, 409, { error: "Job is no longer active" });
       const pauseMatch = /^\/api\/jobs\/([a-f0-9-]+)\/pause$/.exec(url.pathname);
       if (pauseMatch && request.method === "POST") return operations.jobs.pause(pauseMatch[1]!) ? send(response, 202, { status: "pause_requested" }) : send(response, 409, { error: "Job is not running or cannot be paused" });
       const eventMatch = /^\/api\/jobs\/([a-f0-9-]+)\/events$/.exec(url.pathname);
@@ -140,7 +156,7 @@ export function createApiHandler(operations: StudioOperations) {
         const cleanup = () => { if (closed) return; closed = true; clearInterval(heartbeat); unsubscribe(); };
         unsubscribe = operations.jobs.subscribe(eventMatch[1]!, (job) => {
           if (closed || response.destroyed) return; response.write(`event: job\ndata: ${JSON.stringify(publicJob(job, operations.root))}\n\n`);
-          if (["completed", "failed", "paused"].includes(job.status)) { cleanup(); response.end(); }
+          if (["completed", "failed", "paused", "cancelled"].includes(job.status)) { cleanup(); response.end(); }
         }) ?? (() => undefined);
         response.on("close", cleanup); return true;
       }
@@ -894,7 +910,7 @@ export function statusFor(error: unknown): number {
   if (error instanceof HttpError) return error.status;
   if (error instanceof SourceOperationError) return error.status;
   if (error instanceof z.ZodError) return 400;
-  if (error instanceof JobConflictError || /locked by PID|already has active job/.test(String(error))) return 409;
+  if (error instanceof JobConflictError || error instanceof StoryLockConflictError || /locked by PID|already has active job/.test(String(error))) return 409;
   if (error instanceof QaFindingLifecycleConflictError) return 409;
   if (error && typeof error === "object" && "code" in error && (error as { code?: unknown }).code === "QA_FINDING_STALE_SELECTION") return 409;
   if (error instanceof SummarySceneProposalConflictError) return 409;

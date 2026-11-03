@@ -2,7 +2,7 @@ import { z } from "zod";
 import { atomicWriteJson } from "../storage/atomic-write.js";
 import { storyPaths } from "../storage/paths.js";
 import { readJsonIfExists } from "../storage/story-files.js";
-import { withStoryLock } from "../storage/story-lock.js";
+import { withStoryLock, withOperationScope } from "../storage/story-lock.js";
 import { Chapter, StageName, chapterSchema } from "../domain/chapter.js";
 import { Story } from "../domain/story.js";
 import { loadStory } from "../config/load-config.js";
@@ -43,7 +43,7 @@ export async function inspectStagesForCurrent(root: string, slug: string, chapte
 export async function markStagesCurrent(root: string, slug: string, raw: unknown) {
   const input = markCurrentInputSchema.parse(raw);
   const story = await storyForAcceptance(root, slug);
-  return withStoryLock(root, slug, "mark stages current", async () => {
+  return withOperationScope(slug, { chapters: input.chapters }, () => withStoryLock(root, slug, "mark stages current", async () => {
     const changed: Array<{ chapter: number; stage: MarkCurrentStage }> = []; const current: Array<{ chapter: number; stage: MarkCurrentStage }> = []; const missing: Inspection[] = []; const ineligible: Inspection[] = [];
     for (const chapterNumber of [...new Set(input.chapters)].sort((a, b) => a - b)) {
       const paths = storyPaths(root, slug, chapterNumber); const rawChapter = await readJsonIfExists<Chapter>(paths.chapterMeta);
@@ -64,7 +64,7 @@ export async function markStagesCurrent(root: string, slug: string, raw: unknown
     }
     if (changed.length) await recordActivity(root, slug, "stages.mark-current", `Marked ${changed.length} existing stage artifact${changed.length === 1 ? "" : "s"} current without regeneration`);
     return { changed, alreadyCurrent: current, missingArtifacts: missing, ineligible, skipped: [...current, ...missing, ...ineligible] };
-  });
+  }));
 }
 
 async function inspectStage(root: string, slug: string, chapterNumber: number, stage: MarkCurrentStage, loaded?: Chapter): Promise<Inspection> {

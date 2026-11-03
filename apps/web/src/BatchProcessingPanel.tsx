@@ -65,7 +65,7 @@ export function BatchProcessingPanel(props: Props) {
     try {
       setRunning(true); setError(""); setResult(undefined);
       const job = await post<Job>(`/stories/${props.slug}/stages/run`, { ...request(), expectedPlanFingerprint: preview.fingerprint });
-      props.onJob(job); setActiveJob(job); watcher.current?.();
+      props.onJob(job); setRunning(false); setActiveJob(job); watcher.current?.();
       watcher.current = props.watchJob(job.id, (next) => {
         props.onJob(next); setActiveJob(next);
         if (next.status === "completed") { setRunning(false); setResult(next.result); setPreview(undefined); setActiveJob(undefined); }

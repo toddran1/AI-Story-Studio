@@ -1,3 +1,4 @@
+import { ActivityDock, useActivityJobs, activityJobForChapter, useActivityRefresh } from "./ActivityDock.js";
 import { ModelFields, effortLabel } from "./ModelFields.js";
 import { ImageWorkbench } from "./ImageWorkbench.js";
 import { AudioRegeneration } from "./AudioRegeneration.js";
@@ -146,56 +147,18 @@ export function App({ initialJob, initialRoute }: { initialJob?: Job; initialRou
   const [route, setRoute] = useState<Route>(() => initialRoute ?? parseRoute(location.pathname));
   const [stories, setStories] = useState<StoryCard[]>([]);
   const [storiesError, setStoriesError] = useState("");
-  const [job, setJob] = useState<Job | undefined>(initialJob);
+  const activity = useActivityJobs(initialJob);
+  const job = activityJobForChapter(activity.jobs, route.story, route.chapter);
   const [jobRefreshVersion, setJobRefreshVersion] = useState(0);
-  const latestJob = useRef<Job | undefined>(initialJob);
   useEffect(() => { const handler = () => setRoute(parseRoute(location.pathname)); addEventListener("popstate", handler); return () => removeEventListener("popstate", handler); }, []);
   useEffect(() => { let cancelled = false; const refreshStories = () => { setStoriesError(""); api<{ stories: StoryCard[]; warnings?: string[] }>("/stories").then((value) => { if (!cancelled) { setStories(value.stories); setStoriesError(value.warnings?.join(" ") ?? ""); } }).catch((error) => { if (!cancelled) setStoriesError(message(error)); }); }; refreshStories(); window.addEventListener("stories:changed", refreshStories); return () => { cancelled = true; window.removeEventListener("stories:changed", refreshStories); }; }, [jobRefreshVersion]);
-  useEffect(() => {
-    if (latestJob.current && !isTerminalJob(latestJob.current)) {
-      return;
-    }
-    const storySlug = route.story;
-    if (!storySlug) {
-      if (latestJob.current?.story && isTerminalJob(latestJob.current)) {
-        latestJob.current = undefined;
-        setJob(undefined);
-      }
-      return;
-    }
-    if (latestJob.current && latestJob.current.story !== storySlug && isTerminalJob(latestJob.current)) {
-      latestJob.current = undefined;
-      setJob(undefined);
-    }
-    let cancelled = false;
-    api<{ job: Job | null }>(`/stories/${storySlug}/jobs/active`)
-      .then((res) => {
-        if (cancelled) return;
-        if (latestJob.current && !isTerminalJob(latestJob.current)) {
-          return;
-        }
-        const serverJob = res?.job;
-        if (serverJob && !isTerminalJob(serverJob)) {
-          if (!isJobDismissed(serverJob.id)) {
-            latestJob.current = serverJob;
-            setJob(serverJob);
-          }
-        }
-      })
-      .catch(() => undefined);
-    return () => { cancelled = true; };
-  }, [route.story]);
-  const updateJob = (next: Job) => {
-    if (shouldRefreshAfterJob(latestJob.current, next)) setJobRefreshVersion((value) => value + 1);
-    if (isTerminalJob(next)) clearJobDismissal(next.id);
-    latestJob.current = next;
-    setJob(next);
-  };
+  useEffect(() => { const finished = () => setJobRefreshVersion(value => value + 1); window.addEventListener("studio:job-finished", finished); return () => window.removeEventListener("studio:job-finished", finished); }, []);
+  const updateJob = activity.update;
   const navigate = (path: string, options?: NavigateOptions) => { if (options?.replace) history.replaceState({}, "", path); else history.pushState({}, "", path); setRoute(parseRoute(path)); performNavigateScroll(options?.scroll); };
   const active = route.story ? stories.find((story) => story.slug === route.story) : undefined;
   return <div className="studio-shell">
     <Sidebar stories={stories} active={route.story} navigate={navigate} />
-    <main className="canvas" key={`${route.page}:${route.story ?? ""}:${route.chapter ?? ""}:${jobRefreshVersion}`}>
+    <main className="canvas" key={`${route.page}:${route.story ?? ""}:${route.chapter ?? ""}`}>
       <Topbar title={active?.title ?? pageTitle(route.page)} subtitle={active ? `${active.sourceLanguage} → ${active.outputLanguage}` : "Local production workspace"} />
       <ErrorBoundary key={`${route.page}:${route.story ?? ""}:${route.chapter ?? ""}`} navigate={navigate}>
         {route.page === "stories" && <LibraryPage stories={stories} error={storiesError} navigate={navigate} />}
@@ -212,11 +175,11 @@ export function App({ initialJob, initialRoute }: { initialJob?: Job; initialRou
         {route.page === "bible" && route.story && <BiblePage slug={route.story} navigate={navigate} locationSearch={location.search} />}
         {route.page === "names" && route.story && <NamesLocalizationPage slug={route.story} navigate={navigate} onJob={updateJob} />}
         {route.page === "continuity" && route.story && <ContinuityPage slug={route.story} navigate={navigate} />}
-        {route.page === "summaries" && route.story && <SummariesPage slug={route.story} onJob={updateJob} activeJob={job} />}
+        {route.page === "summaries" && route.story && <SummariesPage slug={route.story} onJob={updateJob} activeJob={activity.jobs.filter(current => current.story === route.story && isSummaryRelatedJob(current)).at(-1)} />}
         {route.page === "audio" && route.story && <AudioPage slug={route.story} onJob={updateJob} />}
         {route.page === "video" && route.story && <VideoPage slug={route.story} onJob={updateJob} />}
         {route.page === "scenes" && route.story && <ScenesPage slug={route.story} onJob={updateJob} navigate={navigate} />}
-        {route.page === "production" && route.story && <ProductionPage slug={route.story} activeJob={job?.type === "production" ? job : undefined} onJob={updateJob} navigate={navigate} />}
+        {route.page === "production" && route.story && <ProductionPage slug={route.story} activeJob={activity.jobs.filter(current => current.story === route.story && current.type === "production").at(-1)} onJob={updateJob} navigate={navigate} />}
         {route.page === "costs" && route.story && <CostsPage slug={route.story} />}
         {route.page === "outputs" && route.story && <OutputsPage slug={route.story} />}
         {route.page === "voice" && route.story && <VoicePage slug={route.story} onJob={updateJob} />}
@@ -224,11 +187,7 @@ export function App({ initialJob, initialRoute }: { initialJob?: Job; initialRou
         {route.page === "import" && <ChapterImportPage storySlug={route.story} stories={stories} navigate={navigate} />}
       </ErrorBoundary>
     </main>
-    {job && <JobConsole job={job} onUpdate={updateJob} navigate={navigate} onClose={() => {
-      if (job) dismissJob(job.id);
-      latestJob.current = undefined;
-      setJob(undefined);
-    }} />}
+    <ActivityDock jobs={activity.jobs} error={activity.error} titles={Object.fromEntries(stories.map(story => [story.slug, story.title]))} renderJob={(current, hide) => <JobConsole job={current} onUpdate={updateJob} navigate={navigate} onClose={hide} />} />
   </div>;
 }
 
@@ -610,6 +569,13 @@ export function ChapterPage({
   useEffect(() => {
     setCues(data?.subtitleDocument?.cues?.map((cue: any) => ({ ...cue })) ?? []);
   }, [data?.subtitleDocument]);
+
+  const hasUnsavedDraft = useRef(false);
+  hasUnsavedDraft.current = Boolean(data && ((["translation", "narration"].includes(tab) && draft !== (data[tab as "translation" | "narration"] ?? "")) || compareDrafts.translation !== (data.translation ?? "") || compareDrafts.narration !== (data.narration ?? "")));
+  useEffect(() => {
+    const finished = (event: Event) => { const completed = (event as CustomEvent<Job>).detail; if (completed.story === slug && !hasUnsavedDraft.current) void load().catch(value => setError(message(value))); };
+    window.addEventListener("studio:job-finished", finished); return () => window.removeEventListener("studio:job-finished", finished);
+  }, [slug, chapter]);
 
   const saveText = async (field: "translation" | "narration", text: string) => {
     try {
@@ -3359,6 +3325,8 @@ export function ScenesPage({ slug, onJob, navigate, initialData }: { slug: strin
     }
   };
 
+  useActivityRefresh(slug, () => { void load(data?.selectedChapter).catch(value => setError(message(value))); });
+
   if (error && !data) return <LoadFailure error={error} />;
   if (!data) return <Loading />;
   const plannerNotReady = Boolean(data.scenePlannerRouting && !data.scenePlannerRouting.ready);
@@ -3923,6 +3891,7 @@ export function VideoPage({ slug, onJob }: { slug: string; onJob: (job: Job) => 
   const [data, setData] = useState<Omit<VideoDashboard, "chapters"> & { minChapter?: number; maxChapter?: number }>();
   const [chapterPage, setChapterPage] = useState<{ items: VideoDashboard["chapters"]; page: number; pages: number; total: number }>();
   const [page, setPage] = useState(1); const [pageSize, setPageSize] = useState(25); const [refreshVersion, setRefreshVersion] = useState(0);
+  useActivityRefresh(slug, () => setRefreshVersion(value => value + 1));
   const [range, setRange] = useState({ from: "", to: "", subtitleMode: "none" as "none" | "burn" | "soft" | "both" });
   const { music, setMusic, overrides: musicOverrides, setOverrides: setMusicOverrides } = useMusicExportPreferences(`story-music-export:${slug}`);
   const [chapterExport, setChapterExport] = useState<{ chapter: number; url: string }>();
@@ -4010,6 +3979,7 @@ export function AudioPage({ slug, onJob }: { slug: string; onJob: (job: Job) => 
   const [page, setPage] = useState(1); const [pageSize, setPageSize] = useState(() => { const value = Number(new URLSearchParams(location.search).get("pageSize")); return [10, 25, 50, 100].includes(value) ? value : 25; });
   const [error, setError] = useState(""); const [pageError, setPageError] = useState(""); const watcher = useRef<(() => void) | undefined>(undefined);
   const summaryRequest = useRef(0); const pageRequest = useRef(0); const [refreshVersion, setRefreshVersion] = useState(0);
+  useActivityRefresh(slug, () => setRefreshVersion(value => value + 1));
   useEffect(() => { const request = ++summaryRequest.current; api<Omit<AudioDashboard, "chapters"> & { minChapter?: number; maxChapter?: number }>(`/stories/${slug}/audio/summary`).then((next) => { if (request !== summaryRequest.current) return; setData(next); setError(""); setRange((current) => current.from ? current : { ...current, from: String(next.minChapter ?? ""), to: String(next.maxChapter ?? "") }); }).catch((value) => { if (request === summaryRequest.current) setError(message(value)); }); return () => { summaryRequest.current++; }; }, [slug, refreshVersion]);
   useEffect(() => { const request = ++pageRequest.current; api<{ items: AudioDashboard["chapters"]; page: number; pages: number; total: number }>(`/stories/${slug}/audio/chapters?page=${page}&pageSize=${pageSize}`).then((next) => { if (request === pageRequest.current) { setMasters(next); setPageError(""); } }).catch((value) => { if (request === pageRequest.current) setPageError(message(value)); }); return () => { pageRequest.current++; }; }, [slug, page, pageSize, refreshVersion]);
   useEffect(() => () => watcher.current?.(), [slug]);
@@ -4577,7 +4547,7 @@ export function JobConsole({ job, onUpdate, onClose, navigate, initialQaComparis
   };
 
   useEffect(() => {
-    if (isTerminalJob(job)) return;
+    if (isTerminalJob(job) || job.payload?.queueJobId) return;
     return watchJob(job.id, onUpdate, (value) => setActionError(message(value)));
   }, [job.id]);
   const diagnostic: ErrorDiagnostic | undefined = job.diagnostic ?? job.progress?.diagnostic;
@@ -4606,12 +4576,13 @@ export function JobConsole({ job, onUpdate, onClose, navigate, initialQaComparis
     });
     return () => { cancelled = true; };
   }, [job.id, job.story, qaRelated, diagnostic?.id, diagnostic?.chapter, diagnostic?.qaDependencyFingerprint]);
-  const pause = async () => { try { setActionError(""); await post(`/jobs/${job.id}/pause`, {}); } catch (error) { setActionError(message(error)); } };
+  const pause = async () => { try { setActionError(""); await post(job.payload?.queueJobId ? `/queue/jobs/${job.payload.queueJobId}/pause` : `/jobs/${job.id}/pause`, {}); } catch (error) { setActionError(message(error)); } };
   const retry = async () => {
     if (retrying) return;
     setRetrying(true);
     setActionError("");
     try {
+      if (job.payload?.queueJobId) { await post(`/queue/jobs/${job.payload.queueJobId}/resume`, {}); return; }
       let nextJob: Job;
       try {
         nextJob = await post<Job>(`/jobs/${job.id}/retry`, {});
@@ -4646,6 +4617,8 @@ export function JobConsole({ job, onUpdate, onClose, navigate, initialQaComparis
   const modelBadge = [diagnostic?.provider, diagnostic?.model].filter(Boolean).join(" · ");
   const terminal = isTerminalJob(job);
   const title = terminal ? (job.status === "completed" ? `${label} — completed` : `${label} — ${job.status}`) : label;
+  const progressTotal = job.progress?.total ?? job.progress?.chapterTotal;
+  const progressDone = terminal && job.status === "completed" ? progressTotal : job.progress?.completed ?? (job.progress?.index ? Math.max(0, job.progress.index - (String(job.progress?.type).endsWith("completed") ? 0 : 1)) : undefined);
   const jobWarnings: string[] = [...(Array.isArray(job.progress?.warnings) ? job.progress.warnings : []), ...(Array.isArray(job.result?.warnings) ? job.result.warnings : [])].filter((warning, index, all) => typeof warning === "string" && all.indexOf(warning) === index);
   const onCloseRef = useRef(onClose);
   onCloseRef.current = onClose;
@@ -4718,7 +4691,7 @@ export function JobConsole({ job, onUpdate, onClose, navigate, initialQaComparis
           >
             <span style={{ width: `${summaryView.percent}%` }} />
           </div>
-        ) : <div className="job-progress"><i /><i /><i /><i /><i /></div>}
+        ) : Number.isFinite(progressTotal) && progressTotal > 0 && Number.isFinite(progressDone) ? <div className="job-progress job-progress-detailed" role="progressbar" aria-label="Job progress" aria-valuemin={0} aria-valuemax={progressTotal} aria-valuenow={Math.min(progressTotal, progressDone)}><span style={{width:`${Math.min(100, Math.max(0, progressDone / progressTotal * 100))}%`}}/></div> : <div className="job-progress"><i /><i /><i /><i /><i /></div>}
         {diagnostic ? <div className="incident">
           <h3>{isSceneJob ? "Scene planning failed" : diagnostic.summary}</h3>
           <div className="incident-meta">
@@ -4742,16 +4715,18 @@ export function JobConsole({ job, onUpdate, onClose, navigate, initialQaComparis
             ? <details><summary>Issues reported by this attempt</summary><ul>{diagnostic.issues.slice(0, 3).map((issue, index) => <li key={`${issue.category}-${index}`}><b>{pretty(issue.category)}</b>{issue.message}</li>)}</ul></details>
             : <ul>{diagnostic.issues.slice(0, 3).map((issue, index) => <li key={`${issue.category}-${index}`}><b>{pretty(issue.category)}</b>{issue.message}</li>)}</ul>) : null}          <div className="incident-next"><small>Recommended next step</small><p>{diagnostic.recommendedAction}</p></div>
           <details><summary>Technical details</summary><p>{diagnostic.technicalDetails ?? "No additional provider details were supplied."}</p><small>{new Date(diagnostic.timestamp).toLocaleString()} · {diagnostic.id} · Job {job.id.slice(0, 8)}</small></details>
-        </div> : <p className={summaryView ? "job-artwork-detail" : undefined} aria-live={summaryView ? "polite" : undefined}>{actionError || job.error || (summaryView ? summaryView.detail : chapter ? `Chapter ${chapter} · ${pretty(stage ?? "working")}${detail ? ` — ${detail}` : ""}` : pretty(job.status))}</p>}
+        </div> : <p className={summaryView ? "job-artwork-detail" : undefined} aria-live={summaryView ? "polite" : undefined}>{actionError || job.error || (summaryView ? summaryView.detail : chapter ? `Chapter ${chapter} · ${pretty(stage ?? "working")}${detail ? ` — ${detail}` : ""}` : detail ?? pretty(job.status))}</p>}
         {jobWarnings.length > 0 && <ul className="job-warnings">{jobWarnings.map((warning, index) => <li key={index}>{warning}</li>)}</ul>}
         <div className="job-actions">
+          {!terminal && <button type="button" disabled={job.cancelRequested} onClick={() => void post(job.payload?.queueJobId ? `/queue/jobs/${job.payload.queueJobId}/cancel` : `/jobs/${job.id}/cancel`, {}).catch(error => setActionError(message(error)))}>{job.cancelRequested ? "Cancelling after current action…" : "Cancel remaining work"}</button>}
+          {job.payload?.queueJobId && <button type="button" onClick={() => navigate?.("/queue")}>Open production queue</button>}
           {diagnostic && <button type="button" onClick={() => void copyDiagnostic()}>{copied ? "Copied" : "Copy details"}</button>}
-          {(job.status === "failed" || (job.status === "paused" && job.type === "stageExecution")) && <button type="button" className="button-retry" disabled={retrying} onClick={() => void retry()}>{retrying ? "Starting…" : job.status === "paused" ? "Resume remaining chapters" : "Retry"}</button>}
+          {((job.status === "failed" && !job.payload?.queueJobId) || (job.status === "paused" && ["stageExecution", "batch", "audio", "audiobook", "subtitles", "alignment", "video", "videoExport", "scenes", "artwork", "production"].includes(job.type))) && <button type="button" className="button-retry" disabled={retrying} onClick={() => void retry()}>{retrying ? "Starting…" : job.status === "paused" ? "Resume remaining chapters" : "Retry"}</button>}
           {job.story && (
             <button type="button" onClick={() => navigate?.(`/stories/${job.story}/settings`) ?? (location.href = `/stories/${job.story}/settings`)}>Open model settings</button>
           )}
           {diagnostic?.chapter && <a href={`/stories/${job.story}/chapters/${diagnostic.chapter}`}>Open chapter</a>}
-          {job.status === "running" && ["batch", "stageExecution", "audio", "audiobook", "subtitles", "video", "scenes", "artwork", "production"].includes(job.type) && <button type="button" onClick={() => void pause()}>Pause after chapter</button>}
+          {!terminal && <button type="button" disabled={job.pauseRequested} onClick={() => void pause()}>{job.pauseRequested ? "Pausing after current action…" : "Pause after current action"}</button>}
           <button type="button" onClick={onClose}>{terminal ? "Close" : "Dismiss"}</button>
         </div>
         {actionError && diagnostic && <p className="incident-action-error">{actionError}</p>}
@@ -5150,7 +5125,7 @@ function formatDuration(seconds: number) { if (!Number.isFinite(seconds) || seco
 function formatBytes(bytes: number) { if (bytes < 1024) return `${bytes} B`; if (bytes < 1024 ** 2) return `${(bytes / 1024).toFixed(1)} KB`; return `${(bytes / 1024 ** 2).toFixed(1)} MB`; }
 function formatTime(seconds: number) { const minutes = Math.floor(Math.max(0, seconds) / 60); const rest = Math.floor(Math.max(0, seconds) % 60); return `${minutes}:${String(rest).padStart(2, "0")}`; }
 
-export function isTerminalJob(job: Job) { return ["completed", "failed", "paused"].includes(job.status); }
+export function isTerminalJob(job: Job) { return ["completed", "failed", "paused", "cancelled"].includes(job.status); }
 export function dismissJob(jobId: string) {
   try {
     if (typeof sessionStorage !== "undefined") {

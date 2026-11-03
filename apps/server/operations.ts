@@ -1,3 +1,4 @@
+import { jobOperationScope } from "../../src/storage/operation-scope.js";
 import { MotionAssetService } from "../../src/video/motion-service.js";
 import { FfmpegMotionTools } from "../../src/video/motion-tools.js";
 import { loadMotionAssets } from "../../src/video/motion-assets.js";
@@ -56,7 +57,7 @@ import { SourceConflictError, SourceInputError, SourceOperationError, SourceUpst
 import { atomicWrite, atomicWriteJson } from "../../src/storage/atomic-write.js";
 import { previewPaths, storyPaths } from "../../src/storage/paths.js";
 import { exists, readJsonIfExists, readTextIfExists } from "../../src/storage/story-files.js";
-import { withStoryLock } from "../../src/storage/story-lock.js";
+import { withStoryLock, withChapterLock, withSummaryLock, withScopedStoryLock } from "../../src/storage/story-lock.js";
 import { ShutdownController } from "../../src/batch/shutdown.js";
 import { JobManager } from "./job-manager.js";
 import { logger } from "../../src/utils/logger.js";
@@ -336,12 +337,15 @@ export class StudioOperations {
     slugSchema.parse(slug); const input = stageExecutionInputSchema.parse(raw);
     if (input.executionPolicy === "chapter-stage" && (input.chapters.length !== 1 || input.stages.length !== 1)) throw new ConfigurationError("Chapter-stage execution requires one chapter and one stage.");
     if (input.dryRun) return this.planStageExecution(slug, input);
+    const scope = jobOperationScope("stageExecution", { ...input, mode: "selected" });
     return this.jobs.create("stageExecution", slug, async (control) => {
       const shutdown = new ShutdownController();
       control.setPause(() => shutdown.request());
-      return withStoryLock(this.root, slug, "manual stage processing", async () => {
       const story = await loadStory(storyPaths(this.root, slug, 1).storyConfig); const imported = await loadImportedChapters(this.root, slug);
       const selected = selectChapterNumbers(imported.chapters, input.chapters); const batchPlan = await planStageExecutionBatch({ root: this.root, story: slug, chapters: selected.map((chapter) => chapter.chapter), selectedStages: input.stages, mode: input.mode, force: input.force, executionPolicy: input.executionPolicy, storyConfig: story });
+      await control.reserve?.(jobOperationScope("stageExecution", { ...input, mode: "selected", stages: [...new Set(batchPlan.chapters.flatMap(chapter => chapter.runStages))] }));
+      if (shutdown.isRequested) return { status: "paused", results: [] };
+      return withStoryLock(this.root, slug, "manual stage processing", async () => {
       if (input.expectedPlanFingerprint && input.expectedPlanFingerprint !== batchPlan.fingerprint) throw new ConfigurationError("The execution plan changed after preview. Preview the current plan before running it.");
       if (batchPlan.summary.operationCount === 0 && batchPlan.summary.blockedOperations === 0) throw new ConfigurationError("The execution plan contains no stages to run. Select stages that need work or enable regeneration, then preview again.");
       if (batchPlan.summary.blockedOperations) {
@@ -359,13 +363,13 @@ export class StudioOperations {
       for (const plan of batchPlan.chapters) {
         if (shutdown.isRequested) break;
         const chapter = plan.chapter; const source = sources.get(chapter)!;
-        control.update({ type: "stage-execution.chapter.planned", chapter, plan });
+        control.update({ type: "stage-execution.chapter.planned", chapter, plan, completed: results.length, index: results.length + 1, total: batchPlan.chapters.length });
         if (plan.blockedStages.length) { results.push({ chapter, status: "blocked", plan }); continue; }
         if (!plan.runStages.length) { results.push({ chapter, status: "reused", plan }); continue; }
         try {
           await executeStagePlan({ root: this.root, story, chapter, inputPath: source.path, source: source.source, plan,
             runtime: { pipeline: this.pipeline, alignment: { config: this.alignConfig, engine: this.aligner }, scenePlanner: this.scenePlanner ?? this.runtime.router.forStage(story.pipeline.scenePlanner), image: this.image, video: this.video },
-            onStageEvent: (event) => control.update({ type: "stage", chapter, event }) });
+            onStageEvent: (event) => control.update({ type: "stage", chapter, event, completed: results.length, index: results.length + 1, total: batchPlan.chapters.length }) });
           results.push({ chapter, status: "completed", plan });
         } catch (error) {
           if (!input.continueOnError) throw error;
@@ -379,7 +383,7 @@ export class StudioOperations {
       const paused = shutdown.isRequested && results.length < batchPlan.chapters.length;
       return { status: paused ? "paused" : failedChapters ? "completed_with_errors" : "completed", stopReason: failedChapters ? `${failedChapters} of ${results.length} chapters failed. See the chapter errors below.` : undefined, fingerprint: batchPlan.fingerprint, results, summary: { ...batchPlan.summary, completedOperations: results.filter((item) => item.status === "completed").reduce((count, item) => count + item.plan.runStages.length, 0), completedChapters: results.filter((item) => item.status === "completed").length, reusedChapters: results.filter((item) => item.status === "reused").length, blockedChapters: results.filter((item) => item.status === "blocked").length, failedChapters } };
       });
-    }, input);
+    }, input, scope);
   }
 
   novelProviders() { return this.registry.listNovelProviders(); }
@@ -595,7 +599,7 @@ export class StudioOperations {
       } } : this.pipeline;
       return new BatchRunner(processor).run({ root: this.root, story, chapters: selected, state, shutdown, retry: retryConfigSchema.parse({}),
         onProgress: (event: ProgressEvent) => control.update(event) }).then(async (result) => { await invalidateChapterStatusDerivedReads(this.root, slug); await invalidateStoryBibleDerivedReads(this.root, slug); return result; });
-    }));
+    }), input);
   }
 
   async productionPlan(slug: string, raw: unknown) { slugSchema.parse(slug); const input = productionInputSchema.parse(raw); const story = await loadStory(storyPaths(this.root, slug, 1).storyConfig); const plan=(await planProduction({ root: this.root, story, ...input, dryRun: true }, { loadChapters: async () => (await loadImportedChapters(this.root, slug)).chapters })).plan;const analytics=this.usage?await this.usage.summary({story:slug}):{dimensions:[]};return{...plan,costEstimate:estimatePlanCost(plan,analytics as any,story)}; }
@@ -658,14 +662,14 @@ export class StudioOperations {
       return shutdown.isRequested ? { status: "paused", summary: result } : result;
     }), { summaryId: id, operation: stage });
   }
-  editSummaryScenes(slug: string, id: string, raw: unknown) { slugSchema.parse(slug); return withStoryLock(this.root, slug, "summary scene edits", () => this.summaryVisuals().editScenes(slug, id, raw)); }
-  updateSummaryScene(slug: string, id: string, scene: string, raw: unknown) { slugSchema.parse(slug); z.string().regex(/^scene-\d{3}$/).parse(scene); return withStoryLock(this.root, slug, "summary single scene edit", () => this.summaryVisuals().updateScene(slug, id, scene, raw)); }
+  editSummaryScenes(slug: string, id: string, raw: unknown) { slugSchema.parse(slug); return withSummaryLock(this.root, slug, id, "summary scene edits", () => this.summaryVisuals().editScenes(slug, id, raw)); }
+  updateSummaryScene(slug: string, id: string, scene: string, raw: unknown) { slugSchema.parse(slug); z.string().regex(/^scene-\d{3}$/).parse(scene); return withSummaryLock(this.root, slug, id, "summary single scene edit", () => this.summaryVisuals().updateScene(slug, id, scene, raw)); }
   previewSummarySceneRegeneration(slug: string, id: string, scene: string, raw: unknown) { slugSchema.parse(slug); z.string().regex(/^scene-\d{3}$/).parse(scene); return withUsageScope({ story: slug, stage: "scenePlanning" }, () => this.summaryMedia().previewSceneRegeneration(slug, id, scene, raw)); }
-  applySummarySceneRegeneration(slug: string, id: string, scene: string, raw: unknown) { slugSchema.parse(slug); z.string().regex(/^scene-\d{3}$/).parse(scene); return withStoryLock(this.root, slug, "summary scene regeneration apply", () => this.summaryVisuals().applySceneRegeneration(slug, id, scene, raw)); }
+  applySummarySceneRegeneration(slug: string, id: string, scene: string, raw: unknown) { slugSchema.parse(slug); z.string().regex(/^scene-\d{3}$/).parse(scene); return withSummaryLock(this.root, slug, id, "summary scene regeneration apply", () => this.summaryVisuals().applySceneRegeneration(slug, id, scene, raw)); }
   summarySceneArtworkGrounding(slug: string, id: string) { slugSchema.parse(slug); return this.summaryVisuals().sceneArtworkGrounding(slug, id); }
   summarySceneContinuity(slug: string, id: string) { slugSchema.parse(slug); return this.summaryVisuals().sceneContinuityDetail(slug, id); }
-  updateSummarySceneContinuity(slug: string, id: string, scene: string, raw: unknown) { slugSchema.parse(slug); return withStoryLock(this.root, slug, "summary visual continuity override", () => this.summaryVisuals().updateSceneContinuity(slug, id, scene, raw)); }
-  resetSummarySceneContinuity(slug: string, id: string, scene: string) { slugSchema.parse(slug); return withStoryLock(this.root, slug, "summary visual continuity reset", () => this.summaryVisuals().resetSceneContinuity(slug, id, scene)); }
+  updateSummarySceneContinuity(slug: string, id: string, scene: string, raw: unknown) { slugSchema.parse(slug); return withSummaryLock(this.root, slug, id, "summary visual continuity override", () => this.summaryVisuals().updateSceneContinuity(slug, id, scene, raw)); }
+  resetSummarySceneContinuity(slug: string, id: string, scene: string) { slugSchema.parse(slug); return withSummaryLock(this.root, slug, id, "summary visual continuity reset", () => this.summaryVisuals().resetSceneContinuity(slug, id, scene)); }
   async inspectSummaryArtworkVisualPreflight(slug: string, id: string, raw: unknown) {
     slugSchema.parse(slug);
     const input = summaryVisualInputSchema.parse(raw);
@@ -673,8 +677,8 @@ export class StudioOperations {
     if (!("preflight" in report)) throw new Error("Summary artwork inspection did not produce a Visual Profile report");
     return { ...report.preflight, imageCountEstimate: report.imagesToGenerate, sceneIds: report.sceneIds };
   }
-  reviewSummaryArtwork(slug: string, id: string, scene: string, review: unknown) { slugSchema.parse(slug); return withStoryLock(this.root, slug, "summary artwork review", () => this.summaryVisuals().reviewArtwork(slug, id, scene, review)); }
-  reviewSummaryArtworkVersion(slug: string, id: string, scene: string, version: string) { slugSchema.parse(slug); return withStoryLock(this.root, slug, "summary artwork version review", () => this.summaryVisuals().reviewArtworkVersion(slug, id, scene, version)); }
+  reviewSummaryArtwork(slug: string, id: string, scene: string, review: unknown) { slugSchema.parse(slug); return withSummaryLock(this.root, slug, id, "summary artwork review", () => this.summaryVisuals().reviewArtwork(slug, id, scene, review)); }
+  reviewSummaryArtworkVersion(slug: string, id: string, scene: string, version: string) { slugSchema.parse(slug); return withSummaryLock(this.root, slug, id, "summary artwork version review", () => this.summaryVisuals().reviewArtworkVersion(slug, id, scene, version)); }
   async estimateSummaryArtwork(slug: string, id: string, raw: unknown) {
     slugSchema.parse(slug);
     const input = summaryVisualInputSchema.parse(raw);
@@ -704,7 +708,7 @@ export class StudioOperations {
   }
   editSummaryNarration(slug: string, id: string, raw: unknown) {
     slugSchema.parse(slug); summaryNarrationEditSchema.parse(raw);
-    return withStoryLock(this.root, slug, "summary narration edit", () => this.summaryMedia().editNarration(slug, id, raw));
+    return withSummaryLock(this.root, slug, id, "summary narration edit", () => this.summaryMedia().editNarration(slug, id, raw));
   }
   startSummary(slug: string, raw: unknown) {
     slugSchema.parse(slug);
@@ -737,7 +741,7 @@ export class StudioOperations {
       await recordActivity(this.root, slug, "summary.generated", `Generated summary '${result.title}' for ${result.chapters.length} chapter(s)`); return result;
     }), { summaryId, operation: "generate" });
   }
-  updateSummary(slug: string, id: string, raw: unknown) { slugSchema.parse(slug); return withStoryLock(this.root, slug, "summary edit", async () => {
+  updateSummary(slug: string, id: string, raw: unknown) { slugSchema.parse(slug); return withSummaryLock(this.root, slug, id, "summary edit", async () => {
     const service = new SummaryService(this.root, this.llm);
     const before = await service.get(slug, id);
     let result = await service.update(slug, id, raw);
@@ -777,13 +781,13 @@ export class StudioOperations {
       await recordActivity(this.root, slug, "summary.regenerated", `Regenerated summary '${result.title}'`); return result;
     }), { summaryId: id, operation: "regenerate" });
   }
-  deleteSummary(slug: string, id: string) { slugSchema.parse(slug); return withStoryLock(this.root, slug, "summary deletion", async () => { const result = await new SummaryService(this.root, this.llm).delete(slug, id); await recordActivity(this.root, slug, "summary.deleted", `Deleted summary ${id}`); return result; }); }
+  deleteSummary(slug: string, id: string) { slugSchema.parse(slug); return withSummaryLock(this.root, slug, id, "summary deletion", async () => { const result = await new SummaryService(this.root, this.llm).delete(slug, id); await recordActivity(this.root, slug, "summary.deleted", `Deleted summary ${id}`); return result; }); }
 
-  async editChapterText(slug: string, chapter: number, raw: unknown) { slugSchema.parse(slug); const input = chapterTextEditSchema.parse(raw); return withStoryLock(this.root, slug, "manual chapter text edit", async () => { const result = await saveChapterTextEdit(this.root, slug, chapter, input); await invalidateChapterStatusDerivedReads(this.root, slug); await invalidateStoryBibleDerivedReads(this.root, slug); await recordActivity(this.root, slug, "chapter.edited", `Edited Chapter ${chapter} ${input.field}`); return result; }); }
+  async editChapterText(slug: string, chapter: number, raw: unknown) { slugSchema.parse(slug); const input = chapterTextEditSchema.parse(raw); return withChapterLock(this.root, slug, chapter, "manual chapter text edit", async () => { const result = await saveChapterTextEdit(this.root, slug, chapter, input); await invalidateChapterStatusDerivedReads(this.root, slug); await invalidateStoryBibleDerivedReads(this.root, slug); await recordActivity(this.root, slug, "chapter.edited", `Edited Chapter ${chapter} ${input.field}`); return result; }); }
   async dismissQaFindings(slug: string, chapter: number, raw: unknown) {
     slugSchema.parse(slug); if (!Number.isSafeInteger(chapter) || chapter < 1) throw new ConfigurationError("Chapter must be a positive integer");
     const input = qaDismissInputSchema.parse(raw);
-    return withStoryLock(this.root, slug, "QA finding dismissal", async () => {
+    return withChapterLock(this.root, slug, chapter, "QA finding dismissal", async () => {
       const paths = storyPaths(this.root, slug, chapter);
       const [qaRaw, chapterRaw] = await Promise.all([readJsonIfExists(paths.qa), readJsonIfExists<Chapter>(paths.chapterMeta)]);
       if (!qaRaw || !chapterRaw) throw new Error(`Chapter ${chapter} does not have a QA result`);
@@ -834,7 +838,7 @@ export class StudioOperations {
       const targets = qaRepairTargetsFor(finding, { translation: preflightTranslation ?? "", narration: preflightNarration ?? "" }, overridesByFindingId[snapshot.id]);
       assertQaRepairArtifacts(chapter, targets, { translation: preflightTranslation, narration: preflightNarration });
     }
-    return this.jobs.create("qaRepair", slug, async (control) => withStoryLock(this.root, slug, "selected QA repair", async () => {
+    return this.jobs.create("qaRepair", slug, async (control) => withChapterLock(this.root, slug, chapter, "selected QA repair", async () => {
       const story = await loadStory(storyPaths(this.root, slug, chapter).storyConfig); const paths = storyPaths(this.root, slug, chapter);
       const qaRaw = await readJsonIfExists(paths.qa);
       if (!qaRaw) throw new QaFindingStaleSelectionError();
@@ -864,14 +868,14 @@ export class StudioOperations {
   startQaRecheck(slug: string, chapter: number, raw?: unknown) {
     slugSchema.parse(slug); if (!Number.isSafeInteger(chapter) || chapter < 1) throw new ConfigurationError("Chapter must be a positive integer");
     const input = qaRecheckInputSchema.parse(raw ?? {});
-    return this.jobs.create("qaRecheck", slug, async (control) => withStoryLock(this.root, slug, "QA-only recheck", async () => {
+    return this.jobs.create("qaRecheck", slug, async (control) => withChapterLock(this.root, slug, chapter, "QA-only recheck", async () => {
       const paths = storyPaths(this.root, slug, chapter); const story = await loadStory(paths.storyConfig);
       control.update({ type: "qa.recheck.started", chapter, stage: "qa", mode: input.mode });
       const result = await withUsageScope({ story: slug, chapter, stage: "qa" }, () => recheckChapterQa({ root: this.root, story, chapter, provider: this.llm.forStage(story.pipeline.qa), mode: input.mode }));
       control.update({ type: "qa.recheck.completed", chapter, stage: "qa", status: result.state.status });
       invalidateCatalogCache(this.root, slug); await invalidateChapterStatusDerivedReads(this.root, slug); await recordQaActivityBestEffort(this.root, slug, "chapter.qa_rechecked", `Rechecked Chapter ${chapter} using its retained translation and narration`);
       return { chapter, qa: result.state.status, qaOnly: true, summary: result.summary };
-    }));
+    }), { ...input, chapter });
   }
 
   async getChapterQa(slug: string, chapter: number) {
@@ -948,7 +952,7 @@ export class StudioOperations {
   async resolveQaFindingManually(slug: string, chapter: number, id: string, raw: unknown) {
     slugSchema.parse(slug); if (!Number.isSafeInteger(chapter) || chapter < 1) throw new ConfigurationError("Chapter must be a positive integer");
     qaFindingIdSchema.parse(id); const input = qaResolveManualInputSchema.parse(raw);
-    return withStoryLock(this.root, slug, "QA finding manual resolution", async () => {
+    return withChapterLock(this.root, slug, chapter, "QA finding manual resolution", async () => {
       const finalTextFingerprint = input.finalText?.trim() ? fingerprint(input.finalText) : undefined;
       const { finding, state } = await this.mutateQaFindingState(slug, chapter, id, "manual_fix", { finalTextFingerprint });
       await recordQaActivityBestEffort(this.root, slug, "chapter.qa_manually_fixed", `Marked QA finding ${id} for Chapter ${chapter} manually fixed`);
@@ -959,7 +963,7 @@ export class StudioOperations {
   async dismissQaFinding(slug: string, chapter: number, id: string, raw: unknown) {
     slugSchema.parse(slug); if (!Number.isSafeInteger(chapter) || chapter < 1) throw new ConfigurationError("Chapter must be a positive integer");
     qaFindingIdSchema.parse(id); const input = qaFindingDismissInputSchema.parse(raw);
-    return withStoryLock(this.root, slug, "QA finding dismissal", async () => {
+    return withChapterLock(this.root, slug, chapter, "QA finding dismissal", async () => {
       const paths = storyPaths(this.root, slug, chapter);
       const [qaRaw, chapterRaw] = await Promise.all([readJsonIfExists(paths.qa), readJsonIfExists<Chapter>(paths.chapterMeta)]);
       if (!qaRaw || !chapterRaw) throw new Error(`Chapter ${chapter} does not have a QA result`);
@@ -999,7 +1003,7 @@ export class StudioOperations {
   async reopenQaFinding(slug: string, chapter: number, id: string) {
     slugSchema.parse(slug); if (!Number.isSafeInteger(chapter) || chapter < 1) throw new ConfigurationError("Chapter must be a positive integer");
     qaFindingIdSchema.parse(id);
-    return withStoryLock(this.root, slug, "QA finding reopen", async () => {
+    return withChapterLock(this.root, slug, chapter, "QA finding reopen", async () => {
       const { finding, state } = await this.mutateQaFindingState(slug, chapter, id, "reopen");
       await recordQaActivityBestEffort(this.root, slug, "chapter.qa_reopened", `Reopened QA finding ${id} for Chapter ${chapter}`);
       return { chapter, finding, qa: state, presentation: await this.getChapterQa(slug, chapter) };
@@ -1045,7 +1049,7 @@ export class StudioOperations {
     const selection: QaRepairFindingSnapshot = { id: preflightFinding.id, fingerprint: preflightFinding.fingerprint, ...captureQaRepairTextSnapshot(preflightTranslation, preflightNarration) };
     const preflightTargets = qaRepairTargetsFor(preflightFinding, { translation: preflightTranslation ?? "", narration: preflightNarration ?? "" }, input.target);
     assertQaRepairArtifacts(chapter, preflightTargets, { translation: preflightTranslation, narration: preflightNarration });
-    return this.jobs.create("qaRepair", slug, async (control) => withStoryLock(this.root, slug, "QA finding AI fix", async () => {
+    return this.jobs.create("qaRepair", slug, async (control) => withChapterLock(this.root, slug, chapter, "QA finding AI fix", async () => {
       const paths = storyPaths(this.root, slug, chapter); const story = await loadStory(paths.storyConfig);
       const qaRaw = await readJsonIfExists(paths.qa);
       if (!qaRaw) throw new Error(`Chapter ${chapter} does not have a QA result`);
@@ -1145,7 +1149,7 @@ export class StudioOperations {
 
   startQaSafeFixes(slug: string, chapter: number) {
     slugSchema.parse(slug); if (!Number.isSafeInteger(chapter) || chapter < 1) throw new ConfigurationError("Chapter must be a positive integer");
-    return this.jobs.create("qaRepair", slug, async (control) => withStoryLock(this.root, slug, "QA safe fixes", () => this.applyQaSafeFixes(slug, chapter, control)));
+    return this.jobs.create("qaRepair", slug, async (control) => withChapterLock(this.root, slug, chapter, "QA safe fixes", () => this.applyQaSafeFixes(slug, chapter, control)), { chapter });
   }
 
   async listQaExceptions(slug: string) { slugSchema.parse(slug); return { exceptions: await listQaExceptions(this.root, slug) }; }
@@ -1423,7 +1427,7 @@ export class StudioOperations {
       const result = await withUsageScope({ story: slug, stage: "pronunciation" }, () => enrichStoryPronunciations(this.root, slug, base, this.llm.forStage(story.pipeline.storyBible), story.pipeline.storyBible, story.sourceLanguage, input.entityId ? [input.entityId] : undefined, input.force || Boolean(input.entityId), input.dryRun));
       invalidateCatalogCache(this.root, slug); await invalidateChapterStatusDerivedReads(this.root, slug); await invalidateStoryBibleDerivedReads(this.root, slug);
       return result;
-    }));
+    }), input);
   }
   startPronunciationTest(slug: string, id: string) {
     slugSchema.parse(slug); z.string().regex(/^ent_[a-f0-9]{24}$/).parse(id);
@@ -1462,7 +1466,7 @@ export class StudioOperations {
       }));
       await recordActivity(this.root, slug, "bible.localization.suggested", `Generated localized name suggestions for ${entity.canonicalName}`);
       return { entityId: id, locale: input.locale ?? defaultLocale(story.outputLanguage), model: config, suggestions: result.suggestions };
-    });
+    }, input);
   }
   private async executeCanonicalEntityMerge(
     slug: string,
@@ -1786,10 +1790,10 @@ export class StudioOperations {
       const saved = await saveVoicePreview(this.root, slug, result.audio, request, result.quality);
       await recordActivity(this.root, slug, "voice.preview", "Generated a voice preview");
       return saved;
-    });
+    }, input);
   }
 
-  startProduction(slug: string, raw: unknown) { slugSchema.parse(slug); const input = productionInputSchema.parse(raw); return this.jobs.create("production", slug, async (control) => withStoryLock(this.root, slug, "end-to-end production", async () => { const story = await loadStory(storyPaths(this.root, slug, 1).storyConfig); const shutdown = new ShutdownController(); control.setPause(() => shutdown.request()); await recordActivity(this.root, slug, "production.started", `Started production for Chapters ${input.from}–${input.to}`); const manifest = (await runProduction({ root: this.root, story, ...input, pause: shutdown, recordedCost: this.usage ? () => this.usage!.recordedCost({ story: slug }) : undefined, onProgress: (event) => control.update(event) }, { pipeline: this.pipeline, loadChapters: async () => (await loadImportedChapters(this.root, slug)).chapters, refresh: (from, to) => refreshProductionRange({ root: this.root, story, from, to, registry: this.registry }), scenePlanner: this.scenePlanner ?? this.runtime.router.forStage(story.pipeline.scenePlanner), image: this.image, video: this.video, videoExport: this.videoExport, audiobook: this.audiobook, alignmentConfig: this.alignConfig, alignmentEngine: this.aligner })).manifest; await invalidateChapterStatusDerivedReads(this.root, slug); await invalidateStoryBibleDerivedReads(this.root, slug); await recordActivity(this.root, slug, `production.${manifest.status}`, `${manifest.status === "completed" ? "Completed" : "Stopped"} production for Chapters ${input.from}–${input.to}`); return manifest; })); }
+  startProduction(slug: string, raw: unknown) { slugSchema.parse(slug); const input = productionInputSchema.parse(raw); return this.jobs.create("production", slug, async (control) => withStoryLock(this.root, slug, "end-to-end production", async () => { const story = await loadStory(storyPaths(this.root, slug, 1).storyConfig); const shutdown = new ShutdownController(); control.setPause(() => shutdown.request()); await recordActivity(this.root, slug, "production.started", `Started production for Chapters ${input.from}–${input.to}`); const manifest = (await runProduction({ root: this.root, story, ...input, pause: shutdown, recordedCost: this.usage ? () => this.usage!.recordedCost({ story: slug }) : undefined, onProgress: (event) => control.update(event) }, { pipeline: this.pipeline, loadChapters: async () => (await loadImportedChapters(this.root, slug)).chapters, refresh: (from, to) => refreshProductionRange({ root: this.root, story, from, to, registry: this.registry }), scenePlanner: this.scenePlanner ?? this.runtime.router.forStage(story.pipeline.scenePlanner), image: this.image, video: this.video, videoExport: this.videoExport, audiobook: this.audiobook, alignmentConfig: this.alignConfig, alignmentEngine: this.aligner })).manifest; await invalidateChapterStatusDerivedReads(this.root, slug); await invalidateStoryBibleDerivedReads(this.root, slug); await recordActivity(this.root, slug, `production.${manifest.status}`, `${manifest.status === "completed" ? "Completed" : "Stopped"} production for Chapters ${input.from}–${input.to}`); return manifest; }), input); }
   async submitProduction(slug:string,raw:unknown){if(this.queue)return this.queue.submit(slug,raw);return this.startProduction(slug,raw);}
 
   startPreview(slug: string, raw: unknown) {
@@ -1798,7 +1802,7 @@ export class StudioOperations {
       const story = await loadStory(storyPaths(this.root, slug, input.chapter).storyConfig); const imported = await loadImportedChapters(this.root, slug);
       const chapter = imported.chapters.find((item) => item.chapter === input.chapter); if (!chapter) throw new Error(`Imported source does not contain Chapter ${input.chapter}`);
       return withUsageScope({story:slug,chapter:input.chapter,stage:"preview"},()=>this.preview.run({ root: this.root, story, chapter: input.chapter, inputPath: chapter.path, presets: input.presets, audioPreview: input.audioPreview }));
-    }));
+    }), input);
   }
 
   startAudio(slug: string, raw: unknown) {
@@ -1825,7 +1829,7 @@ export class StudioOperations {
       }
       await invalidateChapterStatusDerivedReads(this.root, slug);
       return { status: "completed", mastered, reused, total: selected.length, warnings: [...new Set(warnings)] };
-    }));
+    }), input);
   }
 
   private speechTranscriber() {
@@ -1852,16 +1856,16 @@ export class StudioOperations {
       const quality = await verifyStoredChapterTts({ root: this.root, story, chapter: input.chapter, transcriber: this.speechTranscriber() });
       await recordActivity(this.root, slug, "tts.quality.verified", `Re-verified TTS quality for Chapter ${input.chapter}`);
       return { quality };
-    }));
+    }), input);
   }
 
   startRegenerateChapterTtsSegment(slug: string, chapter: number, segment: number) {
     slugSchema.parse(slug); chapterParamSchema.parse(chapter); segmentParamSchema.parse(segment);
-    return this.jobs.create("ttsSegmentRegenerate", slug, async () => withStoryLock(this.root, slug, "TTS segment regeneration", async () => {
+    return this.jobs.create("ttsSegmentRegenerate", slug, async () => withChapterLock(this.root, slug, chapter, "TTS segment regeneration", async () => {
       const quality = await this.regenerateSingleAudioSegment(slug, chapter, segment);
       await recordActivity(this.root, slug, "tts.quality.segment_regenerated", `Regenerated TTS segment ${segment} for Chapter ${chapter}`);
       return { quality };
-    }));
+    }), { chapter });
   }
 
   private async regenerateSingleAudioSegment(slug: string, chapter: number, segment: number, selectedSegments?: number[]) {
@@ -1942,13 +1946,13 @@ export class StudioOperations {
       }
       invalidateCatalogCache(this.root, slug);
       return { status: shutdown.isRequested ? "paused" : "completed", results, completed, total };
-    }));
+    }), input);
   }
 
   async acceptChapterTtsSegment(slug: string, chapter: number, segment: number, raw: unknown) {
     slugSchema.parse(slug); chapterParamSchema.parse(chapter); segmentParamSchema.parse(segment);
     const input = z.object({ reason: z.string().max(500).optional() }).strict().parse(raw);
-    return withStoryLock(this.root, slug, "TTS segment acceptance", async () => {
+    return withChapterLock(this.root, slug, chapter, "TTS segment acceptance", async () => {
       const quality = await acceptStoredChapterTtsSegment({ root: this.root, slug, chapter, segment: segment - 1, reason: input.reason });
       await recordActivity(this.root, slug, "tts.quality.segment_accepted", `Manually accepted TTS segment ${segment} for Chapter ${chapter}`);
       return { quality };
@@ -1980,19 +1984,19 @@ export class StudioOperations {
       const assembled = await assembleAudiobook({ root: this.root, story, from: selected[0]!.chapter, to: selected.at(-1)!.chapter, format: input.format as AudiobookFormat,
         processor: this.audiobook, force: input.force, music: input.music, musicOverrides: input.musicOverrides, onProgress: (event) => control.update(event) });
       await invalidateChapterStatusDerivedReads(this.root, slug); return { ...assembled, warnings: [...new Set(warnings)] };
-    }));
+    }), input);
   }
 
-  startAlignment(slug: string, raw: unknown) { slugSchema.parse(slug); const input = alignmentJobSchema.parse(raw); return this.jobs.create("alignment", slug, async (control) => withStoryLock(this.root, slug, "web chapter alignment", async () => { const story = await loadStory(storyPaths(this.root, slug, input.chapter).storyConfig); control.update({ type: "alignment.chapter.started", chapter: input.chapter }); const result = await alignStoredChapter({ root: this.root, storySlug: slug, chapter: input.chapter, language: story.outputLanguage, config: this.alignConfig, engine: this.aligner, force: input.force, forceEstimated: input.forceEstimated, requireAligned: input.requireAligned, onEvent: (event) => control.update({ type: `alignment.${event.status}`, chapter: input.chapter, mode: event.mode }) }); await invalidateChapterStatusDerivedReads(this.root, slug); return result; })); }
+  startAlignment(slug: string, raw: unknown) { slugSchema.parse(slug); const input = alignmentJobSchema.parse(raw); return this.jobs.create("alignment", slug, async (control) => withStoryLock(this.root, slug, "web chapter alignment", async () => { const story = await loadStory(storyPaths(this.root, slug, input.chapter).storyConfig); control.update({ type: "alignment.chapter.started", chapter: input.chapter }); const result = await alignStoredChapter({ root: this.root, storySlug: slug, chapter: input.chapter, language: story.outputLanguage, config: this.alignConfig, engine: this.aligner, force: input.force, forceEstimated: input.forceEstimated, requireAligned: input.requireAligned, onEvent: (event) => control.update({ type: `alignment.${event.status}`, chapter: input.chapter, mode: event.mode }) }); await invalidateChapterStatusDerivedReads(this.root, slug); return result; }), input); }
 
-  startSubtitles(slug: string, raw: unknown) { slugSchema.parse(slug); const input = rangeJobSchema.parse(raw); return this.jobs.create("subtitles", slug, async (control) => withStoryLock(this.root, slug, "web subtitle generation", async () => { const story = await loadStory(storyPaths(this.root, slug, 1).storyConfig); const selected = selectChapterRange((await loadImportedChapters(this.root, slug)).chapters, input.from, input.to); const shutdown = new ShutdownController(); control.setPause(() => shutdown.request()); let generated = 0; let reused = 0; const warnings: string[] = []; for (let index = 0; index < selected.length; index++) { if (shutdown.isRequested) return { status: "paused", generated, reused, warnings: [...new Set(warnings)] }; const chapter = selected[index]!.chapter; control.update({ type: "subtitles.chapter.started", chapter, index: index + 1, total: selected.length }); if (!input.forceEstimated) { const alignment = await alignStoredChapter({ root: this.root, storySlug: slug, chapter, language: story.outputLanguage, config: this.alignConfig, engine: this.aligner }); warnings.push(...(alignment.warnings ?? [])); } const result = await generateStoredSubtitles({ root: this.root, story, chapter, force: input.force, forceEstimated: input.forceEstimated }); result.reused ? reused++ : generated++; warnings.push(...(result.warnings ?? [])); await invalidateChapterStatusDerivedReads(this.root, slug); control.update({ type: "subtitles.chapter.completed", chapter, index: index + 1, total: selected.length, reused: result.reused, warnings: result.warnings }); } await invalidateChapterStatusDerivedReads(this.root, slug); return { generated, reused, total: selected.length, warnings: [...new Set(warnings)] }; })); }
+  startSubtitles(slug: string, raw: unknown) { slugSchema.parse(slug); const input = rangeJobSchema.parse(raw); return this.jobs.create("subtitles", slug, async (control) => withStoryLock(this.root, slug, "web subtitle generation", async () => { const story = await loadStory(storyPaths(this.root, slug, 1).storyConfig); const selected = selectChapterRange((await loadImportedChapters(this.root, slug)).chapters, input.from, input.to); const shutdown = new ShutdownController(); control.setPause(() => shutdown.request()); let generated = 0; let reused = 0; const warnings: string[] = []; for (let index = 0; index < selected.length; index++) { if (shutdown.isRequested) return { status: "paused", generated, reused, warnings: [...new Set(warnings)] }; const chapter = selected[index]!.chapter; control.update({ type: "subtitles.chapter.started", chapter, index: index + 1, total: selected.length }); if (!input.forceEstimated) { const alignment = await alignStoredChapter({ root: this.root, storySlug: slug, chapter, language: story.outputLanguage, config: this.alignConfig, engine: this.aligner }); warnings.push(...(alignment.warnings ?? [])); } const result = await generateStoredSubtitles({ root: this.root, story, chapter, force: input.force, forceEstimated: input.forceEstimated }); result.reused ? reused++ : generated++; warnings.push(...(result.warnings ?? [])); await invalidateChapterStatusDerivedReads(this.root, slug); control.update({ type: "subtitles.chapter.completed", chapter, index: index + 1, total: selected.length, reused: result.reused, warnings: result.warnings }); } await invalidateChapterStatusDerivedReads(this.root, slug); return { generated, reused, total: selected.length, warnings: [...new Set(warnings)] }; }), input); }
 
-  async editSubtitles(slug: string, chapter: number, raw: unknown) { slugSchema.parse(slug); const input = z.object({ cues: z.array(z.unknown()).min(1).max(10_000) }).strict().parse(raw); return withStoryLock(this.root, slug, "manual subtitle edit", () => saveManualSubtitles(this.root, slug, chapter, input.cues)); }
-  async resetSubtitles(slug: string, chapter: number) { slugSchema.parse(slug); return withStoryLock(this.root, slug, "discard manual subtitles", async () => { await discardManualSubtitles(this.root, slug, chapter); const story = await loadStory(storyPaths(this.root, slug, chapter).storyConfig); return generateStoredSubtitles({ root: this.root, story, chapter, force: true }); }); }
+  async editSubtitles(slug: string, chapter: number, raw: unknown) { slugSchema.parse(slug); const input = z.object({ cues: z.array(z.unknown()).min(1).max(10_000) }).strict().parse(raw); return withChapterLock(this.root, slug, chapter, "manual subtitle edit", () => saveManualSubtitles(this.root, slug, chapter, input.cues)); }
+  async resetSubtitles(slug: string, chapter: number) { slugSchema.parse(slug); return withChapterLock(this.root, slug, chapter, "discard manual subtitles", async () => { await discardManualSubtitles(this.root, slug, chapter); const story = await loadStory(storyPaths(this.root, slug, chapter).storyConfig); return generateStoredSubtitles({ root: this.root, story, chapter, force: true }); }); }
 
-  startVideo(slug: string, raw: unknown) { slugSchema.parse(slug); const input = videoJobSchema.parse(raw); return this.jobs.create("video", slug, async (control) => withStoryLock(this.root, slug, "web chapter video rendering", async () => { let story = await loadStory(storyPaths(this.root, slug, 1).storyConfig); if (input.subtitleMode) story = { ...story, video: { ...story.video, subtitleMode: input.subtitleMode } }; const selected = selectChapterRange((await loadImportedChapters(this.root, slug)).chapters, input.from, input.to); const shutdown = new ShutdownController(); control.setPause(() => shutdown.request()); let rendered = 0; let reused = 0; const warnings: string[] = []; for (let index = 0; index < selected.length; index++) { if (shutdown.isRequested) return { status: "paused", rendered, reused, warnings: [...new Set(warnings)] }; const chapter = selected[index]!.chapter; if (story.video.subtitleMode !== "none") { const alignment = await alignStoredChapter({ root: this.root, storySlug: slug, chapter, language: story.outputLanguage, config: this.alignConfig, engine: this.aligner }); const subtitles = await generateStoredSubtitles({ root: this.root, story, chapter }); warnings.push(...(alignment.warnings ?? []), ...(subtitles.warnings ?? [])); } control.update({ type: "video.chapter.started", chapter, index: index + 1, total: selected.length }); const result = await renderStoredChapterVideo({ root: this.root, story, chapter, processor: this.video, force: input.force }); result.reused ? reused++ : rendered++; warnings.push(...(result.warnings ?? [])); await invalidateChapterStatusDerivedReads(this.root, slug); control.update({ type: "video.chapter.completed", chapter, index: index + 1, total: selected.length, reused: result.reused, warnings: result.warnings }); } await invalidateChapterStatusDerivedReads(this.root, slug); return { rendered, reused, total: selected.length, warnings: [...new Set(warnings)] }; })); }
+  startVideo(slug: string, raw: unknown) { slugSchema.parse(slug); const input = videoJobSchema.parse(raw); return this.jobs.create("video", slug, async (control) => withStoryLock(this.root, slug, "web chapter video rendering", async () => { let story = await loadStory(storyPaths(this.root, slug, 1).storyConfig); if (input.subtitleMode) story = { ...story, video: { ...story.video, subtitleMode: input.subtitleMode } }; const selected = selectChapterRange((await loadImportedChapters(this.root, slug)).chapters, input.from, input.to); const shutdown = new ShutdownController(); control.setPause(() => shutdown.request()); let rendered = 0; let reused = 0; const warnings: string[] = []; for (let index = 0; index < selected.length; index++) { if (shutdown.isRequested) return { status: "paused", rendered, reused, warnings: [...new Set(warnings)] }; const chapter = selected[index]!.chapter; if (story.video.subtitleMode !== "none") { const alignment = await alignStoredChapter({ root: this.root, storySlug: slug, chapter, language: story.outputLanguage, config: this.alignConfig, engine: this.aligner }); const subtitles = await generateStoredSubtitles({ root: this.root, story, chapter }); warnings.push(...(alignment.warnings ?? []), ...(subtitles.warnings ?? [])); } control.update({ type: "video.chapter.started", chapter, index: index + 1, total: selected.length }); const result = await renderStoredChapterVideo({ root: this.root, story, chapter, processor: this.video, force: input.force }); result.reused ? reused++ : rendered++; warnings.push(...(result.warnings ?? [])); await invalidateChapterStatusDerivedReads(this.root, slug); control.update({ type: "video.chapter.completed", chapter, index: index + 1, total: selected.length, reused: result.reused, warnings: result.warnings }); } await invalidateChapterStatusDerivedReads(this.root, slug); return { rendered, reused, total: selected.length, warnings: [...new Set(warnings)] }; }), input); }
 
-  startVideoExport(slug: string, raw: unknown) { slugSchema.parse(slug); const input = videoExportInputSchema.parse(raw); return this.jobs.create("videoExport", slug, async (control) => withStoryLock(this.root, slug, "web combined video export", async () => { let story = await loadStory(storyPaths(this.root, slug, 1).storyConfig); if (input.subtitleMode) story = { ...story, video: { ...story.video, subtitleMode: input.subtitleMode } }; for (const id of [...(input.summaries?.beginning ?? []), ...(input.summaries?.ending ?? [])]) await selectSummaryVideo(this.root, slug, id); await resolveExportMusic(this.root, story, input.music, input.musicOverrides); const selected = selectChapterRange((await loadImportedChapters(this.root, slug)).chapters, input.from, input.to); const warnings: string[] = []; for (let index = 0; index < selected.length; index++) { const chapter = selected[index]!.chapter; if (input.music.mode !== "none" && !input.subtitleMode) { if (!await exists(storyPaths(this.root, slug, chapter).video)) throw new Error(`Chapter ${chapter} has no retained clean video to export`); control.update({ type: "video.chapter.completed", chapter, index: index + 1, total: selected.length, reused: true, retained: true }); continue; } if (story.video.subtitleMode !== "none") { const alignment = await alignStoredChapter({ root: this.root, storySlug: slug, chapter, language: story.outputLanguage, config: this.alignConfig, engine: this.aligner }); const subtitles = await generateStoredSubtitles({ root: this.root, story, chapter }); warnings.push(...(alignment.warnings ?? []), ...(subtitles.warnings ?? [])); } const rendered = await renderStoredChapterVideo({ root: this.root, story, chapter, processor: this.video }); warnings.push(...(rendered.warnings ?? [])); await invalidateChapterStatusDerivedReads(this.root, slug); control.update({ type: "video.chapter.completed", chapter, index: index + 1, total: selected.length, reused: rendered.reused, warnings: rendered.warnings }); } const assembled = await assembleVideoExport({ root: this.root, story, from: selected[0]!.chapter, to: selected.at(-1)!.chapter, processor: this.videoExport, summaries: input.summaries, force: input.force, music: input.music, musicOverrides: input.musicOverrides, onProgress: (event) => control.update(event) }); await invalidateChapterStatusDerivedReads(this.root, slug); return { ...assembled, warnings: [...new Set(warnings)] }; })); }
+  startVideoExport(slug: string, raw: unknown) { slugSchema.parse(slug); const input = videoExportInputSchema.parse(raw); return this.jobs.create("videoExport", slug, async (control) => withStoryLock(this.root, slug, "web combined video export", async () => { let story = await loadStory(storyPaths(this.root, slug, 1).storyConfig); if (input.subtitleMode) story = { ...story, video: { ...story.video, subtitleMode: input.subtitleMode } }; for (const id of [...(input.summaries?.beginning ?? []), ...(input.summaries?.ending ?? [])]) await selectSummaryVideo(this.root, slug, id); await resolveExportMusic(this.root, story, input.music, input.musicOverrides); const selected = selectChapterRange((await loadImportedChapters(this.root, slug)).chapters, input.from, input.to); const warnings: string[] = []; for (let index = 0; index < selected.length; index++) { const chapter = selected[index]!.chapter; if (input.music.mode !== "none" && !input.subtitleMode) { if (!await exists(storyPaths(this.root, slug, chapter).video)) throw new Error(`Chapter ${chapter} has no retained clean video to export`); control.update({ type: "video.chapter.completed", chapter, index: index + 1, total: selected.length, reused: true, retained: true }); continue; } if (story.video.subtitleMode !== "none") { const alignment = await alignStoredChapter({ root: this.root, storySlug: slug, chapter, language: story.outputLanguage, config: this.alignConfig, engine: this.aligner }); const subtitles = await generateStoredSubtitles({ root: this.root, story, chapter }); warnings.push(...(alignment.warnings ?? []), ...(subtitles.warnings ?? [])); } const rendered = await renderStoredChapterVideo({ root: this.root, story, chapter, processor: this.video }); warnings.push(...(rendered.warnings ?? [])); await invalidateChapterStatusDerivedReads(this.root, slug); control.update({ type: "video.chapter.completed", chapter, index: index + 1, total: selected.length, reused: rendered.reused, warnings: rendered.warnings }); } const assembled = await assembleVideoExport({ root: this.root, story, from: selected[0]!.chapter, to: selected.at(-1)!.chapter, processor: this.videoExport, summaries: input.summaries, force: input.force, music: input.music, musicOverrides: input.musicOverrides, onProgress: (event) => control.update(event) }); await invalidateChapterStatusDerivedReads(this.root, slug); return { ...assembled, warnings: [...new Set(warnings)] }; }), input); }
 
   startSummaryMusicExport(slug: string, id: string, raw: unknown) {
     slugSchema.parse(slug);
@@ -2024,7 +2028,7 @@ export class StudioOperations {
   startChapterMusicExport(slug: string, raw: unknown) { slugSchema.parse(slug); const input = chapterMusicInputSchema.parse(raw); return this.jobs.create("chapterMusicExport", slug, async () => withStoryLock(this.root, slug, "web chapter music export", async () => {
     const story = await loadStory(storyPaths(this.root, slug, 1).storyConfig);
     return exportChapterWithMusic({ root: this.root, story, ...input });
-  })); }
+  }), input); }
 
   startScenes(slug: string, raw: unknown) { slugSchema.parse(slug); const input = explicitRangeJobSchema.parse(raw); return this.jobs.create("scenes", slug, async (control) => withStoryLock(this.root, slug, "web scene planning", async () => { const story = await loadStory(storyPaths(this.root, slug, 1).storyConfig); const selected = selectChapterRange((await loadImportedChapters(this.root, slug)).chapters, input.from, input.to); const shutdown = new ShutdownController(); control.setPause(() => shutdown.request()); let planned = 0; let reused = 0; const warnings: string[] = []; for (let index = 0; index < selected.length; index++) { if (shutdown.isRequested) return { status: "paused", planned, reused, warnings: [...new Set(warnings)] }; const chapter = selected[index]!.chapter; control.update({ type: "scenes.chapter.started", chapter, index: index + 1, total: selected.length }); const provider = this.scenePlanner ?? this.runtime.router.forStage(story.pipeline.scenePlanner); const result = await withUsageScope({story:slug,chapter,stage:"scenePlanning"},()=>planStoredScenes({ root: this.root, story, chapter, provider, force: input.force })); result.reused ? reused++ : planned++; warnings.push(...(result.warnings ?? [])); await invalidateChapterStatusDerivedReads(this.root, slug); control.update({ type: "scenes.chapter.completed", chapter, index: index + 1, total: selected.length, scenes: result.manifest.scenes.length, reused: result.reused, warnings: result.warnings }); } await invalidateChapterStatusDerivedReads(this.root, slug); return { planned, reused, total: selected.length, warnings: [...new Set(warnings)] }; }), raw); }
 
@@ -2114,10 +2118,10 @@ export class StudioOperations {
     }
   }
 
-  async updateScenes(slug: string, chapter: number, scenes: unknown) { slugSchema.parse(slug); return withStoryLock(this.root, slug, "manual scene edit", async () => { const story = await loadStory(storyPaths(this.root, slug, chapter).storyConfig); const result = await updateStoredSceneManifest({ root: this.root, story, chapter, scenes }); await invalidateChapterStatusDerivedReads(this.root, slug); return result; }); }
+  async updateScenes(slug: string, chapter: number, scenes: unknown) { slugSchema.parse(slug); return withChapterLock(this.root, slug, chapter, "manual scene edit", async () => { const story = await loadStory(storyPaths(this.root, slug, chapter).storyConfig); const result = await updateStoredSceneManifest({ root: this.root, story, chapter, scenes }); await invalidateChapterStatusDerivedReads(this.root, slug); return result; }); }
   async updateScene(slug: string, chapter: number, sceneId: string, scene: unknown, expectedFingerprint: string) {
     slugSchema.parse(slug);
-    return withStoryLock(this.root, slug, "manual single scene edit", async () => {
+    return withChapterLock(this.root, slug, chapter, "manual single scene edit", async () => {
       const story = await loadStory(storyPaths(this.root, slug, chapter).storyConfig);
       const result = await updateStoredScene({ root: this.root, story, chapter, sceneId, scene, expectedFingerprint });
       await invalidateChapterStatusDerivedReads(this.root, slug);
@@ -2132,7 +2136,7 @@ export class StudioOperations {
   }
   async applyChapterSceneRegeneration(slug: string, chapter: number, sceneId: string, proposal: unknown) {
     slugSchema.parse(slug);
-    return withStoryLock(this.root, slug, "chapter scene regeneration apply", async () => {
+    return withChapterLock(this.root, slug, chapter, "chapter scene regeneration apply", async () => {
       const story = await loadStory(storyPaths(this.root, slug, chapter).storyConfig);
       const result = await applyStoredSceneRegeneration({ root: this.root, story, chapter, sceneId, proposal });
       await invalidateChapterStatusDerivedReads(this.root, slug);
@@ -2142,7 +2146,7 @@ export class StudioOperations {
   async updateSceneContinuity(slug: string, chapter: number, sceneId: string, raw: unknown) {
     slugSchema.parse(slug);
     const input = visualContinuityOverrideEntrySchema.omit({ revision: true, updatedAt: true }).parse({ ...(typeof raw === "object" && raw !== null ? raw : {}), sceneId });
-    return withStoryLock(this.root, slug, "manual visual continuity override", async () => {
+    return withChapterLock(this.root, slug, chapter, "manual visual continuity override", async () => {
       const overlay = await upsertVisualContinuityOverride({ root: this.root, slug, chapter, entry: visualContinuityOverrideEntrySchema.parse({ ...input, revision: 1, updatedAt: new Date().toISOString() }) });
       await this.afterContinuityOverride(slug, chapter);
       return overlay;
@@ -2150,7 +2154,7 @@ export class StudioOperations {
   }
   async deleteSceneContinuity(slug: string, chapter: number, sceneId: string) {
     slugSchema.parse(slug);
-    return withStoryLock(this.root, slug, "manual visual continuity override reset", async () => {
+    return withChapterLock(this.root, slug, chapter, "manual visual continuity override reset", async () => {
       const overlay = await removeVisualContinuityOverride({ root: this.root, slug, chapter, sceneId });
       await this.afterContinuityOverride(slug, chapter);
       return overlay;
@@ -2173,10 +2177,10 @@ export class StudioOperations {
     const manifest = rawManifest ? sceneManifestSchema.safeParse(rawManifest) : undefined;
     if (manifest?.success) await persistChapterVisualContinuity({ root: this.root, slug, chapter, manifest: manifest.data, origin: "manual" });
   }
-  async reviewArtwork(slug: string, chapter: number, sceneId: string, review: unknown) { slugSchema.parse(slug); return withStoryLock(this.root, slug, "artwork review", async () => { const story = await loadStory(storyPaths(this.root, slug, chapter).storyConfig); return reviewStoredArtwork({ root: this.root, story, chapter, sceneId, review }); }); }
+  async reviewArtwork(slug: string, chapter: number, sceneId: string, review: unknown) { slugSchema.parse(slug); return withChapterLock(this.root, slug, chapter, "artwork review", async () => { const story = await loadStory(storyPaths(this.root, slug, chapter).storyConfig); return reviewStoredArtwork({ root: this.root, story, chapter, sceneId, review }); }); }
   async reviewArtworkVersion(slug: string, chapter: number, sceneId: string, versionId: string, review?: unknown) {
     slugSchema.parse(slug);
-    return withStoryLock(this.root, slug, "artwork version review", async () => {
+    return withChapterLock(this.root, slug, chapter, "artwork version review", async () => {
       const story = await loadStory(storyPaths(this.root, slug, chapter).storyConfig);
       const parsedReview = review !== undefined ? artworkReviewSchema.parse(review) : "approved";
       return reviewStoredArtworkVersion({
@@ -2193,7 +2197,7 @@ export class StudioOperations {
   async reupscaleArtwork(slug: string, chapter: number, raw: unknown) {
     slugSchema.parse(slug);
     const input = z.object({ sceneId: z.string().regex(/^scene-\d{3}$/).optional(), versionNumber: z.number().int().positive().optional() }).strict().parse(raw ?? {});
-    return withStoryLock(this.root, slug, "artwork re-upscale", async () => {
+    return withChapterLock(this.root, slug, chapter, "artwork re-upscale", async () => {
       const story = await loadStory(storyPaths(this.root, slug, chapter).storyConfig);
       return reupscaleStoredArtwork({ root: this.root, story, chapter, sceneId: input.sceneId, versionNumber: input.versionNumber });
     });
@@ -2468,7 +2472,7 @@ export class StudioOperations {
   }
   async selectSceneMotion(slug: string, raw: unknown) {
     slugSchema.parse(slug); const input = z.object({ target: visualSceneSelectionSchema, id: z.string().min(1).optional() }).strict().parse(raw);
-    return withStoryLock(this.root, slug, "select scene motion", async () => { const result = await this.motionAssets().select(slug, input.target, input.id); await invalidateChapterStatusDerivedReads(this.root, slug); return result; });
+    return withScopedStoryLock(this.root, slug, jobOperationScope("visualWorkflow", input), "select scene motion", async () => { const result = await this.motionAssets().select(slug, input.target, input.id); await invalidateChapterStatusDerivedReads(this.root, slug); return result; });
   }
   async sceneMotionFile(slug: string, raw: unknown, id: string) { slugSchema.parse(slug); return this.motionAssets().file(slug, visualSceneSelectionSchema.parse(raw), id); }
 

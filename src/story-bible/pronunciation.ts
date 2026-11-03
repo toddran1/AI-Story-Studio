@@ -1,3 +1,4 @@
+import { withStoryResource } from "../storage/story-lock.js";
 import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { z } from "zod";
@@ -80,6 +81,7 @@ export async function dismissPronunciationSuggestion(root: string, slug: string,
  */
 export async function enrichStoryPronunciations(root: string, slug: string, base: StoryBible, provider: LLMProvider, config: StageModelConfig, language: string, ids?: string[], force = Boolean(ids), dryRun = false,
   onProgress?: (progress: { processed: number; total: number }) => void) {
+  return withStoryResource(root, slug, "pronunciation", async () => {
   const startedAt = Date.now();
   const path = enrichmentCachePath(root, slug);
   const cache = await loadPronunciationEnrichment(root, slug);
@@ -144,6 +146,7 @@ export async function enrichStoryPronunciations(root: string, slug: string, base
     onProgress?.({ processed: Math.min(start + batch.length, candidates.length), total: candidates.length });
   }
   return { enriched: suggested, unresolved: uncertain, entities, suggestions: Object.fromEntries(Object.entries(cache).flatMap(([id, entry]) => entry.suggestion ? [[id, entry.suggestion]] : [])), summary: { ...summary, successful: suggested.length, needsReview: uncertain.length, durationMs: Date.now() - startedAt } };
+  });
 }
 
 export async function clearPronunciationAttempt(root: string, slug: string, id: string) {

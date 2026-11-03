@@ -1253,7 +1253,7 @@ describe("web UI", () => {
       expect(html).toContain("Chapter 449");
       expect(html).toContain("job-progress");
       expect(html).toContain("Dismiss");
-      expect(html).toContain("Pause after chapter");
+      expect(html).toContain("Pause after current action");
     });
 
     it("shows chapter Fish chunk and mastering progress from production events", () => {

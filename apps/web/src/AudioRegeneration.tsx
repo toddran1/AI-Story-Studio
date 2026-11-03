@@ -1,3 +1,4 @@
+import { useActivityRefresh } from "./ActivityDock.js";
 import { useEffect, useRef, useState } from "react";
 import { api, post, getChapterTtsQuality, chapterTtsSegmentAudioUrl, type AudioDashboard, type Job, type TtsQualityArtifact } from "./api.js";
 
@@ -15,6 +16,7 @@ export function AudioRegeneration({ slug, onJob, watchJob }: { slug: string; onJ
   const [entry, setEntry] = useState(""); const [error, setError] = useState("");
   const [rebuild, setRebuild] = useState(true), [busy, setBusy] = useState(false);
   const [job, setJob] = useState<Job>(); const watcher = useRef<(() => void) | undefined>(undefined);
+  useActivityRefresh(slug, () => { setRevision(value => value + 1); setQualities({}); });
   const sorted = [...selections].sort((a,b) => a.chapter-b.chapter);
   const full = sorted.filter(row => !row.segments).length;
   const segments = sorted.reduce((sum,row) => sum + (row.segments?.length ?? 0),0);
@@ -56,10 +58,10 @@ export function AudioRegeneration({ slug, onJob, watchJob }: { slug: string; onJ
     setBusy(true); setError("");
     try {
       const next = await post<Job>(`/stories/${slug}/jobs/audio-regeneration`, { selections: sorted, rebuildMasters: rebuild });
-      setJob(next); onJob(next); watcher.current?.();
+      setJob(next); onJob(next); setBusy(false); watcher.current?.();
       watcher.current = watchJob(next.id, next => {
         setJob(next); onJob(next);
-        if (["completed","failed","paused"].includes(next.status)) { setBusy(false); setRevision(value => value+1); setQualities({}); if (next.error) setError(next.error); }
+        if (["completed","failed","paused","cancelled"].includes(next.status)) { setBusy(false); setRevision(value => value+1); setQualities({}); if (next.error) setError(next.error); }
       }, error => { setBusy(false); setError(String(error)); });
     } catch (error) { setBusy(false); setError(String(error)); }
   };
