@@ -100,7 +100,7 @@ async function fixture(artwork?: Partial<Story["artwork"]>, options?: { withCano
 
 describe("image provider registry", () => {
   it("exposes provider defaults and supported models", () => {
-    expect(defaultImageModel("openai")).toBe("gpt-image-2.5-flare");
+    expect(defaultImageModel("openai")).toBe("gpt-image-2.6-flare");
     expect(IMAGE_PROVIDER_CATALOG.openai.models).toContain("gpt-image-2.5-sunburst");
     expect(defaultImageModel("gemini")).toBe("gemini-3.1-flash-image");
     expect(() => defaultImageModel("midjourney")).toThrow("not supported");
@@ -126,9 +126,9 @@ describe("image provider registry", () => {
     await expect(new GeminiImageProvider().validateConfiguration()).rejects.toBeInstanceOf(ConfigurationError);
     await expect(new GeminiImageProvider().validateConfiguration()).rejects.toThrow(/GEMINI_API_KEY/);
   });
-  it("defaults new artwork settings to gpt-image-2.5-flare while loading legacy values", () => {
+  it("defaults new artwork settings to gpt-image-2.6-flare while loading legacy values", () => {
     const parsed = artworkSettingsSchema.parse({});
-    expect(parsed).toMatchObject({ provider: "openai", model: "gpt-image-2.5-flare", aspectRatio: "16:9" });
+    expect(parsed).toMatchObject({ provider: "openai", model: "gpt-image-2.6-flare", aspectRatio: "16:9" });
     const legacy = artworkSettingsSchema.parse({ provider: "openai", model: "gpt-image-1" });
     expect(legacy.model).toBe("gpt-image-1");
     expect(artworkSettingsSchema.parse({ provider: "gemini", model: "gemini-3.1-flash-image" }).provider).toBe("gemini");
@@ -159,14 +159,14 @@ describe("OpenAI image adapter", () => {
     },
   });
   const request: ImageGenerationRequest = {
-    model: "gpt-image-2.5-flare", prompt: "A brass observatory", negativePrompt: "text, watermark",
+    model: "gpt-image-2.6-flare", prompt: "A brass observatory", negativePrompt: "text, watermark",
     aspectRatio: "16:9", quality: "medium", size: "1536x1024", outputFormat: "png",
   };
   it("maps the normalized intent onto the images.generate API", async () => {
     const captured: any = {};
     const provider = new OpenAIImageProvider("key", 1000, okClient(captured) as any);
     const result = await provider.generate(request);
-    expect(captured.generate).toMatchObject({ model: "gpt-image-2.5-flare", size: "1536x1024", quality: "medium", output_format: "png", n: 1 });
+    expect(captured.generate).toMatchObject({ model: "gpt-image-2.6-flare", size: "1536x1024", quality: "medium", output_format: "png", n: 1 });
     expect(captured.generate.prompt).toContain("A brass observatory");
     expect(captured.generate.prompt).toContain("AVOID: text, watermark");
     expect(captured.edit).toBeUndefined();
@@ -179,13 +179,13 @@ describe("OpenAI image adapter", () => {
     await provider.generate(request);
     expect(captured.generate.moderation).toBe("low");
   });
-  it("routes reference images through images.edit only for the 2.5 family", async () => {
+  it("routes 2.6 Flare reference images through images.edit", async () => {
     const referenceImages = [{ data: PNG_ALT, mimeType: "image/png", role: "face_portrait" }];
     const withRefs: any = {};
     const provider = new OpenAIImageProvider("key", 1000, okClient(withRefs) as any);
     await provider.generate({ ...request, referenceImages });
     expect(withRefs.edit).toBeDefined();
-    expect(withRefs.edit.model).toBe("gpt-image-2.5-flare");
+    expect(withRefs.edit.model).toBe("gpt-image-2.6-flare");
     expect(withRefs.edit.image).toHaveLength(1);
     expect(withRefs.generate).toBeUndefined();
     const legacy: any = {};

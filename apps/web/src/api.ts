@@ -113,7 +113,7 @@ export type ArtworkSettings = { provider: "openai" | "gemini"; model: string; st
 export type ArtworkRouting = { provider: string; model: string; availableProviders: Array<{ name: string; models: string[]; defaultModel: string }> };
 // Mirrors the server IMAGE_PROVIDER_CATALOG; used where artworkRouting is unavailable (e.g. the settings page).
 export const ARTWORK_PROVIDERS: ArtworkRouting["availableProviders"] = [
-  { name: "openai", models: ["gpt-image-2.5-flare", "gpt-image-2.5-sunburst", "gpt-image-1", "gpt-image-1-mini"], defaultModel: "gpt-image-2.5-flare" },
+  { name: "openai", models: ["gpt-image-2.6-flare", "gpt-image-2.6-sunburst", "gpt-image-2.5-flare", "gpt-image-2.5-sunburst", "gpt-image-1", "gpt-image-1-mini"], defaultModel: "gpt-image-2.6-flare" },
   { name: "gemini", models: ["gemini-3.1-flash-image"], defaultModel: "gemini-3.1-flash-image" },
 ];
 export type VisualRole =

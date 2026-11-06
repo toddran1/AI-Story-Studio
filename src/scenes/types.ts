@@ -15,7 +15,7 @@ export const sceneSettingsSchema = z.object({
 
 export const artworkSettingsSchema = z.object({
   provider: z.enum(["openai", "gemini"]).default("openai"),
-  model: z.string().trim().min(1).default("gpt-image-2.5-flare"),
+  model: z.string().trim().min(1).default("gpt-image-2.6-flare"),
   stylePrompt: z.string().trim().min(1).max(4000).default("cinematic illustrated fiction, dramatic natural lighting, consistent character design, widescreen composition"),
   aspectRatio: z.enum(["16:9", "1:1", "9:16"]).default("16:9"),
   // Generation effort only — final output resolution is controlled separately.
@@ -26,7 +26,7 @@ export const artworkSettingsSchema = z.object({
   upscaling: artworkUpscalingModeSchema.default("automatic"),
   upscaler: upscalerEngineSchema.default("ffmpeg-lanczos"),
   adultContent: z.boolean().default(true),
-}).default({ provider: "openai", model: "gpt-image-2.5-flare", stylePrompt: "cinematic illustrated fiction, dramatic natural lighting, consistent character design, widescreen composition", aspectRatio: "16:9", quality: "medium", size: "1536x1024", outputFormat: "png", outputResolution: "native", upscaling: "automatic", upscaler: "ffmpeg-lanczos", adultContent: true });
+}).default({ provider: "openai", model: "gpt-image-2.6-flare", stylePrompt: "cinematic illustrated fiction, dramatic natural lighting, consistent character design, widescreen composition", aspectRatio: "16:9", quality: "medium", size: "1536x1024", outputFormat: "png", outputResolution: "native", upscaling: "automatic", upscaler: "ffmpeg-lanczos", adultContent: true });
 
 export const artworkReviewSchema = z.enum(["unreviewed", "approved", "rejected", "needs-regeneration"]);
 export const sceneImportanceSchema = z.enum(["transition", "standard", "major"]);

@@ -19,10 +19,13 @@ async function root() { return mkdtemp(join(tmpdir(), "story-projects-")); }
 describe("story project management", () => {
   it("uses application defaults only when creating a new story", async () => {
     const directory = await root(); const defaults = await loadGlobalSettings(directory, env);
-    await saveGlobalSettings(directory, { ...defaults, defaultSourceLanguage: "ja-JP", defaultOutputLanguage: "en-GB", defaultProductionProfile: "everything", translation: { provider: "openai", model: "new-model" } });
+    await saveGlobalSettings(directory, { ...defaults, defaultSourceLanguage: "ja-JP", defaultOutputLanguage: "en-GB", defaultProductionProfile: "everything", translation: { provider: "openai", model: "new-model" }, artwork: { provider: "gemini", model: "gemini-3.1-flash-image" } });
     const first = await createBlankStory(directory, env, metadata); expect(first.pipeline.translation.model).toBe("new-model"); expect(first.defaultProductionProfile).toBe("everything");
+    expect(first.artwork).toMatchObject({ provider: "gemini", model: "gemini-3.1-flash-image" });
     await saveGlobalSettings(directory, { ...defaults, translation: { provider: "gemini", model: "later-model" } });
-    expect((await loadStory(storyPaths(directory, first.slug, 1).storyConfig)).pipeline.translation.model).toBe("new-model");
+    const stored = await loadStory(storyPaths(directory, first.slug, 1).storyConfig);
+    expect(stored.pipeline.translation.model).toBe("new-model");
+    expect(stored.artwork).toEqual(first.artwork);
   });
 
   it("duplicates settings alone or the full project and always chooses a unique slug", async () => {

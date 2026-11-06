@@ -48,10 +48,9 @@ export function geminiSupportedImageSizes(model: string): string[] {
 
 export const IMAGE_PROVIDER_CATALOG: Record<ImageProviderName, ImageProviderCatalogEntry> = {
   openai: {
-    defaultModel: "gpt-image-2.5-flare",
-    models: ["gpt-image-2.5-flare", "gpt-image-2.5-sunburst", "gpt-image-1", "gpt-image-1-mini"],
-    // Only the GPT Image 2.5 family accepts reference-image input.
-    supportsReferenceImages: (model) => model.startsWith("gpt-image-2.5"),
+    defaultModel: "gpt-image-2.6-flare",
+    models: ["gpt-image-2.6-flare", "gpt-image-2.6-sunburst", "gpt-image-2.5-flare", "gpt-image-2.5-sunburst", "gpt-image-1", "gpt-image-1-mini"],
+    supportsReferenceImages: (model) => /^gpt-image-2\.[56]-/.test(model),
     nativeTiers: {
       "16:9": [{ label: "1536x1024", width: 1536, height: 1024 }],
       "1:1": [{ label: "1024x1024", width: 1024, height: 1024 }],

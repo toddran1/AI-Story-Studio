@@ -1991,6 +1991,8 @@ describe("Scene Reel artwork routing and versions", () => {
 
   it("switches model options per provider and keeps an unlisted current model selectable", () => {
     expect(artworkModelOptionsFor("openai", "gpt-image-2.5-flare")).toEqual([
+      "gpt-image-2.6-flare",
+      "gpt-image-2.6-sunburst",
       "gpt-image-2.5-flare",
       "gpt-image-2.5-sunburst",
       "gpt-image-1",

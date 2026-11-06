@@ -24,7 +24,7 @@ it("prices free Fish separately and covers the selectable OpenAI text models", (
 it("uses the published Gemini promotion boundary and actual image tokens", () => {
   expect(pricingFor("gemini","gemini-3.8-flash",undefined,new Date("2026-12-31T23:59:59Z"))?.outputPerMillion).toBe(3.75);
   expect(pricingFor("gemini","gemini-3.8-flash",undefined,new Date("2027-01-01T00:00:00Z"))?.outputPerMillion).toBe(7.5);
-  const image = pricingFor("openai","gpt-image-2.5-flare",{quality:"medium",size:"1536x1024"});
+  const image = pricingFor("openai","gpt-image-2.6-flare",{quality:"medium",size:"1536x1024"});
   expect(calculateCost(image,{imageCount:1})).toBeUndefined();
   expect(calculateCost(image,{inputTextTokens:1000,inputImageTokens:2000,outputTokens:1000})).toBe(.051);
   expect(calculateCost(image,{inputTextTokens:1000,inputImageTokens:2000,outputTokens:1000,cachedInputTokens:200})).toBeUndefined();

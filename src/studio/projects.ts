@@ -1,3 +1,4 @@
+import { defaultImageModel, imageModelCompatible, imageProviderNameSchema } from "../artwork/providers.js";
 import { stageModelConfigSchema } from "../domain/provider.js";
 import { randomUUID } from "node:crypto";
 import { createReadStream, createWriteStream } from "node:fs";
@@ -30,7 +31,16 @@ export type Activity = { id: string; type: string; message: string; at: string }
 const activitySchema = z.array(z.object({ id: z.string(), type: z.string(), message: z.string(), at: z.string() })).default([]);
 export const cleanupKindSchema = z.enum(["voicePreviews", "abPreviews", "oldProductionManifests", "artwork", "chapterVideo", "exports"]);
 
-export const globalSettingsSchema = z.object({ defaultSourceLanguage: z.string().min(2), defaultOutputLanguage: z.string().min(2), defaultProductionProfile: z.enum(["audio", "audiobook", "story-video", "everything"]), translation: stageModelConfigSchema, narration: stageModelConfigSchema, qa: stageModelConfigSchema, storyBible: stageModelConfigSchema, scenePlanner: stageModelConfigSchema, tts: z.object({ provider: ttsProviderNameSchema, model: z.string().min(1), referenceId: z.string().optional() }) });
+const defaultArtworkRouting = { provider: "openai" as const, model: defaultImageModel("openai") };
+const artworkRoutingSchema = z.object({
+  provider: imageProviderNameSchema,
+  model: z.string().trim().min(1),
+}).refine(({ provider, model }) => imageModelCompatible(provider, model), {
+  path: ["model"],
+  message: "Select an artwork model supported by the image provider",
+}).default(defaultArtworkRouting);
+
+export const globalSettingsSchema = z.object({ defaultSourceLanguage: z.string().min(2), defaultOutputLanguage: z.string().min(2), defaultProductionProfile: z.enum(["audio", "audiobook", "story-video", "everything"]), translation: stageModelConfigSchema, narration: stageModelConfigSchema, qa: stageModelConfigSchema, storyBible: stageModelConfigSchema, scenePlanner: stageModelConfigSchema, artwork: artworkRoutingSchema, tts: z.object({ provider: ttsProviderNameSchema, model: z.string().min(1), referenceId: z.string().optional() }) });
 export type GlobalSettings = z.infer<typeof globalSettingsSchema>;
 
 export async function loadGlobalSettings(root: string, env: Environment): Promise<GlobalSettings> { const raw = await readJsonIfExists<Record<string, unknown>>(globalSettingsPath(root)); const defaults = { defaultSourceLanguage: "zh-CN", defaultOutputLanguage: "en-US", defaultProductionProfile: "audiobook" as const, translation: { provider: "gemini" as const, model: env.GEMINI_DEFAULT_MODEL }, narration: { provider: "openai" as const, model: env.OPENAI_DEFAULT_MODEL }, qa: { provider: "openai" as const, model: env.OPENAI_DEFAULT_MODEL }, storyBible: { provider: "gemini" as const, model: env.GEMINI_DEFAULT_MODEL }, scenePlanner: { provider: "openai" as const, model: env.OPENAI_DEFAULT_MODEL }, tts: { provider: "fish" as const, model: env.FISH_AUDIO_MODEL, referenceId: env.FISH_AUDIO_REFERENCE_ID } }; return globalSettingsSchema.parse(raw ? { ...defaults, ...raw } : defaults); }
@@ -38,7 +48,7 @@ export async function saveGlobalSettings(root: string, value: unknown) { const s
 
 export async function createBlankStory(root: string, env: Environment, raw: unknown) {
   const input = storyMetadataSchema.extend({ slug: safeSlugSchema, sourceLanguage: z.string().trim().min(2).max(30).optional(), outputLanguage: z.string().trim().min(2).max(30).optional() }).parse(raw); const paths = storyPaths(root, input.slug, 1); if (await exists(paths.story)) throw new Error(`Story '${input.slug}' already exists`);
-  const defaults = await loadGlobalSettings(root, env); let story = defaultStory(input.slug, env); story = storySchema.parse({ ...story, ...input, source: { type: "original" }, sourceLanguage: input.sourceLanguage ?? defaults.defaultSourceLanguage, outputLanguage: input.outputLanguage ?? defaults.defaultOutputLanguage, defaultProductionProfile: defaults.defaultProductionProfile, pipeline: { ...story.pipeline, translation: defaults.translation, narration: defaults.narration, qa: defaults.qa, storyBible: defaults.storyBible, scenePlanner: defaults.scenePlanner, tts: { ...story.pipeline.tts, provider: defaults.tts.provider, model: defaults.tts.model, referenceId: defaults.tts.referenceId } } });
+  const defaults = await loadGlobalSettings(root, env); let story = defaultStory(input.slug, env); story = storySchema.parse({ ...story, ...input, source: { type: "original" }, sourceLanguage: input.sourceLanguage ?? defaults.defaultSourceLanguage, outputLanguage: input.outputLanguage ?? defaults.defaultOutputLanguage, defaultProductionProfile: defaults.defaultProductionProfile, artwork: { ...story.artwork, ...defaults.artwork }, pipeline: { ...story.pipeline, translation: defaults.translation, narration: defaults.narration, qa: defaults.qa, storyBible: defaults.storyBible, scenePlanner: defaults.scenePlanner, tts: { ...story.pipeline.tts, provider: defaults.tts.provider, model: defaults.tts.model, referenceId: defaults.tts.referenceId } } });
   const stage = join(root, "stories", `.create-${randomUUID()}`); await mkdir(stage, { recursive: true }); try { await atomicWriteJson(join(stage, "story.json"), story); await atomicWriteJson(join(stage, "pipeline.json"), story.pipeline); await rename(stage, paths.story); } catch (error) { await rm(stage, { recursive: true, force: true }); throw error; }
   await recordActivity(root, input.slug, "story.created", "Created story project"); return story;
 }
