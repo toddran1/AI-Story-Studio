@@ -383,30 +383,36 @@ describe("web service layer", () => {
     await operations.close();
   });
 
-  it("pauses stage execution after the current chapter", async () => {
+  it("finishes every selected stage in the current chapter before pausing", async () => {
     const root = await mkdtemp(join(tmpdir(), "story-stage-pause-")); const jobs = new JobManager();
     let releaseFirst!: () => void;
     let signalFirst!: () => void;
     const firstStarted = new Promise<void>((resolve) => { signalFirst = resolve; });
     const firstMayFinish = new Promise<void>((resolve) => { releaseFirst = resolve; });
     const calls: number[] = [];
+    const finishedStages: string[] = [];
     const operations = new StudioOperations(root, env, jobs, { pipeline: { run: async (options) => {
       calls.push(options.chapter);
+      expect(options.executionStages).toEqual(expect.arrayContaining(["translation", "narration", "qa"]));
+      finishedStages.push(`${options.chapter}:translation`);
       if (options.chapter === 1) { signalFirst(); await firstMayFinish; }
+      finishedStages.push(`${options.chapter}:narration`, `${options.chapter}:qa`);
       return undefined;
     } } });
     try {
       const inspection = await operations.inspectSource({ files: [{ name: "chapter-001.txt", text: "One" }, { name: "chapter-002.txt", text: "Two" }] });
       const imported = await operations.importInspection("stage-pause-story", inspection.id);
-      const started = operations.startStageExecution(imported.story.slug, { chapters: [1, 2], stages: ["translation"], mode: "prerequisites", force: true }) as Job;
+      const started = operations.startStageExecution(imported.story.slug, { chapters: [1, 2], stages: ["translation", "narration", "qa"], mode: "prerequisites", force: true }) as Job;
       const finished = waitForJob(jobs, started.id);
       await firstStarted;
       expect(jobs.pause(started.id)).toBe(true);
+      expect(finishedStages).toEqual(["1:translation"]);
       releaseFirst();
       const result = await finished;
       expect(result.status).toBe("paused");
       expect(result.result).toMatchObject({ status: "paused", results: [{ chapter: 1, status: "completed" }] });
       expect(calls).toEqual([1]);
+      expect(finishedStages).toEqual(["1:translation", "1:narration", "1:qa"]);
       const resumed = await waitForJob(jobs, (await operations.retryJob(started.id) as Job).id);
       expect(resumed.status).toBe("completed");
       expect(resumed.payload).toMatchObject({ chapters: [2] });

@@ -145,13 +145,13 @@ describe("preferred narration names", () => {
   it("enforces a strict full name throughout narration without duplicating an already correct name", () => {
     const context = { narrationNamingEntities: [{ canonicalName: "Netherworld King", aliases: ["King", "Dark King"], localizedNaming: { usageMode: "always_full", fullName: "Tarkatan King", shortName: "Tarkatan" }, aliasNarrationRules: [] }] };
     expect(applyNarrationNamingPreferences("Netherworld King spoke. The King answered the Dark King. Tarkatan King waited. [Name: Netherworld King]", context))
-      .toBe("Tarkatan King spoke. The Tarkatan King answered the Tarkatan King. Tarkatan King waited. [Name: Netherworld King]");
+      .toBe("Tarkatan King spoke. The King answered the Tarkatan King. Tarkatan King waited. [Name: Netherworld King]");
   });
 
-  it("enforces a strict short name and custom alias while honoring exceptions", () => {
+  it("enforces complete names while deferring one-word aliases to contextual generation", () => {
     const context = { canonicalEntities: [{ canonicalName: "Huo Haitao", aliases: ["Haitao", "Coach Huo", "Huo"], localizedNaming: { usageMode: "always_short", fullName: "Cadien Hao", shortName: "Cadien" }, aliasNarrationRules: [{ alias: "Coach Huo", behavior: "no_override" }, { alias: "Huo", behavior: "custom", replacement: "Coach Cadien" }] }] };
     expect(applyNarrationNamingPreferences("Huo Haitao's rival called Haitao. Coach Huo answered Huo.", context))
-      .toBe("Cadien's rival called Cadien. Coach Huo answered Coach Cadien.");
+      .toBe("Cadien's rival called Haitao. Coach Huo answered Huo.");
   });
 
   it("does not guess which identity owns a shared alias", () => {

@@ -1,3 +1,4 @@
+import { identityNames, needsContextualNameResolution, identitySpans, narrationNameScopeGuidance } from "./name-scope.js";
 import { preferShortNameGuidance } from "./naming-guidance.js";
 import type { CanonicalEntity } from "../domain/story-bible.js";
 
@@ -15,14 +16,23 @@ type NamingEntity = {
  * Enforces explicit Story Bible narration names after model generation. The
  * matcher is quote-agnostic, so dialogue and exposition follow the same rule,
  * while possessive suffixes and surrounding punctuation remain untouched.
+ * One-word names require contextual generation; lexical replacement cannot
+ * distinguish an actual named identity from ordinary language.
  */
 export function applyNarrationNamingPreferences(text: string, context?: unknown): string {
   const entities = namingEntities(context);
   const replacements = new Map<string, { source: string; replacement: string }>();
   const ambiguous = new Set<string>();
   const preservedAliases = new Set<string>();
+  const allEntities = [...entities, ...((context && typeof context === "object" && Array.isArray((context as {canonicalEntities?:unknown}).canonicalEntities)) ? (context as {canonicalEntities:NamingEntity[]}).canonicalEntities : [])];
+  const owners = new Map<string, Set<string>>();
+  for (const entity of allEntities) for (const name of identityNames(entity)) {
+    const key = name.toLocaleLowerCase();
+    const owner = JSON.stringify([entity.canonicalName, entity.originalName]);
+    const values = owners.get(key) ?? new Set<string>(); values.add(owner); owners.set(key, values);
+  }
   const add = (source: string | undefined, replacement: string | undefined) => {
-    if (!source || !replacement || source.toLocaleLowerCase() === replacement.toLocaleLowerCase()) return;
+    if (!source || !replacement || needsContextualNameResolution(source) || source.toLocaleLowerCase() === replacement.toLocaleLowerCase()) return;
     const key = source.toLocaleLowerCase();
     if (replacements.has(key) && replacements.get(key)!.replacement.toLocaleLowerCase() !== replacement.toLocaleLowerCase()) ambiguous.add(key);
     else replacements.set(key, { source, replacement });
@@ -53,6 +63,7 @@ export function applyNarrationNamingPreferences(text: string, context?: unknown)
     }
   }
 
+  for (const [key, values] of owners) if (values.size > 1) ambiguous.add(key);
   for (const key of ambiguous) replacements.delete(key);
   const ordered = [...replacements.values()].sort((left, right) => right.source.length - left.source.length);
   if (!ordered.length) return text;
@@ -69,6 +80,7 @@ export function applyNarrationNamingPreferences(text: string, context?: unknown)
       if (!sourceSpans.some((span) => span.start <= match.index && span.end >= end && span.end - span.start > match[0].length)) protectedSpans.push({ start: match.index, end });
     }
   }
+  for (const span of identitySpans(text, allEntities)) if (!sourceSpans.some(source => source.start === span.start && source.end === span.end)) protectedSpans.push(span);
   for (const alias of preservedAliases) {
     const aliasPattern = new RegExp(`(?<![\\p{L}\\p{N}_])${escapeRegExp(alias)}(?![\\p{L}\\p{N}_])`, "giu");
     for (const match of text.matchAll(aliasPattern)) protectedSpans.push({ start: match.index, end: match.index + match[0].length });
@@ -104,7 +116,7 @@ export function narrationNameRequirements(context: unknown): string {
     }) : [];
     return [localized?.usageMode === "ai_contextual" && localized.preferShortName === true ? `${base}. ${preferShortNameGuidance}` : base, ...aliases].filter(Boolean);
   });
-  return lines.length ? `NARRATION NAME REQUIREMENTS FOR THIS CHAPTER:\n${lines.map((line) => `- ${line}`).join("\n")}` : "";
+  return lines.length ? `NARRATION NAME REQUIREMENTS FOR THIS CHAPTER:\n${narrationNameScopeGuidance}\n${lines.map((line) => `- ${line}`).join("\n")}` : "";
 }
 
 function stringValue(value: unknown): string | undefined {

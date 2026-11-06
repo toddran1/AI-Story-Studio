@@ -1253,7 +1253,13 @@ describe("web UI", () => {
       expect(html).toContain("Chapter 449");
       expect(html).toContain("job-progress");
       expect(html).toContain("Dismiss");
-      expect(html).toContain("Pause after current action");
+      expect(html).toContain("Pause after current chapter");
+    });
+
+    it("keeps the chapter boundary visible while a batch pause is pending", () => {
+      const html = renderToStaticMarkup(<JobConsole job={{ ...runningJob, type: "stageExecution", pauseRequested: true }} onUpdate={() => undefined} onClose={() => undefined} />);
+      expect(html).toContain("Pausing after current chapter…");
+      expect(html).not.toContain("Pausing after current action");
     });
 
     it("shows chapter Fish chunk and mastering progress from production events", () => {

@@ -11,7 +11,7 @@ import { summarizeQuality } from "./quality-guard.js";
 
 import { z } from "zod";
 
-export const CENSOR_AUDIO_VERSION = "censor-tone-v4-emphasis-before-split";
+export const CENSOR_AUDIO_VERSION = "censor-tone-v5-no-empty-speech-fragments";
 export const CENSOR_BLEEP_MARKER = "[CENSOR_BLEEP]" as const;
 export const censorToneConfig = {
   frequencyHz: 1000,
@@ -59,12 +59,12 @@ export function planCensoredSpeech(text: string): CensorSegment[] {
     // If a censored word opens dialogue, the quote belongs with the speech
     // after the tone. Leaving it before the tone creates a punctuation-only
     // Fish chunk (and an unbalanced closing quote in the next chunk).
-    const danglingQuote = /[“‘"]$/u.exec(speech)?.[0];
+    const danglingQuote = /(?:\[(?:soft|calm)\]\s*)*[“‘"「『«]$/u.exec(speech)?.[0];
     if (danglingQuote) {
-      speech = speech.slice(0, -1).trimEnd();
+      speech = speech.slice(0, -danglingQuote.length).trimEnd();
       quoteAfterCensor = danglingQuote;
     }
-    if (speech) segments.push({ kind: "speech", text: speech });
+    if (hasCensorSpeech(speech)) segments.push({ kind: "speech", text: speech });
     const original = match[0];
     segments.push({ kind: "censor", marker: CENSOR_BLEEP_MARKER, original, durationSeconds: censorDuration(original) });
     // A tone already supplies the interruption/pause implied by punctuation.
@@ -75,8 +75,16 @@ export function planCensoredSpeech(text: string): CensorSegment[] {
     cursor = afterWord + (punctuation?.[0].length ?? 0);
   }
   const tail = `${quoteAfterCensor}${text.slice(cursor)}`.trim();
-  if (tail) segments.push({ kind: "speech", text: tail });
+  if (hasCensorSpeech(tail)) segments.push({ kind: "speech", text: tail });
   return segments;
+}
+
+// Censoring can leave an empty quotation plus punctuation (for example
+// “Fuck?!” followed by a standalone ellipsis). These are not speech requests.
+// Delivery/speaker controls alone do not make them speakable; vocalization
+// cues such as [laughing] remain meaningful and must still reach the provider.
+function hasCensorSpeech(text: string): boolean {
+  return /[\p{L}\p{N}]/u.test(text.replace(/\[(?:soft|calm|speaker_\d+)\]/giu, ""));
 }
 
 export function censorDuration(word: string, config = censorToneConfig): number {

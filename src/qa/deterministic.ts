@@ -1,3 +1,4 @@
+import { needsContextualNameResolution, identitySpans } from "../narration/name-scope.js";
 import { Story } from "../domain/story.js";
 import { CanonicalEntity, hasActivePronunciation } from "../domain/story-bible.js";
 import { continuityReviewSchema } from "../story-bible/continuity.js";
@@ -30,14 +31,16 @@ function nameOccurrences(text: string, name: string): Array<{ start: number; end
   return [...text.matchAll(pattern)].map((match) => ({ start: match.index!, end: match.index! + match[0].length }));
 }
 
-function hasUnauthorizedOccurrence(text: string, written: string, authorized: string[]): boolean {
-  const allowedSpans = authorized.flatMap((name) => nameOccurrences(text, name));
+function hasUnauthorizedOccurrence(text: string, written: string, authorized: string[], protectedNames: Array<{start:number;end:number;nameLength:number}>): boolean {
+  if (needsContextualNameResolution(written)) return false;
+  const allowedSpans = [...authorized.flatMap((name) => nameOccurrences(text, name)), ...protectedNames.filter(span => span.nameLength > written.length)];
   return nameOccurrences(text, written).some((occurrence) => !allowedSpans.some((allowed) => allowed.start <= occurrence.start && allowed.end >= occurrence.end));
 }
 
 /** Confirmed violations of explicit narration-facing naming rules. */
 function namingDetections(entities: CanonicalEntity[], translation: string, narration: string): FreshQaDetection[] {
   const detections: FreshQaDetection[] = [];
+  const protectedNames = identitySpans(narration, entities);
   const emitted = new Set<string>();
   const flag = (entity: CanonicalEntity, written: string, required: string | string[], reason: string, safeToFix: boolean) => {
     const forms = Array.isArray(required) ? required : [required];
@@ -68,7 +71,7 @@ function namingDetections(entities: CanonicalEntity[], translation: string, narr
         const authorized = authorizedNarrationNames(entity, written);
         const required = authorized[0];
         if (!required || normalizeQaText(written) === normalizeQaText(required)) continue;
-        if (hasUnauthorizedOccurrence(narration, written, authorized)) {
+        if (hasUnauthorizedOccurrence(narration, written, authorized, protectedNames)) {
           const safe = !naming && entity.preferredNarrationName === required && !required.includes(" ") && !written.includes(" ");
           flag(entity, written, naming?.usageMode === "ai_contextual" ? authorized : required, naming ? `localizedNaming ${naming.usageMode}` : "Preferred Narration Name", safe);
         }
@@ -84,7 +87,7 @@ function namingDetections(entities: CanonicalEntity[], translation: string, narr
       const authorized = authorizedNarrationNames(entity, alias);
       const required = rule?.behavior === "custom" ? rule.replacement : authorized[0];
       if (!required || normalizeQaText(alias) === normalizeQaText(required)) continue;
-      if (hasUnauthorizedOccurrence(narration, alias, authorized)) {
+      if (hasUnauthorizedOccurrence(narration, alias, authorized, protectedNames)) {
         const reason = rule?.behavior === "custom" ? "custom alias rule" : rule?.behavior === "use_preferred" ? "use_preferred alias rule" : naming ? `localizedNaming ${naming.usageMode}` : "Preferred Narration Name";
         flag(entity, alias, naming?.usageMode === "ai_contextual" && rule?.behavior !== "custom" ? authorized : required, reason, false);
       }
@@ -232,7 +235,7 @@ export async function runDeterministicQaChecks(deps: {
 }): Promise<DeterministicQaResult> {
   const { root, story, translation, narration } = deps;
   const [namingEntities, pronunciationEntities, acceptedContinuity] = await Promise.all([
-    loadNarrationNamingEntities(root, story.slug),
+    loadNarrationNamingEntities(root, story.slug, { includeUnmapped: true }),
     loadPronunciationEntities(root, story.slug),
     loadAcceptedContinuity(root, story.slug),
   ]);

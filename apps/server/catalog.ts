@@ -69,7 +69,7 @@ const storyCardCache = new Map<string, { value: any; expiresAt: number }>();
 export function invalidateCatalogCache(root: string, slug: string) { const key = `${root}\0${slug}`; storyCardCache.delete(key); storageCache.delete(key); }
 
 export type ChapterSummary = {
-  chapter: number; originalTitle?: string; translation: string; narration: string; qa?: QaResult["status"];
+  chapter: number; originalTitle?: string; translation: string; narration: string; storyBible: string; qa?: QaResult["status"];
   qaScore?: number; qaIssues?: QaResult["issues"]; qaStale: boolean; qaNeedsVerification?: number; qaStage?: string; tts: string; audioMastering: string; continuity: string; alignment: string; subtitles: string; subtitlesAvailable: boolean; subtitlesStale: boolean; scenePlanning: string; artwork: string; video: string; audioAvailable: boolean; audioStale: boolean; videoAvailable: boolean; videoStale: boolean; durationSeconds?: number;
 };
 
@@ -1225,7 +1225,7 @@ async function loadSummaries(root: string, slug: string, numbers: number[], inde
     const audioMasteringStatus = fresh && metadata?.stages.audioMastering.status === "complete" ? "complete" : audioAvailable ? "stale" : metadata?.stages.audioMastering.status ?? "pending";
     const videoStatus = fresh && metadata?.stages.video.status === "complete" ? "complete" : videoFileExists ? "stale" : metadata?.stages.video.status ?? "pending";
     return { chapter, originalTitle: metadata?.originalTitle ?? index.titles.get(chapter), translation: translationStatus,
-      narration: narrationStatus, qa: qa?.status,
+      narration: narrationStatus, storyBible: !fresh && metadata?.stages.storyBible.status === "complete" ? "stale" : metadata?.stages.storyBible.status ?? "pending", qa: qa?.status,
       qaScore: qa?.score, qaIssues, qaStale: Boolean(qa) && (qaFreshness ? qaFreshness.freshness !== "current" : !fresh || metadata?.stages.qa.status !== "complete"), qaNeedsVerification: qaStats?.needsVerification, qaStage, tts, audioMastering: audioMasteringStatus, continuity, alignment, subtitles, subtitlesAvailable: subtitleFileExists, subtitlesStale: subtitleFileExists && (!fresh || subtitles !== "complete"), scenePlanning, artwork, video: videoStatus,
       durationSeconds: audioAvailable ? metadata?.audio?.durationSeconds : undefined,
       audioAvailable, audioStale, videoAvailable: videoFileExists, videoStale };

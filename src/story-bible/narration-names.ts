@@ -13,8 +13,8 @@ export function narrationNamingChanged(before: CanonicalEntity, after: Canonical
   return before.preferredNarrationName !== after.preferredNarrationName || JSON.stringify(before.aliasNarrationRules) !== JSON.stringify(after.aliasNarrationRules) || JSON.stringify(before.localizedNaming) !== JSON.stringify(after.localizedNaming);
 }
 
-export async function loadNarrationNamingEntities(root: string, slug: string) {
-  return (await loadStoryBibleWithCanonicalOverlay(root, slug)).canonicalEntities.filter((entity) => entity.localizedNaming || entity.preferredNarrationName || entity.aliasNarrationRules.length);
+export async function loadNarrationNamingEntities(root: string, slug: string, options: { includeUnmapped?: boolean } = {}) {
+  return (await loadStoryBibleWithCanonicalOverlay(root, slug)).canonicalEntities.filter((entity) => options.includeUnmapped || entity.localizedNaming || entity.preferredNarrationName || entity.aliasNarrationRules.length);
 }
 
 /** A compact, current-chapter naming roster independent of the general Story

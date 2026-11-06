@@ -399,16 +399,16 @@ describe("finding lifecycle endpoints", () => {
 
 describe("safe fixes", () => {
   const namingEntity = {
-    id: "ent_aaaaaaaaaaaaaaaaaaaaaaaa", type: "character", canonicalName: "Suming", originalName: "", aliases: [] as string[],
+    id: "ent_aaaaaaaaaaaaaaaaaaaaaaaa", type: "character", canonicalName: "Su Ming", originalName: "", aliases: [] as string[],
     preferredNarrationName: "Asher", firstAppearance: 1, lastKnownAppearance: 1, status: "alive",
   };
 
   it("applies mechanical fixes only to open safeToFix findings", async () => {
-    const narration = "Suming opened the heavy door and listened for a long quiet moment.";
+    const narration = "Su Ming opened the heavy door and listened for a long quiet moment.";
     const { root, story, paths } = await fixture({
       narration, bibleEntities: [namingEntity],
       detections: [
-        detection({ category: "names", message: `Narration uses "Suming" but the authorized narration rendering is "Asher".`, evidence: `Narration contains "Suming" but never "Asher".`, origin: "deterministic", safeToFix: true, entityIds: ["ent_aaaaaaaaaaaaaaaaaaaaaaaa"] }),
+        detection({ category: "names", message: `Narration uses "Su Ming" but the authorized narration rendering is "Asher".`, evidence: `Narration contains "Su Ming" but never "Asher".`, origin: "deterministic", safeToFix: true, entityIds: ["ent_aaaaaaaaaaaaaaaaaaaaaaaa"] }),
         detection({ message: "Use the canonical ability name", evidence: `Narration says "the heavy door" but the locked term is required.` }),
       ],
     });

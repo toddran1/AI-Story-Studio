@@ -369,6 +369,8 @@ export class StudioOperations {
       }
       const sources = new Map(selected.map((item) => [item.chapter, item])); const results: Array<{ chapter: number; status: "completed" | "reused" | "blocked" | "failed"; plan: (typeof batchPlan.chapters)[number]; error?: string; diagnostic?: ErrorDiagnostic }> = [];
       for (const plan of batchPlan.chapters) {
+        // Pause only between chapters: executeStagePlan must finish all of
+        // this chapter's selected stages before honoring a pause request.
         if (shutdown.isRequested) break;
         const chapter = plan.chapter; const source = sources.get(chapter)!;
         control.update({ type: "stage-execution.chapter.planned", chapter, plan, completed: results.length, index: results.length + 1, total: batchPlan.chapters.length });

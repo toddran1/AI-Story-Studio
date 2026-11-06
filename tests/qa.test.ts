@@ -154,7 +154,7 @@ describe("QA authorized narration naming", () => {
   });
 
   it("records the bumped prompt version", () => {
-    expect(QA_PROMPT_VERSION).toBe("15-prefer-short-name");
+    expect(QA_PROMPT_VERSION).toBe("16-identity-scoped-names");
   });
 
   it("documents the output contract, severity rubric, and repair-routing phrasing", () => {
