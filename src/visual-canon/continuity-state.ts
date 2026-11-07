@@ -54,6 +54,9 @@ export type VisualObjectState = z.infer<typeof visualObjectStateSchema>;
 export const visualContinuityStateSchema = z.object({
   characters: z.array(visualCharacterStateSchema).max(30).default([]),
   environment: visualEnvironmentStateSchema.optional(),
+  activeLocationKey: z.string().optional(),
+  absentCharacters: z.record(z.string(), visualCharacterStateSchema).optional(),
+  knownLocations: z.record(z.string(), visualEnvironmentStateSchema).optional(),
   objects: z.array(visualObjectStateSchema).max(20).default([]),
   spatial: bounded(500).optional(),
 });
@@ -149,12 +152,44 @@ export function normalizeVisualContinuityChange(raw: unknown): VisualContinuityC
 }
 
 export const visualContinuitySourceFactSchema = z.object({ subject: bounded(300), field: bounded(100), chapter: z.number().int().positive(), sceneId: z.string().regex(/^scene-\d{3}$/), passage: bounded(8000), valueFingerprint: bounded(100) });
+export const continuitySnapshotSchema = z.record(z.string(), z.string());
+export type ContinuitySnapshot = z.infer<typeof continuitySnapshotSchema>;
+export type ContinuityDifference = { detail: string; before?: string; after?: string };
+
+export function continuitySnapshot(state: ResolvedSceneContinuity): ContinuitySnapshot {
+  const entries: Array<[string, string]> = [];
+  const add = (subject: string, fields: Record<string, unknown>) => {
+    for (const [field, value] of Object.entries(fields)) {
+      if (value !== undefined) entries.push([`${subject} · ${field}`, Array.isArray(value) ? value.join(", ") : String(value)]);
+    }
+  };
+  for (const { name, entityId, ...fields } of state.endState.characters) add(name, fields);
+  if (state.endState.environment) {
+    const { locationId, ...fields } = state.endState.environment;
+    add("Environment", fields);
+  }
+  for (const { name, ...fields } of state.endState.objects) add(name, fields);
+  add("Scene", { geography: state.endState.spatial, note: state.manualOverride?.note });
+  return Object.fromEntries(entries);
+}
+
+export function continuityDifferences(baseline: unknown, current: ContinuitySnapshot): ContinuityDifference[] {
+  const parsed = continuitySnapshotSchema.safeParse(baseline);
+  if (!parsed.success) return [];
+  const before = new Map(Object.entries(parsed.data));
+  const after = new Map(Object.entries(current));
+  return [...new Set([...before.keys(), ...after.keys()])].sort()
+    .filter(detail => before.get(detail) !== after.get(detail))
+    .map(detail => ({ detail, before: before.get(detail), after: after.get(detail) }));
+}
+
 export const visualContinuityHandoffSchema = z.object({
   version: z.literal(1),
   chapter: z.number().int().positive(),
   state: visualContinuityStateSchema,
   source: z.object({ chapter: z.number().int().positive(), sceneId: z.string().regex(/^scene-\d{3}$/) }),
   stateFingerprint: z.string().min(1),
+  sceneBaselines: z.record(z.string(), z.object({ sceneFingerprint: z.string(), snapshot: continuitySnapshotSchema })).optional(),
   sourceFacts: z.record(z.string(), visualContinuitySourceFactSchema).optional(),
   inputFingerprint: z.string().min(1).optional(),
   referenceArtwork: z.object({
@@ -210,6 +245,8 @@ export type VisualContinuityDecision = {
 };
 
 export type ResolvedSceneContinuity = {
+  historical?: boolean;
+  historicalStateAvailable?: boolean;
   sceneId: string;
   startState: VisualContinuityState;
   changes?: VisualContinuityChange;

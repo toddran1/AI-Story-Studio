@@ -1,10 +1,12 @@
+import { createHash } from "node:crypto";
+import { continuityDifferences, continuitySnapshot, loadVisualContinuityHandoff } from "../../src/visual-canon/continuity.js";
 import { jobOperationScope } from "../../src/storage/operation-scope.js";
 import { MotionAssetService } from "../../src/video/motion-service.js";
 import { FfmpegMotionTools } from "../../src/video/motion-tools.js";
 import { loadMotionAssets } from "../../src/video/motion-assets.js";
 import type { MotionClipProvider } from "../../src/video/motion-assets.js";
 import { rankVisualReferences } from "../../src/visual-canon/reference-selection.js";
-import { imageStoryboardInputSchema, imageScopeSchema, imageAutomationSchema, ImageRunBudget, ImageBudgetExceeded, explainAppearance, storyboardFlags } from "../../src/scenes/image-workbench.js";
+import { imageStoryboardInputSchema, imageScopeSchema, imageAutomationSchema, ImageRunBudget, ImageBudgetExceeded, explainAppearance, storyboardFlags, continuityPreflight, type ImageDraftOutcome } from "../../src/scenes/image-workbench.js";
 import { artworkRepairSchema } from "../../src/artwork/repair.js";
 import { readCachedVisualCheck, visualCheckOutcome, visualCheckFindings } from "../../src/artwork/visual-check.js";
 import { loadVisualContinuityOverlay, resolvePreviousVisualContinuity, resolveChapterVisualContinuity, renderSceneContinuity } from "../../src/visual-canon/continuity.js";
@@ -20,7 +22,7 @@ import { planReferenceBatch, runReferenceBatch, referenceBatchInputSchema } from
 import { resolveSummarySceneArtDirection } from "../../src/summaries/art-direction.js";
 import { backingArtworkVersion, loadApprovedVisualProfileReferences } from "../../src/artwork/generator.js";
 import { visualWorkflowCatalog, visualSceneImpact } from "../../src/visual-canon/workflow.js";
-import { resolveVisualCanonPrompt } from "../../src/visual-canon/resolver.js";
+import { resolveVisualCanonPrompt, resolveVisuallyRelevantCanonicalEntities, shouldUseVisualProfileForEntity } from "../../src/visual-canon/resolver.js";
 import { syncAppearanceChanges } from "../../src/visual-canon/appearance-changes.js";
 import { loadPronunciationEntities, enrichStoryPronunciations, clearPronunciationAttempt, dismissPronunciationSuggestion, inspectPronunciationImpact, invalidatePronunciationChange, loadPronunciationSuggestions } from "../../src/story-bible/pronunciation.js";
 import { pronunciationProvider, pronunciationFingerprint, resolvePronunciations } from "../../src/tts/pronunciation.js";
@@ -85,6 +87,7 @@ import { ImageProvider } from "../../src/artwork/provider.js";
 import { ImageProviderSource, resolveImageProvider } from "../../src/artwork/providers.js";
 import {
   loadVisualProfiles,
+  saveVisualProfiles,
   getVisualProfile as loadVisualProfileEntity,
   updateVisualProfile,
   deleteVisualProfile,
@@ -329,8 +332,8 @@ export class StudioOperations {
   async planStageExecution(slug: string, raw: unknown) {
     slugSchema.parse(slug); const input = stageExecutionInputSchema.parse(raw);
     if (input.executionPolicy === "chapter-stage" && (input.chapters.length !== 1 || input.stages.length !== 1)) throw new ConfigurationError("Chapter-stage execution requires one chapter and one stage.");
-    const story = input.executionPolicy === "chapter-stage" ? await loadStory(storyPaths(this.root, slug, 1).storyConfig) : undefined;
-    const imported = await loadImportedChapters(this.root, slug); const selected = selectChapterNumbers(imported.chapters, input.chapters);
+    const story = await loadStory(storyPaths(this.root, slug, 1).storyConfig);
+    const imported = await loadImportedChapters(this.root, slug); const selected = selectChapterNumbers(imported.chapters, input.chapters, story.title);
     return planStageExecutionBatch({ root: this.root, story: slug, chapters: selected.map((chapter) => chapter.chapter), selectedStages: input.stages, mode: input.mode, force: input.force, executionPolicy: input.executionPolicy, storyConfig: story });
   }
   startStageExecution(slug: string, raw: unknown) {
@@ -342,7 +345,7 @@ export class StudioOperations {
       const shutdown = new ShutdownController();
       control.setPause(() => shutdown.request());
       let story = await loadStory(storyPaths(this.root, slug, 1).storyConfig); const imported = await loadImportedChapters(this.root, slug);
-      let selected = selectChapterNumbers(imported.chapters, input.chapters); let batchPlan = await planStageExecutionBatch({ root: this.root, story: slug, chapters: selected.map((chapter) => chapter.chapter), selectedStages: input.stages, mode: input.mode, force: input.force, executionPolicy: input.executionPolicy, storyConfig: story });
+      let selected = selectChapterNumbers(imported.chapters, input.chapters, story.title); let batchPlan = await planStageExecutionBatch({ root: this.root, story: slug, chapters: selected.map((chapter) => chapter.chapter), selectedStages: input.stages, mode: input.mode, force: input.force, executionPolicy: input.executionPolicy, storyConfig: story });
       const reservedScope = jobOperationScope("stageExecution", { ...input, mode: "selected", stages: [...new Set(batchPlan.chapters.flatMap(chapter => chapter.runStages))] });
       await control.reserve?.(reservedScope);
       if (shutdown.isRequested) return { status: "paused", results: [] };
@@ -350,7 +353,7 @@ export class StudioOperations {
       // Settings and source imports may change while a job waits in memory.
       // Re-read them only after the filesystem lease has been acquired.
       story = await loadStory(storyPaths(this.root, slug, 1).storyConfig);
-      selected = selectChapterNumbers((await loadImportedChapters(this.root, slug)).chapters, input.chapters);
+      selected = selectChapterNumbers((await loadImportedChapters(this.root, slug)).chapters, input.chapters, story.title);
       batchPlan = await planStageExecutionBatch({ root: this.root, story: slug, chapters: selected.map(chapter => chapter.chapter), selectedStages: input.stages, mode: input.mode, force: input.force, executionPolicy: input.executionPolicy, storyConfig: story });
       const currentScope = jobOperationScope("stageExecution", { ...input, mode: "selected", stages: [...new Set(batchPlan.chapters.flatMap(chapter => chapter.runStages))] });
       if (currentScope.resources?.some(resource => !reservedScope.resources?.includes(resource))) throw new ConfigurationError("The execution plan changed while waiting and needs additional shared resources. Preview and retry the current plan.");
@@ -2310,7 +2313,7 @@ export class StudioOperations {
         const state = continuity.find(r => r.sceneId === scene.id);
         if (scene.visualChanges?.transition === "flashback") lineage.clear();
         const facts = explainAppearance(scene, state).map(f => {
-          const factKey = JSON.stringify([f.subject === scene.location ? "Environment" : f.subject,f.field]); const previous = lineage.get(factKey);
+          const factKey = JSON.stringify([f.subject === scene.location ? ["Environment", state?.endState.activeLocationKey ?? scene.location] : f.subject,f.field]); const previous = lineage.get(factKey);
           const origin = previous && f.source.startsWith("Inherited") && ((previous.value && typeof previous.value === "object" && "recordedFingerprint" in previous.value ? previous.value.recordedFingerprint : fingerprint(previous.value)) === fingerprint(f.value)) && !f.passage ? previous : undefined;
           if (f.passage) lineage.set(factKey, { key: visualSceneKey(target), passage: f.passage, value: f.value });
           return { ...f, inheritedFrom: origin?.key, passage: f.passage ?? origin?.passage };
@@ -2329,6 +2332,10 @@ export class StudioOperations {
         const base = source.chapter ? `/api/stories/${slug}/chapters/${source.chapter}/scenes/${scene.id}` : `/api/stories/${slug}/summaries/${source.summaryId}/artwork/${scene.id}`;
         const imageUrl = version ? `${base}/versions/${version.id}${source.chapter ? ".png" : ""}?v=${version.imageFingerprint}` : scene.artwork.imageFingerprint ? `${base}${source.chapter ? ".png" : ""}?v=${scene.artwork.imageFingerprint}` : undefined;
         const flags = storyboardFlags(scene, source.scenes.slice(0,index).reverse().find(previous => !previous.disabled));
+        for (const message of resolved?.continuityIssues ?? []) flags.push({ kind: "continuity", message });
+        const review = resolved?.continuityReview;
+        if (review?.sceneChanges.length) flags.push({ kind: "continuity", message: "Scene continuity changed. Open the generation preview to compare details." });
+        if (review?.artworkChanges.length) flags.push({ kind: "continuity", message: "Artwork uses earlier continuity. Review the changes before reusing this frame." });
         const latestCandidate = scene.artwork.versions.at(-1);
         const candidate = latestCandidate && version && latestCandidate.id !== version.id ? { ...latestCandidate, imageUrl: `${base}/versions/${latestCandidate.id}${source.chapter ? ".png" : ""}?v=${latestCandidate.imageFingerprint}` } : undefined;
         const status = scene.disabled ? "disabled" : groundingError ? "needs_profile" : imageError ? "image_invalid" : !version && !scene.artwork.imageFingerprint ? "missing" : check?.stale || !check?.check ? "unchecked" : visualCheckOutcome(check.check);
@@ -2337,6 +2344,39 @@ export class StudioOperations {
     }
     return { rows, totalRows, offset, limit, hasMore: offset + rows.length < totalRows, missingPlans: sources.filter(s => !s.manifest).map(s => ({ chapter: s.chapter, summaryId: s.summaryId, label: s.label })), fingerprint: fingerprint(sources.map(s => s.fingerprint)) };
   }
+  private async imageDraftContinuity(slug: string, source: Awaited<ReturnType<StudioOperations["imageScopeSources"]>>[number]) {
+    if (source.chapter && source.manifest) {
+      const { resolved } = await resolveChapterVisualContinuity({ root: this.root, slug, chapter: source.chapter, manifest: source.manifest });
+      return new Map(resolved.perScene.map(state => [state.sceneId, state]));
+    }
+    return new Map<string, import("../../src/visual-canon/continuity-state.js").ResolvedSceneContinuity>();
+  }
+
+  private async staleImageDraftReferences(slug: string, source: Awaited<ReturnType<StudioOperations["imageScopeSources"]>>[number], continuity: Awaited<ReturnType<StudioOperations["imageDraftContinuity"]>>) {
+    const stale = new Set<string>();
+    if (!source.chapter) return stale;
+    const prior = new Map<number, { scenes: Scene[]; states: typeof continuity }>();
+    prior.set(source.chapter, { scenes: source.scenes, states: continuity });
+    for (const [sceneId, state] of continuity) {
+      const reference = state.referenceDecision;
+      if (!reference?.used || !reference.sourceSceneId) continue;
+      const chapter = reference.sourceChapter ?? source.chapter;
+      let origin = prior.get(chapter);
+      if (!origin) {
+        const manifest = sceneManifestSchema.safeParse(await readJsonIfExists(storyPaths(this.root, slug, chapter).scenesManifest));
+        if (!manifest.success) continue;
+        const { resolved } = await resolveChapterVisualContinuity({ root: this.root, slug, chapter, manifest: manifest.data });
+        origin = { scenes: manifest.data.scenes, states: new Map(resolved.perScene.map(entry => [entry.sceneId, entry])) };
+        prior.set(chapter, origin);
+      }
+      const frame = origin.scenes.find(scene => scene.id === reference.sourceSceneId);
+      const snapshot = frame?.artwork.versions.find(version => version.id === reference.versionId)?.provenance?.continuitySnapshot;
+      const current = origin.states.get(reference.sourceSceneId);
+      if (current && continuityDifferences(snapshot, continuitySnapshot(current)).length) stale.add(sceneId);
+    }
+    return stale;
+  }
+
   async planImageAutomation(slug: string, raw: unknown) {
     slugSchema.parse(slug); const input = imageAutomationSchema.parse(raw);
     const [sources, profiles, bible, direction, story] = await Promise.all([this.imageScopeSources(slug, input.scope), loadVisualProfiles(this.root, slug), getStoryBible(this.root, slug), loadStoryArtDirection(this.root, slug), loadStory(storyPaths(this.root, slug, 1).storyConfig)]);
@@ -2347,8 +2387,31 @@ export class StudioOperations {
     const generationInputs: unknown[] = [];
     const blocked: Array<{ label: string; reason: string }> = [];
     const provider = resolveImageProvider(this.image, story);
+    const profileDrafts = new Map<string, string>();
     for (const source of sources) {
-      const sceneIds = source.scenes.filter(scene => !scene.disabled && !artworkIsProtected(scene)).map(scene => scene.id);
+      const continuity = await this.imageDraftContinuity(slug, source);
+      const staleReferences = await this.staleImageDraftReferences(slug, source, continuity);
+      const sceneIds: string[] = [];
+      for (const scene of source.scenes.filter(scene => !scene.disabled)) {
+        const issues = continuityPreflight(scene, continuity.get(scene.id), bible);
+        if (staleReferences.has(scene.id)) issues.push("The selected continuity reference uses earlier scene details. Review the source frame or disable the previous-frame reference.");
+        if (issues.length) {
+          blocked.push({ label: `${source.label} · ${scene.id}`, reason: issues.join(" ") });
+          continue;
+        }
+        if (artworkIsProtected(scene)) continue;
+        try {
+          if (input.draftMissingProfiles) {
+            for (const entity of resolveVisuallyRelevantCanonicalEntities(scene, bible)) {
+              if (["character", "location"].includes(entity.type) && !profiles[entity.id] && entity.visualProfilePolicy?.mode !== "skip" && shouldUseVisualProfileForEntity(scene, entity)) profileDrafts.set(entity.id, entity.canonicalName);
+            }
+          }
+        } catch (error) {
+          blocked.push({ label: `${source.label} · ${scene.id}`, reason: error instanceof Error ? error.message : String(error) });
+          continue;
+        }
+        sceneIds.push(scene.id);
+      }
       if (!sceneIds.length) continue;
       try {
         const estimate = source.chapter ? await generateStoredArtwork({ root: this.root, story, chapter: source.chapter, sceneIds, provider, dryRun: true }) : await this.summaryVisuals().artwork(slug, source.summaryId!, { scenes: sceneIds, dryRun: true });
@@ -2358,8 +2421,8 @@ export class StudioOperations {
       } catch (error) { blocked.push({ label: source.label, reason: error instanceof Error ? error.message : String(error) }); }
     }
     if (!this.llm.forStage(story.pipeline.qa).supportsImageInputs) blocked.push({ label: "Image continuity review", reason: "Select an image-capable QA provider before running the automatic draft." });
-    const estimatedRequests = missingPlans.length + minimumImages + scenes.length + scenes.filter(s => !artworkIsProtected(s)).length * input.maxRepairs * 2;
-    return { input, blocked, missingPlans, sceneCount: scenes.length, protectedCount, minimumImages, estimatedRequests, budgetUsd: input.budgetUsd, maxRequests: input.maxRequests, allowanceNote: "Reserved-cost budget, not a provider billing cap. Every actual provider attempt, including retries, consumes its configured allowance before it starts. Unknown scene counts and repairs make the final total variable. Review allowances against your provider pricing.", provider: story.artwork.provider, model: story.artwork.model, qaProvider: story.pipeline.qa.provider, qaModel: story.pipeline.qa.model, fingerprint: fingerprint({ input, generationInputs, sources: sources.map(s => s.fingerprint), profiles, bible, direction, artwork: story.artwork, providerVersion: provider.version, qa: story.pipeline.qa, planner: story.pipeline.scenePlanner }) };
+    const estimatedRequests = profileDrafts.size * 2 + missingPlans.length + minimumImages + scenes.length + scenes.filter(s => !artworkIsProtected(s)).length * input.maxRepairs * 2;
+    return { input, blocked, missingPlans, profileDrafts: [...profileDrafts.values()], sceneCount: scenes.length, protectedCount, minimumImages, estimatedRequests, budgetUsd: input.budgetUsd, maxRequests: input.maxRequests, allowanceNote: "Reserved-cost budget, not a provider billing cap. Every actual provider attempt, including retries, consumes its configured allowance before it starts. Unknown scene counts and repairs make the final total variable. Review allowances against your provider pricing.", provider: story.artwork.provider, model: story.artwork.model, qaProvider: story.pipeline.qa.provider, qaModel: story.pipeline.qa.model, fingerprint: fingerprint({ input, blocked, generationInputs, sources: sources.map(s => s.fingerprint), profiles, bible, direction, artwork: story.artwork, providerVersion: provider.version, qa: story.pipeline.qa, planner: story.pipeline.scenePlanner }) };
   }
   async startImageAutomation(slug: string, raw: unknown) {
     slugSchema.parse(slug); const input = imageAutomationSchema.extend({ planFingerprint: z.string().min(1) }).parse(raw);
@@ -2368,14 +2431,37 @@ export class StudioOperations {
       const plan = await this.planImageAutomation(slug, config);
       if (plan.fingerprint !== planFingerprint) throw new Error("Image inputs changed after preview. Preview the draft again.");
       let stopped = false; control.setPause(() => { stopped = true; });
-      const outcomes: Array<{ key: string; status: string; repairs: number; error?: string }> = [];
+      const priorReport = await readJsonIfExists<{ outcomes?: ImageDraftOutcome[] }>(join(storyPaths(this.root, slug, 1).story, "image-draft-latest.json"));
+      const outcomes: ImageDraftOutcome[] = [];
       const reportPath = join(storyPaths(this.root, slug, 1).story, "image-draft-latest.json");
-      const budget = new ImageRunBudget(config, async state => { await atomicWriteJson(reportPath, { version: 1, scope: config.scope, ...state, outcomes, status: "running", updatedAt: new Date().toISOString() }); control.update({ stage: "image-draft", ...state, outcomes: [...outcomes] }); });
+      const budget = new ImageRunBudget(config, async state => { await atomicWriteJson(reportPath, { version: 1, config, scope: config.scope, ...state, outcomes, status: "running", updatedAt: new Date().toISOString() }); control.update({ stage: "image-draft", ...state, outcomes: [...outcomes] }); });
       const story = await loadStory(storyPaths(this.root, slug, 1).storyConfig);
       const original = resolveImageProvider(this.image, story);
       const image: ImageProvider = { name: original.name, version: original.version, capabilities: original.capabilities, validateConfiguration: () => original.validateConfiguration(), generate: async request => { if (stopped) throw new ImageBudgetExceeded("Image run paused"); await budget.reserve("image"); return original.generate(request); } };
       const planner = this.scenePlanner ?? this.llm.forStage(story.pipeline.scenePlanner);
-      const meteredPlanner: LLMProvider = { name: planner.name, supportsImageInputs: planner.supportsImageInputs, validateConfiguration: () => planner.validateConfiguration(), generateText: async request => { if (stopped) throw new ImageBudgetExceeded("Image run paused"); await budget.reserve("planning"); return planner.generateText(request); }, generateStructured: async request => { if (stopped) throw new ImageBudgetExceeded("Image run paused"); await budget.reserve("planning"); return planner.generateStructured(request); } };
+      const meterPlanning = (provider: LLMProvider): LLMProvider => ({
+        name: provider.name,
+        supportsImageInputs: provider.supportsImageInputs,
+        validateConfiguration: () => provider.validateConfiguration(),
+        generateText: async request => {
+          if (stopped) throw new ImageBudgetExceeded("Image run paused");
+          await budget.reserve("planning");
+          return provider.generateText(request);
+        },
+        generateStructured: async request => {
+          if (stopped) throw new ImageBudgetExceeded("Image run paused");
+          await budget.reserve("planning");
+          return provider.generateStructured(request);
+        },
+      });
+      const meteredPlanner = meterPlanning(planner);
+      const profileAttempts = new Set<string>();
+      const bible = await getStoryBible(this.root, slug);
+      const profiles = await loadVisualProfiles(this.root, slug);
+      if (config.sceneKeys) {
+        outcomes.push(...(priorReport?.outcomes ?? []).filter(item => ["profile_review", "reference_rejected", "reference_failed", "reference_pending"].includes(item.status) && item.entityId
+          && !profiles[item.entityId]?.references.some(ref => ref.id === item.referenceId && ref.approved)));
+      }
       const meteredRouter = new LLMRouter(new Map([[planner.name, meteredPlanner]]));
       const summaryImages = new SummaryVisualService(this.root, this.summaryMedia(), image, this.video, this.alignConfig, this.aligner);
       let status = "completed";
@@ -2385,19 +2471,73 @@ export class StudioOperations {
           if (stopped) { status = "paused"; break; }
           if (!source.manifest) {
             if (!config.planMissingScenes) { outcomes.push({ key: source.label, status: "missing_plan", repairs: 0 }); continue; }
-            if (source.chapter) await planStoredScenes({ root: this.root, story, chapter: source.chapter, provider: meteredPlanner });
-            else { // Reserve each summary planning attempt through its provider router.
-              const media = new SummaryMediaService(this.root, meteredRouter, this.tts, this.censor, this.audio);
-              await media.scenes(slug, source.summaryId!, {});
+            try {
+              if (source.chapter) await planStoredScenes({ root: this.root, story, chapter: source.chapter, provider: meteredPlanner });
+              else {
+                const media = new SummaryMediaService(this.root, meteredRouter, this.tts, this.censor, this.audio);
+                await media.scenes(slug, source.summaryId!, {});
+              }
+            } catch (error) {
+              if (error instanceof ImageBudgetExceeded || (error instanceof Error && /Image run reached|Image run paused/.test(error.message))) throw error;
+              outcomes.push({ key: source.label, status: "planning_failed", repairs: 0, error: error instanceof Error ? error.message : String(error) });
+              continue;
             }
           }
           const fresh = (await this.imageScopeSources(slug, source.chapter ? { chapters: [source.chapter] } : { summaryId: source.summaryId }))[0]!;
-          for (const scene of fresh.scenes.filter(s => !s.disabled)) {
+          const continuity = await this.imageDraftContinuity(slug, fresh);
+          const staleReferences = await this.staleImageDraftReferences(slug, fresh, continuity);
+          for (const scene of fresh.scenes.filter(s => !s.disabled && (!config.sceneKeys || config.sceneKeys.includes(visualSceneKey({ chapter: source.chapter, summaryId: source.summaryId, sceneId: s.id }))))) {
             if (stopped) { status = "paused"; break; }
             const target = { chapter: source.chapter, summaryId: source.summaryId, sceneId: scene.id };
             const outcome = { key: visualSceneKey(target), status: "running", repairs: 0, error: undefined as string | undefined }; outcomes.push(outcome);
             try {
-              if (!artworkIsProtected(scene)) await this.generateImageDraftScene(slug, target, image, summaryImages);
+              const state = continuity.get(scene.id);
+              const issues = continuityPreflight(scene, state, bible);
+              if (staleReferences.has(scene.id)) issues.push("The selected continuity reference uses earlier scene details. Review the source frame or disable the previous-frame reference.");
+              if (issues.length) throw new Error(issues.join(" "));
+              const artworkBaseline = backingArtworkVersion(scene)?.provenance?.continuitySnapshot;
+              if (artworkIsProtected(scene) && state && continuityDifferences(artworkBaseline, continuitySnapshot(state)).length) {
+                throw new Error("Protected artwork uses earlier continuity. Compare details in the scene preview.");
+              }
+              if (!artworkIsProtected(scene)) {
+                if (config.draftMissingProfiles) {
+                  for (const entity of resolveVisuallyRelevantCanonicalEntities(scene, bible)) {
+                    if (!["character", "location"].includes(entity.type) || profiles[entity.id] || entity.visualProfilePolicy?.mode === "skip" || profileAttempts.has(entity.id) || !shouldUseVisualProfileForEntity(scene, entity)) continue;
+                    profileAttempts.add(entity.id);
+                    try {
+                      const provider = meterPlanning(this.llm.forStage(story.pipeline.storyBible));
+                      const proposal = await withUsageScope({ story: slug, stage: "visual-profile" }, () =>
+                        proposeMissingVisualDetails(this.root, slug, bible, entity.id, provider, story.pipeline.storyBible));
+                      if (!Object.keys(proposal.values).length) throw new Error("No draft details were available. Review the Story Bible evidence and profile fields.");
+                      profiles[entity.id] = await applyVisualProfileProposal(this.root, slug, bible, proposal, Object.keys(proposal.values));
+                      await invalidateStoryBibleDerivedReads(this.root, slug);
+                      const review: ImageDraftOutcome = {
+                        key: entity.canonicalName, entityId: entity.id, status: "reference_pending", repairs: 0, profileRevision: profiles[entity.id]!.revision,
+                        error: "Draft saved. Generate its first reference sheet in Visual Canon.",
+                      };
+                      outcomes.push(review);
+                      try {
+                        const result = await withUsageScope({ story: slug, stage: "visual-reference" }, () =>
+                          generateStyleSheet(this.root, slug, entity.id, image, story));
+                        profiles[entity.id] = result.profile;
+                        review.referenceId = result.reference.id;
+                        review.profileRevision = result.profile.revision;
+                        review.status = "profile_review";
+                        review.error = "First reference sheet ready. Review the draft and approve the sheet in Visual Canon.";
+                        await invalidateStoryBibleDerivedReads(this.root, slug);
+                      } catch (error) {
+                        if (error instanceof ImageBudgetExceeded || (error instanceof Error && /Image run reached|Image run paused/.test(error.message))) throw error;
+                        review.status = "reference_failed";
+                        review.error = `Draft saved. First sheet generation failed: ${error instanceof Error ? error.message : String(error)}`;
+                      }
+                    } catch (error) {
+                      if (error instanceof ImageBudgetExceeded || (error instanceof Error && /Image run reached|Image run paused/.test(error.message))) throw error;
+                      outcomes.push({ key: entity.canonicalName, entityId: entity.id, status: "profile_failed", repairs: 0, error: error instanceof Error ? error.message : String(error) });
+                    }
+                  }
+                }
+                await this.generateImageDraftScene(slug, target, image, summaryImages);
+              }
               for (;;) {
                 const checkContext = await this.artworkCheckInputs(slug, target);
                 if (stopped) throw new ImageBudgetExceeded("Image run paused");
@@ -2412,6 +2552,7 @@ export class StudioOperations {
                   await atomicWriteJson(checkContext.checkPath, check);
                 }
                 outcome.status = visualCheckOutcome(check);
+                outcome.error = outcome.status === "ready" ? undefined : check.summary;
                 if (outcome.status !== "mismatch" || artworkIsProtected(scene) || outcome.repairs >= config.maxRepairs) break;
                 const latest = (await this.imageScopeSources(slug, source.chapter ? { chapters: [source.chapter] } : { summaryId: source.summaryId }))[0]!.scenes.find(s => s.id === scene.id)!;
                 const version = latest.artwork.versions.at(-1); if (!version) break;
@@ -2423,19 +2564,197 @@ export class StudioOperations {
               if (error instanceof ImageBudgetExceeded || (error instanceof Error && /Image run reached|Image run paused/.test(error.message))) throw error;
               outcome.status = "needs_attention"; outcome.error = error instanceof Error ? error.message : String(error);
             }
-            await atomicWriteJson(reportPath, { version: 1, scope: config.scope, outcomes, requests: budget.requests, reservedUsd: budget.reservedUsd, status: "running", updatedAt: new Date().toISOString() });
+            await atomicWriteJson(reportPath, { version: 1, config, scope: config.scope, outcomes, requests: budget.requests, reservedUsd: budget.reservedUsd, status: "running", updatedAt: new Date().toISOString() });
             control.update({ stage: "image-draft", label: outcome.key, outcomes: [...outcomes], requests: budget.requests, reservedUsd: budget.reservedUsd });
           }
         }
       } catch (error) {
-        if (error instanceof ImageBudgetExceeded || (error instanceof Error && /Image run reached|Image run paused/.test(error.message))) { status = stopped ? "paused" : "budget_reached"; const pending = outcomes.at(-1); if (pending?.status === "running") pending.status = "deferred"; }
+        if (error instanceof ImageBudgetExceeded || (error instanceof Error && /Image run reached|Image run paused/.test(error.message))) { status = stopped ? "paused" : "budget_reached"; const pending = outcomes.find(outcome => outcome.status === "running"); if (pending?.status === "running") pending.status = "deferred"; }
         else { status = "needs_attention"; outcomes.push({ key: "planning", status: "failed", repairs: 0, error: error instanceof Error ? error.message : String(error) }); }
       }
       if (status === "completed" && outcomes.some(o => o.status !== "ready")) status = "completed_with_exceptions";
-      const result = { version: 1, scope: config.scope, status, outcomes, requests: budget.requests, reservedUsd: budget.reservedUsd, updatedAt: new Date().toISOString() };
+      const result = { version: 1, config, scope: config.scope, status, outcomes, requests: budget.requests, reservedUsd: budget.reservedUsd, updatedAt: new Date().toISOString() };
       await atomicWriteJson(reportPath, result); await invalidateChapterStatusDerivedReads(this.root, slug); return result;
     }), { ...input, operation: "image-draft" }, "visualWorkflow");
   }
+  async rejectImageDraftReference(slug: string, raw: unknown) {
+    slugSchema.parse(slug);
+    const input = z.object({
+      entityId: canonicalEntitySchema.shape.id, referenceId: z.string().min(1),
+      reportUpdatedAt: z.string(), feedback: z.string().trim().max(2000).default(""),
+      regenerate: z.boolean().default(true),
+    }).strict().parse(raw);
+    return this.rejectImageDraftReferences(slug, {
+      selection: [{ entityId: input.entityId, referenceId: input.referenceId, feedback: input.feedback }],
+      reportUpdatedAt: input.reportUpdatedAt, regenerate: input.regenerate,
+    });
+  }
+
+  async rejectImageDraftReferences(slug: string, raw: unknown) {
+    slugSchema.parse(slug);
+    const input = z.object({
+      selection: z.array(z.object({
+        entityId: canonicalEntitySchema.shape.id, referenceId: z.string().min(1).optional(),
+        feedback: z.string().trim().max(2000).default(""),
+      }).strict()).min(1).max(500),
+      reportUpdatedAt: z.string(), regenerate: z.boolean().default(true), retryFailedOnly: z.boolean().default(false),
+    }).strict().parse(raw);
+    if (new Set(input.selection.map(item => item.entityId)).size !== input.selection.length) throw new Error("Choose one reference sheet per profile.");
+    return this.jobs.createDurable(this.visualJobsDirectory(), slug, control => withStoryLock(this.root, slug, "reject image draft reference", async () => {
+      const report = z.object({
+        version: z.literal(1), config: imageAutomationSchema, scope: imageScopeSchema,
+        status: z.string(), updatedAt: z.string(), requests: z.number().int().nonnegative(),
+        reservedUsd: z.number().nonnegative(),
+        outcomes: z.array(z.object({
+          key: z.string(), status: z.string(), repairs: z.number(),
+          entityId: z.string().optional(), referenceId: z.string().optional(),
+          profileRevision: z.number().optional(), feedback: z.string().optional(), error: z.string().optional(),
+        })),
+      }).parse(await this.imageDraftReport(slug));
+      if (report.updatedAt !== input.reportUpdatedAt || report.status === "running") throw new Error("The image run changed. Refresh the review queue.");
+      const profiles = await loadVisualProfiles(this.root, slug);
+      const candidates = input.selection.map(selected => {
+        const queued = report.outcomes.find(item => item.entityId === selected.entityId && item.referenceId === selected.referenceId && (input.retryFailedOnly ? ["reference_failed", "reference_pending"] : ["profile_review", "reference_rejected", "reference_failed", "reference_pending"]).includes(item.status));
+        if (!queued) throw new Error("A selected sheet is no longer awaiting review.");
+        const profile = profiles[selected.entityId];
+        const reference = profile?.references.find(item => item.id === selected.referenceId);
+        if (!profile || (selected.referenceId ? !reference || reference.approved : !["reference_failed", "reference_pending"].includes(queued.status)) || profile.status === "approved" || queued.profileRevision !== profile.revision) throw new Error("A draft changed. Refresh the queue or review it in Visual Canon.");
+        return { selected, queued, profile, reference };
+      });
+      let stopped = false;
+      control.setPause(() => { stopped = true; });
+      const persist = async (status: string) => {
+        report.status = status;
+        report.updatedAt = new Date().toISOString();
+        await atomicWriteJson(join(storyPaths(this.root, slug, 1).story, "image-draft-latest.json"), report);
+        control.update({ stage: "visual-reference", requests: report.requests, reservedUsd: report.reservedUsd });
+      };
+      const rejectedAt = new Date().toISOString();
+      // Publish the validated rejection batch with one atomic profile write.
+      for (const { selected, queued, profile, reference } of candidates) {
+        profiles[selected.entityId] = visualProfileSchema.parse({
+          ...profile, revision: profile.revision + 1, updatedAt: rejectedAt,
+          references: profile.references.map(item => item.id !== reference?.id ? item : {
+            ...item, approved: false, provenance: { ...item.provenance, rejectedAt, rejectionFeedback: selected.feedback },
+          }),
+        });
+        queued.status = input.regenerate ? "reference_pending" : "reference_rejected";
+        queued.profileRevision = profiles[selected.entityId]!.revision;
+        queued.feedback = selected.feedback;
+        queued.error = "Reference rejected. Generate a replacement before approval.";
+      }
+      await saveVisualProfiles(this.root, slug, profiles);
+      await invalidateStoryBibleDerivedReads(this.root, slug);
+      await persist(input.regenerate ? "running" : "completed_with_exceptions");
+      if (!input.regenerate) return { status: "reference_rejected" };
+      const budget = new ImageRunBudget(report.config, async state => {
+        report.requests = state.requests; report.reservedUsd = state.reservedUsd;
+        await persist("running");
+      });
+      budget.requests = report.requests;
+      budget.reservedUsd = report.reservedUsd;
+      const story = await loadStory(storyPaths(this.root, slug, 1).storyConfig);
+      const provider = resolveImageProvider(this.image, story);
+      const metered: ImageProvider = {
+        name: provider.name, version: provider.version, capabilities: provider.capabilities,
+        validateConfiguration: () => provider.validateConfiguration(),
+        generate: async request => {
+          if (stopped) throw new ImageBudgetExceeded("Image run paused");
+          await budget.reserve("image");
+          return provider.generate(request);
+        },
+      };
+      let status = "completed_with_exceptions";
+      for (const { selected, queued } of candidates) {
+        if (stopped) { status = "paused"; break; }
+        control.update({ stage: "visual-reference", label: queued.key });
+        try {
+          const replacement = await withUsageScope({ story: slug, stage: "visual-reference" }, () =>
+            generateStyleSheet(this.root, slug, selected.entityId, metered, story, { feedback: selected.feedback, replacesReferenceId: selected.referenceId }));
+          queued.referenceId = replacement.reference.id;
+          queued.profileRevision = replacement.profile.revision;
+          queued.status = "profile_review";
+          queued.error = "Replacement sheet ready. Review before approval.";
+          await invalidateStoryBibleDerivedReads(this.root, slug);
+          await persist("running");
+        } catch (error) {
+          queued.status = error instanceof ImageBudgetExceeded ? "reference_pending" : "reference_failed";
+          queued.error = `Reference generation needs another attempt: ${error instanceof Error ? error.message : String(error)}`;
+          if (error instanceof ImageBudgetExceeded) {
+            status = stopped ? "paused" : "budget_reached";
+            break;
+          }
+          await persist("running");
+        }
+      }
+      await persist(status);
+      return { status, outcomes: report.outcomes };
+
+    }), { ...input, operation: "reference-rejection" }, "visualWorkflow");
+  }
+
+  async approveImageDraftReference(slug: string, raw: unknown) {
+    const input = z.object({ entityId: canonicalEntitySchema.shape.id, referenceId: z.string().min(1), reportUpdatedAt: z.string() }).strict().parse(raw);
+    return this.approveImageDraftReferences(slug, { selection: [{ entityId: input.entityId, referenceId: input.referenceId }], reportUpdatedAt: input.reportUpdatedAt });
+  }
+
+  async approveImageDraftReferences(slug: string, raw: unknown) {
+    slugSchema.parse(slug);
+    const input = z.object({
+      selection: z.array(z.object({ entityId: canonicalEntitySchema.shape.id, referenceId: z.string().min(1) }).strict()).min(1).max(500),
+      reportUpdatedAt: z.string(),
+    }).strict().parse(raw);
+    if (new Set(input.selection.map(item => item.entityId)).size !== input.selection.length) throw new Error("Choose one reference sheet per profile.");
+    const continuation = await withStoryLock(this.root, slug, "approve image draft reference", async () => {
+      const report = z.object({
+        config: imageAutomationSchema,
+        updatedAt: z.string(),
+        reservedUsd: z.number().nonnegative(),
+        requests: z.number().int().nonnegative(),
+        status: z.string(),
+        outcomes: z.array(z.object({ key: z.string(), status: z.string(), entityId: z.string().optional(), referenceId: z.string().optional(), profileRevision: z.number().optional() })),
+      }).parse(await this.imageDraftReport(slug));
+      if (report.updatedAt !== input.reportUpdatedAt || report.status === "running") throw new Error("The image run changed. Refresh the review queue.");
+      const bible = await getStoryBible(this.root, slug);
+      for (const selected of input.selection) {
+        if (!report.outcomes.some(item => item.entityId === selected.entityId && item.referenceId === selected.referenceId && item.status === "profile_review")) throw new Error("A selected sheet is not awaiting approval in this run.");
+        await synchronizeVisualProfileConflicts(this.root, slug, bible, selected.entityId);
+      }
+      const profiles = await loadVisualProfiles(this.root, slug);
+      const approvedAt = new Date().toISOString();
+      // Validate the entire selection before publishing any approvals.
+      for (const selected of input.selection) {
+        const profile = profiles[selected.entityId];
+        if (!profile) throw new Error("A draft profile was removed.");
+        if (profile.conflicts?.some(conflict => conflict.status === "needs_review")) throw new Error("Resolve profile conflicts in Visual Canon before approving.");
+        const queued = report.outcomes.find(item => item.entityId === selected.entityId && item.referenceId === selected.referenceId);
+        if (queued?.profileRevision !== profile.revision) throw new Error("A draft profile changed. Review and approve it in Visual Canon.");
+        const reference = profile.references.find(item => item.id === selected.referenceId);
+        if (!reference || reference.approved) throw new Error("A reference changed. Refresh the review queue.");
+        const bytes = await readFile(reference.imagePath);
+        if (!bytes.length || (reference.provenance?.imageFingerprint && createHash("sha256").update(bytes).digest("hex") !== reference.provenance.imageFingerprint)) throw new Error("A reference image changed or is empty. Review it in Visual Canon.");
+        profiles[selected.entityId] = visualProfileSchema.parse({
+          ...profile, status: "approved", approvedAt, updatedAt: approvedAt, revision: profile.revision + 1,
+          references: profile.references.map(item => ({
+            ...item,
+            approved: item.id === reference.id ? true : item.approved,
+            role: item.id === reference.id ? "primary_reference" : item.role === "primary_reference" ? "general_reference" : item.role,
+          })),
+        });
+      }
+      const config = report.config;
+      const budgetUsd = config.budgetUsd - report.reservedUsd;
+      const maxRequests = config.maxRequests - report.requests;
+      if (budgetUsd <= 0 || maxRequests <= 0) throw new Error("The run budget is exhausted. Approve in Visual Canon and preview a new image run with a budget.");
+      await saveVisualProfiles(this.root, slug, profiles);
+      await invalidateStoryBibleDerivedReads(this.root, slug);
+      const sceneKeys = report.outcomes.filter(item => ["needs_attention", "missing_plan", "deferred"].includes(item.status) && /^(chapter|summary):/.test(item.key)).map(item => item.key);
+      return { ...config, budgetUsd, maxRequests, sceneKeys };
+    });
+    const plan = await this.planImageAutomation(slug, continuation);
+    return this.startImageAutomation(slug, { ...continuation, planFingerprint: plan.fingerprint });
+  }
+
   private async generateImageDraftScene(slug: string, target: { chapter?: number; summaryId?: string; sceneId: string }, image: ImageProvider, summaries: SummaryVisualService, repair?: import("../../src/artwork/repair.js").ArtworkRepair) {
     const story = await loadStory(storyPaths(this.root, slug, 1).storyConfig);
     return withUsageScope<unknown>({ story: slug, chapter: target.chapter, stage: "artwork" }, () => target.chapter ? generateStoredArtwork({ root: this.root, story, chapter: target.chapter, sceneId: target.sceneId, provider: image, force: Boolean(repair), repair }) : summaries.artwork(slug, target.summaryId!, { scenes: [target.sceneId], force: Boolean(repair), repair }));
@@ -2497,7 +2816,23 @@ export class StudioOperations {
   }
   async sceneMotionFile(slug: string, raw: unknown, id: string) { slugSchema.parse(slug); return this.motionAssets().file(slug, visualSceneSelectionSchema.parse(raw), id); }
 
-  async imageDraftReport(slug: string) { slugSchema.parse(slug); return await readJsonIfExists(join(storyPaths(this.root, slug, 1).story, "image-draft-latest.json")) ?? null; }
+  async imageDraftReport(slug: string) {
+    slugSchema.parse(slug);
+    const report = await readJsonIfExists<Record<string, unknown>>(join(storyPaths(this.root, slug, 1).story, "image-draft-latest.json"));
+    if (!report || report.status !== "running" || typeof report.updatedAt !== "string") return report ?? null;
+    const updatedAt = report.updatedAt;
+    const active = this.jobs.list().some(job => job.story === slug
+      && ["queued", "running"].includes(job.status)
+      && job.createdAt <= updatedAt
+      && typeof job.payload === "object" && job.payload !== null
+      && "operation" in job.payload && ["image-draft", "reference-rejection"].includes(String(job.payload.operation)));
+    if (active) return report;
+    // An interrupted run must leave its completed candidates available to review.
+    return { ...report, status: "paused", outcomes: Array.isArray(report.outcomes) ? report.outcomes.map(outcome =>
+      outcome && typeof outcome === "object" && outcome.status === "running"
+        ? { ...outcome, status: "deferred" }
+        : outcome) : report.outcomes };
+  }
 
   async imageCorrectionImpact(slug: string, entityId: string) {
     const scenes = await this.visualImpact(slug, entityId);
@@ -2587,7 +2922,16 @@ export class StudioOperations {
     const resolved = resolveVisualCanonPrompt({ scene, frameState: continuity?.endState, visualContinuity: continuity ? renderSceneContinuity(continuity) : undefined, chapter: summary ? Math.min(...summary.chapters) : input.chapter, bible, story, visualProfiles: profiles, artDirection: summaryDirection?.preset ?? resolveActiveArtDirection(direction, input.scene.overrides?.artDirectionPresetId) });
     const references = await loadApprovedVisualProfileReferences(this.root, story, resolved);
     const decisions = resolved.resolvedEntities.flatMap(entity => rankVisualReferences(entity.references ?? [], resolved.referenceContextByEntity?.[entity.entityId] ?? resolved.referenceContext).map(row => ({ entityId: entity.entityId, referenceId: row.reference.id, reason: row.reason, eligible: row.eligible, selected: references.loadedReferenceIds.includes(row.reference.id) })));
-    return { ...resolved, references: { decisions, mode: references.mode, available: references.available, loadedReferenceIds: references.loadedReferenceIds, loadedReferences: references.images.map(image => ({ entityId: image.entityId, referenceId: image.referenceId })) } };
+    const handoff = input.chapter && !input.summaryId ? await loadVisualContinuityHandoff(this.root, slug, input.chapter) : undefined;
+    const version = backingArtworkVersion(scene);
+    const snapshot = continuity && continuitySnapshot(continuity);
+    const artworkBaseline = version?.provenance?.continuitySnapshot;
+    const continuityReview = snapshot && !input.summaryId ? {
+      sceneChanges: continuityDifferences(handoff?.sceneBaselines?.[scene.id]?.snapshot, snapshot),
+      artworkChanges: continuityDifferences(artworkBaseline, snapshot),
+      artworkBaselineMissing: Boolean(version || scene.artwork.imageFingerprint) && artworkBaseline === undefined,
+    } : undefined;
+    return { ...resolved, continuityReview, continuityIssues: continuityPreflight(scene, continuity, bible), references: { decisions, mode: references.mode, available: references.available, loadedReferenceIds: references.loadedReferenceIds, loadedReferences: references.images.map(image => ({ entityId: image.entityId, referenceId: image.referenceId })) } };
   }
 
   async visualImpact(slug: string, entityId: string) {

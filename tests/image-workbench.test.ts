@@ -163,7 +163,7 @@ describe("image continuity desk", () => {
   it("does not carry a future handoff into a pinned opening flashback or the flashback outfit back into the present", () => {
     const result=resolveVisualContinuity({previousHandoff:{chapter:29,sceneId:"scene-001",state:{characters:[{name:"Mara",wardrobe:"future armor"}],objects:[]}},scenes:[{id:"past",appearanceChapter:2,visualChanges:{characters:[{name:"Mara",op:"enter",set:{wardrobe:"childhood coat"}}]}},{id:"present"}]});
     expect(result.perScene[0]?.startState.characters).toEqual([]);
-    expect(result.perScene[1]?.endState.characters).toEqual([]);
+    expect(result.perScene[1]?.endState.characters).toEqual([{ name: "Mara", wardrobe: "future armor" }]);
     expect(result.perScene[1]?.changes?.transition).toBe("time_jump");
     expect(result.perScene[1]?.referenceDecision?.used).toBe(false);
   });

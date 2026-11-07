@@ -1,8 +1,9 @@
+import type { ContinuityDifference } from "../../../src/visual-canon/continuity-state.js";
 import { api, post, type VisualEntityProfile, type Scene } from "./api.js";
 export type VisualTask = { key: string; kind: "profile" | "era" | "form" | "conflict" | "reference"; scopeId?: string; label: string; needsSheet: boolean; stale?: boolean };
 export type VisualCatalogEntity = { id: string; name: string; type: string; profile?: VisualEntityProfile; tasks: VisualTask[]; baseReferenceIds: string[] };
 export type VisualImpact = { chapter?: number; summaryId?: string; source: string; sceneId: string; summary: string; disabled: boolean; protected: boolean; hasArtwork: boolean; review: string };
-export type ResolvedVisualPreview = { references: { mode: string; available: number; loadedReferenceIds: string[]; loadedReferences: Array<{ entityId?: string; referenceId?: string }> }; prompt: string; negativePrompt: string; resolvedEntities: Array<{ entityId: string; name: string; description: string; appearanceEra?: { name: string }; references?: VisualEntityProfile["references"]; groundingMode: string }> };
+export type ResolvedVisualPreview = { continuityIssues?: string[]; continuityReview?: { sceneChanges: ContinuityDifference[]; artworkChanges: ContinuityDifference[]; artworkBaselineMissing: boolean }; references: { mode: string; available: number; loadedReferenceIds: string[]; loadedReferences: Array<{ entityId?: string; referenceId?: string }> }; prompt: string; negativePrompt: string; resolvedEntities: Array<{ entityId: string; name: string; description: string; appearanceEra?: { name: string }; references?: VisualEntityProfile["references"]; groundingMode: string }> };
 const catalogRequests = new Map<string, Promise<VisualCatalogEntity[]>>();
 export function getVisualCatalog(slug: string) {
   const pending = catalogRequests.get(slug); if (pending) return pending;

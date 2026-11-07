@@ -210,6 +210,220 @@ describe("visual workflow generation", () => {
       expect(images.requests).toHaveLength(0); expect(checks).toBe(1);
     } finally { await rm(f.root, { recursive: true, force: true }); }
   });
+  it("queues unsafe continuity and drafts a missing profile once without generating unapproved artwork", async () => {
+    const f = await fixture();
+    try {
+      f.story.pipeline.storyBible = { provider: "openai", model: "draft-model" };
+      await atomicWriteJson(f.paths.storyConfig, f.story);
+      const mara = canonicalEntitySchema.parse({ id: "ent_aaaaaaaaaaaaaaaaaaaaaaaa", type: "character", canonicalName: "Mara", firstAppearance: 1, lastKnownAppearance: 2 });
+      await atomicWriteJson(f.paths.bible, { ...emptyStoryBible(), canonicalEntities: [mara] });
+      const scene = { ...f.scene, characters: ["Mara"], creatureGroups: [], artwork: {} };
+      await atomicWriteJson(f.paths.scenesManifest, sceneManifestSchema.parse({ ...f.manifest, scenes: [
+        { ...scene, visualChanges: { transition: "flashback" } },
+        { ...scene, id: "scene-002", visualChanges: { transition: "time_jump" } },
+        { ...scene, id: "scene-003" },
+      ] }));
+      let drafts = 0;
+      const llm: LLMProvider = {
+        name: "openai", supportsImageInputs: true,
+        async validateConfiguration() {},
+        async generateText() { throw new Error("Unexpected text request"); },
+        async generateStructured(request) {
+          if (request.schemaName !== "visual_profile_completion") return { value: request.schema.parse({
+            summary: "Matches", ...Object.fromEntries(VISUAL_CHECK_CATEGORIES.map(category => [category, { status: "match", observation: "Matches" }])),
+          }) };
+          drafts++;
+          return { value: request.schema.parse({ values: [{ field: "appearance", value: "Dark curly hair and a narrow face" }] }) };
+        },
+      };
+      const images = new Images();
+      const operations = new StudioOperations(f.root, loadEnvironment({}), undefined, { image: images, llm: new LLMRouter(new Map([["openai", llm]])) });
+      const input = { scope: { chapters: [1] } };
+      const plan = await operations.planImageAutomation(f.story.slug, input);
+      expect(plan.blocked[0]?.reason).toContain("Appearance Chapter");
+      expect(plan.profileDrafts).toEqual(["Mara"]);
+      const job = await operations.startImageAutomation(f.story.slug, { ...input, planFingerprint: plan.fingerprint });
+      expect((await finish(operations, job.id)).result).toMatchObject({ status: "completed_with_exceptions", requests: 2 });
+      expect(await operations.imageDraftReport(f.story.slug)).toMatchObject({ outcomes: expect.arrayContaining([
+        expect.objectContaining({ key: "chapter:1:scene-001", error: expect.stringContaining("Appearance Chapter") }),
+        expect.objectContaining({ entityId: mara.id, status: "profile_review", referenceId: expect.any(String) }),
+      ]) });
+      expect((await loadVisualProfiles(f.root, f.story.slug))[mara.id]).toMatchObject({ status: "draft", references: [{ approved: false }], appearance: "Dark curly hair and a narrow face" });
+      expect(drafts).toBe(1);
+      expect(images.requests).toHaveLength(1);
+      const report = await operations.imageDraftReport(f.story.slug) as { updatedAt: string; outcomes: Array<{ entityId?: string; referenceId?: string }> };
+      const queued = report.outcomes.find(item => item.entityId === mara.id)!;
+      const rejected = await operations.rejectImageDraftReference(f.story.slug, {
+        entityId: mara.id, referenceId: queued.referenceId, reportUpdatedAt: report.updatedAt,
+        regenerate: false, feedback: "Use a blue coat",
+      });
+      await finish(operations, rejected.id);
+      expect(images.requests).toHaveLength(1);
+      let nextReport = await operations.imageDraftReport(f.story.slug) as typeof report;
+      await expect(operations.approveImageDraftReference(f.story.slug, { entityId: mara.id, referenceId: queued.referenceId, reportUpdatedAt: nextReport.updatedAt })).rejects.toThrow("not awaiting");
+      const replacementJob = await operations.rejectImageDraftReference(f.story.slug, {
+        entityId: mara.id, referenceId: queued.referenceId, reportUpdatedAt: nextReport.updatedAt,
+        feedback: "Use a blue coat",
+      });
+      await finish(operations, replacementJob.id);
+      expect(images.requests[1]?.prompt).toContain("Use a blue coat");
+      nextReport = await operations.imageDraftReport(f.story.slug) as typeof report;
+      const candidate = nextReport.outcomes.find(item => item.entityId === mara.id)!;
+      expect(candidate.referenceId).not.toBe(queued.referenceId);
+      const history = (await loadVisualProfiles(f.root, f.story.slug))[mara.id]!;
+      expect(history.references).toHaveLength(2);
+      expect(history.references.every(ref => !ref.approved)).toBe(true);
+      expect(history.references[0]?.provenance).toMatchObject({ rejectionFeedback: "Use a blue coat" });
+      expect(history.references[1]?.replacesReferenceId).toBe(queued.referenceId);
+      const approval = { entityId: mara.id, referenceId: candidate.referenceId!, reportUpdatedAt: nextReport.updatedAt };
+      const resumed = await operations.approveImageDraftReference(f.story.slug, approval);
+      const completed = await finish(operations, resumed.id);
+      expect(completed.result).toMatchObject({ status: "completed_with_exceptions" });
+      expect(images.requests).toHaveLength(4);
+      const approved = (await loadVisualProfiles(f.root, f.story.slug))[mara.id]!;
+      expect(approved.status).toBe("approved");
+      expect(approved.references[0]?.approved).toBe(false);
+      expect(approved.references[1]?.approved).toBe(true);
+      const result = await operations.imageDraftReport(f.story.slug) as { config: { budgetUsd: number; maxRequests: number }; outcomes: Array<{ key: string; status: string }> };
+      expect(result.config).toMatchObject({ budgetUsd: 7.5, maxRequests: 47 });
+      expect(result.outcomes.filter(item => item.status === "ready")).toHaveLength(2);
+      await expect(operations.approveImageDraftReference(f.story.slug, approval)).rejects.toThrow("Refresh");
+
+    } finally { await rm(f.root, { recursive: true, force: true }); }
+  });
+
+  it("validates all selected sheets before bulk approval and resumes their shared scene once", async () => {
+    const f = await fixture();
+    try {
+      f.story.pipeline.storyBible = { provider: "openai", model: "draft-model" };
+      await atomicWriteJson(f.paths.storyConfig, f.story);
+      const entities = ["Mara", "Lucine"].map((name, index) => canonicalEntitySchema.parse({
+        id: index ? "ent_bbbbbbbbbbbbbbbbbbbbbbbb" : "ent_aaaaaaaaaaaaaaaaaaaaaaaa",
+        type: "character", canonicalName: name, firstAppearance: 1, lastKnownAppearance: 1,
+      }));
+      await atomicWriteJson(f.paths.bible, { ...emptyStoryBible(), canonicalEntities: entities });
+      await atomicWriteJson(f.paths.scenesManifest, sceneManifestSchema.parse({
+        ...f.manifest, scenes: [{ ...f.scene, characters: entities.map(entity => entity.canonicalName), creatureGroups: [], artwork: {} }],
+      }));
+      const llm: LLMProvider = {
+        name: "openai", supportsImageInputs: true, async validateConfiguration() {},
+        async generateText() { throw new Error("Unexpected text request"); },
+        async generateStructured(request) {
+          return { value: request.schema.parse(request.schemaName === "visual_profile_completion"
+            ? { values: [{ field: "appearance", value: "Curly hair and a blue coat" }] }
+            : { summary: "Matches", ...Object.fromEntries(VISUAL_CHECK_CATEGORIES.map(category => [category, { status: "match", observation: "Matches" }])) }) };
+        },
+      };
+      const images = new Images();
+      const operations = new StudioOperations(f.root, loadEnvironment({}), undefined, { image: images, llm: new LLMRouter(new Map([["openai", llm]])) });
+      const plan = await operations.planImageAutomation(f.story.slug, { scope: { chapters: [1] } });
+      await finish(operations, (await operations.startImageAutomation(f.story.slug, { ...plan.input, planFingerprint: plan.fingerprint })).id);
+      let report = await operations.imageDraftReport(f.story.slug) as { updatedAt: string; outcomes: Array<{ entityId: string; referenceId: string; status: string }> };
+      let selection = report.outcomes.filter(item => item.status === "profile_review").map(({ entityId, referenceId }) => ({ entityId, referenceId }));
+      expect(selection).toHaveLength(2);
+      await expect(operations.approveImageDraftReferences(f.story.slug, {
+        reportUpdatedAt: report.updatedAt, selection: [selection[0], { ...selection[1], referenceId: "missing" }],
+      })).rejects.toThrow("not awaiting");
+      const unchanged = await loadVisualProfiles(f.root, f.story.slug);
+      expect(selection.every(item => unchanged[item.entityId]?.status === "draft")).toBe(true);
+      const invalid = await operations.rejectImageDraftReferences(f.story.slug, {
+        reportUpdatedAt: report.updatedAt,
+        selection: [selection[0], { ...selection[1], referenceId: "missing" }],
+      });
+      expect((await finish(operations, invalid.id)).status).toBe("failed");
+      expect((await loadVisualProfiles(f.root, f.story.slug))[selection[0]!.entityId]?.references[0]?.provenance?.rejectedAt).toBeUndefined();
+      images.failAt = 3;
+      const replacements = await operations.rejectImageDraftReferences(f.story.slug, {
+        reportUpdatedAt: report.updatedAt,
+        selection: selection.map((item, index) => ({ ...item, feedback: index ? "Green coat" : "Red coat" })),
+      });
+      await finish(operations, replacements.id);
+      expect(images.requests[2]?.prompt).toContain("Red coat");
+      expect(images.requests[3]?.prompt).toContain("Green coat");
+      report = await operations.imageDraftReport(f.story.slug) as typeof report;
+      expect(report.outcomes.filter(item => item.status === "reference_failed")).toHaveLength(1);
+      expect(report.outcomes.filter(item => item.status === "profile_review")).toHaveLength(1);
+      images.failAt = undefined;
+      const successful = report.outcomes.find(item => item.status === "profile_review")!;
+      const refused = await operations.rejectImageDraftReferences(f.story.slug, {
+        reportUpdatedAt: report.updatedAt, selection: [{ entityId: successful.entityId, referenceId: successful.referenceId }], retryFailedOnly: true,
+      });
+      expect((await finish(operations, refused.id)).status).toBe("failed");
+      expect(images.requests).toHaveLength(4);
+      const retry = await operations.rejectImageDraftReferences(f.story.slug, {
+        reportUpdatedAt: report.updatedAt,
+        selection: [{ ...selection[0], feedback: "Red coat" }], retryFailedOnly: true,
+      });
+      await finish(operations, retry.id);
+      report = await operations.imageDraftReport(f.story.slug) as typeof report;
+      selection = report.outcomes.filter(item => item.status === "profile_review").map(({ entityId, referenceId }) => ({ entityId, referenceId }));
+      expect(selection).toHaveLength(2);
+      expect(selection).toContainEqual({ entityId: successful.entityId, referenceId: successful.referenceId });
+      const resumed = await operations.approveImageDraftReferences(f.story.slug, { reportUpdatedAt: report.updatedAt, selection });
+      expect((await finish(operations, resumed.id)).result).toMatchObject({ status: "completed", requests: 2 });
+      const approved = await loadVisualProfiles(f.root, f.story.slug);
+      expect(selection.every(item => approved[item.entityId]?.references.some(ref => ref.id === item.referenceId && ref.approved))).toBe(true);
+      expect(images.requests).toHaveLength(6);
+    } finally { await rm(f.root, { recursive: true, force: true }); }
+  });
+
+  it("retries an interrupted first sheet before any candidate image exists", async () => {
+    const f = await fixture();
+    try {
+      f.profile.status = "draft";
+      f.profile.references = [];
+      await saveVisualProfiles(f.root, f.story.slug, { [id]: f.profile });
+      const updatedAt = new Date().toISOString();
+      await atomicWriteJson(join(f.paths.story, "image-draft-latest.json"), {
+        version: 1, config: { scope: { chapters: [1] } }, scope: { chapters: [1] },
+        status: "running", requests: 0, reservedUsd: 0, updatedAt,
+        outcomes: [{ key: "Goblin", entityId: id, status: "reference_pending", repairs: 0, profileRevision: f.profile.revision }],
+      });
+      const images = new Images();
+      const operations = new StudioOperations(f.root, loadEnvironment({}), undefined, { image: images });
+      expect(await operations.imageDraftReport(f.story.slug)).toMatchObject({ status: "paused" });
+      const job = await operations.rejectImageDraftReferences(f.story.slug, {
+        reportUpdatedAt: updatedAt, selection: [{ entityId: id }], retryFailedOnly: true,
+      });
+      expect((await finish(operations, job.id)).status).toBe("completed");
+      expect(images.requests).toHaveLength(1);
+      const saved = (await loadVisualProfiles(f.root, f.story.slug))[id]!;
+      expect(saved.references).toHaveLength(1);
+      expect(saved.references[0]?.approved).toBe(false);
+      expect(await operations.imageDraftReport(f.story.slug)).toMatchObject({
+        requests: 1, outcomes: [{ status: "profile_review", referenceId: saved.references[0]!.id }],
+      });
+    } finally { await rm(f.root, { recursive: true, force: true }); }
+  });
+
+  it("keeps unattempted sheets retryable when a replacement batch exhausts its budget", async () => {
+    const f = await fixture();
+    try {
+      const secondId = "ent_aaaaaaaaaaaaaaaaaaaaaaaa";
+      const bible = emptyStoryBible();
+      bible.canonicalEntities = [id, secondId].map(entityId => canonicalEntitySchema.parse({ id: entityId, type: "character", canonicalName: entityId === id ? "Mara" : "Lucine", firstAppearance: 1, lastKnownAppearance: 1 }));
+      await atomicWriteJson(f.paths.bible, bible);
+      await saveVisualProfiles(f.root, f.story.slug, Object.fromEntries([id, secondId].map(entityId => [entityId, { ...f.profile, entityId, status: "draft", references: [] }])));
+      const updatedAt = new Date().toISOString();
+      await atomicWriteJson(join(f.paths.story, "image-draft-latest.json"), {
+        version: 1, config: { scope: { chapters: [1] }, budgetUsd: 1, maxRequests: 1 }, scope: { chapters: [1] },
+        status: "paused", requests: 0, reservedUsd: 0, updatedAt,
+        outcomes: [id, secondId].map(entityId => ({ key: entityId, entityId, status: "reference_pending", repairs: 0, profileRevision: f.profile.revision })),
+      });
+      const images = new Images();
+      const operations = new StudioOperations(f.root, loadEnvironment({}), undefined, { image: images });
+      const job = await operations.rejectImageDraftReferences(f.story.slug, {
+        reportUpdatedAt: updatedAt, selection: [id, secondId].map(entityId => ({ entityId })), retryFailedOnly: true,
+      });
+      await finish(operations, job.id);
+      expect(images.requests).toHaveLength(1);
+      expect(await operations.imageDraftReport(f.story.slug)).toMatchObject({
+        status: "budget_reached", requests: 1,
+        outcomes: [{ status: "profile_review" }, { status: "reference_pending" }],
+      });
+    } finally { await rm(f.root, { recursive: true, force: true }); }
+  });
+
   it("stops before a paid check when the reserved-cost limit is exhausted", async () => {
     const f = await fixture(); try {
       f.profile.creatureForms![0]!.status = "approved"; await saveVisualProfiles(f.root, f.story.slug, { [id]: f.profile });

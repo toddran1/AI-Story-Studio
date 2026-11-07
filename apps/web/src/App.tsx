@@ -168,7 +168,7 @@ export function App({ initialJob, initialRoute }: { initialJob?: Job; initialRou
         {route.page === "queue" && <QueueStudioPage navigate={navigate} />}
         {route.page === "review" && <NeedsReviewPage navigate={navigate} />}
         {route.page === "manage" && route.story && <ManageStoryPage slug={route.story} navigate={navigate} />}
-        {route.page === "story" && route.story && <StoryPage slug={route.story} navigate={navigate} onJob={updateJob} />}
+        {route.page === "story" && route.story && <StoryPage key={route.story} slug={route.story} navigate={navigate} onJob={updateJob} />}
         {route.page === "errors" && route.story && <JobErrorHistoryPage slug={route.story} />}
         {route.page === "chapter" && route.story && route.chapter && <ChapterPage slug={route.story} chapter={route.chapter} navigate={navigate} onJob={updateJob} activeJob={job} />}
         {route.page === "qa" && route.story && <QaPage slug={route.story} navigate={navigate} />}

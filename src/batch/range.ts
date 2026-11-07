@@ -38,11 +38,15 @@ export function formatChapterSelection(values: readonly number[]): string {
 }
 
 /** Resolve normalized numbers against the authoritative imported catalog. */
-export function selectChapterNumbers(chapters: DiscoveredChapter[], requested: readonly number[]): DiscoveredChapter[] {
+export function selectChapterNumbers(chapters: DiscoveredChapter[], requested: readonly number[], storyTitle?: string): DiscoveredChapter[] {
   if (!requested.length) throw new BatchValidationError("Chapter selection cannot be empty");
   const byNumber = new Map(chapters.map((chapter) => [chapter.chapter, chapter]));
   const missing = requested.filter((chapter) => !byNumber.has(chapter));
-  if (missing.length) throw new BatchValidationError(`Chapters are not imported: ${formatChapterSelection(missing)}`);
+  if (missing.length) {
+    const selection = formatChapterSelection(missing);
+    if (!storyTitle) throw new BatchValidationError(`Chapters are not imported: ${selection}`);
+    throw new BatchValidationError(`Chapters ${selection} are not imported in “${storyTitle}”. This story has ${byNumber.size} imported chapters. Check the story and chapter selection.`);
+  }
   return [...new Set(requested)].sort((left, right) => left - right).map((chapter) => byNumber.get(chapter)!);
 }
 

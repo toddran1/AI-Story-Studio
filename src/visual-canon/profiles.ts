@@ -366,6 +366,8 @@ export async function generateStyleSheet(
   story: Story,
   options: {
     promptOverride?: string;
+    feedback?: string;
+    replacesReferenceId?: string;
     role?: VisualRole;
     presetId?: string;
     appearanceEraId?: string;
@@ -465,7 +467,7 @@ export async function generateStyleSheet(
     entityDetails.join("\n"),
     paletteGuidance,
     referenceRequirements.join("\n"),
-  ].filter(Boolean).join("\n\n"), profile.visualType === "character" ? REFERENCE_BASELINE_POLICY + "\n" + CHARACTER_DESIGN_GUIDANCE + "\nOTHER CAST DESIGNS (comparison only): " + JSON.stringify(castDesigns) : "", identity.images.length ? IDENTITY_TRANSFORMATION_INSTRUCTION : "", referenceFigureRequirement(character, story.artwork.adultContent)].filter(Boolean).join("\n\n");
+  ].filter(Boolean).join("\n\n"), options.feedback?.trim() ? `REFERENCE REVIEW FEEDBACK:\n${options.feedback.trim()}\nKeep the established profile identity and source-backed traits consistent.` : "", profile.visualType === "character" ? REFERENCE_BASELINE_POLICY + "\n" + CHARACTER_DESIGN_GUIDANCE + "\nOTHER CAST DESIGNS (comparison only): " + JSON.stringify(castDesigns) : "", identity.images.length ? IDENTITY_TRANSFORMATION_INSTRUCTION : "", referenceFigureRequirement(character, story.artwork.adultContent)].filter(Boolean).join("\n\n");
 
   // Combined negative prompt
   const negativePromptParts = [
@@ -544,6 +546,7 @@ export async function generateStyleSheet(
       presetId: activePreset.id,
       presetName: activePreset.name,
       artDirectionFingerprint,
+      reviewFeedback: options.feedback?.trim(),
       profileRevision: profile.revision,
       profileFingerprint,
       promptFingerprint,
@@ -551,16 +554,16 @@ export async function generateStyleSheet(
     },
     // Keep the earlier primary as retained history while a new candidate moves
     // through review. Approval can then atomically make this the active one.
-    replacesReferenceId: primaryReference?.id,
+    replacesReferenceId: options.replacesReferenceId ?? primaryReference?.id,
   });
 }
 
 /** Fingerprint the design intent, not unapproved candidates or unrelated revisions. */
-export function referenceSheetTargetFingerprint(profile: VisualEntityProfile, story: Story, direction: unknown, scope: { appearanceEraId?: string; creatureFormId?: string; promptOverride?: string }, identityFingerprints: string[] = [], entity?: CanonicalEntity, castDesigns: unknown[] = []) {
+export function referenceSheetTargetFingerprint(profile: VisualEntityProfile, story: Story, direction: unknown, scope: { appearanceEraId?: string; creatureFormId?: string; promptOverride?: string; feedback?: string }, identityFingerprints: string[] = [], entity?: CanonicalEntity, castDesigns: unknown[] = []) {
   const form = profile.creatureForms?.find(item => item.id === scope.creatureFormId);
   const era = scope.appearanceEraId ? profile.appearanceEras?.find(item => item.id === scope.appearanceEraId) : form ? { ...form, startChapter: 1 } : undefined;
   const effective = effectiveVisualProfile(profile, era);
-  return fingerprint({ characterDesignVersion: profile.visualType === "character" ? CHARACTER_DESIGN_VERSION : undefined, castDesigns: profile.visualType === "character" ? castDesigns : undefined, entityId: profile.entityId, entityName: entity?.canonicalName, visualType: profile.visualType, sourceEvidence: profile.status !== "approved" && !era ? entity?.visualEvidence : undefined, scope: { appearanceEraId: scope.appearanceEraId, creatureFormId: scope.creatureFormId, promptOverride: scope.promptOverride }, appearance: effective.appearance, visualPrompt: effective.visualPrompt, negativePrompt: effective.negativePrompt, character: effective.character, creature: effective.creature, location: effective.location, item: effective.item, direction, artwork: story.artwork, identityFingerprints });
+  return fingerprint({ characterDesignVersion: profile.visualType === "character" ? CHARACTER_DESIGN_VERSION : undefined, castDesigns: profile.visualType === "character" ? castDesigns : undefined, entityId: profile.entityId, entityName: entity?.canonicalName, visualType: profile.visualType, sourceEvidence: profile.status !== "approved" && !era ? entity?.visualEvidence : undefined, scope: { appearanceEraId: scope.appearanceEraId, creatureFormId: scope.creatureFormId, promptOverride: scope.promptOverride, ...(scope.feedback?.trim() ? { feedback: scope.feedback.trim() } : {}) }, appearance: effective.appearance, visualPrompt: effective.visualPrompt, negativePrompt: effective.negativePrompt, character: effective.character, creature: effective.creature, location: effective.location, item: effective.item, direction, artwork: story.artwork, identityFingerprints });
 }
 
 export interface PreparedVisualCanonMerge {

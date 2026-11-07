@@ -1,3 +1,5 @@
+import { identityNames } from "../narration/name-scope.js";
+import type { StoryBible } from "../domain/story-bible.js";
 import { z } from "zod";
 import { summaryIdSchema } from "../summaries/types.js";
 import { fingerprint } from "../utils/hash.js";
@@ -6,7 +8,7 @@ import type { ResolvedSceneContinuity } from "../visual-canon/continuity-state.j
 export const imageScopeSchema = z.object({ chapters: z.array(z.number().int().positive()).max(100).default([]), summaryId: summaryIdSchema.optional() }).strict().refine(v => v.summaryId ? v.chapters.length === 0 : v.chapters.length > 0, "Choose chapters or one summary");
 export const imageStoryboardInputSchema = imageScopeSchema.safeExtend({ offset: z.number().int().nonnegative().default(0), limit: z.number().int().min(1).max(100).default(40) });
 export const imageAutomationSchema = z.object({
-  scope: imageScopeSchema, planMissingScenes: z.boolean().default(true),
+  scope: imageScopeSchema, sceneKeys: z.array(z.string().min(1).max(300)).max(10000).optional(), planMissingScenes: z.boolean().default(true), draftMissingProfiles: z.boolean().default(true),
   budgetUsd: z.number().positive().max(10000).default(10), maxRequests: z.number().int().min(1).max(1000).default(50), maxRepairs: z.number().int().min(0).max(3).default(1),
   imageAllowanceUsd: z.number().positive().max(100).default(1), checkAllowanceUsd: z.number().positive().max(100).default(.25), planningAllowanceUsd: z.number().positive().max(100).default(.5),
 }).strict();
@@ -22,7 +24,27 @@ export class ImageRunBudget {
     await this.persist({ reservedUsd: this.reservedUsd, requests: this.requests });
   }
 }
-export type StoryboardFlag = { kind: "repetition" | "missing_character" | "abrupt_change" | "pacing" | "spatial"; message: string };
+export function continuityPreflight(scene: Scene, state: ResolvedSceneContinuity | undefined, bible: StoryBible): string[] {
+  const issues: string[] = [];
+  if (state?.historical && state.historicalStateAvailable === false) {
+    issues.push(scene.overrides?.appearanceChapter
+      ? `No saved visual state for flashback chapter ${scene.overrides.appearanceChapter}.`
+      : "The flashback needs an Appearance Chapter with a saved scene plan.");
+  }
+  const check = (name: string, types: string[]) => {
+    const key = name.trim().toLowerCase();
+    const matches = bible.canonicalEntities.filter(entity => types.includes(entity.type)
+      && [entity.id, ...identityNames(entity)].some(alias => alias.trim().toLowerCase() === key));
+    if (matches.length > 1) issues.push(`Ambiguous identity “${name}”: ${matches.map(entity => entity.canonicalName).join(", ")}.`);
+  };
+  for (const name of new Set(scene.characters)) check(name, ["character", "creature"]);
+  if (scene.location) check(scene.location, ["location"]);
+  return issues;
+}
+
+export type ImageDraftOutcome = { key: string; status: string; repairs: number; error?: string; entityId?: string; referenceId?: string; profileRevision?: number; feedback?: string };
+
+export type StoryboardFlag = { kind: "repetition" | "missing_character" | "abrupt_change" | "pacing" | "spatial" | "continuity"; message: string };
 export function storyboardFlags(scene: Scene, previous?: Scene): StoryboardFlag[] {
   const flags: StoryboardFlag[] = [];
   if (previous && !scene.disabled && !previous.disabled) {

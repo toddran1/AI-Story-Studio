@@ -2,7 +2,7 @@ import { mkdtemp, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { generateStoredArtwork, artworkFingerprint, reviewStoredArtwork } from "../src/artwork/generator.js";
+import { generateStoredArtwork, reviewStoredArtwork } from "../src/artwork/generator.js";
 import { ImageProviderRouter } from "../src/artwork/router.js";
 import { ImageProvider } from "../src/artwork/provider.js";
 import { chapterSchema } from "../src/domain/chapter.js";
@@ -199,7 +199,7 @@ describe("artwork generation", () => {
     const removed = await updateStoredSceneManifest({ root, story, chapter: 1, scenes: enabled.scenes.filter((scene) => scene.id !== blank.id) });
     expect(emptySceneAtEnd(removed.scenes, removed.durationSeconds, removed.nextSceneNumber).id).toBe("scene-004");
   });
-  it("supports dry-run estimates, partial regeneration, fingerprints, and review states", async () => { const { root, story, paths } = await fixture(); await planStoredScenes({ root, story, chapter: 1, provider: new SceneLLM() }); const images = new FakeImages(); const estimate = await generateStoredArtwork({ root, story, chapter: 1, provider: images, dryRun: true }); expect(estimate.imagesToGenerate).toBe(2); expect(images.calls).toHaveLength(0); const one = await generateStoredArtwork({ root, story, chapter: 1, provider: images, sceneId: "scene-001" }); expect(one.generated).toBe(1); expect(images.calls).toHaveLength(1); const reused = await generateStoredArtwork({ root, story, chapter: 1, provider: images, sceneId: "scene-001" }); expect(reused.generated).toBe(0); await reviewStoredArtwork({ root, story, chapter: 1, sceneId: "scene-001", review: "approved" }); const manifest = sceneManifestSchema.parse(JSON.parse(await readFile(paths.scenesManifest, "utf8"))); expect(manifest.scenes[0]!.artwork.review).toBe("approved"); expect(artworkFingerprint(manifest.scenes[0]!, [], story, images.version)).toBe(manifest.scenes[0]!.artwork.fingerprint); });
+  it("supports dry-run estimates, partial regeneration, fingerprints, and review states", async () => { const { root, story, paths } = await fixture(); await planStoredScenes({ root, story, chapter: 1, provider: new SceneLLM() }); const images = new FakeImages(); const estimate = await generateStoredArtwork({ root, story, chapter: 1, provider: images, dryRun: true }); expect(estimate.imagesToGenerate).toBe(2); expect(images.calls).toHaveLength(0); const one = await generateStoredArtwork({ root, story, chapter: 1, provider: images, sceneId: "scene-001" }); expect(one.generated).toBe(1); expect(images.calls).toHaveLength(1); const reused = await generateStoredArtwork({ root, story, chapter: 1, provider: images, sceneId: "scene-001" }); expect(reused.generated).toBe(0); await reviewStoredArtwork({ root, story, chapter: 1, sceneId: "scene-001", review: "approved" }); const manifest = sceneManifestSchema.parse(JSON.parse(await readFile(paths.scenesManifest, "utf8"))); expect(manifest.scenes[0]!.artwork.review).toBe("approved"); expect(manifest.scenes[0]!.artwork.versions[0]?.promptFingerprint).toBe(manifest.scenes[0]!.artwork.fingerprint); });
   it("excludes disabled scenes from artwork generation, preflight, freshness, and stage counts while preserving their history", async () => {
     const { root, story, paths } = await fixture();
     const planned = await planStoredScenes({ root, story, chapter: 1, provider: new SceneLLM() });

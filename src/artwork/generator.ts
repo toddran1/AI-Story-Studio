@@ -1,3 +1,4 @@
+import { continuitySnapshot, type ContinuitySnapshot } from "../visual-canon/continuity-state.js";
 import { prepareArtworkRepair, type ArtworkRepair } from "./repair.js";
 import { rankVisualReferences } from "../visual-canon/reference-selection.js";
 import { writeArtworkOutputManifest } from "./output-index-revision.js";
@@ -194,6 +195,7 @@ export async function generateStoredArtwork(options: {
     resolved: ResolvedSceneVisualPrompt;
     refs: Awaited<ReturnType<typeof loadCharacterVisualReferences>>;
     continuityReference?: VisualContinuityReferenceDecision;
+    continuitySnapshot?: ContinuitySnapshot;
     loadedReferences: SceneReferencePayload;
     inputFingerprint: string;
   }> = [];
@@ -244,7 +246,7 @@ export async function generateStoredArtwork(options: {
       ["needs-regeneration", "rejected"].includes(scene.artwork.review);
 
     if (needs) {
-      candidates.push({ scene, prompt: resolved.prompt, resolved, refs, continuityReference: sceneContinuity?.referenceDecision, loadedReferences, inputFingerprint });
+      candidates.push({ scene, prompt: resolved.prompt, resolved, refs, continuityReference: sceneContinuity?.referenceDecision, continuitySnapshot: sceneContinuity && continuitySnapshot(sceneContinuity), loadedReferences, inputFingerprint });
     }
   }
 
@@ -437,6 +439,7 @@ export async function generateStoredArtwork(options: {
           referenceImageCount: references.images.length,
           availableReferenceCount: references.available,
           continuityReference: references.continuityReference,
+          continuitySnapshot: item.continuitySnapshot,
           characterReferences: characterReferenceProvenance(references.images),
           visualGrounding: item.resolved.resolvedEntities.map((entity) => ({ entityId: entity.entityId, name: entity.name, mode: entity.groundingMode, appearanceEra: entity.appearanceEra })),
         },

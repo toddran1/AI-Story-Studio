@@ -1,3 +1,4 @@
+import { emptyStoryBible, canonicalEntitySchema } from "../src/domain/story-bible.js";
 import { mkdtemp, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -80,7 +81,61 @@ async function storyRoot(chapters: number[]) {
   return { root, story };
 }
 
+it("replays a historical chapter using canonical IDs and restores present state after the flashback", async () => {
+  const { root, story } = await storyRoot([1, 2, 3]);
+  const paths = storyPaths(root, story.slug, 1);
+  const mara = "ent_aaaaaaaaaaaaaaaaaaaaaaaa";
+  const warehouse = "ent_bbbbbbbbbbbbbbbbbbbbbbbb";
+  await atomicWriteJson(paths.bible, { ...emptyStoryBible(), canonicalEntities: [
+    canonicalEntitySchema.parse({ id: mara, type: "character", canonicalName: "Mara", aliases: ["Captain Mara"], firstAppearance: 1, lastKnownAppearance: 3 }),
+    canonicalEntitySchema.parse({ id: warehouse, type: "location", canonicalName: "Warehouse", aliases: ["Depot"], firstAppearance: 1, lastKnownAppearance: 3 }),
+  ] });
+  for (const chapter of [1, 2]) {
+    const plan = structuredClone(nightPlan);
+    plan.scenes[0]!.visualChanges!.characters[0]!.set.injuries = chapter === 1 ? "Uninjured" : "Cut hand";
+    Object.assign(plan.scenes[0]!.visualChanges!.environment.set, { damage: chapter === 1 ? "Intact" : "Collapsed roof" });
+    await planStoredScenes({ root, story, chapter, provider: new SceneLLM(plan) });
+  }
+  const scene = { id: "scene-001", location: "Depot", artwork: { versions: [] } };
+  const { resolved } = await resolveChapterVisualContinuity({ root, slug: story.slug, chapter: 3, manifest: { scenes: [
+    { ...scene, overrides: { appearanceChapter: 1 }, visualChanges: { transition: "flashback", characters: [{ name: "Captain Mara", op: "enter" }] } },
+    { ...scene, id: "scene-002" },
+  ] } });
+  expect(resolved.perScene[0]?.endState.characters).toMatchObject([{ entityId: mara, injuries: "Uninjured" }]);
+  expect(resolved.perScene[0]?.endState.environment).toMatchObject({ locationId: warehouse, damage: "Intact" });
+  expect(resolved.perScene[0]?.referenceDecision?.used).toBe(false);
+  expect(resolved.perScene[1]?.endState.characters).toMatchObject([{ entityId: mara, injuries: "Cut hand" }]);
+  expect(resolved.perScene[1]?.endState.environment).toMatchObject({ locationId: warehouse, damage: "Collapsed roof" });
+});
+
 describe("visual continuity resolver", () => {
+  it("keeps canonical location IDs through explicit alias deltas and manual character edits", () => {
+    const mara = canonicalEntitySchema.parse({ id: "ent_aaaaaaaaaaaaaaaaaaaaaaaa", type: "character", canonicalName: "Mara", aliases: ["Captain"], firstAppearance: 1, lastKnownAppearance: 2 });
+    const hall = canonicalEntitySchema.parse({ id: "ent_bbbbbbbbbbbbbbbbbbbbbbbb", type: "location", canonicalName: "Hall", aliases: ["Depot"], firstAppearance: 1, lastKnownAppearance: 2 });
+    const result = resolveVisualContinuity({
+      entities: [mara, hall],
+      scenes: [
+        { id: "scene-001", location: "Hall", visualChanges: { characters: [{ name: "Mara", op: "enter" }], environment: { set: { locationId: "Depot", damage: "Broken roof" } } } },
+        { id: "scene-002", location: "Depot" },
+      ],
+      manualOverrides: { version: 1, entries: [{ sceneId: "scene-002", revision: 1, updatedAt: new Date().toISOString(), setState: { characters: [{ name: "Captain", injuries: "Cut hand" }] } }] },
+    });
+    expect(result.chapterEndState.environment).toMatchObject({ locationId: hall.id, damage: "Broken roof" });
+    expect(result.chapterEndState.characters).toHaveLength(1);
+    expect(result.chapterEndState.characters[0]).toMatchObject({ entityId: mara.id, injuries: "Cut hand" });
+  });
+
+  it("ignores stale reference preference overrides when a scene moves", () => {
+    const result = resolveVisualContinuity({
+      scenes: [
+        { id: "scene-001", location: "Hall", approvedArtwork: { versionId: "v1", versionNumber: 1, imageFingerprint: "image" } },
+        { id: "scene-002", location: "Beach", contentFingerprint: "new" },
+      ],
+      manualOverrides: { version: 1, entries: [{ sceneId: "scene-002", revision: 1, updatedAt: new Date().toISOString(), sceneContentFingerprint: "old", usePreviousReference: "prefer" }] },
+    });
+    expect(result.perScene[1]?.referenceDecision?.used).toBe(false);
+  });
+
   it("folds scene deltas so scene 1 end state is scene 2 start state", () => {
     const resolved = resolveVisualContinuity({ scenes: [
       { id: "scene-001", visualChanges: { characters: [{ name: "Mara", op: "enter", set: { injuries: "bleeding left arm", wardrobe: "red coat" } }] } },
@@ -89,6 +144,34 @@ describe("visual continuity resolver", () => {
     expect(resolved.perScene[1]!.startState).toEqual(resolved.perScene[0]!.endState);
     expect(resolved.perScene[1]!.startState.characters[0]).toMatchObject({ name: "Mara", injuries: "bleeding left arm" });
     expect(resolved.chapterEndState.characters).toHaveLength(1);
+  });
+
+  it("restores durable appearance by entity ID after a cross-chapter exit", () => {
+    const first = resolveVisualContinuity({ scenes: [
+      { id: "scene-001", visualChanges: { characters: [{ name: "Mara", entityId: "mara", op: "enter", set: { injuries: "Cut hand", wardrobe: "Red coat", activeAbilities: ["Flames"] } }] } },
+      { id: "scene-002", visualChanges: { characters: [{ name: "Mara", entityId: "mara", op: "exit" }] } },
+    ] });
+    expect(first.chapterEndState.characters).toEqual([]);
+    const next = resolveVisualContinuity({
+      previousHandoff: { chapter: 1, sceneId: "scene-002", state: first.chapterEndState },
+      scenes: [{ id: "scene-001", visualChanges: { characters: [{ name: "Captain Mara", entityId: "mara", op: "enter", set: { wardrobe: "Blue coat" } }] } }],
+    });
+    expect(next.chapterEndState.characters).toEqual([
+      { name: "Captain Mara", entityId: "mara", injuries: "Cut hand", wardrobe: "Blue coat" },
+    ]);
+  });
+
+  it("restores a revisited location's damage without its old lighting or the intervening location's state", () => {
+    const first = resolveVisualContinuity({ scenes: [
+      { id: "scene-001", location: "Palace Hall", visualChanges: { environment: { set: { damage: "Collapsed staircase", lighting: "Candlelight" } } } },
+      { id: "scene-002", location: "Garden", visualChanges: { environment: { set: { weather: "Rain" } } } },
+    ] });
+    const revisit = resolveVisualContinuity({
+      previousHandoff: { chapter: 1, sceneId: "scene-002", state: first.chapterEndState },
+      scenes: [{ id: "scene-001", location: "Palace Hall" }],
+    });
+    expect(first.chapterEndState.environment?.damage).toBeUndefined();
+    expect(revisit.perScene[0]?.endState.environment).toEqual({ description: "Palace Hall", damage: "Collapsed staircase" });
   });
 
   it("lets current narration override inherited environment instead of carrying it", () => {
@@ -268,7 +351,7 @@ describe("chapter handoff artifacts and planning integration", () => {
     const before = await readFile(storyPaths(root, story.slug, 1).scenesManifest, "utf8");
     const { resolved, previous } = await resolveChapterVisualContinuity({ root, slug: story.slug, chapter: 1, manifest: sceneManifestSchema.parse(JSON.parse(before)) });
     expect(previous).toBeUndefined();
-    expect(resolved.chapterEndState).toEqual({ characters: [], objects: [] });
+    expect(resolved.chapterEndState).toMatchObject({ characters: [], objects: [], environment: { description: "Warehouse" } });
     expect(resolved.perScene[0]!.changes).toBeUndefined();
     expect(await readFile(storyPaths(root, story.slug, 1).scenesManifest, "utf8")).toBe(before);
   });
@@ -298,6 +381,27 @@ describe("artwork continuity references", () => {
     await planStoredScenes({ root, story, chapter: 2, provider: new SceneLLM(beachPlan) });
     return { root, story: imageStory, images };
   }
+
+  it("flags an inherited change against both the scene plan and generated artwork", async () => {
+    const { root, story, images } = await twoChapterArtwork("gpt-image-2.5-flare");
+    await generateStoredArtwork({ root, story, chapter: 2, provider: images, sceneId: "scene-001" });
+    const operations = new StudioOperations(root, env, new JobManager(), { llm: new LLMRouter(new Map()) });
+    const manifest = sceneManifestSchema.parse(await readJsonIfExists(storyPaths(root, story.slug, 2).scenesManifest));
+    const previewInput = { chapter: 2, scene: manifest.scenes[0] };
+    expect((await operations.previewSceneVisuals(story.slug, previewInput)).continuityReview?.artworkChanges).toEqual([]);
+    await upsertVisualContinuityOverride({
+      root, slug: story.slug, chapter: 1,
+      entry: { sceneId: "scene-002", revision: 1, updatedAt: new Date().toISOString(),
+        setState: { characters: [{ name: "Mara", injuries: "Bandaged right arm" }] } },
+    });
+    const { continuityReview } = await operations.previewSceneVisuals(story.slug, previewInput);
+    const change = { detail: "Mara · injuries", before: "bleeding left arm", after: "Bandaged right arm" };
+    expect(continuityReview?.sceneChanges).toContainEqual(change);
+    expect(continuityReview?.artworkChanges).toContainEqual(change);
+    const board = await operations.imageStoryboard(story.slug, { chapters: [2] });
+    expect(board.rows[0]?.flags.filter(flag => flag.kind === "continuity")).toHaveLength(2);
+    expect(board.rows[0]?.needsAttention).toBe(true);
+  });
 
   it("falls back to textual continuity when the provider cannot consume reference images", async () => {
     // gpt-image-1 does not accept reference images; the continuity decision is

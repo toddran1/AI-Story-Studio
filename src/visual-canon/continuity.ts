@@ -1,3 +1,6 @@
+import { loadStoryBibleWithCanonicalOverlay } from "../story-bible/canonical.js";
+import { identityNames } from "../narration/name-scope.js";
+import type { CanonicalEntity } from "../domain/story-bible.js";
 import { sceneEditableState } from "../scenes/editable-state.js";
 import type { Scene } from "../scenes/types.js";
 import { readdir, stat } from "node:fs/promises";
@@ -8,6 +11,7 @@ import { readJsonIfExists } from "../storage/story-files.js";
 import { fingerprint } from "../utils/hash.js";
 import { logger } from "../utils/logger.js";
 import {
+  continuitySnapshot,
   VisualCharacterState,
   VisualContinuityChange,
   VisualContinuityDecision,
@@ -41,27 +45,29 @@ function findCharacter(state: VisualContinuityState, name: string, entityId?: st
 function applyChange(state: VisualContinuityState, change: VisualContinuityChange, decisions: VisualContinuityDecision[]) {
   for (const delta of change.characters ?? []) {
     const existing = findCharacter(state, delta.name, delta.entityId);
+    const key = characterKey(delta.name, delta.entityId ?? existing?.entityId);
+    const absent = state.absentCharacters;
+    const remembered = absent && Object.hasOwn(absent, key) ? absent[key] : undefined;
+    const next: VisualCharacterState = { ...remembered, ...existing, name: delta.name };
+    if (delta.entityId) next.entityId = delta.entityId;
+    for (const field of delta.clear ?? []) delete (next as Record<string, unknown>)[field];
+    Object.assign(next, delta.set ?? {});
+
     if (delta.op === "exit") {
-      if (existing) {
-        state.characters = state.characters.filter((entry) => entry !== existing);
-        if (state.spatial) state.spatial = state.spatial.split("; ").filter(part => !part.startsWith(`${delta.name}:`)).join("; ") || undefined;
-        decisions.push({ kind: "dropped", summary: `${delta.name} left the scene`, provenance: "current_narration" });
-      }
+      if (!existing && !remembered) continue;
+      const { activeAbilities, visibleEmotionalState, location, ...durable } = next;
+      state.absentCharacters = { ...absent, [key]: durable };
+      state.characters = state.characters.filter((entry) => entry !== existing);
+      if (state.spatial) state.spatial = state.spatial.split("; ").filter(part => !part.startsWith(`${delta.name}:`)).join("; ") || undefined;
+      decisions.push({ kind: "dropped", summary: `${delta.name} left the scene`, provenance: "current_narration" });
       continue;
     }
-    if (delta.op === "enter") {
-      const next: VisualCharacterState = { name: delta.name, ...(delta.entityId ? { entityId: delta.entityId } : {}), ...(delta.set ?? {}) };
-      if (existing) { for (const field of delta.clear ?? []) delete (existing as Record<string,unknown>)[field]; Object.assign(existing, next); }
-      else state.characters.push(next);
-      continue;
+    if (remembered) {
+      delete absent![key];
+      decisions.push({ kind: "carried", summary: `Restored last known appearance for ${delta.name}`, provenance: "previous_chapter" });
     }
-    if (!existing) {
-      state.characters.push({ name: delta.name, ...(delta.entityId ? { entityId: delta.entityId } : {}), ...(delta.set ?? {}) });
-      continue;
-    }
-    for (const field of delta.clear ?? []) delete (existing as Record<string, unknown>)[field];
-    if (delta.entityId) existing.entityId = delta.entityId;
-    Object.assign(existing, delta.set ?? {});
+    if (existing) state.characters[state.characters.indexOf(existing)] = next;
+    else state.characters.push(next);
   }
   if (change.environment?.set || change.environment?.clear) {
     const environment = { ...(state.environment ?? {}) };
@@ -113,11 +119,14 @@ export function resolveVisualContinuity(options: {
   previousHandoff?: { chapter: number; sceneId: string; state: VisualContinuityState; referenceArtwork?: VisualContinuityHandoff["referenceArtwork"] };
   scenes: ContinuitySceneInput[];
   manualOverrides?: VisualContinuityOverlay;
+  chapter?: number;
+  history?: ReadonlyMap<number, VisualContinuityState>;
+  entities?: CanonicalEntity[];
 }): ResolvedVisualContinuity {
   const decisions: VisualContinuityDecision[] = [];
   const handoff = options.previousHandoff;
   const overlayEntries = options.manualOverrides?.entries ?? [];
-  const current = handoff ? cloneState(handoff.state) : emptyState();
+  let current = handoff ? cloneState(handoff.state) : emptyState();
 
   if (handoff) {
     const carriedCharacters = current.characters.length;
@@ -141,28 +150,49 @@ export function resolveVisualContinuity(options: {
 
   const perScene: ResolvedSceneContinuity[] = [];
   let historicalChapter: number | undefined;
-  for (let index = 0; index < options.scenes.length; index++) {
-    let scene = options.scenes[index]!;
-    const previousChapter = options.scenes[index - 1]?.appearanceChapter ?? (index === 0 ? handoff?.chapter : undefined);
-    const goesBack = scene.appearanceChapter !== undefined && previousChapter !== undefined && scene.appearanceChapter < previousChapter;
-    const enteringHistory = scene.visualChanges?.transition === "flashback" || goesBack;
-    const returningFromHistory = historicalChapter !== undefined && !enteringHistory && (scene.visualChanges?.transition === "time_jump" || (scene.appearanceChapter === undefined && options.scenes[index-1]?.appearanceChapter !== undefined) || (scene.appearanceChapter !== undefined && scene.appearanceChapter > historicalChapter));
-    if (returningFromHistory) {
-      current.characters = []; current.objects = []; delete current.environment; delete current.spatial; factSource.clear();
-      scene = { ...scene, visualChanges: { ...scene.visualChanges, transition: "time_jump" } };
-      historicalChapter = undefined;
-      decisions.push({ kind: "dropped", summary: `Return from a historical scene at ${scene.id}: establish current appearance again`, provenance: "current_narration" });
+  let presentState: VisualContinuityState | undefined;
+  let presentChapter = options.chapter ?? handoff?.chapter;
+  const identities = new Map<string, Set<string>>();
+  for (const entity of options.entities ?? []) {
+    if (entity.type !== "character" && entity.type !== "location") continue;
+    for (const name of [entity.id, ...entity.mergedFromIds, ...identityNames(entity)]) {
+      const key = JSON.stringify([entity.type, name.trim().toLowerCase()]);
+      const matches = identities.get(key) ?? new Set<string>();
+      matches.add(entity.id);
+      identities.set(key, matches);
     }
-    if (enteringHistory) {
-      historicalChapter = scene.appearanceChapter ?? 0;
-      current.characters = []; current.objects = []; delete current.environment; delete current.spatial;
+  }
+  function entityId(type: "character" | "location", name?: string) {
+    if (!name) return undefined;
+    const matches = identities.get(JSON.stringify([type, name.trim().toLowerCase()]));
+    return matches?.size === 1 ? [...matches][0] : undefined;
+  }
+  for (let index = 0; index < options.scenes.length; index++) {
+    const scene = options.scenes[index]!;
+    const target = scene.appearanceChapter;
+    const chapter = presentChapter;
+    const isHistorical = scene.visualChanges?.transition === "flashback"
+      || (target !== undefined && chapter !== undefined && target < chapter)
+      || (historicalChapter !== undefined && target === undefined && scene.visualChanges?.transition !== "time_jump" && options.scenes[index - 1]?.appearanceChapter === undefined);
+    if (!isHistorical && target !== undefined) presentChapter = Math.max(presentChapter ?? target, target);
+    const returning = !isHistorical && presentState !== undefined;
+    if (isHistorical && (!presentState || (target !== undefined && target !== historicalChapter))) {
+      presentState ??= current;
+      historicalChapter = target ?? 0;
+      const recorded = target === undefined ? undefined : options.history?.get(target);
+      current = recorded ? cloneState(recorded) : emptyState();
       factSource.clear();
-      decisions.push({ kind: "dropped", summary: `Historical scene ${scene.id}: later visual state is not carried backward`, provenance: "current_narration" });
+      decisions.push({ kind: "carried", summary: recorded ? `Loaded visual state from chapter ${target}` : "Historical scene has no recorded visual state", provenance: "previous_chapter" });
+    } else if (returning) {
+      current = presentState!;
+      presentState = undefined;
+      historicalChapter = undefined;
+      factSource.clear();
     } else if (scene.visualChanges?.transition === "time_jump") {
       for (const character of current.characters) {
         delete character.activeAbilities; delete character.appearanceDelta; delete character.transformation; delete character.visibleEmotionalState;
       }
-      delete current.environment; delete current.spatial;
+      delete current.environment; delete current.activeLocationKey; delete current.spatial;
       decisions.push({ kind: "dropped", summary: `Time jump at ${scene.id}: transient effects must be established again`, provenance: "current_narration" });
     }
     const previousScene = options.scenes[index - 1];
@@ -174,26 +204,41 @@ export function resolveVisualContinuity(options: {
     if (startState.environment) factProvenance.environment = factSource.get("environment") ?? "previous_scene";
     for (const object of startState.objects) factProvenance[`objects.${object.name}`] = factSource.get(`objects.${object.name}`) ?? "previous_scene";
 
-    if (index === 0 && handoff && current.environment) {
-      const set = scene.visualChanges?.environment?.set;
-      const establishesNewSetting = Boolean(set && (set.locationId || set.description || set.timeOfDay || set.weather))
-        || Boolean(scene.location && !samePlace(scene.location, current.environment.description) && !samePlace(scene.location, current.environment.locationId));
-      if (establishesNewSetting) {
-        const dropped = ["locationId", "description", "timeOfDay", "weather"].filter((field) => (current.environment as Record<string, unknown>)?.[field] !== undefined);
-        if (dropped.length) {
-          const environment = { ...current.environment };
-          for (const field of dropped) delete (environment as Record<string, unknown>)[field];
-          current.environment = Object.keys(environment).length ? environment : undefined;
-          decisions.push({ kind: "overridden", summary: `Current narration establishes a new setting; inherited environment ${dropped.join("/")} not carried forward`, provenance: "current_narration" });
-        }
-      }
+    const location = explicitSetting?.locationId ?? scene.location ?? explicitSetting?.description;
+    const stableLocationId = entityId("location", location);
+    const locationKey = (stableLocationId ?? location)?.trim().toLowerCase();
+    const previousLocation = current.activeLocationKey ?? current.environment?.locationId ?? current.environment?.description;
+    const changedLocation = Boolean(location && !samePlace(locationKey, previousLocation));
+    if (changedLocation) {
+      if (current.environment) decisions.push({ kind: "overridden", summary: `Scene ${scene.id} establishes a new setting: ${location}`, provenance: "current_narration" });
+      const remembered = locationKey && current.knownLocations && Object.hasOwn(current.knownLocations, locationKey)
+        ? current.knownLocations[locationKey]
+        : undefined;
+      current.environment = { ...remembered, description: remembered?.description ?? scene.location ?? explicitSetting?.description, locationId: stableLocationId ?? explicitSetting?.locationId };
+      delete current.spatial;
+      factProvenance.environment = remembered ? "previous_chapter" : "current_narration";
     }
+
+    if (locationKey) current.activeLocationKey = locationKey;
 
     if (scene.sequence?.axis || scene.sequence?.positions.length) {
       const inherited = scene.sequence.axis ? [] : (current.spatial?.split("; ") ?? []).filter(part => !scene.sequence!.positions.some(p => part.startsWith(`${p.name}:`)));
       current.spatial = [scene.sequence.axis, ...inherited, ...scene.sequence.positions.map(p => `${p.name}: ${p.position}, facing ${p.facing}${p.movement ? `, ${p.movement}` : ""}`)].filter(Boolean).join("; ").slice(0,500);
     }
-    const changes = scene.visualChanges;
+    const changes = (scene.visualChanges || returning) ? {
+      ...scene.visualChanges,
+      environment: scene.visualChanges?.environment && {
+        ...scene.visualChanges.environment,
+        set: scene.visualChanges.environment.set && {
+          ...scene.visualChanges.environment.set,
+          ...(stableLocationId ? { locationId: stableLocationId } : {}),
+        },
+      },
+      transition: scene.visualChanges?.transition ?? (returning ? "time_jump" as const : undefined),
+      characters: scene.visualChanges?.characters?.map(delta => ({
+        ...delta, entityId: entityId("character", delta.entityId) ?? delta.entityId ?? entityId("character", delta.name),
+      })),
+    } : undefined;
     if (changes) applyChange(current, changes, decisions);
     if (changes) {
       for (const delta of changes.characters ?? []) { factSource.set(`characters.${delta.name}`, "current_narration"); factProvenance[`characters.${delta.name}`] = "current_narration"; }
@@ -208,7 +253,17 @@ export function resolveVisualContinuity(options: {
       // entry was written: apply note-level intent only, conservatively.
       const stale = Boolean(override.sceneContentFingerprint && scene.contentFingerprint && override.sceneContentFingerprint !== scene.contentFingerprint);
       if (!stale && override.setState) {
-        applyManualStatePatch(current, override.setState);
+        applyManualStatePatch(current, {
+          ...override.setState,
+          characters: override.setState.characters?.map(character => ({
+            ...character,
+            entityId: entityId("character", character.entityId) ?? character.entityId ?? entityId("character", character.name),
+          })),
+          environment: override.setState.environment && {
+            ...override.setState.environment,
+            ...(entityId("location", override.setState.environment.locationId) ? { locationId: entityId("location", override.setState.environment.locationId) } : {}),
+          },
+        });
         for (const character of override.setState.characters ?? []) factSource.set(`characters.${character.name}`, "manual_override");
         if (override.setState.environment) factSource.set("environment", "manual_override");
         for (const object of override.setState.objects ?? []) factSource.set(`objects.${object.name}`, "manual_override");
@@ -220,18 +275,31 @@ export function resolveVisualContinuity(options: {
       manualOverride = { fields: !stale ? [...(override.setState?.characters ?? []).flatMap(c => Object.keys(c).filter(k => k !== "name" && k !== "entityId").map(k => `characters.${c.name}.${k}`)), ...Object.keys(override.setState?.environment ?? {}).map(k => `environment.${k}`)] : [], note: override.note, usePreviousReference: override.usePreviousReference, revision: override.revision, stale };
     }
 
-    const referenceDecision = index === 0
-      ? decidePreviousChapterReference(handoff, scene, override, decisions)
-      : decidePreviousSceneReference(options.scenes[index - 1]!, scene, override);
+    // Remember durable setting details only. Time, lighting and weather belong to the frame.
+    const effectiveLocation = locationKey ?? current.activeLocationKey ?? current.environment?.locationId ?? current.environment?.description;
+    if (effectiveLocation && current.environment) {
+      const { locationId, description, condition, damage } = current.environment;
+      current.knownLocations = {
+        ...current.knownLocations,
+        [effectiveLocation.trim().toLowerCase()]: { locationId, description, condition, damage },
+      };
+    }
 
-    perScene.push({ sceneId: scene.id, startState, changes, endState: cloneState(current), factProvenance, referenceDecision, manualOverride });
+    const referenceOverride = manualOverride?.stale ? undefined : override;
+    const referenceDecision = isHistorical || returning
+      ? { kind: "none" as const, used: false, reason: "Narrative time discontinuity; prior frame excluded" }
+      : index === 0
+      ? decidePreviousChapterReference(handoff, stableLocationId ? { ...scene, location: stableLocationId } : scene, referenceOverride, decisions)
+      : decidePreviousSceneReference(options.scenes[index - 1]!, scene, referenceOverride);
+
+    perScene.push({ sceneId: scene.id, historical: isHistorical, historicalStateAvailable: isHistorical ? options.history?.has(historicalChapter ?? 0) ?? false : undefined, startState, changes, endState: cloneState(current), factProvenance, referenceDecision, manualOverride });
   }
 
-  return { perScene, chapterEndState: cloneState(current), decisions };
+  return { perScene, chapterEndState: cloneState(presentState ?? current), decisions };
 }
 
 function decidePreviousChapterReference(
-  handoff: { chapter: number; sceneId: string; referenceArtwork?: VisualContinuityHandoff["referenceArtwork"] } | undefined,
+  handoff: { chapter: number; sceneId: string; state: VisualContinuityState; referenceArtwork?: VisualContinuityHandoff["referenceArtwork"] } | undefined,
   scene: ContinuitySceneInput,
   override: VisualContinuityOverrideEntry | undefined,
   decisions: VisualContinuityDecision[],
@@ -247,7 +315,9 @@ function decidePreviousChapterReference(
   }
   if ((scene.appearanceChapter !== undefined && scene.appearanceChapter < handoff.chapter) || (scene.visualChanges?.transition && scene.visualChanges.transition !== "continuous")) return { kind: "previous-chapter", used: false, reason: "Narrative time discontinuity; prior frame excluded" };
   const set = scene.visualChanges?.environment?.set;
-  const settingChanged = Boolean(set && (set.locationId || set.description || set.timeOfDay));
+  const previousLocation = handoff.state.activeLocationKey ?? handoff.state.environment?.locationId ?? handoff.state.environment?.description;
+  const settingChanged = Boolean(set && (set.locationId || set.description || set.timeOfDay))
+    || Boolean(scene.location && !samePlace(scene.location, previousLocation));
   if (settingChanged) {
     decisions.push({ kind: "overridden", summary: `Previous chapter artwork rejected for ${scene.id}: location or time changed`, provenance: "current_narration" });
     return { kind: "previous-chapter", used: false, reason: "location or time changed in the first scene; textual continuity retained", sourceChapter: handoff.chapter, sourceSceneId: artwork.sceneId };
@@ -356,27 +426,33 @@ export type PreviousVisualContinuity = {
   origin: "automatic" | "manual" | "derived";
 };
 
-const previousContinuityCache = new Map<string, { signature: string; value?: PreviousVisualContinuity }>();
-function continuityInputFingerprint(scenes: ManifestSceneLike[], overlay: VisualContinuityOverlay, previous?: PreviousVisualContinuity) {
-  return fingerprint({ version: "continuity-input-v2", scenes: continuitySceneInputs({ scenes }).map(input => ({ ...input, narrationText: scenes.find(scene => scene.id === input.id)?.narrationText })), overlay, previous: previous && { chapter: previous.chapter, stateFingerprint: previous.stateFingerprint, sourceFacts: previous.sourceFacts, referenceArtwork: previous.referenceArtwork } });
+const previousContinuityCache = new Map<string, { signature: string; value?: PreviousVisualContinuity; history: Map<number, VisualContinuityState> }>();
+function continuityInputFingerprint(scenes: ManifestSceneLike[], overlay: VisualContinuityOverlay, previous: PreviousVisualContinuity | undefined, entities: CanonicalEntity[], history: ReadonlyMap<number, VisualContinuityState>) {
+  return fingerprint({ version: "continuity-input-v6", identities: entities.map(entity => [entity.id, entity.type, entity.mergedFromIds, identityNames(entity)]), historical: scenes.map(scene => scene.overrides?.appearanceChapter === undefined ? null : history.get(scene.overrides.appearanceChapter) ?? null), scenes: continuitySceneInputs({ scenes }).map(input => ({ ...input, narrationText: scenes.find(scene => scene.id === input.id)?.narrationText })), overlay, previous: previous && { chapter: previous.chapter, stateFingerprint: previous.stateFingerprint, sourceFacts: previous.sourceFacts, referenceArtwork: previous.referenceArtwork } });
 }
 
 /** Reconcile manifests in chapter order. A saved handoff is a reusable cache
  * only while its own scene/overlay inputs and upstream state still match. */
 export async function resolvePreviousVisualContinuity(root: string, slug: string, chapter: number): Promise<PreviousVisualContinuity | undefined> {
+  return (await resolveContinuityHistory(root, slug, chapter)).previous;
+}
+
+async function resolveContinuityHistory(root: string, slug: string, chapter: number) {
+  const entities = (await loadStoryBibleWithCanonicalOverlay(root, slug)).canonicalEntities;
+  const history = new Map<number, VisualContinuityState>();
   let names: string[];
   try { names = await readdir(join(storyPaths(root, slug, chapter).story, "chapters")); }
-  catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; }
+  catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return { previous: undefined, history, entities }; throw error; }
   const chapters = names.map(name => /^\d{4,}$/.test(name) ? Number(name) : NaN).filter(n => Number.isSafeInteger(n) && n > 0 && n < chapter).sort((a,b) => a-b);
-  const signature = fingerprint(await Promise.all(chapters.map(async number => {
+  const signature = fingerprint([entities.map(entity => [entity.id, entity.type, entity.mergedFromIds, identityNames(entity)]), await Promise.all(chapters.map(async number => {
     const paths = storyPaths(root,slug,number);
     return [number, await Promise.all([paths.scenesManifest,paths.visualContinuityManual,paths.visualContinuity].map(async path => {
       try { const info = await stat(path); return [info.ino,info.size,info.mtimeMs,info.ctimeMs]; }
       catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return null; throw error; }
     }))];
-  })));
+  }))]);
   const key = JSON.stringify([root,slug,chapter]); const cached = previousContinuityCache.get(key);
-  if (cached?.signature === signature) return cached.value ? structuredClone(cached.value) : undefined;
+  if (cached?.signature === signature) return { previous: structuredClone(cached.value), history: structuredClone(cached.history), entities };
   const { sceneManifestSchema } = await import("../scenes/types.js");
   let previous: PreviousVisualContinuity | undefined;
   for (const number of chapters) {
@@ -384,23 +460,25 @@ export async function resolvePreviousVisualContinuity(root: string, slug: string
     const manifest = sceneManifestSchema.safeParse(raw);
     const saved = await loadVisualContinuityHandoff(root,slug,number);
     if (!manifest.success) {
+      if (saved) history.set(number, saved.state);
       if (saved) previous = { chapter: number, sceneId: saved.source.sceneId, state: saved.state, stateFingerprint: saved.stateFingerprint, sourceFacts: saved.sourceFacts, referenceArtwork: saved.referenceArtwork, origin: saved.origin };
       continue;
     }
     const scenes = manifest.data.scenes.filter(scene => !scene.disabled);
     if (!scenes.length) continue;
     const overlay = await loadVisualContinuityOverlay(root,slug,number);
-    const inputFingerprint = continuityInputFingerprint(scenes,overlay,previous);
-    if (saved?.inputFingerprint === inputFingerprint) {
+    if (saved?.inputFingerprint === continuityInputFingerprint(scenes, overlay, previous, entities, history)) {
+      history.set(number, saved.state);
       previous = { chapter: number, sceneId: saved.source.sceneId, state: saved.state, stateFingerprint: saved.stateFingerprint, sourceFacts: saved.sourceFacts, referenceArtwork: saved.referenceArtwork, origin: saved.origin };
       continue;
     }
-    const resolved = resolveVisualContinuity({ previousHandoff: previous ? { ...previous } : undefined, scenes: continuitySceneInputs({scenes}), manualOverrides: overlay });
-    previous = { chapter: number, sceneId: scenes.at(-1)!.id, state: resolved.chapterEndState, stateFingerprint: fingerprint(resolved.chapterEndState), sourceFacts: continuitySourceFacts(scenes,overlay,resolved,number,previous), referenceArtwork: approvedReferenceArtwork(scenes), origin: "derived" };
+    const resolved = resolveVisualContinuity({ previousHandoff: previous ? { ...previous } : undefined, scenes: continuitySceneInputs({scenes}), manualOverrides: overlay, chapter: number, history, entities });
+    history.set(number, resolved.chapterEndState);
+    previous = { chapter: number, sceneId: scenes.at(-1)!.id, state: resolved.chapterEndState, stateFingerprint: fingerprint(resolved.chapterEndState), sourceFacts: continuitySourceFacts(scenes,overlay,resolved,number,previous), referenceArtwork: resolved.perScene.at(-1)?.historical ? undefined : approvedReferenceArtwork(scenes), origin: "derived" };
   }
   if (previousContinuityCache.size >= 64) previousContinuityCache.delete(previousContinuityCache.keys().next().value!);
-  previousContinuityCache.set(key,{signature,value:previous ? structuredClone(previous) : undefined});
-  return previous;
+  previousContinuityCache.set(key,{signature,value: structuredClone(previous), history });
+  return { previous, history, entities };
 }
 
 type ManifestSceneLike = {
@@ -440,7 +518,7 @@ export function approvedReferenceArtwork(scenes: ManifestSceneLike[]): VisualCon
 function continuitySourceFacts(scenes: ManifestSceneLike[], overlay: VisualContinuityOverlay, resolved: ResolvedVisualContinuity, chapter: number, previous?: PreviousVisualContinuity) {
   const sourceFacts: NonNullable<VisualContinuityHandoff["sourceFacts"]> = { ...previous?.sourceFacts };
   for (const scene of scenes.filter(scene => !scene.disabled)) {
-    if (scene.visualChanges?.transition === "flashback") for (const key of Object.keys(sourceFacts)) delete sourceFacts[key];
+    if (resolved.perScene.find(entry => entry.sceneId === scene.id)?.historical) continue;
     const record = (subject: string, field: string, value: unknown) => {
       const key = JSON.stringify([subject, field]);
       if (scene.narrationText?.trim()) sourceFacts[key] = { subject, field, valueFingerprint: fingerprint(value), chapter: chapter, sceneId: scene.id, passage: scene.narrationText.slice(0,8000) };
@@ -470,19 +548,23 @@ export async function persistChapterVisualContinuity(options: {
   root: string;
   slug: string;
   chapter: number;
-  manifest: { chapter: number; scenes: ManifestSceneLike[] };
+  manifest: { chapter: number; planningFingerprint?: string; scenes: ManifestSceneLike[] };
   origin?: "automatic" | "manual";
 }): Promise<ResolvedVisualContinuity> {
-  const previous = await resolvePreviousVisualContinuity(options.root, options.slug, options.chapter);
-  const overlay = await loadVisualContinuityOverlay(options.root, options.slug, options.chapter);
-  const resolved = resolveVisualContinuity({
-    previousHandoff: previous ? { chapter: previous.chapter, sceneId: previous.sceneId, state: previous.state, referenceArtwork: previous.referenceArtwork } : undefined,
-    scenes: continuitySceneInputs(options.manifest),
-    manualOverrides: overlay,
-  });
+  const { previous, overlay, resolved, inputFingerprint } = await resolveChapterVisualContinuity(options);
   const finalScene = options.manifest.scenes.filter(scene => !scene.disabled).at(-1);
   if (!finalScene) throw new Error("Continuity requires at least one enabled scene");
   const sourceFacts = continuitySourceFacts(options.manifest.scenes, overlay, resolved, options.chapter, previous);
+  const existing = await loadVisualContinuityHandoff(options.root, options.slug, options.chapter);
+  const sceneBaselines = Object.fromEntries(continuitySceneInputs(options.manifest).flatMap(input => {
+    const state = resolved.perScene.find(entry => entry.sceneId === input.id);
+    if (!state || !input.contentFingerprint) return [];
+    const prior = existing?.sceneBaselines?.[input.id];
+    const sceneFingerprint = fingerprint([options.manifest.planningFingerprint, input.contentFingerprint]);
+    return [[input.id, prior?.sceneFingerprint === sceneFingerprint
+      ? prior
+      : { sceneFingerprint, snapshot: continuitySnapshot(state) }]];
+  }));
   const artifact: VisualContinuityHandoff = {
     version: 1,
     chapter: options.chapter,
@@ -490,17 +572,18 @@ export async function persistChapterVisualContinuity(options: {
     source: { chapter: options.chapter, sceneId: finalScene.id },
     stateFingerprint: fingerprint(resolved.chapterEndState),
     sourceFacts,
-    inputFingerprint: continuityInputFingerprint(options.manifest.scenes, overlay, previous),
-    referenceArtwork: approvedReferenceArtwork(options.manifest.scenes),
+    sceneBaselines,
+    inputFingerprint,
+    referenceArtwork: resolved.perScene.at(-1)?.historical ? undefined : approvedReferenceArtwork(options.manifest.scenes),
     origin: options.origin ?? "automatic",
     updatedAt: new Date().toISOString(),
   };
-  const existing = await loadVisualContinuityHandoff(options.root, options.slug, options.chapter);
   const unchanged = existing
     && existing.stateFingerprint === artifact.stateFingerprint
     && existing.source.sceneId === artifact.source.sceneId
     && fingerprint(existing.referenceArtwork ?? null) === fingerprint(artifact.referenceArtwork ?? null)
     && existing.inputFingerprint === artifact.inputFingerprint
+    && fingerprint(existing.sceneBaselines ?? {}) === fingerprint(sceneBaselines)
     && existing.origin === artifact.origin
     && fingerprint(existing.sourceFacts ?? {}) === fingerprint(artifact.sourceFacts ?? {});
   if (!unchanged) await atomicWriteJson(storyPaths(options.root, options.slug, options.chapter).visualContinuity, artifact);
@@ -514,15 +597,16 @@ export async function resolveChapterVisualContinuity(options: {
   chapter: number;
   manifest: { scenes: ManifestSceneLike[] };
   contentFingerprints?: Record<string, string>;
-}): Promise<{ resolved: ResolvedVisualContinuity; previous?: PreviousVisualContinuity; overlay: VisualContinuityOverlay }> {
-  const previous = await resolvePreviousVisualContinuity(options.root, options.slug, options.chapter);
+}): Promise<{ resolved: ResolvedVisualContinuity; previous?: PreviousVisualContinuity; overlay: VisualContinuityOverlay; inputFingerprint: string }> {
+  const { previous, history, entities } = await resolveContinuityHistory(options.root, options.slug, options.chapter);
   const overlay = await loadVisualContinuityOverlay(options.root, options.slug, options.chapter);
   const resolved = resolveVisualContinuity({
     previousHandoff: previous ? { chapter: previous.chapter, sceneId: previous.sceneId, state: previous.state, referenceArtwork: previous.referenceArtwork } : undefined,
     scenes: continuitySceneInputs(options.manifest, options.contentFingerprints),
     manualOverrides: overlay,
+    chapter: options.chapter, history, entities,
   });
-  return { resolved, previous, overlay };
+  return { resolved, previous, overlay, inputFingerprint: continuityInputFingerprint(options.manifest.scenes.filter(scene => !scene.disabled), overlay, previous, entities, history) };
 }
 
 export async function upsertVisualContinuityOverride(options: {
