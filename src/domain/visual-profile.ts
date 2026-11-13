@@ -154,11 +154,19 @@ export const visualVariantSchema = z.object({
 });
 export type VisualVariant = z.infer<typeof visualVariantSchema>;
 
+export const wardrobeEvidenceSchema = z.object({
+  chapter: z.number().int().positive(),
+  excerpt: z.string().trim().min(1).max(500),
+}).strict();
+
 /** An approved, chapter-bound change to a lasting appearance. Draft eras are
  * editorial work and never affect generated artwork. */
 export const visualAppearanceEraSchema = z.object({
   id: z.string().min(1),
   name: z.string().trim().min(1).max(200),
+  wornItemIds: z.array(z.string().regex(/^ent_[a-f0-9]{24}$/)).max(10).optional(),
+  sceneAliases: z.array(z.string().trim().min(1).max(200)).max(20).optional(),
+  wardrobeEvidence: z.array(wardrobeEvidenceSchema).min(1).max(5).optional(),
   creatureState: z.enum(["living", "dead", "zombie", "skeleton", "undead", "other"]).optional(),
   startChapter: z.number().int().positive(),
   endChapter: z.number().int().positive().optional(),
@@ -222,10 +230,15 @@ export const visualProfileSchema = z.object({
       context.addIssue({ code: "custom", path: ["appearanceEras"], message: `Approved appearance era ${era.name} needs an appearance, prompt, or changed visual trait` });
     }
   }
-  for (let index = 1; index < approved.length; index++) {
-    if (approved[index].startChapter <= (approved[index - 1].endChapter ?? Number.MAX_SAFE_INTEGER)) {
-      context.addIssue({ code: "custom", path: ["appearanceEras"], message: `Approved appearance eras overlap: ${approved[index - 1].name} and ${approved[index].name}` });
+  const timelineEras = approved.filter(era => !isSceneAppearanceLook(era));
+  for (let index = 1; index < timelineEras.length; index++) {
+    if (timelineEras[index].startChapter <= (timelineEras[index - 1].endChapter ?? Number.MAX_SAFE_INTEGER)) {
+      context.addIssue({ code: "custom", path: ["appearanceEras"], message: `Approved appearance eras overlap: ${timelineEras[index - 1].name} and ${timelineEras[index].name}` });
     }
   }
 });
 export type VisualEntityProfile = z.infer<typeof visualProfileSchema>;
+
+export function isSceneAppearanceLook(era: VisualAppearanceEra) {
+  return Boolean(era.sceneAliases?.length || era.wardrobeEvidence?.length);
+}

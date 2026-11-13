@@ -50,6 +50,70 @@ async function core() {
 async function metadata(chapter = 1) { return chapterSchema.parse(JSON.parse(await readFile(storyPaths(root, "demo-story", chapter).chapterMeta, "utf8"))); }
 
 describe("subscription processing", () => {
+  it.each(["codex", "antigravity"])("publishes a complete Source Name Index through the %s CLI with no network", async agent => {
+    const story = "demo-story";
+    const paths = storyPaths(root, story, 1);
+    const texts = ["星灯亮起。星灯在发光。", "星灯熄灭。"];
+    const chapters = await Promise.all(texts.map(async (text, index) => {
+      const chapter = index + 1;
+      const ref = { chapter, sourceId: `source-${chapter}`, sourceType: "text" as const, metadata: {} };
+      const file = `chapters/${String(chapter).padStart(4, "0")}.txt`;
+      await atomicWrite(join(paths.source, file), text);
+      return { chapter, file, ref, fingerprint: importedChapterFingerprint(ref, text) };
+    }));
+    await atomicWriteJson(paths.sourceManifest, { version: 1, adapterVersion: "fixture", type: "text", origin: { path: "fixture.txt", name: "fixture" }, fingerprint: "a".repeat(64), importedAt: new Date().toISOString(), warnings: [], unnumberedSections: [], chapters });
+    const cli = async (...args: string[]) => {
+      const result = await runAgentCommand(args, root);
+      if (!("stage" in result) || result.stage !== "sourceNameIndex") throw new Error("Expected a source-name run");
+      return result;
+    };
+    const preview = await cli("prepare", "--story", story, "--chapters", "all", "--stages", "sourceNameIndex", "--agent", agent, "--model", "session-model");
+    const runArgs = ["--story", story, "--run", preview.id];
+    expect(preview).toMatchObject({ status: "awaiting-confirmation", totalPassages: 2, chapterSelection: "1-2", chapterCount: 2, apiRequests: 0 });
+    expect(preview).not.toHaveProperty("request");
+    await expect(cli("next", ...runArgs)).rejects.toThrow("Confirm");
+    await cli("confirm", ...runArgs, "--plan", preview.planFingerprint);
+    const first = await cli("next", ...runArgs);
+    if (!first.request) throw new Error("Expected the first passage");
+    expect(first.request).toMatchObject({ input: texts[0], chapter: 1, schemaName: "source_name_index" });
+    const file = join(root, "agent-response.json");
+    await writeFile(file, "{}");
+    const invalid = await cli("respond", ...runArgs, "--request", first.request.id, "--file", file);
+    expect(invalid).toMatchObject({ status: "needs-input", completedPassages: 0 });
+    await writeFile(file, JSON.stringify({ entities: [{
+      sourceName: "星灯", aliases: [], type: "item", displayName: "Star Lamp", description: "A lamp.", importance: "recurring", suggestedName: "Starlight", reason: "Shorter.",
+    }] }));
+    const second = await cli("respond", ...runArgs, "--request", first.request.id, "--file", file);
+    if (!second.request) throw new Error("Expected the second passage");
+    expect(second.request.chapter).toBe(2);
+    const { loadSourceNameIndex } = await import("../src/naming/source-index.js");
+    expect(await loadSourceNameIndex(root, story)).toBeUndefined();
+    await cli("fail", ...runArgs, "--request", second.request.id, "--outcome", "needs-input", "--reason", "Host paused");
+    const resumed = await cli("resume", ...runArgs);
+    expect(resumed).toMatchObject({ completedPassages: 1, request: { id: second.request.id } });
+    const final = await cli("respond", ...runArgs, "--request", second.request.id, "--file", file);
+    expect(final).toMatchObject({ status: "complete", completedPassages: 2, result: { entries: 1 }, apiRequests: 0 });
+    expect(await loadSourceNameIndex(root, story)).toMatchObject({
+      subscription: { runId: preview.id, agent, model: "session-model", apiRequests: 0 },
+      entries: [{ sourceName: "星灯", mentions: 3, chapters: [{ chapter: 1, count: 2 }, { chapter: 2, count: 1 }] }],
+    });
+    const { saveSourceNameRules } = await import("../src/naming/source-index.js");
+    const { canonicalEntitySchema } = await import("../src/domain/story-bible.js");
+    const entityId = "ent_0123456789abcdef01234567";
+    await saveSourceNameRules(root, story, { sample: canonicalEntitySchema.parse({
+      id: entityId, type: "item", originalName: "星灯", canonicalName: "Star Lamp", firstAppearance: 1, lastKnownAppearance: 2,
+      localizedNaming: { locale: "en-US", fullName: "Starlight", usageMode: "always_full" },
+    }) });
+    await atomicWrite(paths.english, "The Star Lamp lit up.");
+    let narrationRun = await start(await plan(["narration"], [1], { agent }));
+    expect(narrationRun.request?.schemaName).toBe("source_name_translation_bridge");
+    narrationRun = await respond(narrationRun, { mappings: [{ id: entityId, renderings: ["Star Lamp"] }] });
+    expect(narrationRun.request?.input).toContain("Starlight");
+    expect((await respond(narrationRun, "The Star Lamp lit up.")).status).toBe("complete");
+    expect(await readFile(paths.narration, "utf8")).toBe("The Starlight lit up.");
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
   it("requires matching confirmation and preserves all content during preview and requests", async () => {
     const story = storyPaths(root, "demo-story", 1).story;
     const before = inventoryFingerprint(await inventory(story));

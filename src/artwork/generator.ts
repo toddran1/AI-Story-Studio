@@ -2,7 +2,7 @@ import { continuitySnapshot, type ContinuitySnapshot } from "../visual-canon/con
 import { prepareArtworkRepair, type ArtworkRepair } from "./repair.js";
 import { rankVisualReferences } from "../visual-canon/reference-selection.js";
 import { writeArtworkOutputManifest } from "./output-index-revision.js";
-import { readFile, stat } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import { Chapter, chapterSchema } from "../domain/chapter.js";
 import { Story } from "../domain/story.js";
 import { ArtworkError, ConfigurationError } from "../pipeline/errors.js";
@@ -24,7 +24,7 @@ import { resolveVisualCanonPrompt, ResolvedSceneVisualPrompt, MATURE_ARTWORK_STY
 import { renderSceneContinuity, resolveChapterVisualContinuity, VisualContinuityReferenceDecision } from "../visual-canon/continuity.js";
 import { emptyStoryBible, storyBibleSchema, StoryBible } from "../domain/story-bible.js";
 import { assertImageModelCompatible, imageNativeTiers, MAX_REFERENCE_IMAGES, MAX_REFERENCE_IMAGE_BYTES, MAX_REFERENCE_TOTAL_BYTES, providerSupportsReferenceImages } from "./providers.js";
-import { findVisualReferenceFile, mimeForVisualReferenceExtension } from "../visual-canon/assets.js";
+import { loadReferenceSheetImage } from "../visual-canon/reference-identity.js";
 import { VisualReferenceImage } from "../domain/visual-profile.js";
 import { stageFreshness, stalePrerequisiteWarning } from "../studio/artifact-state.js";
 import { estimateNativeDimensions, imageDimensions, planResolution, qualityTierIndex, resolveTargetDimensions } from "./resolution.js";
@@ -435,12 +435,12 @@ export async function generateStoredArtwork(options: {
           : {}),
         provenance: {
           ...(options.repair ? { repair: options.repair } : {}),
-          referencesUsed: references.mode,
-          referenceImageCount: references.images.length,
-          availableReferenceCount: references.available,
-          continuityReference: references.continuityReference,
+          referencesUsed: referenceImages.length ? "images" : references.mode,
+          referenceImageCount: referenceImages.length,
+          availableReferenceCount: references.available + Number(Boolean(options.repair)),
+          continuityReference: sentContinuityReference(references.continuityReference, referenceImages),
           continuitySnapshot: item.continuitySnapshot,
-          characterReferences: characterReferenceProvenance(references.images),
+          characterReferences: characterReferenceProvenance(referenceImages),
           visualGrounding: item.resolved.resolvedEntities.map((entity) => ({ entityId: entity.entityId, name: entity.name, mode: entity.groundingMode, appearanceEra: entity.appearanceEra })),
         },
         review: "unreviewed",
@@ -776,6 +776,11 @@ export async function generateSceneImage(
 }
 
 type ContinuityReferenceProvenance = { kind: "previous-scene" | "previous-chapter" | "none"; used: boolean; reason?: string };
+export function sentContinuityReference<T extends { used: boolean; reason?: string }>(reference: T, images: ImageReferenceImage[]): T {
+  return reference.used && !images.some(image => image.sourceKind === "continuity" && image.role !== "repair-source")
+    ? { ...reference, used: false, reason: "Previous-frame reference did not fit the repair image budget." }
+    : reference;
+}
 type SceneReferencePayload = { images: ImageReferenceImage[]; available: number; mode: "images" | "text-only" | "none"; continuityReference: ContinuityReferenceProvenance };
 
 export type VisualProfileReferencePayload = {
@@ -785,6 +790,7 @@ export type VisualProfileReferencePayload = {
   loadedEntityIds: string[];
   loadedReferenceIds: string[];
   referenceFingerprints: string[];
+  unavailableReferenceIds?: string[];
 };
 
 /** Shared, approved-only Visual Profile reference loader. Summary artwork uses
@@ -812,6 +818,7 @@ export async function loadApprovedVisualProfileReferences(root: string, story: S
   const loadedEntityIds = new Set<string>();
   const loadedReferenceIds: string[] = [];
   const referenceFingerprints: string[] = [];
+  const unavailableReferenceIds: string[] = [];
   let totalBytes = 0;
   for (const { reference: ref, entityName } of wanted) {
     if (images.length >= Math.min(MAX_REFERENCE_IMAGES, options.maxImages ?? MAX_REFERENCE_IMAGES)) break;
@@ -819,21 +826,18 @@ export async function loadApprovedVisualProfileReferences(root: string, story: S
     // request and be cloned onto an unprofiled cast member. Keep the first
     // successfully loaded approved reference per owner in mixed scenes.
     if (mixedCast && loadedPerEntity.has(ref.entityId)) continue;
-    const hint = /\.([a-zA-Z0-9]+)$/.exec(ref.imagePath)?.[1];
-    const file = await findVisualReferenceFile(root, story.slug, ref.entityId, ref.id, hint);
-    if (!file) continue;
-    const size = (await stat(file.path)).size;
-    if (!size || size > MAX_REFERENCE_IMAGE_BYTES || totalBytes + size > MAX_REFERENCE_TOTAL_BYTES) continue;
-    const data = await readFile(file.path);
-    if (!data.length || data.length > MAX_REFERENCE_IMAGE_BYTES || totalBytes + data.length > MAX_REFERENCE_TOTAL_BYTES) continue;
+    const loaded = await loadReferenceSheetImage(root, story.slug, ref.entityId, ref);
+    if (!loaded) { unavailableReferenceIds.push(ref.id); continue; }
+    if (totalBytes + loaded.image.data.length > MAX_REFERENCE_TOTAL_BYTES) continue;
+    const { data } = loaded.image;
     totalBytes += data.length;
-    images.push({ data, mimeType: mimeForVisualReferenceExtension(file.ext), role: ref.role, sourceKind: "visual-profile", entityId: ref.entityId, entityName, referenceId: ref.id });
+    images.push({ ...loaded.image, entityName });
     loadedEntityIds.add(ref.entityId);
     loadedPerEntity.add(ref.entityId);
     loadedReferenceIds.push(ref.id);
     referenceFingerprints.push(fingerprint(data.toString("base64")));
   }
-  return { images, available, mode: images.length ? "images" : "text-only", loadedEntityIds: [...loadedEntityIds], loadedReferenceIds, referenceFingerprints };
+  return { images, available, mode: images.length ? "images" : "text-only", loadedEntityIds: [...loadedEntityIds], loadedReferenceIds, referenceFingerprints, unavailableReferenceIds };
 }
 
 /** Collect Visual Canon reference images for a scene, then the resolved visual

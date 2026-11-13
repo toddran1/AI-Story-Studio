@@ -7,7 +7,7 @@ import { referenceUrl } from "./visual-workflow.js";
 import type { StudioOperations } from "../../server/operations.js";
 import "./image-workbench.css";
 type Board = Awaited<ReturnType<StudioOperations["imageStoryboard"]>>;
-type DraftReport = { status?: string; reservedUsd?: number; requests?: number; outcomes?: ImageDraftOutcome[]; updatedAt?: string };
+type DraftReport = { status?: string; reservedUsd?: number; requests?: number; outcomes?: ImageDraftOutcome[]; updatedAt?: string; config?: { budgetUsd: number; maxRequests: number }; scope?: { chapters: number[]; summaryId?: string } };
 type Plan = Awaited<ReturnType<StudioOperations["planImageAutomation"]>>;
 const time = (s: number) => `${Math.floor(s/60)}:${String(Math.floor(s%60)).padStart(2,"0")}`;
 export function ImageWorkbench({ slug, chapter, summaryId, disabled = false, onRefresh }: { slug: string; chapter?: number; summaryId?: string; disabled?: boolean; onRefresh?: () => void }) {
@@ -50,6 +50,20 @@ export function ImageWorkbench({ slug, chapter, summaryId, disabled = false, onR
     catch (error) { if (currentIdentity.current === identity) setError(String(error)); }
     finally { if (currentIdentity.current === identity) setBusy(false); }
   };
+  const continueRun = async () => {
+    if (!report?.updatedAt) return;
+    setBusy(true); setError("");
+    try {
+      const job = await post<Job>(`${endpoint}/continue`, { reportUpdatedAt: report.updatedAt });
+      if (currentIdentity.current === identity) { work.track(job); setPlan(undefined); }
+    } catch (error) {
+      if (currentIdentity.current === identity) setError(String(error));
+    } finally {
+      if (currentIdentity.current === identity) setBusy(false);
+    }
+  };
+  const remainingBudget = report?.config ? report.config.budgetUsd - (report.reservedUsd ?? 0) : 0;
+  const remainingRequests = report?.config ? report.config.maxRequests - (report.requests ?? 0) : 0;
   const approveAndContinue = async (items: ImageDraftOutcome[]) => {
     setBusy(true); setError("");
     try {
@@ -88,7 +102,10 @@ export function ImageWorkbench({ slug, chapter, summaryId, disabled = false, onR
       {([ ["budgetUsd","Reserved-cost limit ($)"],["maxRequests","Maximum provider requests"],["maxRepairs","Repairs per scene (0–3)"],["imageAllowanceUsd","Reserve per image attempt ($)"],["checkAllowanceUsd","Reserve per check ($)"],["planningAllowanceUsd","Reserve per planning attempt ($)"] ] as const).map(([key,label])=><label key={key}>{label}<input type="number" min={key==="maxRepairs"?0:key==="maxRequests"?1:.01} max={key==="maxRepairs"?3:undefined} step={key==="maxRepairs"||key==="maxRequests"?1:.01} value={config[key]} disabled={pending} onChange={e=>{setConfig(c=>({...c,[key]:Number(e.target.value)}));setPlan(undefined);}}/></label>)}
     </div><label><input type="checkbox" checked={config.draftMissingProfiles} disabled={pending} onChange={e=>{setConfig(c=>({...c,draftMissingProfiles:e.target.checked}));setPlan(undefined);}}/> Draft missing character and location profiles</label><label><input type="checkbox" checked={config.planMissingScenes} disabled={pending} onChange={e=>{setConfig(c=>({...c,planMissingScenes:e.target.checked}));setPlan(undefined);}}/> Plan scenes when a plan is missing</label><button type="button" disabled={pending} onClick={()=>void preview()}>Preview image run</button>
     {plan&&<div className="image-run-preview"><p>{plan.sceneCount} planned scenes · {plan.protectedCount} protected · {plan.minimumImages} known images to generate · {plan.missingPlans.length} missing scene plans</p>{plan.profileDrafts?.length > 0 && <p>Planned profile drafts and first reference sheets: {plan.profileDrafts.join(", ")}</p>}<ul>{plan.blocked.map((item,index)=><li key={index}>{item.label}: {item.reason}</li>)}</ul><p>{plan.provider} / {plan.model} · QA: {plan.qaProvider} / {plan.qaModel}</p><p>Reserve up to ${plan.budgetUsd.toFixed(2)} across at most {plan.maxRequests} provider attempts. Repair allowance: {plan.input.maxRepairs} per scene.</p><small>{plan.allowanceNote}</small><button type="button" disabled={pending} onClick={()=>void start()}>Start image draft</button></div>}
-    </details><VisualWorkflowJob job={work.job} error={work.error}/>{report&&<p className="image-run-report">Last image run: {report.status?.replaceAll("_"," ")} · {report.requests??0} requests · ${(report.reservedUsd??0).toFixed(2)} reserved</p>}{report?.outcomes && <ImageDraftExceptions slug={slug} outcomes={report.outcomes} disabled={pending || !report.updatedAt} onApprove={approveAndContinue} onReject={rejectReference} />}{error&&<p role="alert">{error}</p>}{busy&&<p role="status">Loading image work…</p>}
+    </details><VisualWorkflowJob job={work.job} error={work.error}/>{report&&<p className="image-run-report">Last image run: {report.status?.replaceAll("_"," ")} · {report.requests??0} requests · ${(report.reservedUsd??0).toFixed(2)} reserved</p>}{report?.config && report.updatedAt && report.status !== "completed" && report.status !== "running" && <div className="image-run-report">
+      <button type="button" disabled={pending || remainingBudget <= 0 || remainingRequests <= 0} onClick={() => void continueRun()}>Continue last image run</button>
+      <p>{report.scope?.summaryId ? "Saved summary scope" : `Saved chapters: ${report.scope?.chapters.join(", ") ?? "—"}`} · {Math.max(0, remainingRequests)} requests and ${Math.max(0, remainingBudget).toFixed(2)} reserved budget remaining</p>
+    </div>}{report?.outcomes && <ImageDraftExceptions slug={slug} outcomes={report.outcomes} disabled={pending || !report.updatedAt} onApprove={approveAndContinue} onReject={rejectReference} />}{error&&<p role="alert">{error}</p>}{busy&&<p role="status">Loading image work…</p>}
     {board?.missingPlans.map(s=><p key={s.label}>{s.label}: no scene plan. Use Automatic image draft to plan it.</p>)}
     {board && board.totalRows > board.limit && <nav aria-label="Storyboard pages"><button type="button" disabled={pending || board.offset === 0} onClick={() => void reload(undefined, Math.max(0,board.offset-board.limit))}>Previous frames</button><span>{board.offset+1}–{board.offset+board.rows.length} of {board.totalRows} frames</span><button type="button" disabled={pending || !board.hasMore} onClick={() => void reload(undefined,board.offset+board.limit)}>Next frames</button></nav>}
     <div className={mode==="storyboard"?"image-contact-sheet":"image-continuity-timeline"}>{rows.map(row=><article key={row.key} className={`image-frame image-frame-${row.status}`}><header><span>{row.label} · {row.scene.id}</span><strong>{row.status.replaceAll("_"," ")}{row.protected?" · protected":""}</strong></header>

@@ -5,3 +5,5 @@ export class SourceInputError extends SourceOperationError { constructor(message
 export class SourceConflictError extends SourceOperationError { constructor(message: string, options?: ErrorOptions) { super(message, 409, options); this.name = "SourceConflictError"; } }
 export class SourceValidationError extends SourceOperationError { constructor(message: string, options?: ErrorOptions) { super(message, 422, options); this.name = "SourceValidationError"; } }
 export class SourceUpstreamError extends SourceOperationError { constructor(message: string, options?: ErrorOptions) { super(message, 502, options); this.name = "SourceUpstreamError"; } }
+
+export class SourceAuthenticationRequiredError extends SourceValidationError {}

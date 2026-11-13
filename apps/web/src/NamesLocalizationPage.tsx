@@ -42,7 +42,7 @@ export function NamesLocalizationPage({ slug, onJob, navigate }: { slug: string;
   const entity = detail?.entity as Entity | undefined;
 
   return <section className="page localization-page">
-    <div className="section-heading localization-heading"><div><span className="eyebrow">Target-language identity desk</span><h2>Names / Localization</h2><p>Shape how established entities are named without changing who they are.</p></div><button className="button" onClick={() => navigate(`/stories/${slug}/bible`)}>Open Story Bible</button></div>
+    <div className="section-heading localization-heading"><div><span className="eyebrow">Target-language identity desk</span><h2>Names / Localization</h2><p>Shape how established entities are named without changing who they are.</p></div><div className="production-head-actions"><button className="button" onClick={() => navigate(`/stories/${slug}/source-names`)}>Source Name Index</button><button className="button" onClick={() => navigate(`/stories/${slug}/bible`)}>Open Story Bible</button></div></div>
     {error && <div className="error-box">{error}</div>}{notice && <div className="naming-notice">{notice}</div>}
     <div className="localization-workspace">
       <aside className="localization-index">

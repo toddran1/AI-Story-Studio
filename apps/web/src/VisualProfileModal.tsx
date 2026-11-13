@@ -151,6 +151,9 @@ export function VisualProfileModal({
   const [regenerationExpanded, setRegenerationExpanded] = useState(false);
   const [proposalExpanded, setProposalExpanded] = useState(true);
   const [proposal, setProposal] = useState<VisualProfileProposal | null>(null);
+  const [evidenceFrom, setEvidenceFrom] = useState("");
+  const [evidenceTo, setEvidenceTo] = useState("");
+  const [saveWardrobeLooks, setSaveWardrobeLooks] = useState(false);
   const [selectedProposalFields, setSelectedProposalFields] = useState<string[]>([]);
   const [proposing, setProposing] = useState(false);
   const [selectedRegenerationFields, setSelectedRegenerationFields] = useState<string[]>([]);
@@ -426,15 +429,22 @@ export function VisualProfileModal({
     }
   };
 
-  const handlePropose = async (regenerate = false, requestedFields?: string[]) => {
+  const handlePropose = async (regenerate = false, requestedFields?: string[], includeWardrobeLooks = false) => {
     if (!profile) return;
     setProposing(true);
     setError(null);
     try {
       const fields = requestedFields ?? (regenerate ? selectedRegenerationFields : undefined);
-      const next = await proposeVisualProfile(slug, entityId, { fields, regenerate });
+      const fromChapter = Number(evidenceFrom);
+      const toChapter = Number(evidenceTo);
+      const evidenceRange = evidenceFrom || evidenceTo ? { fromChapter, toChapter } : undefined;
+      if (evidenceRange && (!Number.isSafeInteger(fromChapter) || !Number.isSafeInteger(toChapter) || fromChapter < 1 || toChapter < fromChapter)) {
+        throw new Error("Enter a valid first and last evidence chapter, or leave both blank.");
+      }
+      const next = await proposeVisualProfile(slug, entityId, { fields, regenerate, evidenceRange, includeWardrobeLooks });
       setProposal(next); setProposalExpanded(true);
       setSelectedProposalFields(Object.keys(next.values));
+      setSaveWardrobeLooks(Boolean(next.wardrobeLooks?.length));
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -458,7 +468,7 @@ export function VisualProfileModal({
     setSaving(true);
     setError(null);
     try {
-      const updated = await applyVisualProfileProposal(slug, entityId, proposal, selectedProposalFields);
+      const updated = await applyVisualProfileProposal(slug, entityId, proposal, selectedProposalFields, saveWardrobeLooks);
       setProfile(updated);
       setProposal(null);
       setRegenerationExpanded(false); setSelectedRegenerationFields([]);
@@ -575,8 +585,12 @@ export function VisualProfileModal({
                   {Object.entries(proposal.values).map(([field, value]) => (
                     <label key={field} className="proposal-field"><input type="checkbox" checked={selectedProposalFields.includes(field)} onChange={(event) => setSelectedProposalFields((items) => event.target.checked ? [...items, field] : items.filter((item) => item !== field))} /><span><b>{field.replace(/^(character|location|creature|item)\./, "").replace(/([a-z])([A-Z])/g, "$1 $2")}</b><br />{value}</span></label>
                   ))}
-                  {!Object.keys(proposal.values).length && <p className="hint-text">No safe missing details were proposed.</p>}
-                  <div className="proposal-actions"><button type="button" className="btn btn-primary" onClick={handleApplyProposal} disabled={saving || !selectedProposalFields.length}>Apply selected</button><button type="button" className="btn btn-outline" onClick={() => setProposal(null)}>Cancel</button></div>
+                  {Boolean(proposal.wardrobeLooks?.length) && <fieldset><legend>Separate wardrobe drafts</legend>
+                    {proposal.wardrobeLooks?.map((look, index) => <p key={index}><b>{look.name}</b> · {look.outfit}</p>)}
+                    <label className="proposal-field"><input type="checkbox" checked={saveWardrobeLooks} onChange={event => setSaveWardrobeLooks(event.target.checked)} />Save these looks as drafts</label>
+                  </fieldset>}
+                  {!Object.keys(proposal.values).length && !proposal.wardrobeLooks?.length && <p className="hint-text">No safe missing details were proposed.</p>}
+                  <div className="proposal-actions"><button type="button" className="btn btn-primary" onClick={handleApplyProposal} disabled={saving || (!selectedProposalFields.length && !saveWardrobeLooks)}>Apply selected</button><button type="button" className="btn btn-outline" onClick={() => setProposal(null)}>Cancel</button></div>
                 </details>
               )}
 
@@ -584,8 +598,15 @@ export function VisualProfileModal({
             <div className="form-group-stack">
               <section className="visual-completion-panel">
                 <div><strong>Generate appearance &amp; prompts</strong><p className="hint-text">Propose missing appearance, visual prompt, and negative prompt fields. Review suggestions before applying. Internal studio notes are manual.</p></div>
-                <button type="button" className="btn btn-primary" disabled={proposing || saving} onClick={() => handlePropose(false, ["appearance", "visualPrompt", "negativePrompt"])}>{proposing ? "Preparing proposal…" : "Generate appearance & prompts with AI"}</button>
+                <button type="button" className="btn btn-primary" disabled={proposing || saving} onClick={() => handlePropose(false, ["appearance", "visualPrompt", "negativePrompt"], profile.visualType === "character")}>{proposing ? "Preparing proposal…" : "Generate appearance & prompts with AI"}</button>
               </section>
+              <fieldset><legend>Evidence chapters</legend>
+                <p className="hint-text">Leave blank to search recorded appearances, or focus on a specific chapter range.</p>
+                <div className="form-grid-2col">
+                  <label>First evidence chapter<input type="number" min="1" step="1" placeholder="650" value={evidenceFrom} onChange={event => setEvidenceFrom(event.target.value)} /></label>
+                  <label>Last evidence chapter<input type="number" min="1" step="1" placeholder="720" value={evidenceTo} onChange={event => setEvidenceTo(event.target.value)} /></label>
+                </div>
+              </fieldset>
               <div className="form-row">
                 <label>Visual Entity Type</label>
                 <select
@@ -1185,7 +1206,7 @@ export function VisualProfileModal({
                       </button>
                       <div className="reference-meta">
                         <span className="reference-role">{ref.role.replace(/_/g, " ")}</span>
-                        <span className="reference-source">{ref.approved ? "Approved" : "Review required"} · {ref.source}</span>
+                        <span className="reference-source">{ref.provenance?.rejectedAt ? "Rejected" : ref.approved ? "Approved" : "Review required"} · {ref.source}</span>
                         {ref.replacesReferenceId && <span className="reference-source">Revision of {ref.replacesReferenceId}</span>}
                       </div>
                       <details className="reference-applicability"><summary>When to use this reference</summary><p>Restrict outfit, lighting, or historical variants. Save Visual Profile to apply.</p>
@@ -1196,8 +1217,10 @@ export function VisualProfileModal({
                         <div className="reference-actions">
                           <button type="button" className="btn btn-outline" onClick={() => openReference(ref)}>View</button>
                           <button type="button" className="btn btn-outline" onClick={() => handleDownloadReference(ref)}>Download</button>
-                          <button type="button" className="btn btn-secondary" disabled={saving} onClick={() => handleApproveReference(ref.id, false)}>Approve</button>
-                          <button type="button" className="btn btn-primary" disabled={saving} onClick={() => handleApproveReference(ref.id, true)}>Set primary</button>
+                          {!ref.provenance?.rejectedAt && <>
+                            <button type="button" className="btn btn-secondary" disabled={saving} onClick={() => handleApproveReference(ref.id, false)}>Approve</button>
+                            <button type="button" className="btn btn-primary" disabled={saving} onClick={() => handleApproveReference(ref.id, true)}>Set primary</button>
+                          </>}
                           <button type="button" className="btn btn-danger" disabled={saving} onClick={() => void handleDeleteReference(ref)}>Delete</button>
                         </div>
                       )}

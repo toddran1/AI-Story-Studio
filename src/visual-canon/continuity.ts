@@ -1,3 +1,4 @@
+import { loadVisualProfiles } from "./profiles.js";
 import { loadStoryBibleWithCanonicalOverlay } from "../story-bible/canonical.js";
 import { identityNames } from "../narration/name-scope.js";
 import type { CanonicalEntity } from "../domain/story-bible.js";
@@ -49,6 +50,11 @@ function applyChange(state: VisualContinuityState, change: VisualContinuityChang
     const absent = state.absentCharacters;
     const remembered = absent && Object.hasOwn(absent, key) ? absent[key] : undefined;
     const next: VisualCharacterState = { ...remembered, ...existing, name: delta.name };
+    if (remembered && !existing) {
+      delete next.visibleEquipment;
+      delete next.concealedItems;
+      delete next.visibleEffects;
+    }
     if (delta.entityId) next.entityId = delta.entityId;
     for (const field of delta.clear ?? []) delete (next as Record<string, unknown>)[field];
     Object.assign(next, delta.set ?? {});
@@ -77,7 +83,7 @@ function applyChange(state: VisualContinuityState, change: VisualContinuityChang
   }
   for (const delta of change.objects ?? []) {
     const key = delta.name.trim().toLowerCase();
-    const existing = state.objects.find((entry) => entry.name.trim().toLowerCase() === key);
+    const existing = state.objects.find(entry => delta.entityId && entry.entityId ? delta.entityId === entry.entityId : entry.name.trim().toLowerCase() === key);
     if (delta.op === "remove") {
       if (existing) {
         state.objects = state.objects.filter((entry) => entry !== existing);
@@ -85,8 +91,9 @@ function applyChange(state: VisualContinuityState, change: VisualContinuityChang
       }
       continue;
     }
-    if (existing) Object.assign(existing, delta.set ?? {});
-    else state.objects.push({ name: delta.name, ...(delta.set ?? {}) });
+    const update = { ...delta.set, ...(delta.entityId ? { entityId: delta.entityId, name: delta.name } : {}), ...(delta.clearWornBy ? { wornBy: null } : {}) };
+    if (existing) Object.assign(existing, update);
+    else state.objects.push({ name: delta.name, ...update });
   }
 }
 
@@ -154,7 +161,7 @@ export function resolveVisualContinuity(options: {
   let presentChapter = options.chapter ?? handoff?.chapter;
   const identities = new Map<string, Set<string>>();
   for (const entity of options.entities ?? []) {
-    if (entity.type !== "character" && entity.type !== "location") continue;
+    if (!["character", "location", "item", "concept"].includes(entity.type)) continue;
     for (const name of [entity.id, ...entity.mergedFromIds, ...identityNames(entity)]) {
       const key = JSON.stringify([entity.type, name.trim().toLowerCase()]);
       const matches = identities.get(key) ?? new Set<string>();
@@ -162,7 +169,7 @@ export function resolveVisualContinuity(options: {
       identities.set(key, matches);
     }
   }
-  function entityId(type: "character" | "location", name?: string) {
+  function entityId(type: "character" | "location" | "item" | "concept", name?: string) {
     if (!name) return undefined;
     const matches = identities.get(JSON.stringify([type, name.trim().toLowerCase()]));
     return matches?.size === 1 ? [...matches][0] : undefined;
@@ -199,6 +206,13 @@ export function resolveVisualContinuity(options: {
     const explicitSetting = scene.visualChanges?.environment?.set;
     if (explicitSetting?.locationId || explicitSetting?.description || (previousScene?.location && scene.location && !samePlace(previousScene.location,scene.location)) || (previousScene?.sequence?.id && scene.sequence?.id && previousScene.sequence.id !== scene.sequence.id)) delete current.spatial;
     const startState = cloneState(current);
+    // Visibility is specific to the selected frame, even when ownership or
+    // an active transformation continues.
+    for (const character of current.characters) {
+      delete character.visibleEquipment;
+      delete character.concealedItems;
+      delete character.visibleEffects;
+    }
     const factProvenance: Record<string, VisualContinuityFactProvenance> = {};
     for (const character of startState.characters) factProvenance[`characters.${character.name}`] = factSource.get(`characters.${character.name}`) ?? "previous_scene";
     if (startState.environment) factProvenance.environment = factSource.get("environment") ?? "previous_scene";
@@ -234,6 +248,15 @@ export function resolveVisualContinuity(options: {
           ...(stableLocationId ? { locationId: stableLocationId } : {}),
         },
       },
+      objects: scene.visualChanges?.objects?.map(delta => {
+        const name = delta.entityId ?? delta.name;
+        const id = entityId("item", name) ?? entityId("concept", name);
+        const canonical = id && options.entities?.find(entity => entity.id === id);
+        return {
+          ...delta, entityId: id, name: canonical ? canonical.canonicalName : delta.name,
+          set: delta.set && { ...delta.set, wornBy: entityId("character", delta.set.wornBy ?? undefined) ?? delta.set.wornBy },
+        };
+      }),
       transition: scene.visualChanges?.transition ?? (returning ? "time_jump" as const : undefined),
       characters: scene.visualChanges?.characters?.map(delta => ({
         ...delta, entityId: entityId("character", delta.entityId) ?? delta.entityId ?? entityId("character", delta.name),
@@ -348,6 +371,7 @@ export function renderContinuityForPlanner(state: VisualContinuityState, maxChar
     const parts = [
       character.wardrobe && `wardrobe: ${character.wardrobe}`,
       character.activeAbilities !== undefined && `active abilities: ${character.activeAbilities.join(", ") || "none (inactive baseline)"}`,
+      character.visibleEffects?.length && `visible effects: ${character.visibleEffects.join(", ")}`,
       character.visibleEquipment !== undefined && `visible equipment: ${character.visibleEquipment.join(", ") || "none"}`,
       character.concealedItems?.length && `concealed/stored (do not display): ${character.concealedItems.join(", ")}`,
       character.equipment && `equipment possession (visibility must be established): ${character.equipment}`,
@@ -366,7 +390,7 @@ export function renderContinuityForPlanner(state: VisualContinuityState, maxChar
     const parts = [env.description, env.timeOfDay && `time: ${env.timeOfDay}`, env.lighting && `lighting: ${env.lighting}`, env.weather && `weather: ${env.weather}`, env.condition && `condition: ${env.condition}`, env.damage && `damage: ${env.damage}`].filter(Boolean);
     if (parts.length) lines.push(`- Environment — ${parts.join("; ")}`);
   }
-  for (const object of state.objects) lines.push(`- Object ${object.name}${object.condition ? ` — ${object.condition}` : ""}${object.possessedBy ? ` (held by ${object.possessedBy})` : ""}`);
+  for (const object of state.objects) lines.push(`- Object ${object.name}${object.condition ? ` — ${object.condition}` : ""}${object.wornBy ? ` (worn by ${state.characters.find(character => character.entityId === object.wornBy)?.name ?? object.wornBy})` : object.possessedBy ? ` (possessed by ${object.possessedBy}; visibility requires current frame evidence)` : ""}`);
   if (state.spatial) lines.push(`- Spatial: ${state.spatial}`);
   const text = lines.length ? lines.join("\n") : "No prior visual continuity state.";
   return text.length > maxCharacters ? `${text.slice(0, maxCharacters - 1)}…` : text;
@@ -428,7 +452,7 @@ export type PreviousVisualContinuity = {
 
 const previousContinuityCache = new Map<string, { signature: string; value?: PreviousVisualContinuity; history: Map<number, VisualContinuityState> }>();
 function continuityInputFingerprint(scenes: ManifestSceneLike[], overlay: VisualContinuityOverlay, previous: PreviousVisualContinuity | undefined, entities: CanonicalEntity[], history: ReadonlyMap<number, VisualContinuityState>) {
-  return fingerprint({ version: "continuity-input-v6", identities: entities.map(entity => [entity.id, entity.type, entity.mergedFromIds, identityNames(entity)]), historical: scenes.map(scene => scene.overrides?.appearanceChapter === undefined ? null : history.get(scene.overrides.appearanceChapter) ?? null), scenes: continuitySceneInputs({ scenes }).map(input => ({ ...input, narrationText: scenes.find(scene => scene.id === input.id)?.narrationText })), overlay, previous: previous && { chapter: previous.chapter, stateFingerprint: previous.stateFingerprint, sourceFacts: previous.sourceFacts, referenceArtwork: previous.referenceArtwork } });
+  return fingerprint({ version: "continuity-input-v9", identities: entities.map(entity => [entity.id, entity.type, entity.mergedFromIds, identityNames(entity)]), historical: scenes.map(scene => scene.overrides?.appearanceChapter === undefined ? null : history.get(scene.overrides.appearanceChapter) ?? null), scenes: continuitySceneInputs({ scenes }).map(input => ({ ...input, narrationText: scenes.find(scene => scene.id === input.id)?.narrationText })), overlay, previous: previous && { chapter: previous.chapter, stateFingerprint: previous.stateFingerprint, sourceFacts: previous.sourceFacts, referenceArtwork: previous.referenceArtwork } });
 }
 
 /** Reconcile manifests in chapter order. A saved handoff is a reusable cache
@@ -437,8 +461,16 @@ export async function resolvePreviousVisualContinuity(root: string, slug: string
   return (await resolveContinuityHistory(root, slug, chapter)).previous;
 }
 
-async function resolveContinuityHistory(root: string, slug: string, chapter: number) {
-  const entities = (await loadStoryBibleWithCanonicalOverlay(root, slug)).canonicalEntities;
+export async function loadVisualContinuityHistory(root: string, slug: string, throughChapter: number, entities: CanonicalEntity[]) {
+  return (await resolveContinuityHistory(root, slug, throughChapter + 1, entities)).history;
+}
+
+async function resolveContinuityHistory(root: string, slug: string, chapter: number, identities?: CanonicalEntity[]) {
+  let entities = identities;
+  if (!entities) {
+    const [bible, profiles] = await Promise.all([loadStoryBibleWithCanonicalOverlay(root, slug), loadVisualProfiles(root, slug)]);
+    entities = continuityCanonicalEntities(bible.canonicalEntities, profiles);
+  }
   const history = new Map<number, VisualContinuityState>();
   let names: string[];
   try { names = await readdir(join(storyPaths(root, slug, chapter).story, "chapters")); }
@@ -479,6 +511,14 @@ async function resolveContinuityHistory(root: string, slug: string, chapter: num
   if (previousContinuityCache.size >= 64) previousContinuityCache.delete(previousContinuityCache.keys().next().value!);
   previousContinuityCache.set(key,{signature,value: structuredClone(previous), history });
   return { previous, history, entities };
+}
+
+export function continuityCanonicalEntities(entities: CanonicalEntity[], profiles: Awaited<ReturnType<typeof loadVisualProfiles>>) {
+  // Scene names participate in the visual timeline without changing narration aliases.
+  return entities.map(entity => {
+    const looks = profiles[entity.id]?.appearanceEras?.flatMap(era => era.sceneAliases ?? []) ?? [];
+    return looks.length ? { ...entity, aliases: [...entity.aliases, ...looks] } : entity;
+  });
 }
 
 type ManifestSceneLike = {

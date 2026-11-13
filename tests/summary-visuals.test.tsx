@@ -63,6 +63,25 @@ describe("summary visual production", () => {
   });
   afterEach(async () => { await rm(root, { recursive: true, force: true }); });
   const produce = () => visuals.produce("demo-story", id, { pacing: "custom", sceneCount: 2 });
+  it("uses the saved chapter state for a recap flashback", async () => {
+    const recap = await produce();
+    const earlier = recap.scenePlan!.scenes[0]!;
+    const flashback = { ...earlier, overrides: { ...earlier.overrides, appearanceChapter: 1 }, visualChanges: { transition: "flashback" as const } };
+    expect((await visuals.sceneContinuityDetail("demo-story", id, flashback))[0]?.continuity).toMatchObject({ historical: true, historicalStateAvailable: false });
+
+    await atomicWriteJson(storyPaths(root, "demo-story", 1).scenesManifest, {
+      ...recap.scenePlan, chapter: 1, sourceType: "chapter", sourceId: "1",
+      scenes: [{ ...earlier, artwork: { status: "pending" }, visualChanges: {
+        characters: [{ name: "Su Ming", op: "update", set: { wardrobe: "Blue travelling coat" } }],
+        environment: { set: { condition: "Undamaged" } },
+      } }],
+    });
+    const state = (await visuals.sceneContinuityDetail("demo-story", id, flashback))[0]?.continuity;
+    expect(state).toMatchObject({ historical: true, historicalStateAvailable: true, endState: {
+      characters: [expect.objectContaining({ name: "Su Ming", wardrobe: "Blue travelling coat" })],
+      environment: { condition: "Undamaged" },
+    } });
+  });
   it("renders selected summary motion, keeps its reuse fingerprint current, and detects deselection", async () => {
     await produce(); await visuals.reviewArtwork("demo-story",id,"scene-001","approved");
     await visuals.artwork("demo-story",id,{scenes:["scene-002"],force:true});

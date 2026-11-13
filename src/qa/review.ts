@@ -14,13 +14,14 @@ import {
   anchorFromIssue, computeFindingId, deriveIssues, extractNameRelation, FindingAnchor, findingFingerprint,
   migrateQaState, normalizeExcerptKey, normalizeQaText, openFindings, qaCounts, recomputeQaSummary,
 } from "./findings.js";
-import { computeQaDependencyFingerprint, computeQaDependencyFingerprints, qaDependencySnapshot, loadQaDeterministicDependencies, loadStoredQaDependencies, resolveStoredQaContext } from "./freshness.js";
+import { loadSourceNameBridge } from "../naming/translation-bridge.js";
+import { loadNarrationNamingEntities, relevantNarrationNamingEntities } from "../story-bible/narration-names.js";
+import { computeQaDependencyFingerprint, computeQaDependencyFingerprints, qaDependencySnapshot, loadQaDeterministicDependencies, scopeQaSourceRules, loadStoredQaDependencies, resolveStoredQaContext } from "./freshness.js";
 import { QA_PROMPT_VERSION } from "./prompts.js";
 import { validateChapterQuality } from "./validator.js";
 import { runDeterministicQaChecks, type AcceptedContinuity } from "./deterministic.js";
 import { filterQaDetectionsForStory, qaFingerprintConfig, qaPolicyPrompt, storedQaFindingEnabled } from "./policy.js";
 import { exceptionsPromptSection, filterExceptedFindings, listQaExceptions } from "./exceptions.js";
-import { loadStoryBibleWithCanonicalOverlay } from "../story-bible/canonical.js";
 import { authorizedNarrationNames } from "../narration/naming-preferences.js";
 import { persistQaStateWithMetadata } from "./persistence.js";
 import type { QaDependencySnapshot } from "../domain/qa.js";
@@ -708,12 +709,13 @@ export async function recheckChapterQa(deps: {
     loadQaDeterministicDependencies(root, story.slug),
   ]);
   const config = story.pipeline.qa;
-  const effectiveNamingEntities = (await loadStoryBibleWithCanonicalOverlay(root, story.slug)).canonicalEntities;
+  const relevantNames = relevantNarrationNamingEntities(await loadNarrationNamingEntities(root, story.slug, { includeUnmapped: true }), `${source}\n${translation}\n${narration}`, chapter, source);
+  const effectiveNamingEntities = await loadSourceNameBridge({ root, slug: story.slug, chapter }, source, translation, relevantNames);
   const currentDependencies = {
     source: fingerprint({ source, sourceLanguage: story.sourceLanguage, outputLanguage: story.outputLanguage }),
     translation: fingerprint(translation), narration: fingerprint(narration), context: qaContext.raw,
     config: qaFingerprintConfig(story), narrationSettings: { profanityMode: story.narrationSettings.profanityMode, includeChapterTitle: story.narrationSettings.includeChapterTitle },
-    prompt: QA_PROMPT_VERSION, mode: story.qaMode, ...deterministicDeps,
+    prompt: QA_PROMPT_VERSION, mode: story.qaMode, ...deterministicDeps, naming: scopeQaSourceRules(deterministicDeps.naming, source),
   };
   const dependencyFingerprints = computeQaDependencyFingerprints(currentDependencies);
   const dependencySnapshot = qaDependencySnapshot(dependencyFingerprints);

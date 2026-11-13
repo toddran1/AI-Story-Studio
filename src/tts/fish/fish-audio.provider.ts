@@ -9,7 +9,7 @@ import { splitForTTS } from "../split-text.js";
 import { normalizeFishSpeechText, attachInlineLaughter } from "./speech-normalizer.js";
 import { castQuotedDialogue, directQuotedDialogue, prepareFishMultiSpeakerChunks } from "./dialogue-casting.js";
 import { isFishS2Model } from "./control-cues.js";
-import { normalizeUnknownFieldValues } from "../speech-normalization.js";
+import { normalizeNumberLabels, normalizeNumericRanges, normalizeUnknownFieldValues } from "../speech-normalization.js";
 import { adaptPronunciationText } from "../pronunciation.js";
 import type { VocalizationCapabilities, VocalizationRenderStrategy } from "../vocalizations.js";
 import { logger } from "../../utils/logger.js";
@@ -55,8 +55,8 @@ export class FishAudioProvider implements TTSProvider {
     } = {},
   ) {
     this.inputNormalizationVersion = speechOptions.tskRendering === "direction"
-      ? "fish-speech-normalization-v44-prose-boundaries-tsk-direction"
-      : "fish-speech-normalization-v44-prose-boundaries";
+      ? "fish-speech-normalization-v50-throat-clear-tsk-direction"
+      : "fish-speech-normalization-v50-throat-clear";
   }
 
   resolveReferenceId(referenceId?: string): string | undefined {
@@ -67,7 +67,7 @@ export class FishAudioProvider implements TTSProvider {
    * unknown models fall back to canonical short spoken forms. No guessed tags. */
   vocalizationStrategy(model?: string): VocalizationRenderStrategy {
     if (!isFishS2Model(model)) return { kind: "safe_normalize" };
-    return { kind: "native_tags", tags: { laugh: "[laughing]", chuckle: "[chuckle]", throat_clear: "[cough]", sigh: "[sigh]", gasp: "[gasp]", scream: "[shouting] Ah!" } };
+    return { kind: "native_tags", tags: { laugh: "[laughing]", chuckle: "[chuckle]", throat_clear: "[clears throat]", sigh: "[sigh]", gasp: "[gasp]", scream: "[shouting] Ah!" } };
   }
 
   async validateConfiguration(): Promise<void> { if (!this.apiKey) throw new ConfigurationError("Missing required fish credential (FISH_AUDIO_API_KEY). Add it to .env."); }
@@ -81,7 +81,7 @@ export class FishAudioProvider implements TTSProvider {
       : (() => {
           const speechText = normalizeFishSpeechText(adaptPronunciationText(request.text, request.pronunciation ?? [], this.pronunciationCapabilities), request.model, this.speechOptions);
           if (!speechText) throw new ProviderError("Fish Audio narration is empty after speech normalization");
-          const meaningfulText = attachInlineLaughter(stripEmptyDialogueLines(speechText));
+          const meaningfulText = attachInlineLaughter(stripEmptyDialogueLines(speechText), isFishS2Model(request.model) && !multiSpeaker);
           if (!meaningfulText) throw new ProviderError("Fish Audio narration is empty after removing empty dialogue");
           const castText = multiSpeaker ? castQuotedDialogue(meaningfulText) : directedSingleVoice ? directQuotedDialogue(meaningfulText) : meaningfulText;
           let prepared = multiSpeaker
@@ -121,14 +121,16 @@ export class FishAudioProvider implements TTSProvider {
       // Saved exact chunks can contain empty dialogue left after profanity was
       // replaced by a tone. Clean only the wire input so their stored boundaries
       // remain usable for segment regeneration and censor reassembly.
-      const meaningfulText = attachInlineLaughter(normalizeUnknownFieldValues(stripEmptyDialogueLines(text)));
+      // Fresh text was handled before casting. On retries, handle saved chunks
+      // here without re-splitting them or treating newly injected cues as input.
+      const meaningfulText = attachInlineLaughter(normalizeNumericRanges(normalizeNumberLabels(normalizeUnknownFieldValues(stripEmptyDialogueLines(text)))), request.exactChunk === true && isFishS2Model(request.model) && !multiSpeaker);
       if (!meaningfulText) throw new ProviderError("Fish Audio segment contains only empty dialogue");
       // Blank lines between prose can provoke an invented vocal reaction in
       // Fish. Change only the transport text, after segmentation, so saved
       // segment indices and censor reassembly remain stable. Quoted dialogue
       // and explicit cue/speaker boundaries are left intact.
       const flowingProse = meaningfulText.replace(/(?<=[\p{L}\p{N}.!?…。！？,;:])[ \t]*\r?\n(?:[ \t]*\r?\n)+[ \t]*(?=\p{L})/gu, " ");
-      const wireText = renderFishPronunciationDictionary(flowingProse, request.pronunciationDictionary, request.model, request.pronunciationProtectedTerms);
+      const wireText = renderFishPronunciationDictionary(flowingProse, request.pronunciationDictionary, request.model, request.pronunciationProtectedTerms, request.pronunciationIdentityConflicts);
       const currentChunk = index + 1;
       const totalChunks = chunks.length;
       const chunkStem = String(currentChunk).padStart(4, "0");

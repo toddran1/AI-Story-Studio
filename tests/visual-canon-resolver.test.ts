@@ -1,10 +1,11 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { resolveVisualCanonPrompt, resolveVisuallyRelevantCanonicalEntities } from "../src/visual-canon/resolver.js";
 import { createDefaultArtDirection } from "../src/domain/art-direction.js";
-import { StoryBible, emptyStoryBible } from "../src/domain/story-bible.js";
+import { StoryBible, canonicalEntitySchema, emptyStoryBible } from "../src/domain/story-bible.js";
 import { Scene } from "../src/scenes/types.js";
 import { testStory } from "./helpers.js";
 import { VisualEntityProfile } from "../src/domain/visual-profile.js";
+import { resolveVisualContinuity } from "../src/visual-canon/continuity.js";
 
 describe("Visual Canon Prompt Resolver", () => {
   const story = testStory();
@@ -54,6 +55,73 @@ describe("Visual Canon Prompt Resolver", () => {
     importance: "major",
     artwork: { status: "pending", review: "unreviewed", versions: [] },
   };
+
+  it("routes a cover name to the same character and selects only its scene look references", () => {
+    const now = new Date().toISOString();
+    const ref = (id: string, role: "primary_reference" | "expression_sheet") => ({
+      id, role, entityId: entityId1, imagePath: id + ".png", approved: true, source: "style_sheet" as const, createdAt: now,
+    });
+    const profile: VisualEntityProfile = {
+      id: "profile", entityId: entityId1, visualType: "character", status: "approved",
+      appearance: "Lean build", visualPrompt: "", negativePrompt: "", notes: "",
+      variants: [], revision: 1, createdAt: now, updatedAt: now,
+      references: [ref("base", "primary_reference"), ref("masked", "expression_sheet")],
+      appearanceEras: [{ id: "cover", name: "Jing masked", sceneAliases: ["Jing"], startChapter: 3, status: "approved", appearance: "Red-and-white face-covering mask", visualPrompt: "", referenceIds: ["masked"] }],
+    };
+    const resolve = (scene: Scene) => resolveVisualCanonPrompt({ scene, story, bible, visualProfiles: { [entityId1]: profile }, artDirection, chapter: 4 });
+    const masked = resolve({ ...baseScene, summary: "Jing walks in.", characters: ["Jing"], entityIds: [] });
+    expect(masked.resolvedEntities.map(entity => entity.entityId)).toEqual([entityId1]);
+    expect(masked.resolvedEntities[0]?.references?.map(ref => ref.id)).toEqual(["masked"]);
+    expect(masked.prompt).toContain("face-covering mask");
+    expect(masked.prompt).toContain("Lean build");
+    expect(resolve(baseScene).resolvedEntities.find(entity => entity.entityId === entityId1)?.references?.map(ref => ref.id)).toEqual(["base"]);
+  });
+
+  it("reuses the same mask while worn or held, and drops its reference when hidden or off-screen", () => {
+    const now = new Date().toISOString();
+    const profile: VisualEntityProfile = {
+      id: "mask-profile", entityId: entityId2, visualType: "item", status: "approved",
+      appearance: "Rigid red mask with a fastening strap", visualPrompt: "", negativePrompt: "", notes: "",
+      variants: [], revision: 1, createdAt: now, updatedAt: now,
+      references: [{ id: "mask-ref", role: "primary_reference", entityId: entityId2, imagePath: "mask.png", approved: true, source: "style_sheet", createdAt: now }],
+    };
+    bible.canonicalEntities[1] = { ...bible.canonicalEntities[1]!, type: "concept", canonicalName: "Jing Register", aliases: ["Opera Mask"] };
+    const scenes: Scene[] = [
+      { ...baseScene, visualChanges: { objects: [{ name: "Opera Mask", op: "add", set: { possessedBy: "Li Chen", wornBy: "Li Chen" } }] } },
+      { ...baseScene, id: "scene-002", visualChanges: { characters: [{ name: "Li Chen", op: "update", set: { concealedItems: ["Opera Mask"] } }] } },
+      { ...baseScene, id: "scene-003", visualChanges: {
+        objects: [{ name: "Jing Register", op: "update", clearWornBy: true }],
+        characters: [{ name: "Li Chen", op: "update", set: { visibleEquipment: ["Opera Mask"] } }],
+      } },
+      { ...baseScene, id: "scene-004" },
+      { ...baseScene, id: "scene-005", visualChanges: {
+        characters: [{ name: "Li Chen", op: "update", set: { visibleEquipment: ["Opera Mask"], concealedItems: ["Jing Register"] } }],
+      } },
+      { ...baseScene, id: "scene-006", characters: [], visualChanges: {
+        characters: [{ name: "Li Chen", op: "update", set: { visibleEquipment: ["Opera Mask"] } }],
+      } },
+    ];
+    const entities = bible.canonicalEntities.map(entity => canonicalEntitySchema.parse({ ...entity, firstAppearance: 1, lastKnownAppearance: 1 }));
+    const continuity = resolveVisualContinuity({ scenes, entities });
+    const resolve = (index: number) => resolveVisualCanonPrompt({
+      scene: scenes[index]!, frameState: continuity.perScene[index]!.endState,
+      story, bible, visualProfiles: { [entityId2]: profile }, artDirection,
+    });
+    const worn = resolve(0);
+    expect(worn.resolvedEntities.find(entity => entity.entityId === entityId2)?.references?.map(ref => ref.id)).toEqual(["mask-ref"]);
+    expect(worn.prompt).toContain("Li Chen wears Jing Register");
+    expect(resolve(1).resolvedEntities.some(entity => entity.entityId === entityId2)).toBe(false);
+    const held = resolve(2);
+    expect(held.resolvedEntities.find(entity => entity.entityId === entityId2)?.references?.map(ref => ref.id)).toEqual(["mask-ref"]);
+    expect(held.prompt).toContain("Jing Register is visible with Li Chen");
+    expect(held.prompt).not.toContain("Li Chen wears Jing Register");
+    expect(continuity.perScene[3]?.endState.objects).toEqual([{ name: "Jing Register", entityId: entityId2, possessedBy: "Li Chen", wornBy: null }]);
+    expect(resolve(3).resolvedEntities.some(entity => entity.entityId === entityId2)).toBe(false);
+    expect(resolve(3).prompt).toContain("REMOVED EQUIPMENT: Jing Register");
+    expect(resolve(4).resolvedEntities.some(entity => entity.entityId === entityId2)).toBe(false);
+    expect(resolve(5).resolvedEntities.some(entity => entity.entityId === entityId2)).toBe(false);
+  });
+
 
   it("falls back to Story Bible description when visual profile is draft or missing", () => {
     // Neither entity has an approved visual profile

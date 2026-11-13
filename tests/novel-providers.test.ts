@@ -17,8 +17,8 @@ const longText = (label: string) => `${label}。`.repeat(90);
 describe("Milestone 17 novel providers", () => {
   it("registers all built-in providers and resolves their URLs", async () => {
     const registry = new SourceProviderRegistry();
-    expect(registry.listNovelProviders().map((item) => item.id)).toEqual(expect.arrayContaining(["fanqie", "ixdzs8", "shuhaige", "biquge5", "fsshu", "biquge345", "tianyabooks"]));
-    expect(registry.listNovelProviders().at(-1)).toMatchObject({ id: "fanqie", priority: 900, enabledByDefault: false });
+    expect(registry.listNovelProviders().map((item) => item.id)).toEqual(expect.arrayContaining(["fanqie", "ixdzs8", "shuhaige", "biquge5", "fsshu", "biquge345", "tianyabooks", "tomatomtl"]));
+    expect(registry.listNovelProviders().find(({ id }) => id === "fanqie")).toMatchObject({ id: "fanqie", priority: 900, enabledByDefault: false });
     expect((await registry.resolve("https://ixdzs8.com/read/568509/")).provider).toBeInstanceOf(Ixdzs8Source);
     expect((await registry.resolve("https://www.shuhaige.net/126726/")).provider).toBeInstanceOf(ShuhaigeSource);
   });

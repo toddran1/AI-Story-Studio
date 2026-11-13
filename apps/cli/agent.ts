@@ -3,9 +3,11 @@ import { z } from "zod";
 import { loadEnvironment, resolveStudioRoot } from "../../src/config/env.js";
 import { parseChapterSelection } from "../../src/batch/range.js";
 import { agentStageSchema, prepareAgentRun, confirmAgentRun, nextAgentRequest, submitAgentResponse, failAgentRequest, resumeAgentRun, reportAgentRun } from "../../src/agent-processing/service.js";
+import { prepareSourceNameAgentRun, runSourceNameAgentCommand } from "../../src/agent-processing/source-name-run.js";
 
 const help = `Subscription agent processing (local only; no paid provider fallback)
   prepare --story SLUG --chapters "1,5-10,78,100-150" --stages translation,narration --agent codex|antigravity --model MODEL [--image-model MODEL] [--force] [--stop-on-error]
+  prepare --story SLUG --chapters "all|1,5-10" --stages sourceNameIndex --agent codex|antigravity --model MODEL
   confirm --story SLUG --run UUID --plan FINGERPRINT
   next|resume|report --story SLUG --run UUID
   respond --story SLUG --run UUID --request REQUEST_ID --file LOCAL_FILE
@@ -32,11 +34,19 @@ export async function runAgentCommand(args: string[], root: string) {
   for (const name of Object.keys(flags)) if (!allowed[command]!.includes(name.slice(2))) throw new Error(`Unknown option: ${name}`);
   const required = (name: string) => z.string().min(1).parse(flags[`--${name}`]);
   const story = required("story");
+  if (command === "prepare" && required("stages").trim() === "sourceNameIndex") {
+    if (flags["--image-model"] || flags["--force"] || flags["--stop-on-error"]) throw new Error("Source Name Index scans do not accept --image-model, --force, or --stop-on-error");
+    const selection = required("chapters").trim();
+    return prepareSourceNameAgentRun(root, { story, chapters: selection === "all" ? selection : parseChapterSelection(selection), agent: required("agent"), model: required("model") });
+  }
   if (command === "prepare") return prepareAgentRun(root, {
     story, chapters: parseChapterSelection(required("chapters")), stages: required("stages").split(",").map((stage) => agentStageSchema.parse(stage.trim())),
     agent: required("agent"), model: required("model"), imageModel: flags["--image-model"] ?? "unknown", force: Boolean(flags["--force"]), continueOnError: !flags["--stop-on-error"],
   });
   const id = required("run");
+  if (command === "fail") z.enum(["refused", "failed", "needs-input"]).parse(required("outcome"));
+  const sourceNameRun = await runSourceNameAgentCommand(root, story, id, command, flags);
+  if (sourceNameRun) return sourceNameRun;
   if (command === "confirm") return confirmAgentRun(root, story, id, required("plan"));
   if (command === "respond") return submitAgentResponse(root, story, id, required("request"), required("file"));
   if (command === "fail") return failAgentRequest(root, story, id, required("request"), z.enum(["refused", "failed", "needs-input"]).parse(required("outcome")), required("reason"));

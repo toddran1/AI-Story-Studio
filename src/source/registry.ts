@@ -1,3 +1,4 @@
+import { TomatoMtlSource } from "./tomatomtl/tomatomtl-source.js";
 import { WfxsSource } from "./wfxs/wfxs-source.js";
 import { stat } from "node:fs/promises";
 import { extname, resolve } from "node:path";
@@ -13,14 +14,14 @@ import { WebHttpClient, WebHttpError } from "./web/http-client.js";
 import { NovelProviderId, NovelSearchResult, NovelSourceProvider } from "./novel-provider.js";
 import { ProviderCircuitBreaker, providerDescriptor } from "./provider-catalog.js";
 import { builtinSelectorSources } from "./html/builtin-selector-sources.js";
-import { SourceInputError, SourceOperationError, SourceUpstreamError } from "./errors.js";
+import { SourceAuthenticationRequiredError, SourceInputError, SourceOperationError, SourceUpstreamError } from "./errors.js";
 
 export class SourceProviderRegistry {
   private readonly providers = new Map<SourceType, StorySourceProvider>(); private readonly novelProviders = new Map<NovelProviderId, NovelSourceProvider & StorySourceProvider>();
   private readonly breaker: ProviderCircuitBreaker;
   constructor(providers?: StorySourceProvider[], webClient?: WebHttpClient, breaker = new ProviderCircuitBreaker()) {
     this.breaker = breaker;
-    const configured = providers ?? [new TxtSource(), new EpubSource(), new DocxSource(), new FanqieSource(webClient), new Ixdzs8Source(webClient), new ShuhaigeSource(webClient), new XiaoshuoSource(webClient), new WfxsSource(webClient), ...builtinSelectorSources(webClient)];
+    const configured = providers ?? [new TxtSource(), new EpubSource(), new DocxSource(), new FanqieSource(webClient), new Ixdzs8Source(webClient), new ShuhaigeSource(webClient), new XiaoshuoSource(webClient), new WfxsSource(webClient), new TomatoMtlSource(webClient), ...builtinSelectorSources(webClient)];
     for (const provider of configured) {
       if (isNovelProvider(provider)) this.novelProviders.set(provider.id, provider);
       if (provider.type !== "web" || !this.providers.has("web")) this.providers.set(provider.type, provider);
@@ -64,7 +65,7 @@ export class SourceProviderRegistry {
   private async execute<T>(provider: NovelSourceProvider, operation: () => Promise<T>, semanticFailure?: (result: T) => Error | undefined) {
     this.breaker.assertAvailable(provider.id);
     try { const result = await operation(); const failure = semanticFailure?.(result); if (failure) this.breaker.failure(provider.id, failure); else this.breaker.success(provider.id); return result; }
-    catch (error) { this.breaker.failure(provider.id, error); if (error instanceof SourceOperationError || error instanceof WebHttpError) throw error; throw new SourceUpstreamError(`${provider.displayName} source operation failed: ${error instanceof Error ? error.message : String(error)}`, { cause: error }); }
+    catch (error) { if (!(error instanceof SourceAuthenticationRequiredError)) this.breaker.failure(provider.id, error); if (error instanceof SourceOperationError || error instanceof WebHttpError) throw error; throw new SourceUpstreamError(`${provider.displayName} source operation failed: ${error instanceof Error ? error.message : String(error)}`, { cause: error }); }
   }
 }
 

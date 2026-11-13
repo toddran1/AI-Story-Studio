@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { mkdir } from "node:fs/promises";
 import { z } from "zod";
-import { Chapter, StageName, chapterSchema } from "../domain/chapter.js";
+import { Chapter, SOURCE_NAME_HOLD_REASON, StageName, chapterSchema } from "../domain/chapter.js";
 import { StoryBible, storyBibleSchema } from "../domain/story-bible.js";
 import { atomicWrite, atomicWriteJson } from "../storage/atomic-write.js";
 import { storyPaths, voicePreviewPaths } from "../storage/paths.js";
@@ -59,7 +59,7 @@ export async function saveChapterTextEdit(root: string, slug: string, chapterNum
   const stage: StageName = field; const output = field === "translation" ? paths.english : paths.narration; const now = new Date().toISOString(); const outputFingerprint = fingerprint(Buffer.from(text).toString("base64"));
   await atomicWrite(output, text); if (field === "narration") await atomicWrite(paths.narrationTts, text); chapter.stages[stage] = { status: "complete", provider: "manual", model: "studio-editor", fingerprint: `manual:${outputFingerprint}`, outputFingerprint, completedAt: now };
   const order: StageName[] = ["translation", "narration", "qa", "storyBible", "continuity", "tts", "audioMastering", "alignment", "subtitles", "scenePlanning", "artwork", "video"];
-  const invalidated = order.slice(order.indexOf(stage) + 1); for (const name of invalidated) chapter.stages[name] = { status: "pending" };
+  const invalidated = order.slice(order.indexOf(stage) + 1); for (const name of invalidated) if (chapter.stages[name].staleReason !== SOURCE_NAME_HOLD_REASON) chapter.stages[name] = { status: "pending" };
   if (field === "translation") chapter.counts.englishWords = wordCount(text); else chapter.counts.narrationWords = wordCount(text); chapter.quality = undefined; chapter.audio = undefined; chapter.alignment = undefined; chapter.subtitle = undefined; chapter.video = undefined; chapter.scenes = undefined; chapter.updatedAt = now; await atomicWriteJson(paths.chapterMeta, chapter);
   return { chapter, invalidated };
 }

@@ -13,9 +13,10 @@ export function SourceInspectionModal({ progress, error, sourceUrl, onRetry, onC
   const [verificationError, setVerificationError] = useState("");
   const chapters = progress.phase === "chapters" && progress.total !== undefined && progress.total > 0;
   const percent = chapters ? Math.min(100, Math.round((progress.completed ?? 0) / progress.total! * 100)) : undefined;
+  const signIn = Boolean(error && /TomatoMTL sign-in required/iu.test(error));
   const challenge = !!error && /browser verification|CHALLENGE_REQUIRED|just a moment|challenge required/iu.test(error);
   let challengeUrl: string | undefined;
-  try { const parsed = new URL(sourceUrl ?? ""); if (parsed.protocol === "https:" && !parsed.username && !parsed.password) challengeUrl = parsed.href; } catch { /* File imports have no website. */ }
+  try { const parsed = new URL(sourceUrl ?? ""); if (parsed.protocol === "https:" && !parsed.username && !parsed.password) challengeUrl = signIn ? "https://tomatomtl.com/user/login" : parsed.href; } catch { /* File imports have no website. */ }
   const openVerification = async () => {
     if (!challengeUrl) return;
     setVerification("opening"); setVerificationError("");
@@ -50,11 +51,11 @@ export function SourceInspectionModal({ progress, error, sourceUrl, onRetry, onC
     {!error && chapters && <div className="source-inspection-completion"><span>{progress.completed ?? 0} of {progress.total} chapters checked</span><span>{percent}%</span></div>}
     <p id="source-inspection-description">{error ? "Your stored chapters have not been changed." : "Keep this page open. The update preview will appear when inspection finishes. Your stored chapters remain unchanged until you import."}</p>
     {error && <><p className="intake-error" role="alert">{error}</p>
-      {challenge && challengeUrl && <div className="source-challenge-actions">
-        <p>Open a verification window (a visible Chrome window controlled by the studio), solve the website's browser challenge there, then return here. The studio reuses that window's session for its own requests.</p>
+      {(challenge || signIn) && challengeUrl && <div className="source-challenge-actions">
+        <p>{signIn ? "Sign in to TomatoMTL in the Chrome window opened by Story Studio. Leave that window open while importing, then return here to retry." : "Open a verification window (a visible Chrome window), solve the website’s browser challenge, then return here. Story Studio reuses that window’s session for its requests."}</p>
         <button className="button primary" disabled={verification === "opening" || verification === "open" || verification === "verifying"} onClick={() => void openVerification()}>{verification === "opening" ? "Opening verification window…" : verification === "open" || verification === "verifying" ? "Verification window open" : "Open verification window"}</button>
         {(verification === "open" || verification === "verifying") && <>
-          <button className="button primary" disabled={verification === "verifying"} onClick={() => void completeVerification()}>{verification === "verifying" ? "Verifying…" : "I've cleared the challenge — retry"}</button>
+          <button className="button primary" disabled={verification === "verifying"} onClick={() => void completeVerification()}>{verification === "verifying" ? "Verifying…" : signIn ? "I’ve signed in — retry" : "I've cleared the challenge — retry"}</button>
           <button className="button" disabled={verification === "verifying"} onClick={() => void cancelVerification()}>Cancel verification</button>
         </>}
         {verificationError && <p className="intake-error" role="alert">{verificationError}</p>}
@@ -62,6 +63,6 @@ export function SourceInspectionModal({ progress, error, sourceUrl, onRetry, onC
         <a className="button" href={challengeUrl} target="_blank" rel="noopener noreferrer">Open source website</a>
         {onRetry && <button className="button" onClick={onRetry}>Retry inspection</button>}
       </div>}
-      <button className="button" autoFocus onClick={onClose}>Close</button></>}
+      <button className="button" autoFocus onClick={() => { if (verification === "open") void cancelVerification(); onClose(); }}>Close</button></>}
   </dialog>;
 }

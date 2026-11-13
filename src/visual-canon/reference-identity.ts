@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { readFile, stat } from "node:fs/promises";
-import type { VisualEntityProfile, VisualReferenceImage } from "../domain/visual-profile.js";
+import { isSceneAppearanceLook, type VisualEntityProfile, type VisualReferenceImage } from "../domain/visual-profile.js";
 import type { ImageProvider, ImageReferenceImage } from "../artwork/provider.js";
 import type { Story } from "../domain/story.js";
 import { MAX_REFERENCE_IMAGE_BYTES, providerSupportsReferenceImages } from "../artwork/providers.js";
@@ -12,12 +12,12 @@ export function identityReferenceCandidates(profile: VisualEntityProfile, scope:
   const form = profile.creatureForms?.find(item => item.id === scope.creatureFormId);
   const own = era?.referenceIds ?? form?.referenceIds ?? [];
   const assigned = new Set([...(profile.appearanceEras ?? []).flatMap(item => item.referenceIds), ...(profile.creatureForms ?? []).flatMap(item => item.referenceIds)]);
-  const priorEra = era ? profile.appearanceEras?.filter(item => item.status === "approved" && item.startChapter < era.startChapter).sort((a,b) => b.startChapter-a.startChapter)[0] : undefined;
+  const priorEra = era && !isSceneAppearanceLook(era) ? profile.appearanceEras?.filter(item => !isSceneAppearanceLook(item) && item.status === "approved" && item.startChapter < era.startChapter).sort((a,b) => b.startChapter-a.startChapter)[0] : undefined;
   const living = form ? profile.creatureForms?.find(item => item.status === "approved" && item.state === "living" && item.id !== form.id) : undefined;
   const ordered = [own, priorEra?.referenceIds ?? [], profile.references.filter(ref => !assigned.has(ref.id)).map(ref => ref.id), living?.referenceIds ?? []];
   const all: VisualReferenceImage[] = [];
   for (const ids of ordered) {
-    const candidates = profile.references.filter(ref => ref.approved && ids.includes(ref.id)).sort((a,b) => Number(b.role === "primary_reference") - Number(a.role === "primary_reference") || b.createdAt.localeCompare(a.createdAt));
+    const candidates = profile.references.filter(ref => ref.approved && !ref.provenance?.rejectedAt && ids.includes(ref.id)).sort((a,b) => Number(b.role === "primary_reference") - Number(a.role === "primary_reference") || b.createdAt.localeCompare(a.createdAt));
     for (const candidate of candidates) if (!all.some(ref => ref.id === candidate.id)) all.push(candidate);
   }
   return all;
@@ -29,17 +29,29 @@ export async function prepareReferenceSheetIdentity(root: string, slug: string, 
   const supported = provider.capabilities?.supportsReferenceImages !== false && (provider.capabilities?.maxReferenceImages ?? 1) > 0 && providerSupportsReferenceImages(story.artwork.provider, story.artwork.model);
   if (!supported) return { images: [] as ImageReferenceImage[], fingerprints: [] as string[], mode: "text-only" as const, reason: "The configured image model cannot consume identity images." };
   for (const ref of candidates) {
-    const file = await findVisualReferenceFile(root, slug, profile.entityId, ref.id);
-    if (!file) continue;
-    const size = (await stat(file.path)).size;
-    if (!size || size > MAX_REFERENCE_IMAGE_BYTES) continue;
-    const data = await readFile(file.path);
-    if (!data.length || data.length > MAX_REFERENCE_IMAGE_BYTES) continue;
-    const hash = createHash("sha256").update(data).digest("hex");
-    if (ref.provenance?.imageFingerprint && ref.provenance.imageFingerprint !== hash) continue;
-    return { images: [{ data, mimeType: mimeForVisualReferenceExtension(file.ext), sourceKind: "visual-profile" as const, entityId: profile.entityId, referenceId: ref.id, role: ref.role }], fingerprints: [hash], mode: "image-conditioned" as const, reason: "An approved identity reference is supplied; the target design controls transformed anatomy." };
+    const loaded = await loadReferenceSheetImage(root, slug, profile.entityId, ref);
+    if (!loaded) continue;
+    return { images: [loaded.image], fingerprints: [loaded.hash], mode: "image-conditioned" as const, reason: "An approved identity reference is supplied; the target design controls transformed anatomy." };
   }
-  return { images: [] as ImageReferenceImage[], fingerprints: [] as string[], mode: "text-only" as const, reason: candidates.length ? "Approved identity images are missing or exceed the image size limit." : "No approved identity image is available yet." };
+  return { images: [] as ImageReferenceImage[], fingerprints: [] as string[], mode: "text-only" as const, reason: candidates.length ? "Approved identity images are missing, have changed, or exceed the image size limit." : "No approved identity image is available yet." };
+}
+
+export async function loadReferenceSheetImage(root: string, slug: string, entityId: string, ref: VisualReferenceImage) {
+  const hint = /\.([a-zA-Z0-9]+)$/.exec(ref.imagePath)?.[1];
+  const file = await findVisualReferenceFile(root, slug, entityId, ref.id, hint);
+  if (!file) return undefined;
+  try {
+    const info = await stat(file.path);
+    if (!info.isFile() || !info.size || info.size > MAX_REFERENCE_IMAGE_BYTES) return undefined;
+    const data = await readFile(file.path);
+    if (!data.length || data.length > MAX_REFERENCE_IMAGE_BYTES) return undefined;
+    const hash = createHash("sha256").update(data).digest("hex");
+    if (ref.provenance?.imageFingerprint && ref.provenance.imageFingerprint !== hash) return undefined;
+    return { image: { data, mimeType: mimeForVisualReferenceExtension(file.ext), sourceKind: "visual-profile" as const, entityId, referenceId: ref.id, role: ref.role }, hash };
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw error;
+  }
 }
 
 export const IDENTITY_TRANSFORMATION_INSTRUCTION = "IDENTITY REFERENCE: Preserve recognizable identity, proportions, silhouette and signature features only where compatible with the TARGET DESIGN. The TARGET DESIGN overrides the reference's living/dead state, flesh, skin, scales, clothing and changed anatomy. A skeleton target must have the described exposed bones, not living flesh copied from its reference. Render the target as a neutral reusable sheet; do not clone panels into additional story entities.";

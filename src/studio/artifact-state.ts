@@ -1,5 +1,5 @@
 import { open, stat } from "node:fs/promises";
-import { Chapter, StageName } from "../domain/chapter.js";
+import { Chapter, SOURCE_NAME_HOLD_REASON, StageName } from "../domain/chapter.js";
 import { qaResultSchema } from "../domain/qa.js";
 import { storyBibleUpdateSchema } from "../domain/story-bible.js";
 import { alignmentArtifactSchema } from "../alignment/types.js";
@@ -41,6 +41,7 @@ export async function inspectStageArtifact(root: string, story: string, chapterN
   const paths = storyPaths(root, story, chapterNumber);
   const chapter = await readJsonIfExists<Chapter>(paths.chapterMeta);
   const freshness = stageFreshness(chapter, stage);
+  if (stage !== "context" && chapter?.stages?.[stage]?.staleReason === SOURCE_NAME_HOLD_REASON) return { stage, availability: "invalid" };
   try {
     const valid = await artifactIsValid(stage, paths, root, story, chapterNumber);
     return valid

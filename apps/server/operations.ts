@@ -1,4 +1,5 @@
-import { createHash } from "node:crypto";
+import { TomatoMtlSource } from "../../src/source/tomatomtl/tomatomtl-source.js";
+import { loadReferenceSheetImage } from "../../src/visual-canon/reference-identity.js";
 import { continuityDifferences, continuitySnapshot, loadVisualContinuityHandoff } from "../../src/visual-canon/continuity.js";
 import { jobOperationScope } from "../../src/storage/operation-scope.js";
 import { MotionAssetService } from "../../src/video/motion-service.js";
@@ -22,7 +23,7 @@ import { planReferenceBatch, runReferenceBatch, referenceBatchInputSchema } from
 import { resolveSummarySceneArtDirection } from "../../src/summaries/art-direction.js";
 import { backingArtworkVersion, loadApprovedVisualProfileReferences } from "../../src/artwork/generator.js";
 import { visualWorkflowCatalog, visualSceneImpact } from "../../src/visual-canon/workflow.js";
-import { resolveVisualCanonPrompt, resolveVisuallyRelevantCanonicalEntities, shouldUseVisualProfileForEntity } from "../../src/visual-canon/resolver.js";
+import { resolveVisualCanonPrompt, resolveVisuallyRelevantCanonicalEntities, shouldUseVisualProfileForEntity, wornSceneItems } from "../../src/visual-canon/resolver.js";
 import { syncAppearanceChanges } from "../../src/visual-canon/appearance-changes.js";
 import { loadPronunciationEntities, enrichStoryPronunciations, clearPronunciationAttempt, dismissPronunciationSuggestion, inspectPronunciationImpact, invalidatePronunciationChange, loadPronunciationSuggestions } from "../../src/story-bible/pronunciation.js";
 import { pronunciationProvider, pronunciationFingerprint, resolvePronunciations } from "../../src/tts/pronunciation.js";
@@ -59,9 +60,9 @@ import { SourceConflictError, SourceInputError, SourceOperationError, SourceUpst
 import { atomicWrite, atomicWriteJson } from "../../src/storage/atomic-write.js";
 import { previewPaths, storyPaths } from "../../src/storage/paths.js";
 import { exists, readJsonIfExists, readTextIfExists } from "../../src/storage/story-files.js";
-import { withStoryLock, withChapterLock, withSummaryLock, withScopedStoryLock } from "../../src/storage/story-lock.js";
+import { withStoryLock, withOperationScope, withChapterLock, withSummaryLock, withScopedStoryLock } from "../../src/storage/story-lock.js";
 import { ShutdownController } from "../../src/batch/shutdown.js";
-import { JobManager } from "./job-manager.js";
+import { JobConflictError, JobManager, type Job } from "./job-manager.js";
 import { logger } from "../../src/utils/logger.js";
 import { inspectStageArtifact, stalePrerequisiteWarning } from "../../src/studio/artifact-state.js";
 import { AudioMasteringProcessor, FfmpegMasteringProcessor } from "../../src/audio/mastering.js";
@@ -105,13 +106,15 @@ import {
   commitVisualCanonDemote,
   rollbackPreparedVisualCanonDemote,
 } from "../../src/visual-canon/profiles.js";
+import { profileEvidenceRangeSchema } from "../../src/visual-canon/profile-source-evidence.js";
 import { applyVisualProfileProposal, MAX_VISUAL_PROFILE_FIELD_COUNT, proposeMissingVisualDetails, resolveVisualProfileConflict, synchronizeVisualProfileConflicts, visualProfileProposalSchema } from "../../src/visual-canon/completion.js";
 import { loadStoryArtDirection, resolveActiveArtDirection, saveStoryArtDirection, createPreset, updatePreset, deletePreset, duplicatePreset, setDefaultPreset } from "../../src/visual-canon/art-direction.js";
-import { visualProfileSchema } from "../../src/domain/visual-profile.js";
+import { isSceneAppearanceLook, visualProfileSchema } from "../../src/domain/visual-profile.js";
 import { storyArtDirectionSchema, artDirectionPresetEditSchema, createArtDirectionPresetSchema } from "../../src/domain/art-direction.js";
 import { artworkReviewSchema } from "../../src/scenes/types.js";
+import { loadLatestProduction } from "../../src/production/manifest.js";
 import { planProduction, runProduction } from "../../src/production/orchestrator.js";
-import { productionForceSchema, productionOutputSchema } from "../../src/production/types.js";
+import { productionForceSchema, productionManifestSchema, productionOutputSchema } from "../../src/production/types.js";
 import { refreshProductionRange } from "../../src/production/refresh.js";
 import { TTSProvider } from "../../src/tts/provider.js";
 import { ttsQualityMode } from "../../src/domain/provider.js";
@@ -132,9 +135,12 @@ import { appendEntityAudit, type EntityAuditInput } from "../../src/story-bible/
 import { PostgresUsageRepository } from "../../src/cost/repository.js";
 import { estimatePlanCost } from "../../src/cost/estimate.js";
 import { withUsageScope } from "../../src/cost/context.js";
-import { inspectEntityReferenceChapters, inspectNarrationNamingImpact, invalidateCanonicalIdentityChange, invalidateNarrationNamingChange, narrationNamingChanged } from "../../src/story-bible/narration-names.js";
+import { findNewlyHeldSourceRules, publishSourceNameScanWithHolds } from "../../src/naming/source-name-holds.js";
+import { loadSourceNameBridge } from "../../src/naming/translation-bridge.js";
+import { openSourceNameScanBudget, loadAmbiguousSourceNames, loadSourceNameIndex, loadSourceNameRules, saveSourceNameRules, scanSourceNames, publishSourceNameScan, previewSourceNameScan, sourceNameScanSchema, sourceNameScanStartSchema, sourceNameRevision } from "../../src/naming/source-index.js";
+import { inspectEntityReferenceChapters, inspectNarrationNamingImpact, invalidateCanonicalIdentityChange, invalidateNarrationNamingChange, narrationNamingChanged, relevantNarrationNamingEntities } from "../../src/story-bible/narration-names.js";
 import { findChapterGaps } from "../../src/batch/gaps.js";
-import { Chapter, chapterSchema, StageName } from "../../src/domain/chapter.js";
+import { Chapter, chapterSchema, SOURCE_NAME_HOLD_REASON, StageName } from "../../src/domain/chapter.js";
 import { fingerprint } from "../../src/utils/hash.js";
 import { fileFingerprint } from "../../src/utils/file-fingerprint.js";
 import { NovelProviderId, novelProviderIdSchema, storyNovelSourceSchema } from "../../src/source/novel-provider.js";
@@ -278,7 +284,7 @@ export class StudioOperations {
   private readonly inspectionTimer: NodeJS.Timeout; private inspectionBytes = 0;
   readonly queue?: ProductionQueueService; readonly usage?: PostgresUsageRepository;
   private readonly webHttp: WebHttpClient; private readonly browserVerification: BrowserVerificationFactory;
-  private verificationSession?: BrowserVerificationSession; private verificationUrl?: string;
+  private verificationSession?: BrowserVerificationSession; private verificationUrl?: string; private tomatoSession?: BrowserVerificationSession;
   private readonly motionClipProvider?: MotionClipProvider;
   private readonly motionTools?: FfmpegMotionTools;
   constructor(public readonly root: string, private readonly env: Environment, public readonly jobs = new JobManager(), dependencies: OperationsDependencies = {}) {
@@ -306,11 +312,21 @@ export class StudioOperations {
   async completeSourceVerification() {
     const session = this.verificationSession; const url = this.verificationUrl;
     if (!session || !url) throw new SourceInputError("No verification window is open.");
+    const host = new URL(url).hostname.toLowerCase();
+    if (host === "tomatomtl.com" && session.readTomatoChapter) {
+      const provider = this.registry.getNovelProvider("tomatomtl");
+      if (provider instanceof TomatoMtlSource) {
+        await this.tomatoSession?.cancel();
+        this.tomatoSession = session;
+        provider.setChapterReader(session.readTomatoChapter.bind(session));
+        this.verificationSession = undefined; this.verificationUrl = undefined;
+        return { status: "verified" as const, host };
+      }
+    }
     this.verificationSession = undefined; this.verificationUrl = undefined;
     let harvest: { userAgent: string; cookies: Record<string, string> };
     try { harvest = await session.complete(); }
     catch (error) { throw new SourceUpstreamError(error instanceof Error ? error.message : "Browser verification could not be completed.", { cause: error }); }
-    const host = new URL(url).hostname.toLowerCase();
     this.webHttp.setUserAgent(harvest.userAgent);
     await this.webHttp.seedCookies(host, harvest.cookies);
     return { status: "verified" as const, host };
@@ -869,7 +885,7 @@ export class StudioOperations {
         control.update({ type: "qa.repair.started", chapter, target, selectedFindingIds: findings.map((finding) => finding.id) });
         const config = story.pipeline[target]; const provider = this.llm.forStage(config);
         const targetIssues = planned.filter((item) => item.targets.includes(target)).map(({ finding }) => ({ category: finding.category, severity: finding.severity, message: finding.message, evidence: finding.evidence }));
-        const result = await withUsageScope({ story: slug, chapter, stage: `qaRepair.${target}` }, async () => repairQaText(provider, config, { target, chapter, sourceLanguage: story.sourceLanguage, outputLanguage: story.outputLanguage, source, translation: currentTranslation, narration: currentNarration, issues: targetIssues, context: context.parsed, authorizedNarrationEntities: await loadNarrationNamingEntities(this.root, slug), profanityMode: story.narrationSettings.profanityMode, includeChapterTitle: story.narrationSettings.includeChapterTitle !== false }));
+        const result = await withUsageScope({ story: slug, chapter, stage: `qaRepair.${target}` }, async () => repairQaText(provider, config, { target, chapter, sourceLanguage: story.sourceLanguage, outputLanguage: story.outputLanguage, source, translation: currentTranslation, narration: currentNarration, issues: targetIssues, context: context.parsed, authorizedNarrationEntities: await this.loadQaRepairNames(slug, chapter, source, currentTranslation, currentNarration), profanityMode: story.narrationSettings.profanityMode, includeChapterTitle: story.narrationSettings.includeChapterTitle !== false }));
         await saveChapterTextEdit(this.root, slug, chapter, { field: target, text: result.text });
         if (target === "translation") currentTranslation = result.text; else currentNarration = result.text; repaired.push(target);
         control.update({ type: "qa.repair.completed", chapter, target, completed: repaired.length, total: targets.length });
@@ -1023,6 +1039,12 @@ export class StudioOperations {
     });
   }
 
+  private async loadQaRepairNames(slug: string, chapter: number, source: string, translation: string, narration: string) {
+    const entities = await loadNarrationNamingEntities(this.root, slug);
+    const relevant = relevantNarrationNamingEntities(entities, `${source}\n${translation}\n${narration}`, chapter, source);
+    return loadSourceNameBridge({ root: this.root, slug, chapter }, source, translation, relevant);
+  }
+
   /** Repair one finding's target text(s). Caller holds the story lock. Returns the repaired targets. */
   private async repairFindingTargets(slug: string, story: Story, chapter: number, finding: QaFinding, texts: { source: string; translation: string; narration: string; context: unknown }, control?: { update: (event: unknown) => void }, targetOverride?: "translation" | "narration" | "both") {
     const issue = { category: finding.category, severity: finding.severity, message: finding.message, evidence: finding.evidence };
@@ -1036,7 +1058,7 @@ export class StudioOperations {
       const config = story.pipeline[target]; const provider = this.llm.forStage(config);
       const result = await withUsageScope({ story: slug, chapter, stage: `qaRepair.${target}` }, async () => repairQaText(provider, config, {
         target, chapter, sourceLanguage: story.sourceLanguage, outputLanguage: story.outputLanguage, source: texts.source,
-        translation: currentTranslation, narration: currentNarration, issues: [issue], context: texts.context, authorizedNarrationEntities: await loadNarrationNamingEntities(this.root, slug),
+        translation: currentTranslation, narration: currentNarration, issues: [issue], context: texts.context, authorizedNarrationEntities: await this.loadQaRepairNames(slug, chapter, texts.source, currentTranslation, currentNarration),
         profanityMode: story.narrationSettings.profanityMode, includeChapterTitle: story.narrationSettings.includeChapterTitle !== false,
       }));
       await saveChapterTextEdit(this.root, slug, chapter, { field: target, text: result.text });
@@ -1462,6 +1484,138 @@ export class StudioOperations {
       await atomicWriteJson(cachePath, saved); return saved;
     });
   }
+  async getSourceNameIndex(slug: string) {
+    slugSchema.parse(slug);
+    const paths = storyPaths(this.root, slug, 1);
+    const [raw, index, rules, ambiguousNames] = await Promise.all([
+      readJsonIfExists(paths.sourceManifest), loadSourceNameIndex(this.root, slug), loadSourceNameRules(this.root, slug), loadAmbiguousSourceNames(this.root, slug),
+    ]);
+    const chapters = raw ? sourceManifestSchema.parse(raw).chapters : [];
+    const scanned = new Set(index?.chapters);
+    const revision = sourceNameRevision(chapters.filter(item => scanned.has(item.chapter)).map(item => ({
+      chapter: item.chapter, source: { fingerprint: item.contentFingerprint ?? item.fingerprint },
+    })));
+    const bible = index?.entries.length ? await getStoryBible(this.root, slug) : undefined;
+    const canonicalBySource = new Map<string, z.infer<typeof canonicalEntitySchema>[]>();
+    for (const entity of bible?.canonicalEntities ?? []) {
+      if (!entity.originalName) continue;
+      const key = entity.originalName.normalize("NFKC").toLowerCase();
+      const matches = canonicalBySource.get(key) ?? [];
+      matches.push(entity);
+      canonicalBySource.set(key, matches);
+    }
+    const indexedIds = new Set(index?.entries.map(entry => entry.id));
+    const ambiguousSpellings = new Set(ambiguousNames);
+    const canonicalMatches = (entry: NonNullable<typeof index>["entries"][number]) =>
+      canonicalBySource.get(entry.sourceName.normalize("NFKC").toLowerCase()) ?? [];
+    return {
+      ambiguous: (index?.entries ?? []).filter(entry => entry.ambiguous || ambiguousSpellings.has(entry.sourceName.normalize("NFKC").toLowerCase()) || canonicalMatches(entry).some(entity => entity.type !== entry.type) || canonicalMatches(entry).length > 1).map(entry => entry.id),
+      imported: { count: chapters.length, from: chapters[0]?.chapter, to: chapters.at(-1)?.chapter },
+      index, stale: Boolean(index && (index.identityVersion !== 2 || index.sourceRevision !== revision)),
+      saved: Object.fromEntries(Object.entries(rules).map(([id, rule]) => [id, rule.localizedNaming?.fullName])),
+      savedOutsideScan: Object.entries(rules).filter(([id]) => !indexedIds.has(id)).map(([id, rule]) => ({
+        id, sourceName: rule.originalName, name: rule.localizedNaming?.fullName,
+      })),
+      canonical: Object.fromEntries((index?.entries ?? []).flatMap(entry => {
+        const matches = canonicalMatches(entry);
+        return matches.length === 1 ? [[entry.id, { id: matches[0]!.id, displayName: matches[0]!.canonicalName, name: matches[0]!.localizedNaming?.fullName ?? matches[0]!.preferredNarrationName }]] : [];
+      })),
+    };
+  }
+
+  async previewSourceNameScan(slug: string, raw: unknown) {
+    slugSchema.parse(slug);
+    const input = sourceNameScanSchema.parse(raw);
+    const story = await loadStory(storyPaths(this.root, slug, 1).storyConfig);
+    const { chapters } = await loadImportedChapters(this.root, slug);
+    return previewSourceNameScan({ root: this.root, slug, chapters: selectChapterRange(chapters, input.from, input.to),
+      config: story.pipeline.storyBible, outputLanguage: story.outputLanguage });
+  }
+
+  startSourceNameScan(slug: string, raw: unknown, approvalId: string = randomUUID()) {
+    slugSchema.parse(slug);
+    const input = sourceNameScanStartSchema.parse(raw);
+    return this.jobs.create("sourceNameScan", slug, async control => {
+      const shutdown = new ShutdownController();
+      control.setPause(() => shutdown.request());
+      const result = await withStoryLock(this.root, slug, "scan source names", async () => {
+        const story = await loadStory(storyPaths(this.root, slug, 1).storyConfig);
+        const imported = await loadImportedChapters(this.root, slug);
+        const chapters = selectChapterRange(imported.chapters, input.from, input.to);
+        const config = story.pipeline.storyBible;
+        const preview = await previewSourceNameScan({ root: this.root, slug, chapters, config, outputLanguage: story.outputLanguage, stopped: () => shutdown.isRequested });
+        if (shutdown.isRequested) return { status: "paused" as const };
+        const budget = await openSourceNameScanBudget(this.root, slug, approvalId, input.approvedRequests);
+        if (preview.fingerprint !== input.fingerprint || preview.requests > budget.remaining) {
+          throw new ConfigurationError("The scan changed or exceeds its approved request cap. Preview the scan again.");
+        }
+        const scan = await withUsageScope({ story: slug, stage: "sourceNameScan" }, () => scanSourceNames({
+          root: this.root, slug, chapters, config, reserveRequest: budget.reserve, provider: this.llm.forStage(config), outputLanguage: story.outputLanguage,
+          stopped: () => shutdown.isRequested,
+          progress: (chapter, index, total) => control.update({ type: "source-name-scan.chapter", chapter, index, total, completed: index - 1 }),
+        }));
+        if (scan.status === "paused" || shutdown.isRequested) return { status: "paused" as const };
+        if ((await findNewlyHeldSourceRules(this.root, slug, scan.ambiguous)).length) return scan;
+        return publishSourceNameScan(this.root, slug, scan.report, scan.ambiguous);
+      });
+      if (result.status !== "ready") return result;
+      if (shutdown.isRequested) return { status: "paused" };
+      // Publishing a hold writes chapter metadata. Acquire exclusive access only
+      // for that step, after releasing the read-only scan's scoped lease.
+      return withOperationScope(slug, { all: true }, () => withStoryLock(this.root, slug, "publish source name holds", async () => {
+        if (shutdown.isRequested) return { status: "paused" };
+        const { chapters } = await loadImportedChapters(this.root, slug);
+        if (sourceNameRevision(selectChapterRange(chapters, input.from, input.to)) !== result.report.sourceRevision) {
+          throw new ConfigurationError("The source changed before the scan could be published. Preview the scan again.");
+        }
+        const published = await publishSourceNameScanWithHolds(this.root, slug, result.report, result.ambiguous);
+        await invalidateChapterStatusDerivedReads(this.root, slug);
+        invalidateCatalogCache(this.root, slug);
+        return published;
+      }));
+    }, { ...input, approvalId }, { resources: ["source-name-index"] });
+  }
+
+  async saveSourceNameRule(slug: string, id: string, raw: unknown) {
+    slugSchema.parse(slug);
+    const input = z.object({ name: z.string().trim().max(160), scannedAt: z.string().datetime().optional() }).strict().parse(raw);
+    return withStoryLock(this.root, slug, "save source narration name", async () => {
+      const view = await this.getSourceNameIndex(slug);
+      const entry = view.index?.entries.find(item => item.id === id);
+      const rules = await loadSourceNameRules(this.root, slug);
+      const previous = rules[id];
+      if (!input.name && !previous) throw new JobConflictError("This source name rule has already been removed.");
+      if (input.name && (!entry || view.stale || view.index?.scannedAt !== input.scannedAt)) {
+        throw new JobConflictError("The source index changed. Refresh it before saving a name.");
+      }
+      if (input.name && view.ambiguous.includes(id)) throw new JobConflictError("More than one identity shares this spelling. Choose the intended entity in Names / Localization.");
+      const story = await loadStory(storyPaths(this.root, slug, 1).storyConfig);
+      const localizedNaming = { locale: defaultLocale(story.outputLanguage), fullName: input.name, usageMode: "always_full" as const };
+      const canonical = view.canonical[id];
+      if (input.name && canonical?.name) throw new JobConflictError("This entity already has a narration name. Edit it in Names / Localization.");
+      const base = entry ? canonicalEntitySchema.parse({
+        id: `ent_${id}`, type: entry.type, canonicalName: entry.displayName, originalName: entry.sourceName,
+        aliases: entry.aliases, description: entry.description, firstAppearance: 1, lastKnownAppearance: entry.chapters.at(-1)!.chapter,
+      }) : { ...previous!, localizedNaming: undefined };
+      const rule = input.name ? canonicalEntitySchema.parse({ ...base, localizedNaming }) : base;
+      const nextRules = { ...rules };
+      if (input.name) nextRules[id] = rule;
+      else delete nextRules[id];
+      await saveSourceNameRules(this.root, slug, nextRules);
+      let invalidation;
+      try {
+        invalidation = await invalidateNarrationNamingChange(this.root, slug, previous ?? base, rule);
+      } catch (error) {
+        try { await saveSourceNameRules(this.root, slug, rules); }
+        catch (rollbackError) { throw new AggregateError([error, rollbackError], "The name rule could not be restored."); }
+        throw error;
+      }
+      invalidateCatalogCache(this.root, slug);
+      await invalidateChapterStatusDerivedReads(this.root, slug);
+      return { invalidation };
+    });
+  }
+
   startLocalizationSuggestions(slug: string, id: string, raw: unknown) {
     slugSchema.parse(slug); const input = localizationSuggestionRequestSchema.parse(raw);
     return this.jobs.create("entityLocalizationSuggestions", slug, async () => {
@@ -1806,7 +1960,21 @@ export class StudioOperations {
     }, input);
   }
 
-  startProduction(slug: string, raw: unknown) { slugSchema.parse(slug); const input = productionInputSchema.parse(raw); return this.jobs.create("production", slug, async (control) => withStoryLock(this.root, slug, "end-to-end production", async () => { const story = await loadStory(storyPaths(this.root, slug, 1).storyConfig); const shutdown = new ShutdownController(); control.setPause(() => shutdown.request()); await recordActivity(this.root, slug, "production.started", `Started production for Chapters ${input.from}–${input.to}`); const manifest = (await runProduction({ root: this.root, story, ...input, pause: shutdown, recordedCost: this.usage ? () => this.usage!.recordedCost({ story: slug }) : undefined, onProgress: (event) => control.update(event) }, { pipeline: this.pipeline, loadChapters: async () => (await loadImportedChapters(this.root, slug)).chapters, refresh: (from, to) => refreshProductionRange({ root: this.root, story, from, to, registry: this.registry }), scenePlanner: this.scenePlanner ?? this.runtime.router.forStage(story.pipeline.scenePlanner), image: this.image, video: this.video, videoExport: this.videoExport, audiobook: this.audiobook, alignmentConfig: this.alignConfig, alignmentEngine: this.aligner })).manifest; await invalidateChapterStatusDerivedReads(this.root, slug); await invalidateStoryBibleDerivedReads(this.root, slug); await recordActivity(this.root, slug, `production.${manifest.status}`, `${manifest.status === "completed" ? "Completed" : "Stopped"} production for Chapters ${input.from}–${input.to}`); return manifest; }), input); }
+  startProduction(slug: string, raw: unknown, resumeManifestId?: string) { slugSchema.parse(slug); const input = productionInputSchema.parse(raw); return this.jobs.create("production", slug, async (control) => withStoryLock(this.root, slug, "end-to-end production", async () => { const story = await loadStory(storyPaths(this.root, slug, 1).storyConfig); const shutdown = new ShutdownController(); control.setPause(() => shutdown.request()); await recordActivity(this.root, slug, "production.started", `Started production for Chapters ${input.from}–${input.to}`); const manifest = (await runProduction({ root: this.root, story, ...input, resumeManifestId, pause: shutdown, recordedCost: this.usage ? () => this.usage!.recordedCost({ story: slug }) : undefined, onProgress: (event) => control.update(event) }, { pipeline: this.pipeline, loadChapters: async () => (await loadImportedChapters(this.root, slug)).chapters, refresh: (from, to) => refreshProductionRange({ root: this.root, story, from, to, registry: this.registry }), scenePlanner: this.scenePlanner ?? this.runtime.router.forStage(story.pipeline.scenePlanner), image: this.image, video: this.video, videoExport: this.videoExport, audiobook: this.audiobook, alignmentConfig: this.alignConfig, alignmentEngine: this.aligner })).manifest; await invalidateChapterStatusDerivedReads(this.root, slug); await invalidateStoryBibleDerivedReads(this.root, slug); await recordActivity(this.root, slug, `production.${manifest.status}`, `${manifest.status === "completed" ? "Completed" : "Stopped"} production for Chapters ${input.from}–${input.to}`); return manifest; }), { ...input, resumeManifestId }); }
+  async resumeProduction(slug: string, raw: unknown) {
+    slugSchema.parse(slug);
+    const { runId } = z.object({ runId: z.string() }).strict().parse(raw);
+    const manifest = await loadLatestProduction(this.root, slug);
+    if (!manifest || manifest.id !== runId || manifest.status !== "paused") {
+      throw new JobConflictError("This production run is no longer paused.");
+    }
+    const paused = this.jobs.list().find(job => job.story === slug && job.type === "production" && job.status === "paused"
+      && ((job.result as { id?: string } | undefined)?.id === runId
+        || (job.payload as { resumeManifestId?: string } | undefined)?.resumeManifestId === runId));
+    if (paused) return this.retryJob(paused.id);
+    return this.startProduction(slug, { ...manifest.selection, ...manifest.options, dryRun: false }, runId);
+  }
+
   async submitProduction(slug:string,raw:unknown){if(this.queue)return this.queue.submit(slug,raw);return this.startProduction(slug,raw);}
 
   startPreview(slug: string, raw: unknown) {
@@ -1824,9 +1992,11 @@ export class StudioOperations {
       const story = await loadStory(storyPaths(this.root, slug, 1).storyConfig); const imported = await loadImportedChapters(this.root, slug);
       const selected = selectChapterRange(imported.chapters, input.from, input.to); const shutdown = new ShutdownController(); control.setPause(() => shutdown.request()); let mastered = 0; let reused = 0; const warnings: string[] = [];
       for (let index = 0; index < selected.length; index++) {
-        if (shutdown.isRequested) return { status: "paused", mastered, reused, total: selected.length, warnings: [...new Set(warnings)] };
+        if (shutdown.isRequested) return { status: "paused", remainingRange: { from: selected[index]!.chapter, to: selected.at(-1)!.chapter }, mastered, reused, total: selected.length, warnings: [...new Set(warnings)] };
         const chapter = selected[index]!.chapter; control.update({ type: "audio.chapter.started", chapter, index: index + 1, total: selected.length });
-        const retainedAudio = await exists(storyPaths(this.root, slug, chapter).audio);
+        const paths = storyPaths(this.root, slug, chapter);
+        const metadata = await readJsonIfExists<Chapter>(paths.chapterMeta);
+        const retainedAudio = metadata?.stages.audioMastering.staleReason !== SOURCE_NAME_HOLD_REASON && await exists(paths.audio);
         if (!input.force && retainedAudio) {
           reused++;
           const audioArtifact = await inspectStageArtifact(this.root, slug, chapter, "audioMastering");
@@ -1883,6 +2053,8 @@ export class StudioOperations {
 
   private async regenerateSingleAudioSegment(slug: string, chapter: number, segment: number, selectedSegments?: number[]) {
       const story = await loadStory(storyPaths(this.root, slug, chapter).storyConfig);
+      const metadata = await readJsonIfExists<Chapter>(storyPaths(this.root, slug, chapter).chapterMeta);
+      if (metadata?.stages.tts.staleReason === SOURCE_NAME_HOLD_REASON) throw new ConfigurationError(SOURCE_NAME_HOLD_REASON);
       const config = story.pipeline.tts;
       const entities = await loadPronunciationEntities(this.root, slug);
       const { provider } = createEffectiveTtsProvider({
@@ -1972,16 +2144,18 @@ export class StudioOperations {
     });
   }
 
-  startAudiobook(slug: string, raw: unknown) {
+  startAudiobook(slug: string, raw: unknown, resumeFrom?: number) {
     slugSchema.parse(slug); const input = audiobookInputSchema.parse(raw);
     return this.jobs.create("audiobook", slug, async (control) => withStoryLock(this.root, slug, "web audiobook assembly", async () => {
       const story = await loadStory(storyPaths(this.root, slug, 1).storyConfig); await resolveExportMusic(this.root, story, input.music, input.musicOverrides); const imported = await loadImportedChapters(this.root, slug);
       const selected = selectChapterRange(imported.chapters, input.from, input.to); const shutdown = new ShutdownController(); control.setPause(() => shutdown.request());
       const warnings: string[] = [];
-      for (let index = 0; index < selected.length; index++) {
-        if (shutdown.isRequested) return { status: "paused", total: selected.length, warnings: [...new Set(warnings)] };
+      for (let index = selected.filter(item => item.chapter < (resumeFrom ?? 1)).length; index < selected.length; index++) {
+        if (shutdown.isRequested) return { status: "paused", resumeFrom: selected[index]!.chapter, total: selected.length, warnings: [...new Set(warnings)] };
         const chapter = selected[index]!.chapter; control.update({ type: "audio.chapter.started", chapter, index: index + 1, total: selected.length });
-        const retainedAudio = await exists(storyPaths(this.root, slug, chapter).audio);
+        const paths = storyPaths(this.root, slug, chapter);
+        const metadata = await readJsonIfExists<Chapter>(paths.chapterMeta);
+        const retainedAudio = metadata?.stages.audioMastering.staleReason !== SOURCE_NAME_HOLD_REASON && await exists(paths.audio);
         if (retainedAudio) {
           const audioArtifact = await inspectStageArtifact(this.root, slug, chapter, "audioMastering");
           const chapterWarnings: string[] = [];
@@ -1997,17 +2171,17 @@ export class StudioOperations {
       const assembled = await assembleAudiobook({ root: this.root, story, from: selected[0]!.chapter, to: selected.at(-1)!.chapter, format: input.format as AudiobookFormat,
         processor: this.audiobook, force: input.force, music: input.music, musicOverrides: input.musicOverrides, onProgress: (event) => control.update(event) });
       await invalidateChapterStatusDerivedReads(this.root, slug); return { ...assembled, warnings: [...new Set(warnings)] };
-    }), input);
+    }), { ...input, resumeFrom });
   }
 
   startAlignment(slug: string, raw: unknown) { slugSchema.parse(slug); const input = alignmentJobSchema.parse(raw); return this.jobs.create("alignment", slug, async (control) => withStoryLock(this.root, slug, "web chapter alignment", async () => { const story = await loadStory(storyPaths(this.root, slug, input.chapter).storyConfig); control.update({ type: "alignment.chapter.started", chapter: input.chapter }); const result = await alignStoredChapter({ root: this.root, storySlug: slug, chapter: input.chapter, language: story.outputLanguage, config: this.alignConfig, engine: this.aligner, force: input.force, forceEstimated: input.forceEstimated, requireAligned: input.requireAligned, onEvent: (event) => control.update({ type: `alignment.${event.status}`, chapter: input.chapter, mode: event.mode }) }); await invalidateChapterStatusDerivedReads(this.root, slug); return result; }), input); }
 
-  startSubtitles(slug: string, raw: unknown) { slugSchema.parse(slug); const input = rangeJobSchema.parse(raw); return this.jobs.create("subtitles", slug, async (control) => withStoryLock(this.root, slug, "web subtitle generation", async () => { const story = await loadStory(storyPaths(this.root, slug, 1).storyConfig); const selected = selectChapterRange((await loadImportedChapters(this.root, slug)).chapters, input.from, input.to); const shutdown = new ShutdownController(); control.setPause(() => shutdown.request()); let generated = 0; let reused = 0; const warnings: string[] = []; for (let index = 0; index < selected.length; index++) { if (shutdown.isRequested) return { status: "paused", generated, reused, warnings: [...new Set(warnings)] }; const chapter = selected[index]!.chapter; control.update({ type: "subtitles.chapter.started", chapter, index: index + 1, total: selected.length }); if (!input.forceEstimated) { const alignment = await alignStoredChapter({ root: this.root, storySlug: slug, chapter, language: story.outputLanguage, config: this.alignConfig, engine: this.aligner }); warnings.push(...(alignment.warnings ?? [])); } const result = await generateStoredSubtitles({ root: this.root, story, chapter, force: input.force, forceEstimated: input.forceEstimated }); result.reused ? reused++ : generated++; warnings.push(...(result.warnings ?? [])); await invalidateChapterStatusDerivedReads(this.root, slug); control.update({ type: "subtitles.chapter.completed", chapter, index: index + 1, total: selected.length, reused: result.reused, warnings: result.warnings }); } await invalidateChapterStatusDerivedReads(this.root, slug); return { generated, reused, total: selected.length, warnings: [...new Set(warnings)] }; }), input); }
+  startSubtitles(slug: string, raw: unknown) { slugSchema.parse(slug); const input = rangeJobSchema.parse(raw); return this.jobs.create("subtitles", slug, async (control) => withStoryLock(this.root, slug, "web subtitle generation", async () => { const story = await loadStory(storyPaths(this.root, slug, 1).storyConfig); const selected = selectChapterRange((await loadImportedChapters(this.root, slug)).chapters, input.from, input.to); const shutdown = new ShutdownController(); control.setPause(() => shutdown.request()); let generated = 0; let reused = 0; const warnings: string[] = []; for (let index = 0; index < selected.length; index++) { if (shutdown.isRequested) return { status: "paused", remainingRange: { from: selected[index]!.chapter, to: selected.at(-1)!.chapter }, generated, reused, warnings: [...new Set(warnings)] }; const chapter = selected[index]!.chapter; control.update({ type: "subtitles.chapter.started", chapter, index: index + 1, total: selected.length }); if (!input.forceEstimated) { const alignment = await alignStoredChapter({ root: this.root, storySlug: slug, chapter, language: story.outputLanguage, config: this.alignConfig, engine: this.aligner }); warnings.push(...(alignment.warnings ?? [])); } const result = await generateStoredSubtitles({ root: this.root, story, chapter, force: input.force, forceEstimated: input.forceEstimated }); result.reused ? reused++ : generated++; warnings.push(...(result.warnings ?? [])); await invalidateChapterStatusDerivedReads(this.root, slug); control.update({ type: "subtitles.chapter.completed", chapter, index: index + 1, total: selected.length, reused: result.reused, warnings: result.warnings }); } await invalidateChapterStatusDerivedReads(this.root, slug); return { generated, reused, total: selected.length, warnings: [...new Set(warnings)] }; }), input); }
 
   async editSubtitles(slug: string, chapter: number, raw: unknown) { slugSchema.parse(slug); const input = z.object({ cues: z.array(z.unknown()).min(1).max(10_000) }).strict().parse(raw); return withChapterLock(this.root, slug, chapter, "manual subtitle edit", () => saveManualSubtitles(this.root, slug, chapter, input.cues)); }
   async resetSubtitles(slug: string, chapter: number) { slugSchema.parse(slug); return withChapterLock(this.root, slug, chapter, "discard manual subtitles", async () => { await discardManualSubtitles(this.root, slug, chapter); const story = await loadStory(storyPaths(this.root, slug, chapter).storyConfig); return generateStoredSubtitles({ root: this.root, story, chapter, force: true }); }); }
 
-  startVideo(slug: string, raw: unknown) { slugSchema.parse(slug); const input = videoJobSchema.parse(raw); return this.jobs.create("video", slug, async (control) => withStoryLock(this.root, slug, "web chapter video rendering", async () => { let story = await loadStory(storyPaths(this.root, slug, 1).storyConfig); if (input.subtitleMode) story = { ...story, video: { ...story.video, subtitleMode: input.subtitleMode } }; const selected = selectChapterRange((await loadImportedChapters(this.root, slug)).chapters, input.from, input.to); const shutdown = new ShutdownController(); control.setPause(() => shutdown.request()); let rendered = 0; let reused = 0; const warnings: string[] = []; for (let index = 0; index < selected.length; index++) { if (shutdown.isRequested) return { status: "paused", rendered, reused, warnings: [...new Set(warnings)] }; const chapter = selected[index]!.chapter; if (story.video.subtitleMode !== "none") { const alignment = await alignStoredChapter({ root: this.root, storySlug: slug, chapter, language: story.outputLanguage, config: this.alignConfig, engine: this.aligner }); const subtitles = await generateStoredSubtitles({ root: this.root, story, chapter }); warnings.push(...(alignment.warnings ?? []), ...(subtitles.warnings ?? [])); } control.update({ type: "video.chapter.started", chapter, index: index + 1, total: selected.length }); const result = await renderStoredChapterVideo({ root: this.root, story, chapter, processor: this.video, force: input.force }); result.reused ? reused++ : rendered++; warnings.push(...(result.warnings ?? [])); await invalidateChapterStatusDerivedReads(this.root, slug); control.update({ type: "video.chapter.completed", chapter, index: index + 1, total: selected.length, reused: result.reused, warnings: result.warnings }); } await invalidateChapterStatusDerivedReads(this.root, slug); return { rendered, reused, total: selected.length, warnings: [...new Set(warnings)] }; }), input); }
+  startVideo(slug: string, raw: unknown) { slugSchema.parse(slug); const input = videoJobSchema.parse(raw); return this.jobs.create("video", slug, async (control) => withStoryLock(this.root, slug, "web chapter video rendering", async () => { let story = await loadStory(storyPaths(this.root, slug, 1).storyConfig); if (input.subtitleMode) story = { ...story, video: { ...story.video, subtitleMode: input.subtitleMode } }; const selected = selectChapterRange((await loadImportedChapters(this.root, slug)).chapters, input.from, input.to); const shutdown = new ShutdownController(); control.setPause(() => shutdown.request()); let rendered = 0; let reused = 0; const warnings: string[] = []; for (let index = 0; index < selected.length; index++) { if (shutdown.isRequested) return { status: "paused", remainingRange: { from: selected[index]!.chapter, to: selected.at(-1)!.chapter }, rendered, reused, warnings: [...new Set(warnings)] }; const chapter = selected[index]!.chapter; if (story.video.subtitleMode !== "none") { const alignment = await alignStoredChapter({ root: this.root, storySlug: slug, chapter, language: story.outputLanguage, config: this.alignConfig, engine: this.aligner }); const subtitles = await generateStoredSubtitles({ root: this.root, story, chapter }); warnings.push(...(alignment.warnings ?? []), ...(subtitles.warnings ?? [])); } control.update({ type: "video.chapter.started", chapter, index: index + 1, total: selected.length }); const result = await renderStoredChapterVideo({ root: this.root, story, chapter, processor: this.video, force: input.force }); result.reused ? reused++ : rendered++; warnings.push(...(result.warnings ?? [])); await invalidateChapterStatusDerivedReads(this.root, slug); control.update({ type: "video.chapter.completed", chapter, index: index + 1, total: selected.length, reused: result.reused, warnings: result.warnings }); } await invalidateChapterStatusDerivedReads(this.root, slug); return { rendered, reused, total: selected.length, warnings: [...new Set(warnings)] }; }), input); }
 
   startVideoExport(slug: string, raw: unknown) { slugSchema.parse(slug); const input = videoExportInputSchema.parse(raw); return this.jobs.create("videoExport", slug, async (control) => withStoryLock(this.root, slug, "web combined video export", async () => { let story = await loadStory(storyPaths(this.root, slug, 1).storyConfig); if (input.subtitleMode) story = { ...story, video: { ...story.video, subtitleMode: input.subtitleMode } }; for (const id of [...(input.summaries?.beginning ?? []), ...(input.summaries?.ending ?? [])]) await selectSummaryVideo(this.root, slug, id); await resolveExportMusic(this.root, story, input.music, input.musicOverrides); const selected = selectChapterRange((await loadImportedChapters(this.root, slug)).chapters, input.from, input.to); const warnings: string[] = []; for (let index = 0; index < selected.length; index++) { const chapter = selected[index]!.chapter; if (input.music.mode !== "none" && !input.subtitleMode) { if (!await exists(storyPaths(this.root, slug, chapter).video)) throw new Error(`Chapter ${chapter} has no retained clean video to export`); control.update({ type: "video.chapter.completed", chapter, index: index + 1, total: selected.length, reused: true, retained: true }); continue; } if (story.video.subtitleMode !== "none") { const alignment = await alignStoredChapter({ root: this.root, storySlug: slug, chapter, language: story.outputLanguage, config: this.alignConfig, engine: this.aligner }); const subtitles = await generateStoredSubtitles({ root: this.root, story, chapter }); warnings.push(...(alignment.warnings ?? []), ...(subtitles.warnings ?? [])); } const rendered = await renderStoredChapterVideo({ root: this.root, story, chapter, processor: this.video }); warnings.push(...(rendered.warnings ?? [])); await invalidateChapterStatusDerivedReads(this.root, slug); control.update({ type: "video.chapter.completed", chapter, index: index + 1, total: selected.length, reused: rendered.reused, warnings: rendered.warnings }); } const assembled = await assembleVideoExport({ root: this.root, story, from: selected[0]!.chapter, to: selected.at(-1)!.chapter, processor: this.videoExport, summaries: input.summaries, force: input.force, music: input.music, musicOverrides: input.musicOverrides, onProgress: (event) => control.update(event) }); await invalidateChapterStatusDerivedReads(this.root, slug); return { ...assembled, warnings: [...new Set(warnings)] }; }), input); }
 
@@ -2043,7 +2217,7 @@ export class StudioOperations {
     return exportChapterWithMusic({ root: this.root, story, ...input });
   }), input); }
 
-  startScenes(slug: string, raw: unknown) { slugSchema.parse(slug); const input = explicitRangeJobSchema.parse(raw); return this.jobs.create("scenes", slug, async (control) => withStoryLock(this.root, slug, "web scene planning", async () => { const story = await loadStory(storyPaths(this.root, slug, 1).storyConfig); const selected = selectChapterRange((await loadImportedChapters(this.root, slug)).chapters, input.from, input.to); const shutdown = new ShutdownController(); control.setPause(() => shutdown.request()); let planned = 0; let reused = 0; const warnings: string[] = []; for (let index = 0; index < selected.length; index++) { if (shutdown.isRequested) return { status: "paused", planned, reused, warnings: [...new Set(warnings)] }; const chapter = selected[index]!.chapter; control.update({ type: "scenes.chapter.started", chapter, index: index + 1, total: selected.length }); const provider = this.scenePlanner ?? this.runtime.router.forStage(story.pipeline.scenePlanner); const result = await withUsageScope({story:slug,chapter,stage:"scenePlanning"},()=>planStoredScenes({ root: this.root, story, chapter, provider, force: input.force })); result.reused ? reused++ : planned++; warnings.push(...(result.warnings ?? [])); await invalidateChapterStatusDerivedReads(this.root, slug); control.update({ type: "scenes.chapter.completed", chapter, index: index + 1, total: selected.length, scenes: result.manifest.scenes.length, reused: result.reused, warnings: result.warnings }); } await invalidateChapterStatusDerivedReads(this.root, slug); return { planned, reused, total: selected.length, warnings: [...new Set(warnings)] }; }), raw); }
+  startScenes(slug: string, raw: unknown) { slugSchema.parse(slug); const input = explicitRangeJobSchema.parse(raw); return this.jobs.create("scenes", slug, async (control) => withStoryLock(this.root, slug, "web scene planning", async () => { const story = await loadStory(storyPaths(this.root, slug, 1).storyConfig); const selected = selectChapterRange((await loadImportedChapters(this.root, slug)).chapters, input.from, input.to); const shutdown = new ShutdownController(); control.setPause(() => shutdown.request()); let planned = 0; let reused = 0; const warnings: string[] = []; for (let index = 0; index < selected.length; index++) { if (shutdown.isRequested) return { status: "paused", remainingRange: { from: selected[index]!.chapter, to: selected.at(-1)!.chapter }, planned, reused, warnings: [...new Set(warnings)] }; const chapter = selected[index]!.chapter; control.update({ type: "scenes.chapter.started", chapter, index: index + 1, total: selected.length }); const provider = this.scenePlanner ?? this.runtime.router.forStage(story.pipeline.scenePlanner); const result = await withUsageScope({story:slug,chapter,stage:"scenePlanning"},()=>planStoredScenes({ root: this.root, story, chapter, provider, force: input.force })); result.reused ? reused++ : planned++; warnings.push(...(result.warnings ?? [])); await invalidateChapterStatusDerivedReads(this.root, slug); control.update({ type: "scenes.chapter.completed", chapter, index: index + 1, total: selected.length, scenes: result.manifest.scenes.length, reused: result.reused, warnings: result.warnings }); } await invalidateChapterStatusDerivedReads(this.root, slug); return { planned, reused, total: selected.length, warnings: [...new Set(warnings)] }; }), raw); }
 
   async inspectArtworkVisualPreflight(slug: string, raw: unknown) {
     slugSchema.parse(slug);
@@ -2093,7 +2267,7 @@ export class StudioOperations {
     return { mode: entity.visualProfilePolicy?.mode ?? "prompt" };
   }
 
-  startArtwork(slug: string, raw: unknown) { slugSchema.parse(slug); const input = artworkJobSchema.parse(raw); return this.jobs.create("artwork", slug, async (control) => withStoryLock(this.root, slug, "web artwork generation", async () => { const story = await loadStory(storyPaths(this.root, slug, 1).storyConfig); const selected = selectChapterRange((await loadImportedChapters(this.root, slug)).chapters, input.from, input.to); const shutdown = new ShutdownController(); control.setPause(() => shutdown.request()); let generated = 0; let estimate = 0; const warnings: string[] = []; for (let index = 0; index < selected.length; index++) { if (shutdown.isRequested) return { status: "paused", generated, estimate, warnings: [...new Set(warnings)] }; const chapter = selected[index]!.chapter; const result = await withUsageScope({story:slug,chapter,stage:"artwork"},()=>generateStoredArtwork({ root: this.root, story, chapter, provider: resolveImageProvider(this.image, story), sceneId: input.scene, sceneIds: input.scenes, force: input.force, dryRun: input.dryRun, allowUnprofiledEntityIds: input.allowUnprofiledEntityIds, onProgress: (event) => control.update({ ...event, chapterIndex: index + 1, chapterTotal: selected.length }) })); generated += "generated" in result ? result.generated ?? 0 : 0; if (!input.dryRun && "generated" in result && result.generated) await invalidateChapterStatusDerivedReads(this.root, slug); estimate += result.imagesToGenerate; warnings.push(...(result.warnings ?? [])); } await invalidateChapterStatusDerivedReads(this.root, slug); return { dryRun: input.dryRun, generated, imageCountEstimate: estimate, chapters: selected.length, provider: story.artwork.provider, model: story.artwork.model, warnings: [...new Set(warnings)] }; }), raw); }
+  startArtwork(slug: string, raw: unknown) { slugSchema.parse(slug); const input = artworkJobSchema.parse(raw); return this.jobs.create("artwork", slug, async (control) => withStoryLock(this.root, slug, "web artwork generation", async () => { const story = await loadStory(storyPaths(this.root, slug, 1).storyConfig); const selected = selectChapterRange((await loadImportedChapters(this.root, slug)).chapters, input.from, input.to); const shutdown = new ShutdownController(); control.setPause(() => shutdown.request()); let generated = 0; let estimate = 0; const warnings: string[] = []; for (let index = 0; index < selected.length; index++) { if (shutdown.isRequested) return { status: "paused", remainingRange: { from: selected[index]!.chapter, to: selected.at(-1)!.chapter }, generated, estimate, warnings: [...new Set(warnings)] }; const chapter = selected[index]!.chapter; const result = await withUsageScope({story:slug,chapter,stage:"artwork"},()=>generateStoredArtwork({ root: this.root, story, chapter, provider: resolveImageProvider(this.image, story), sceneId: input.scene, sceneIds: input.scenes, force: input.force, dryRun: input.dryRun, allowUnprofiledEntityIds: input.allowUnprofiledEntityIds, onProgress: (event) => control.update({ ...event, chapterIndex: index + 1, chapterTotal: selected.length }) })); generated += "generated" in result ? result.generated ?? 0 : 0; if (!input.dryRun && "generated" in result && result.generated) await invalidateChapterStatusDerivedReads(this.root, slug); estimate += result.imagesToGenerate; warnings.push(...(result.warnings ?? [])); } await invalidateChapterStatusDerivedReads(this.root, slug); return { dryRun: input.dryRun, generated, imageCountEstimate: estimate, chapters: selected.length, provider: story.artwork.provider, model: story.artwork.model, warnings: [...new Set(warnings)] }; }), raw); }
 
   getActiveStoryJob(slug: string) {
     slugSchema.parse(slug);
@@ -2101,8 +2275,19 @@ export class StudioOperations {
   }
 
   async retryJob(id: string) {
-    const job = this.jobs.get(id);
-    if (!job) throw new Error(`Job '${id}' was not found`);
+    return this.jobs.retry(id, job => this.restartJob(job));
+  }
+
+  private remainingRangeInput(job: Job) {
+    if (job.status !== "paused" || job.result === undefined) return job.payload ?? {};
+    const checkpoint = z.object({
+      remainingRange: z.object({ from: z.number().int().positive(), to: z.number().int().positive() }),
+    }).safeParse(job.result);
+    if (!checkpoint.success) throw new ConfigurationError("The remaining chapter range could not be recovered. Select the remaining chapters explicitly.");
+    return { ...(job.payload as object), ...checkpoint.data.remainingRange };
+  }
+
+  private restartJob(job: Job) {
     switch (job.type) {
       case "stageExecution": {
         const input = stageExecutionInputSchema.parse(job.payload);
@@ -2114,12 +2299,17 @@ export class StudioOperations {
                 && ["completed", "reused"].includes(String((item as { status?: unknown }).status))
                 ? [(item as { chapter: number }).chapter] : []),
           );
-          return this.startStageExecution(job.story, { ...retryInput, chapters: retryInput.chapters.filter((chapter) => !completed.has(chapter)) });
+          return this.startStageExecution(job.story, { ...retryInput, chapters: retryInput.chapters.filter((chapter) => !completed.has(chapter)), dryRun: false }) as Job;
         }
-        return this.startStageExecution(job.story, retryInput);
+        return this.startStageExecution(job.story, { ...retryInput, dryRun: false }) as Job;
       }
-      case "scenes": return this.startScenes(job.story, job.payload ?? {});
-      case "artwork": return this.startArtwork(job.story, job.payload ?? {});
+      case "sourceNameScan": {
+        const { approvalId, ...input } = (job.payload ?? {}) as { approvalId?: string };
+        if (!approvalId) throw new ConfigurationError("Preview a new scan to approve its request cap.");
+        return this.startSourceNameScan(job.story, input, approvalId);
+      }
+      case "scenes": return this.startScenes(job.story, this.remainingRangeInput(job));
+      case "artwork": return this.startArtwork(job.story, this.remainingRangeInput(job));
       case "batch": {
         const input = batchInputSchema.parse(job.payload ?? {});
         if (job.status === "paused" && job.result && typeof job.result === "object") {
@@ -2131,13 +2321,21 @@ export class StudioOperations {
         }
         return this.startBatch(job.story, input);
       }
-      case "audio": return this.startAudio(job.story, job.payload ?? {});
-      case "audiobook": return this.startAudiobook(job.story, job.payload ?? {});
-      case "subtitles": return this.startSubtitles(job.story, job.payload ?? {});
+      case "audio": return this.startAudio(job.story, this.remainingRangeInput(job));
+      case "audiobook": {
+        const { resumeFrom, ...input } = (job.payload ?? {}) as { resumeFrom?: number };
+        const checkpoint = z.object({ resumeFrom: z.number().int().positive() }).safeParse(job.result);
+        return this.startAudiobook(job.story, input, checkpoint.success ? checkpoint.data.resumeFrom : resumeFrom);
+      }
+      case "subtitles": return this.startSubtitles(job.story, this.remainingRangeInput(job));
       case "alignment": return this.startAlignment(job.story, job.payload ?? {});
-      case "video": return this.startVideo(job.story, job.payload ?? {});
+      case "video": return this.startVideo(job.story, this.remainingRangeInput(job));
       case "videoExport": return this.startVideoExport(job.story, job.payload ?? {});
-      case "production": return this.startProduction(job.story, job.payload ?? {});
+      case "production": {
+        const { resumeManifestId, ...input } = (job.payload ?? {}) as { resumeManifestId?: string };
+        const checkpoint = productionManifestSchema.safeParse(job.result);
+        return this.startProduction(job.story, input, job.status === "paused" && checkpoint.success ? checkpoint.data.id : resumeManifestId);
+      }
       default: throw new Error(`Retry is not supported for job type '${job.type}'`);
     }
   }
@@ -2402,8 +2600,10 @@ export class StudioOperations {
         if (artworkIsProtected(scene)) continue;
         try {
           if (input.draftMissingProfiles) {
-            for (const entity of resolveVisuallyRelevantCanonicalEntities(scene, bible)) {
-              if (["character", "location"].includes(entity.type) && !profiles[entity.id] && entity.visualProfilePolicy?.mode !== "skip" && shouldUseVisualProfileForEntity(scene, entity)) profileDrafts.set(entity.id, entity.canonicalName);
+            const frame = continuity.get(scene.id)?.endState;
+            const worn = new Set(wornSceneItems(scene, bible, profiles, scene.overrides?.appearanceChapter ?? source.chapter, frame).map(({ entity }) => entity.id));
+            for (const entity of resolveVisuallyRelevantCanonicalEntities(scene, bible, profiles, source.chapter, frame)) {
+              if ((["character", "location"].includes(entity.type) || worn.has(entity.id)) && !profiles[entity.id] && entity.visualProfilePolicy?.mode !== "skip" && shouldUseVisualProfileForEntity(scene, entity)) profileDrafts.set(entity.id, entity.canonicalName);
             }
           }
         } catch (error) {
@@ -2424,17 +2624,51 @@ export class StudioOperations {
     const estimatedRequests = profileDrafts.size * 2 + missingPlans.length + minimumImages + scenes.length + scenes.filter(s => !artworkIsProtected(s)).length * input.maxRepairs * 2;
     return { input, blocked, missingPlans, profileDrafts: [...profileDrafts.values()], sceneCount: scenes.length, protectedCount, minimumImages, estimatedRequests, budgetUsd: input.budgetUsd, maxRequests: input.maxRequests, allowanceNote: "Reserved-cost budget, not a provider billing cap. Every actual provider attempt, including retries, consumes its configured allowance before it starts. Unknown scene counts and repairs make the final total variable. Review allowances against your provider pricing.", provider: story.artwork.provider, model: story.artwork.model, qaProvider: story.pipeline.qa.provider, qaModel: story.pipeline.qa.model, fingerprint: fingerprint({ input, blocked, generationInputs, sources: sources.map(s => s.fingerprint), profiles, bible, direction, artwork: story.artwork, providerVersion: provider.version, qa: story.pipeline.qa, planner: story.pipeline.scenePlanner }) };
   }
-  async startImageAutomation(slug: string, raw: unknown) {
+  private async imageAutomationCheckpoint(slug: string, updatedAt: string) {
+    const report = z.object({
+      config: imageAutomationSchema, updatedAt: z.string(), status: z.string(),
+      requests: z.number().int().nonnegative(), reservedUsd: z.number().nonnegative(),
+      outcomes: z.array(z.object({
+        key: z.string(), status: z.string(), repairs: z.number(),
+        entityId: z.string().optional(), referenceId: z.string().optional(),
+        profileRevision: z.number().optional(), feedback: z.string().optional(), error: z.string().optional(),
+      })),
+    }).parse(await this.imageDraftReport(slug));
+    if (report.updatedAt !== updatedAt || report.status === "running") throw new Error("The image run changed. Refresh the review queue.");
+    if (report.status === "completed") throw new Error("This image run is already complete.");
+    if (report.requests >= report.config.maxRequests || report.reservedUsd >= report.config.budgetUsd) throw new Error("This run has no remaining budget or requests.");
+    return report;
+  }
+
+  async continueImageAutomation(slug: string, raw: unknown) {
+    slugSchema.parse(slug);
+    const { reportUpdatedAt } = z.object({ reportUpdatedAt: z.string().datetime() }).strict().parse(raw);
+    const report = await this.imageAutomationCheckpoint(slug, reportUpdatedAt);
+    const plan = await this.planImageAutomation(slug, report.config);
+    return this.startImageAutomation(slug, { ...report.config, planFingerprint: plan.fingerprint }, { resumeUpdatedAt: reportUpdatedAt });
+  }
+
+  async startImageAutomation(slug: string, raw: unknown, handoff: { resumeUpdatedAt?: string; approvedReportUpdatedAt?: string } = {}) {
     slugSchema.parse(slug); const input = imageAutomationSchema.extend({ planFingerprint: z.string().min(1) }).parse(raw);
     return this.jobs.createDurable(this.visualJobsDirectory(), slug, control => withStoryLock(this.root, slug, "automatic image draft", async () => {
       const { planFingerprint, ...config } = input;
+      const checkpoint = handoff.resumeUpdatedAt ? await this.imageAutomationCheckpoint(slug, handoff.resumeUpdatedAt) : undefined;
+      const reportPath = join(storyPaths(this.root, slug, 1).story, "image-draft-latest.json");
+      const priorReport = await readJsonIfExists<{ outcomes?: ImageDraftOutcome[]; updatedAt?: string }>(reportPath);
+      if (handoff.approvedReportUpdatedAt && priorReport?.updatedAt !== handoff.approvedReportUpdatedAt) {
+        throw new Error("The sheets were approved, but the image run changed before continuation. Refresh the review queue.");
+      }
       const plan = await this.planImageAutomation(slug, config);
       if (plan.fingerprint !== planFingerprint) throw new Error("Image inputs changed after preview. Preview the draft again.");
       let stopped = false; control.setPause(() => { stopped = true; });
-      const priorReport = await readJsonIfExists<{ outcomes?: ImageDraftOutcome[] }>(join(storyPaths(this.root, slug, 1).story, "image-draft-latest.json"));
-      const outcomes: ImageDraftOutcome[] = [];
-      const reportPath = join(storyPaths(this.root, slug, 1).story, "image-draft-latest.json");
+      const previousOutcomes = checkpoint?.outcomes ?? (handoff.approvedReportUpdatedAt ? priorReport?.outcomes : undefined) ?? [];
+      const repairsByScene = new Map(previousOutcomes.filter(item => !item.entityId).map(item => [item.key, item.repairs]));
+      const outcomes: ImageDraftOutcome[] = previousOutcomes.filter(item => item.entityId || item.status === "ready"
+        || (handoff.approvedReportUpdatedAt && /^(chapter|summary):/.test(item.key) && !config.sceneKeys?.includes(item.key)));
+      const completedScenes = new Set(outcomes.filter(item => item.status === "ready").map(item => item.key));
       const budget = new ImageRunBudget(config, async state => { await atomicWriteJson(reportPath, { version: 1, config, scope: config.scope, ...state, outcomes, status: "running", updatedAt: new Date().toISOString() }); control.update({ stage: "image-draft", ...state, outcomes: [...outcomes] }); });
+      budget.requests = checkpoint?.requests ?? 0;
+      budget.reservedUsd = checkpoint?.reservedUsd ?? 0;
       const story = await loadStory(storyPaths(this.root, slug, 1).storyConfig);
       const original = resolveImageProvider(this.image, story);
       const image: ImageProvider = { name: original.name, version: original.version, capabilities: original.capabilities, validateConfiguration: () => original.validateConfiguration(), generate: async request => { if (stopped) throw new ImageBudgetExceeded("Image run paused"); await budget.reserve("image"); return original.generate(request); } };
@@ -2458,7 +2692,13 @@ export class StudioOperations {
       const profileAttempts = new Set<string>();
       const bible = await getStoryBible(this.root, slug);
       const profiles = await loadVisualProfiles(this.root, slug);
-      if (config.sceneKeys) {
+      if (checkpoint || handoff.approvedReportUpdatedAt) {
+        for (let index = outcomes.length - 1; index >= 0; index--) {
+          const item = outcomes[index]!;
+          if (item.entityId && profiles[item.entityId]?.references.some(ref => ref.id === item.referenceId && ref.approved)) outcomes.splice(index, 1);
+        }
+      }
+      if (config.sceneKeys && !checkpoint && !handoff.approvedReportUpdatedAt) {
         outcomes.push(...(priorReport?.outcomes ?? []).filter(item => ["profile_review", "reference_rejected", "reference_failed", "reference_pending"].includes(item.status) && item.entityId
           && !profiles[item.entityId]?.references.some(ref => ref.id === item.referenceId && ref.approved)));
       }
@@ -2489,7 +2729,9 @@ export class StudioOperations {
           for (const scene of fresh.scenes.filter(s => !s.disabled && (!config.sceneKeys || config.sceneKeys.includes(visualSceneKey({ chapter: source.chapter, summaryId: source.summaryId, sceneId: s.id }))))) {
             if (stopped) { status = "paused"; break; }
             const target = { chapter: source.chapter, summaryId: source.summaryId, sceneId: scene.id };
-            const outcome = { key: visualSceneKey(target), status: "running", repairs: 0, error: undefined as string | undefined }; outcomes.push(outcome);
+            const key = visualSceneKey(target);
+            if (completedScenes.has(key)) continue;
+            const outcome = { key, status: "running", repairs: repairsByScene.get(key) ?? 0, error: undefined as string | undefined }; outcomes.push(outcome);
             try {
               const state = continuity.get(scene.id);
               const issues = continuityPreflight(scene, state, bible);
@@ -2501,24 +2743,33 @@ export class StudioOperations {
               }
               if (!artworkIsProtected(scene)) {
                 if (config.draftMissingProfiles) {
-                  for (const entity of resolveVisuallyRelevantCanonicalEntities(scene, bible)) {
-                    if (!["character", "location"].includes(entity.type) || profiles[entity.id] || entity.visualProfilePolicy?.mode === "skip" || profileAttempts.has(entity.id) || !shouldUseVisualProfileForEntity(scene, entity)) continue;
+                  const worn = new Set(wornSceneItems(scene, bible, profiles, scene.overrides?.appearanceChapter ?? source.chapter, state?.endState).map(({ entity }) => entity.id));
+                  for (const entity of resolveVisuallyRelevantCanonicalEntities(scene, bible, profiles, source.chapter, state?.endState)) {
+                    if ((!["character", "location"].includes(entity.type) && !worn.has(entity.id)) || entity.visualProfilePolicy?.mode === "skip" || profileAttempts.has(entity.id) || !shouldUseVisualProfileForEntity(scene, entity)) continue;
+                    const saved = profiles[entity.id];
+                    let review = checkpoint && outcomes.find(item => item.entityId === entity.id && ["reference_failed", "reference_pending"].includes(item.status));
+                    if (saved && (!review || saved.status === "approved" || saved.revision !== review.profileRevision)) continue;
                     profileAttempts.add(entity.id);
                     try {
-                      const provider = meterPlanning(this.llm.forStage(story.pipeline.storyBible));
-                      const proposal = await withUsageScope({ story: slug, stage: "visual-profile" }, () =>
-                        proposeMissingVisualDetails(this.root, slug, bible, entity.id, provider, story.pipeline.storyBible));
-                      if (!Object.keys(proposal.values).length) throw new Error("No draft details were available. Review the Story Bible evidence and profile fields.");
-                      profiles[entity.id] = await applyVisualProfileProposal(this.root, slug, bible, proposal, Object.keys(proposal.values));
-                      await invalidateStoryBibleDerivedReads(this.root, slug);
-                      const review: ImageDraftOutcome = {
-                        key: entity.canonicalName, entityId: entity.id, status: "reference_pending", repairs: 0, profileRevision: profiles[entity.id]!.revision,
-                        error: "Draft saved. Generate its first reference sheet in Visual Canon.",
-                      };
-                      outcomes.push(review);
+                      if (!saved) {
+                        const provider = meterPlanning(this.llm.forStage(story.pipeline.storyBible));
+                        const proposal = await withUsageScope({ story: slug, stage: "visual-profile" }, () =>
+                          proposeMissingVisualDetails(this.root, slug, bible, entity.id, provider, story.pipeline.storyBible));
+                        if (!Object.keys(proposal.values).length) throw new Error("No draft details were available. Review the Story Bible evidence and profile fields.");
+                        profiles[entity.id] = await applyVisualProfileProposal(this.root, slug, bible, proposal, Object.keys(proposal.values));
+                        await invalidateStoryBibleDerivedReads(this.root, slug);
+                        const prior = outcomes.findIndex(item => item.entityId === entity.id && item.status === "profile_failed");
+                        if (prior >= 0) outcomes.splice(prior, 1);
+                        review = {
+                          key: entity.canonicalName, entityId: entity.id, status: "reference_pending", repairs: 0,
+                          profileRevision: profiles[entity.id]!.revision, error: "Draft saved. First reference sheet pending.",
+                        };
+                        outcomes.push(review);
+                      }
+                      if (!review) continue;
                       try {
                         const result = await withUsageScope({ story: slug, stage: "visual-reference" }, () =>
-                          generateStyleSheet(this.root, slug, entity.id, image, story));
+                          generateStyleSheet(this.root, slug, entity.id, image, story, { feedback: review?.feedback, replacesReferenceId: review?.referenceId }));
                         profiles[entity.id] = result.profile;
                         review.referenceId = result.reference.id;
                         review.profileRevision = result.profile.revision;
@@ -2557,8 +2808,15 @@ export class StudioOperations {
                 const latest = (await this.imageScopeSources(slug, source.chapter ? { chapters: [source.chapter] } : { summaryId: source.summaryId }))[0]!.scenes.find(s => s.id === scene.id)!;
                 const version = latest.artwork.versions.at(-1); if (!version) break;
                 const instruction = visualCheckFindings(check).filter(f => f.status === "mismatch").map(f => `${f.category}: correct ${f.observation}`).join("\n").slice(0,2000);
+                outcome.status = "running";
+                const requestsBeforeRepair = budget.requests;
                 outcome.repairs++;
-                await this.generateImageDraftScene(slug, target, image, summaryImages, { sourceVersionId: version.id, instruction });
+                try {
+                  await this.generateImageDraftScene(slug, target, image, summaryImages, { sourceVersionId: version.id, instruction });
+                } catch (error) {
+                  if (budget.requests === requestsBeforeRepair) outcome.repairs--;
+                  throw error;
+                }
               }
             } catch (error) {
               if (error instanceof ImageBudgetExceeded || (error instanceof Error && /Image run reached|Image run paused/.test(error.message))) throw error;
@@ -2621,6 +2879,12 @@ export class StudioOperations {
         if (!profile || (selected.referenceId ? !reference || reference.approved : !["reference_failed", "reference_pending"].includes(queued.status)) || profile.status === "approved" || queued.profileRevision !== profile.revision) throw new Error("A draft changed. Refresh the queue or review it in Visual Canon.");
         return { selected, queued, profile, reference };
       });
+      // Resolve configuration before rejecting anything so a setup error
+      // leaves every candidate available for another attempt.
+      const regeneration = input.regenerate ? await (async () => {
+        const story = await loadStory(storyPaths(this.root, slug, 1).storyConfig);
+        return { story, provider: resolveImageProvider(this.image, story) };
+      })() : undefined;
       let stopped = false;
       control.setPause(() => { stopped = true; });
       const persist = async (status: string) => {
@@ -2646,15 +2910,14 @@ export class StudioOperations {
       await saveVisualProfiles(this.root, slug, profiles);
       await invalidateStoryBibleDerivedReads(this.root, slug);
       await persist(input.regenerate ? "running" : "completed_with_exceptions");
-      if (!input.regenerate) return { status: "reference_rejected" };
+      if (!regeneration) return { status: "reference_rejected" };
       const budget = new ImageRunBudget(report.config, async state => {
         report.requests = state.requests; report.reservedUsd = state.reservedUsd;
         await persist("running");
       });
       budget.requests = report.requests;
       budget.reservedUsd = report.reservedUsd;
-      const story = await loadStory(storyPaths(this.root, slug, 1).storyConfig);
-      const provider = resolveImageProvider(this.image, story);
+      const { story, provider } = regeneration;
       const metered: ImageProvider = {
         name: provider.name, version: provider.version, capabilities: provider.capabilities,
         validateConfiguration: () => provider.validateConfiguration(),
@@ -2706,6 +2969,7 @@ export class StudioOperations {
     }).strict().parse(raw);
     if (new Set(input.selection.map(item => item.entityId)).size !== input.selection.length) throw new Error("Choose one reference sheet per profile.");
     const continuation = await withStoryLock(this.root, slug, "approve image draft reference", async () => {
+      const rawReport = await this.imageDraftReport(slug);
       const report = z.object({
         config: imageAutomationSchema,
         updatedAt: z.string(),
@@ -2713,7 +2977,7 @@ export class StudioOperations {
         requests: z.number().int().nonnegative(),
         status: z.string(),
         outcomes: z.array(z.object({ key: z.string(), status: z.string(), entityId: z.string().optional(), referenceId: z.string().optional(), profileRevision: z.number().optional() })),
-      }).parse(await this.imageDraftReport(slug));
+      }).parse(rawReport);
       if (report.updatedAt !== input.reportUpdatedAt || report.status === "running") throw new Error("The image run changed. Refresh the review queue.");
       const bible = await getStoryBible(this.root, slug);
       for (const selected of input.selection) {
@@ -2730,9 +2994,8 @@ export class StudioOperations {
         const queued = report.outcomes.find(item => item.entityId === selected.entityId && item.referenceId === selected.referenceId);
         if (queued?.profileRevision !== profile.revision) throw new Error("A draft profile changed. Review and approve it in Visual Canon.");
         const reference = profile.references.find(item => item.id === selected.referenceId);
-        if (!reference || reference.approved) throw new Error("A reference changed. Refresh the review queue.");
-        const bytes = await readFile(reference.imagePath);
-        if (!bytes.length || (reference.provenance?.imageFingerprint && createHash("sha256").update(bytes).digest("hex") !== reference.provenance.imageFingerprint)) throw new Error("A reference image changed or is empty. Review it in Visual Canon.");
+        if (!reference || reference.approved || reference.provenance?.rejectedAt) throw new Error("A reference changed. Refresh the review queue.");
+        if (!await loadReferenceSheetImage(this.root, slug, selected.entityId, reference)) throw new Error("A reference image is missing, changed, empty, or too large. Review it in Visual Canon.");
         profiles[selected.entityId] = visualProfileSchema.parse({
           ...profile, status: "approved", approvedAt, updatedAt: approvedAt, revision: profile.revision + 1,
           references: profile.references.map(item => ({
@@ -2743,16 +3006,33 @@ export class StudioOperations {
         });
       }
       const config = report.config;
-      const budgetUsd = config.budgetUsd - report.reservedUsd;
+      const budgetUsd = Math.round((config.budgetUsd - report.reservedUsd) * 1e9) / 1e9;
       const maxRequests = config.maxRequests - report.requests;
-      if (budgetUsd <= 0 || maxRequests <= 0) throw new Error("The run budget is exhausted. Approve in Visual Canon and preview a new image run with a budget.");
+      const exhausted = budgetUsd <= 0 || maxRequests <= 0;
       await saveVisualProfiles(this.root, slug, profiles);
       await invalidateStoryBibleDerivedReads(this.root, slug);
+      const approvedIds = new Set(input.selection.map(item => item.entityId));
+      const updatedAt = new Date(Math.max(Date.now(), (Date.parse(report.updatedAt) || 0) + 1)).toISOString();
+      await atomicWriteJson(join(storyPaths(this.root, slug, 1).story, "image-draft-latest.json"), {
+        ...rawReport, status: exhausted ? "budget_reached" : report.status, updatedAt,
+        outcomes: (rawReport?.outcomes as ImageDraftOutcome[]).filter(item => !item.entityId || !approvedIds.has(item.entityId)),
+      });
       const sceneKeys = report.outcomes.filter(item => ["needs_attention", "missing_plan", "deferred"].includes(item.status) && /^(chapter|summary):/.test(item.key)).map(item => item.key);
-      return { ...config, budgetUsd, maxRequests, sceneKeys };
+      return { config: { ...config, budgetUsd, maxRequests, sceneKeys }, exhausted, updatedAt };
     });
-    const plan = await this.planImageAutomation(slug, continuation);
-    return this.startImageAutomation(slug, { ...continuation, planFingerprint: plan.fingerprint });
+    if (continuation.exhausted || !continuation.config.sceneKeys.length) {
+      const label = continuation.exhausted ? "Sheets approved. Preview a new budget to continue the waiting scenes." : "Sheets approved. No waiting scenes.";
+      return this.jobs.createDurable(this.visualJobsDirectory(), slug, async control => {
+        control.update({ stage: "visual-reference", label });
+        return { status: continuation.exhausted ? "budget_reached" : "completed", approved: input.selection.length };
+      }, { operation: "reference-approval" }, "visualWorkflow");
+    }
+    try {
+      const plan = await this.planImageAutomation(slug, continuation.config);
+      return await this.startImageAutomation(slug, { ...continuation.config, planFingerprint: plan.fingerprint }, { approvedReportUpdatedAt: continuation.updatedAt });
+    } catch (error) {
+      throw new Error(`Sheets were approved. The waiting scenes could not start: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
+    }
   }
 
   private async generateImageDraftScene(slug: string, target: { chapter?: number; summaryId?: string; sceneId: string }, image: ImageProvider, summaries: SummaryVisualService, repair?: import("../../src/artwork/repair.js").ArtworkRepair) {
@@ -2918,10 +3198,23 @@ export class StudioOperations {
     const summary = input.summaryId ? await new SummaryService(this.root, this.llm).get(slug, input.summaryId) : undefined;
     const summaryDirection = summary ? resolveSummarySceneArtDirection(direction, summary.artDirectionOverride, input.scene) : undefined;
     const scene = summaryDirection?.source === "disabled" ? sceneSchema.parse({ ...input.scene, direction: { ...input.scene.direction, useStoryArtDirection: false } }) : input.scene;
-    const continuity = continuityOverride !== undefined ? continuityOverride ?? undefined : input.summaryId ? (await this.summarySceneContinuity(slug, input.summaryId)).find(r => r.sceneId === scene.id)?.continuity : input.chapter ? await (async () => { const raw = await readJsonIfExists(storyPaths(this.root, slug, input.chapter!).scenesManifest); if (!raw) return undefined; return (await resolveChapterVisualContinuity({ root: this.root, slug, chapter: input.chapter!, manifest: sceneManifestSchema.parse(raw) })).resolved.perScene.find(r => r.sceneId === scene.id); })() : undefined;
+    let continuity = continuityOverride ?? undefined;
+    if (continuityOverride === undefined && input.summaryId) {
+      continuity = (await this.summaryVisuals().sceneContinuityDetail(slug, input.summaryId, scene)).find(row => row.sceneId === scene.id)?.continuity;
+    } else if (continuityOverride === undefined && input.chapter) {
+      const raw = await readJsonIfExists(storyPaths(this.root, slug, input.chapter).scenesManifest);
+      const stored = raw ? sceneManifestSchema.parse(raw).scenes : [];
+      const scenes = [...stored.filter(candidate => candidate.id !== scene.id), scene].sort((a, b) => a.startSeconds - b.startSeconds);
+      const { resolved } = await resolveChapterVisualContinuity({ root: this.root, slug, chapter: input.chapter, manifest: { scenes } });
+      continuity = resolved.perScene.find(row => row.sceneId === scene.id);
+    }
     const resolved = resolveVisualCanonPrompt({ scene, frameState: continuity?.endState, visualContinuity: continuity ? renderSceneContinuity(continuity) : undefined, chapter: summary ? Math.min(...summary.chapters) : input.chapter, bible, story, visualProfiles: profiles, artDirection: summaryDirection?.preset ?? resolveActiveArtDirection(direction, input.scene.overrides?.artDirectionPresetId) });
     const references = await loadApprovedVisualProfileReferences(this.root, story, resolved);
-    const decisions = resolved.resolvedEntities.flatMap(entity => rankVisualReferences(entity.references ?? [], resolved.referenceContextByEntity?.[entity.entityId] ?? resolved.referenceContext).map(row => ({ entityId: entity.entityId, referenceId: row.reference.id, reason: row.reason, eligible: row.eligible, selected: references.loadedReferenceIds.includes(row.reference.id) })));
+    const unavailable = new Set(references.unavailableReferenceIds);
+    const decisions = resolved.resolvedEntities.flatMap(entity => rankVisualReferences(entity.references ?? [], resolved.referenceContextByEntity?.[entity.entityId] ?? resolved.referenceContext).map(row => {
+      const missing = unavailable.has(row.reference.id);
+      return { entityId: entity.entityId, referenceId: row.reference.id, reason: missing ? "Reference file is missing, changed, empty, or too large" : row.reason, eligible: row.eligible && !missing, selected: references.loadedReferenceIds.includes(row.reference.id) };
+    }));
     const handoff = input.chapter && !input.summaryId ? await loadVisualContinuityHandoff(this.root, slug, input.chapter) : undefined;
     const version = backingArtworkVersion(scene);
     const snapshot = continuity && continuitySnapshot(continuity);
@@ -2931,12 +3224,15 @@ export class StudioOperations {
       artworkChanges: continuityDifferences(artworkBaseline, snapshot),
       artworkBaselineMissing: Boolean(version || scene.artwork.imageFingerprint) && artworkBaseline === undefined,
     } : undefined;
-    return { ...resolved, continuityReview, continuityIssues: continuityPreflight(scene, continuity, bible), references: { decisions, mode: references.mode, available: references.available, loadedReferenceIds: references.loadedReferenceIds, loadedReferences: references.images.map(image => ({ entityId: image.entityId, referenceId: image.referenceId })) } };
+    const sceneLooks = resolved.resolvedEntities.flatMap(entity => (profiles[entity.entityId]?.appearanceEras ?? [])
+      .filter(isSceneAppearanceLook)
+      .map(era => ({ entityId: entity.entityId, id: era.id, name: era.name, approved: era.status === "approved", aliases: era.sceneAliases ?? [] })));
+    return { ...resolved, sceneLooks, continuityReview, continuityIssues: continuityPreflight(scene, continuity, bible), references: { decisions, mode: references.mode, available: references.available, unavailableCount: unavailable.size, loadedReferenceIds: references.loadedReferenceIds, loadedReferences: references.images.map(image => ({ entityId: image.entityId, referenceId: image.referenceId })) } };
   }
 
   async visualImpact(slug: string, entityId: string) {
     slugSchema.parse(slug); canonicalEntitySchema.shape.id.parse(entityId);
-    const bible = await getStoryBible(this.root, slug);
+    const [bible, profiles] = await Promise.all([getStoryBible(this.root, slug), loadVisualProfiles(this.root, slug)]);
     const result: Array<ReturnType<typeof visualSceneImpact> & { chapter?: number; summaryId?: string; source: string }> = [];
     const directory = join(storyPaths(this.root, slug, 1).story, "chapters");
     for (const name of await readdir(directory).catch((error: NodeJS.ErrnoException) => error.code === "ENOENT" ? [] : Promise.reject(error))) {
@@ -2945,12 +3241,12 @@ export class StudioOperations {
       if (!raw) continue;
       const manifest = sceneManifestSchema.parse(raw);
       for (const scene of manifest.scenes) {
-        const impact = visualSceneImpact(scene, bible, entityId);
+        const impact = visualSceneImpact(scene, bible, entityId, profiles, Number(name));
         if (impact) result.push({ ...impact, chapter: Number(name), source: `Chapter ${Number(name)}` });
       }
     }
     for (const summary of await this.listSummaries(slug)) for (const scene of summary.scenePlan?.scenes ?? []) {
-      const impact = visualSceneImpact(scene, bible, entityId);
+      const impact = visualSceneImpact(scene, bible, entityId, profiles, Math.min(...summary.chapters));
       if (impact) result.push({ ...impact, summaryId: summary.id, source: summary.title });
     }
     return result;
@@ -3068,7 +3364,7 @@ export class StudioOperations {
   async proposeVisualProfile(slug: string, entityId: string, input: unknown) {
     slugSchema.parse(slug);
     canonicalEntitySchema.shape.id.parse(entityId);
-    const parsed = z.object({ fields: z.array(z.string().min(1)).max(MAX_VISUAL_PROFILE_FIELD_COUNT).optional(), regenerate: z.boolean().optional() }).strict().parse(input ?? {});
+    const parsed = z.object({ fields: z.array(z.string().min(1)).max(MAX_VISUAL_PROFILE_FIELD_COUNT).optional(), regenerate: z.boolean().optional(), evidenceRange: profileEvidenceRangeSchema.optional(), includeWardrobeLooks: z.boolean().optional() }).strict().parse(input ?? {});
     return withStoryLock(this.root, slug, "propose visual profile details", async () => {
       const story = await loadStory(storyPaths(this.root, slug, 1).storyConfig);
       return withUsageScope({ story: slug, stage: "visual-profile" }, async () => proposeMissingVisualDetails(this.root, slug, await getStoryBible(this.root, slug), entityId, this.llm.forStage(story.pipeline.storyBible), story.pipeline.storyBible, parsed));
@@ -3078,10 +3374,10 @@ export class StudioOperations {
   async applyVisualProfileProposal(slug: string, entityId: string, input: unknown) {
     slugSchema.parse(slug);
     canonicalEntitySchema.shape.id.parse(entityId);
-    const parsed = z.object({ proposal: visualProfileProposalSchema.extend({ entityId: z.string(), visualType: visualProfileSchema.shape.visualType, eligibleFields: z.array(z.string()), protectedFields: z.array(z.string()), contextFingerprint: z.string(), provider: z.string(), model: z.string() }), selectedFields: z.array(z.string()).max(MAX_VISUAL_PROFILE_FIELD_COUNT) }).strict().parse(input);
+    const parsed = z.object({ proposal: visualProfileProposalSchema.extend({ entityId: z.string(), visualType: visualProfileSchema.shape.visualType, eligibleFields: z.array(z.string()), protectedFields: z.array(z.string()), contextFingerprint: z.string(), provider: z.string(), model: z.string() }), selectedFields: z.array(z.string()).max(MAX_VISUAL_PROFILE_FIELD_COUNT), saveWardrobeLooks: z.boolean().optional() }).strict().parse(input);
     if (parsed.proposal.entityId !== entityId) throw new Error("Visual profile proposal belongs to a different entity");
     return withStoryLock(this.root, slug, "apply visual profile proposal", async () => {
-      const result = await applyVisualProfileProposal(this.root, slug, await getStoryBible(this.root, slug), parsed.proposal, parsed.selectedFields);
+      const result = await applyVisualProfileProposal(this.root, slug, await getStoryBible(this.root, slug), parsed.proposal, parsed.selectedFields, parsed.saveWardrobeLooks);
       await invalidateStoryBibleDerivedReads(this.root, slug);
       return result;
     });
@@ -3214,6 +3510,8 @@ export class StudioOperations {
 
   async close() {
     clearInterval(this.inspectionTimer);
+    await Promise.all([this.cancelSourceVerification(), this.tomatoSession?.cancel()]);
+    this.tomatoSession = undefined;
     try {
       await this.jobs.flushDurable();
     } catch (error) {

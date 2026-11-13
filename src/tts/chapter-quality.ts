@@ -18,7 +18,7 @@ import {
   compareSpokenText, defaultQualityThresholds, hasFishControlCues, summarizeQuality, ttsSegmentQualitySchema, ttsQualitySummaryStatusSchema,
 } from "./quality-guard.js";
 import { scanVocalizations } from "./vocalizations.js";
-import { CensorManifest, type CensorAudioService, FfmpegCensorAudioService, planCensoredSpeech, speechForSynthesis } from "./censor-audio.js";
+import { CensorManifest, type CensorAudioService, FfmpegCensorAudioService, planCensoredSpeech, prepareCensorSpeech } from "./censor-audio.js";
 import { logger } from "../utils/logger.js";
 import { safeErrorMessage } from "../errors/diagnostic.js";
 
@@ -277,12 +277,16 @@ export async function prepareStoredChapterTtsSegment(options: { root: string; st
     const speech = normalizeSpeechForProvider(script, story.outputLanguage, story.narrationSettings, provider, config.model);
     const prepare = (text: string) => provider.prepareSegments!({ text, model: config.model, referenceId: config.referenceId, secondaryReferenceId: config.secondaryReferenceId, voiceMode: config.voiceMode, deliveryIntensity: config.deliveryIntensity, speed: config.speed, format: config.format, sampleRate: config.sampleRate, bitrate: config.bitrate, normalize: config.normalize, maxCharsPerRequest: config.maxCharsPerRequest });
     const plan = existingCensor ? planCensoredSpeech(speech.normalized.text) : undefined;
-    const prepared = plan ? plan.flatMap((part, index) => part.kind === "speech" ? prepare(speechForSynthesis(plan, index)) : []) : prepare(speech.normalized.text);
+    const prepared = plan ? [...prepareCensorSpeech(plan).values()].flatMap(prepare) : prepare(speech.normalized.text);
     // Older Fish artifacts put the narration reset immediately after dialogue;
     // current formatting puts it before the following narration. Current formatting also
     // repeats soft cues for adjacent dialogue. Neither change alters
     // the words in untouched audio and neither should block an edit.
-    const comparableText = (text: string | undefined) => provider.name === "fish" ? text?.replace(/\[(?:calm|soft)\]/gi, " ").replace(/\s+/g, " ").trim() : text;
+    const comparableText = (text: string | undefined) => {
+      const comparable = provider.name === "fish" ? text?.replace(/\[(?:calm|soft)\]/gi, " ").replace(/\s+/g, " ").trim() : text;
+      // Older bleeped clips may have the same words but no synthetic quote at the join.
+      return existingCensor ? comparable?.replace(/^[“‘"「『«]+|[”’"」』»]+$/gu, "") : comparable;
+    };
     const unchangedOthers = artifact.segments.every(segment => segment.index === options.segment || options.allowedChangedSegments?.includes(segment.index) || comparableText(prepared[segment.index]) === comparableText(segment.expectedText));
     // Edits in another segment are allowed: they remain pending for that segment's
     // own regeneration. Require the same paragraph at every join so we cannot

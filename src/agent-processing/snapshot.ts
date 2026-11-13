@@ -42,6 +42,7 @@ export async function inventory(directory: string, scope?: TextInventoryScope): 
       return parts.length === 3 && (selected.has(Number(parts[1]))
         ? /\.(json|txt)$/.test(parts[2]!) : contextFiles.has(parts[2]!));
     }
+    if (parts[0] === "source-name-index") return isDirectory ? parts.length === 1 : ["rules.json", "ambiguous.json"].includes(parts[1]!) && parts.length === 2;
     // Eligible summaries live in direct JSON records; their media is irrelevant.
     if (parts[0] === "summaries") return isDirectory ? parts.length === 1 : parts.length === 2 && name.endsWith(".json");
     return !isDirectory && parts.length === 1 && /\.(json|txt)$/.test(name);

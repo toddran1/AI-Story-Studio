@@ -11,6 +11,7 @@ import type { TTSProvider } from "./provider.js";
 import { type TTSRequest, type TTSResult, type TtsQualityProgress, safeProgress } from "./types.js";
 import { scanVocalizations } from "./vocalizations.js";
 import { splitOpeningSentenceForTTSRepair } from "./split-text.js";
+import { normalizeNumericRanges } from "./speech-normalization.js";
 
 export const TTS_QUALITY_GUARD_VERSION = "tts-quality-guard-v3";
 
@@ -164,7 +165,7 @@ function toleratedVariants(terms: Array<{ surface: string; spoken: string }>): M
  * transcription. Same inputs always produce the same score, metrics, and issues. */
 export function compareSpokenText(expected: string, observations: AlignmentObservation[], opts: CompareOptions = {}): SpokenComparison {
   const thresholds = { ...defaultQualityThresholds, ...opts.thresholds };
-  const expectedTokens = tokenizeSpoken(expected);
+  const expectedTokens = tokenizeSpoken(normalizeNumericRanges(expected));
   // Each observation contributes normalized tokens; sound-only observations
   // (music notes, breath marks) are tracked separately for vocalization tolerance.
   const words = observations.map((observation) => ({ observation, tokens: tokenizeSpoken(observation.text), sound: isSoundToken(observation.text) }));

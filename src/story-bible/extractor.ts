@@ -9,11 +9,13 @@ import { fingerprint } from "../utils/hash.js";
 import { resolveEntityVisualEvidence } from "./visual-evidence.js";
 import { allIdentityRenderings, containsIdentityRendering } from "./entity-identity.js";
 
-export function storyBibleExtractionFingerprint(input: { source: string; translation: string; narration: string; config: StageModelConfig; bible: StoryBible; promptVersion?: string }) {
-  return fingerprint({ source: fingerprint(input.source), translation: fingerprint(input.translation), narration: fingerprint(input.narration), config: input.config, prompt: input.promptVersion ?? STORY_BIBLE_PROMPT_VERSION, context: input.bible });
+export const SOURCE_ONLY_STORY_BIBLE_PROMPT_VERSION = `${STORY_BIBLE_PROMPT_VERSION}-source-only-v1`;
+
+export function storyBibleExtractionFingerprint(input: { source: string; translation: string; narration: string; config: StageModelConfig; bible: StoryBible; promptVersion?: string; sourceOnly?: boolean }) {
+  return fingerprint({ source: fingerprint(input.source), translation: fingerprint(input.translation), narration: fingerprint(input.narration), config: input.config, prompt: input.promptVersion ?? (input.sourceOnly ? SOURCE_ONLY_STORY_BIBLE_PROMPT_VERSION : STORY_BIBLE_PROMPT_VERSION), context: input.bible });
 }
 
-export async function extractStoryBible(provider: LLMProvider, config: StageModelConfig, input: { chapter: number; source: string; translation: string; narration: string; bible: StoryBible }) {
+export async function extractStoryBible(provider: LLMProvider, config: StageModelConfig, input: { chapter: number; source: string; translation: string; narration: string; bible: StoryBible; sourceOnly?: boolean }) {
   const { chapter, source, translation, narration, bible } = input;
   const contextBible = { ...bible, canonicalEntities: bible.canonicalEntities.map((entity) => {
     const resolved = resolveEntityVisualEvidence(entity, chapter - 1);
@@ -22,12 +24,12 @@ export async function extractStoryBible(provider: LLMProvider, config: StageMode
   }) };
   const result = await provider.generateStructured({
     model: config.model,
-    instructions: storyBibleInstructions,
-    input: `CHAPTER NUMBER: ${chapter}\n\nSOURCE CHAPTER:\n${source}\n\nTRANSLATION:\n${translation}\n\nNARRATION:\n${narration}\n\nESTABLISHED STORY BIBLE:\n${JSON.stringify(contextBible, null, 2)}`,
+    instructions: input.sourceOnly ? storyBibleInstructions + "\n\nSOURCE-ONLY MODE: No translation or narration exists for this extraction. Use the source chapter alone for facts, identity evidence and exact visual excerpts. Record each original spelling exactly. Reuse established canonical names; for new non-English names provide a faithful English rendering or transliteration, not an invented localized name. If the source is already English, preserve the names as written." : storyBibleInstructions,
+    input: `CHAPTER NUMBER: ${chapter}\n\nSOURCE CHAPTER:\n${source}${input.sourceOnly ? "" : `\n\nTRANSLATION:\n${translation}\n\nNARRATION:\n${narration}`}\n\nESTABLISHED STORY BIBLE:\n${JSON.stringify(contextBible, null, 2)}`,
     schemaName: "story_bible_update",
     schema: storyBibleUpdateSchema,
   });
-  const normalizedSource = narration.replace(/\s+/g, " ").toLocaleLowerCase();
+  const normalizedSource = (input.sourceOnly ? source : narration).replace(/\s+/g, " ").toLocaleLowerCase();
   result.value.visualObservations = (result.value.visualObservations ?? []).filter((observation) => normalizedSource.includes(observation.excerpt.replace(/\s+/g, " ").toLocaleLowerCase()));
   const hasIdentityEvidence = (text: string, names: Array<string | undefined | null>) =>
     names.some((name) => Boolean(name && containsIdentityRendering(text, name)));

@@ -2,7 +2,7 @@ import { Chapter, StageName, chapterSchema } from "../domain/chapter.js";
 import { Story } from "../domain/story.js";
 import { LLMProvider } from "../llm/provider.js";
 import { PipelineOptions, PipelineStageEvent } from "../pipeline/chapter-pipeline.js";
-import { QualityGateError } from "../pipeline/errors.js";
+import { ConfigurationError, QualityGateError } from "../pipeline/errors.js";
 import { selectRepairStage } from "../qa/repair.js";
 import { DiscoveredChapter } from "../batch/types.js";
 import { retryConfigSchema } from "../batch/types.js";
@@ -19,8 +19,8 @@ import { storyPaths } from "../storage/paths.js";
 import { readJsonIfExists } from "../storage/story-files.js";
 import { fingerprint } from "../utils/hash.js";
 import { buildProductionPlan, isProductionStageForced, resolveProductionOptions } from "./planner.js";
-import { createProductionManifest, emptySummary, loadLatestProduction, persistProductionManifest } from "./manifest.js";
-import { ProductionForce, ProductionManifest, ProductionOutput, ProductionPlan, ProductionStage } from "./types.js";
+import { createProductionManifest, emptySummary, loadLatestProduction, persistProductionManifest, productionPaths } from "./manifest.js";
+import { ProductionForce, ProductionManifest, ProductionOutput, ProductionPlan, ProductionStage, productionManifestSchema } from "./types.js";
 import { withUsageScope } from "../cost/context.js";
 import { alignStoredChapter } from "../alignment/chapter-alignment.js";
 import { AlignmentConfig, AlignmentEngine } from "../alignment/types.js";
@@ -31,7 +31,7 @@ export type ProductionDependencies = {
   scenePlanner?: LLMProvider; image?: ImageProviderSource; video: VideoProcessor; videoExport: VideoExportProcessor; audiobook: AudiobookProcessor;
   alignmentEngine?: AlignmentEngine; alignmentConfig?: AlignmentConfig;
 };
-export type ProductionRequest = { root: string; story: Story; from: number; to: number; profile?: string; outputs?: ProductionOutput[]; artwork?: boolean; repairQa?: boolean; alignment?: boolean; refresh?: boolean; dryRun?: boolean; force?: ProductionForce; audiobookFormat?: "mp3" | "m4b"; resume?: boolean; deferExports?: boolean; propagateChapterErrors?: boolean; productionRunId?: string; queueJobId?: string; maxProviderBudgetUsd?: number; recordedCost?: () => Promise<number>; pause?: { readonly isRequested: boolean }; onProgress?: (event: Record<string, unknown>) => void };
+export type ProductionRequest = { root: string; story: Story; from: number; to: number; profile?: string; outputs?: ProductionOutput[]; artwork?: boolean; repairQa?: boolean; alignment?: boolean; refresh?: boolean; dryRun?: boolean; force?: ProductionForce; audiobookFormat?: "mp3" | "m4b"; resume?: boolean; resumeManifestId?: string; deferExports?: boolean; propagateChapterErrors?: boolean; productionRunId?: string; queueJobId?: string; maxProviderBudgetUsd?: number; recordedCost?: () => Promise<number>; pause?: { readonly isRequested: boolean }; onProgress?: (event: Record<string, unknown>) => void };
 
 export async function planProduction(request: ProductionRequest, dependencies: Pick<ProductionDependencies, "loadChapters" | "refresh">): Promise<{ plan: ProductionPlan; chapters: DiscoveredChapter[]; resolved: ReturnType<typeof resolveProductionOptions> }> {
   validateRange(request.from, request.to); if (request.refresh && !request.dryRun) { if (!dependencies.refresh) throw new Error("Remote refresh is not available"); await dependencies.refresh(request.from, request.to); }
@@ -43,13 +43,24 @@ export async function planProduction(request: ProductionRequest, dependencies: P
 }
 
 export async function runProduction(request: ProductionRequest, dependencies: ProductionDependencies): Promise<{ manifest: ProductionManifest; plan: ProductionPlan }> {
-  const started = Date.now(); const budgetBaseline = request.maxProviderBudgetUsd !== undefined && request.recordedCost ? await request.recordedCost() : 0; const { plan, chapters, resolved } = await planProduction(request, dependencies); const manifestOptions: ProductionManifest["options"] = { outputs: resolved.outputs, artwork: resolved.artwork, repairQa: resolved.repairQa, refresh: Boolean(request.refresh), alignment: resolved.alignment, audiobookFormat: resolved.audiobookFormat, force: request.force, profile: request.profile, dryRun: Boolean(request.dryRun), maxProviderBudgetUsd: request.maxProviderBudgetUsd };
-  let manifest = await resumableManifest(request, plan, manifestOptions) ?? createProductionManifest(request.story, plan, manifestOptions);
+  const started = Date.now(); const budgetBaseline = request.maxProviderBudgetUsd !== undefined && request.recordedCost ? await request.recordedCost() : 0; const { plan, chapters, resolved } = await planProduction(request.resumeManifestId ? { ...request, refresh: false } : request, dependencies); const manifestOptions: ProductionManifest["options"] = { outputs: resolved.outputs, artwork: resolved.artwork, repairQa: resolved.repairQa, refresh: Boolean(request.refresh), alignment: resolved.alignment, audiobookFormat: resolved.audiobookFormat, force: request.force, profile: request.profile, dryRun: Boolean(request.dryRun), maxProviderBudgetUsd: request.maxProviderBudgetUsd };
+  if (request.resumeManifestId && !/^\d{8}T\d{6}Z-[a-f0-9]{8}$/.test(request.resumeManifestId)) {
+    throw new ConfigurationError("Invalid production checkpoint ID.");
+  }
+  const checkpoint = request.resumeManifestId
+    ? productionManifestSchema.parse(await readJsonIfExists(productionPaths(request.root, request.story.slug, request.resumeManifestId).manifest!))
+    : undefined;
+  if (checkpoint && (checkpoint.story !== request.story.slug || checkpoint.selection.from !== plan.from
+    || checkpoint.selection.to !== plan.to || !["paused", "running"].includes(checkpoint.status))) {
+    throw new ConfigurationError("This production checkpoint cannot be resumed.");
+  }
+  const manifest = checkpoint ?? await resumableManifest(request, plan, manifestOptions) ?? createProductionManifest(request.story, plan, manifestOptions);
   if (request.dryRun) { manifest.status = "planned"; manifest.summary = summarize(manifest, Date.now() - started); await persistProductionManifest(request.root, manifest); request.onProgress?.({ type: "production.planned", plan }); return { manifest, plan }; }
   manifest.status = "running"; manifest.startedAt ??= new Date().toISOString(); await persistProductionManifest(request.root, manifest); request.onProgress?.({ type: "production.started", runId: manifest.id, total: chapters.length, plan });
   for (let index = 0; index < chapters.length; index++) {
     const source = chapters[index]!; const run = manifest.chapters[String(source.chapter)]!;
     if (request.pause?.isRequested) { manifest.status = "paused"; break; }
+    if (checkpoint && ["complete", "needs-review", "failed"].includes(run.status)) continue;
     if (!request.force && run.status === "complete" && await canResumeChapter(request.root, request.story, source.chapter, plan.stages)) { request.onProgress?.({ type: "production.chapter.resumed", chapter: source.chapter, index: index + 1, total: chapters.length }); continue; }
     run.status = "running"; run.error = undefined; manifest.current = { chapter: source.chapter }; request.onProgress?.({ type: "production.chapter.started", chapter: source.chapter, index: index + 1, total: chapters.length }); await persistProductionManifest(request.root, manifest);
     let writeChain = Promise.resolve(); const stageEvent = (event: PipelineStageEvent) => { if (event.status !== "progress") updateOperation(run.operations, event.stage, event.status); manifest.current = { chapter: source.chapter, stage: event.stage }; request.onProgress?.({ type: "production.stage", chapter: source.chapter, stage: event.stage, status: event.status, detail: event.detail, currentChunk: event.currentChunk, totalChunks: event.totalChunks, model: event.stage === "tts" ? request.story.pipeline.tts.model : undefined, usage: event.status === "completed" && event.stage === "tts" ? event.state.usage : undefined }); if (event.status !== "progress") writeChain = writeChain.then(() => persistProductionManifest(request.root, manifest)); };

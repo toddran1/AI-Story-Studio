@@ -389,6 +389,8 @@ describe("web service layer", () => {
     let signalFirst!: () => void;
     const firstStarted = new Promise<void>((resolve) => { signalFirst = resolve; });
     const firstMayFinish = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    let releaseOther!: () => void;
+    const otherMayFinish = new Promise<void>(resolve => { releaseOther = resolve; });
     const calls: number[] = [];
     const finishedStages: string[] = [];
     const operations = new StudioOperations(root, env, jobs, { pipeline: { run: async (options) => {
@@ -413,11 +415,21 @@ describe("web service layer", () => {
       expect(result.result).toMatchObject({ status: "paused", results: [{ chapter: 1, status: "completed" }] });
       expect(calls).toEqual([1]);
       expect(finishedStages).toEqual(["1:translation", "1:narration", "1:qa"]);
+      const blocker = jobs.create("audio", imported.story.slug, async () => undefined, { from: 2, to: 2 });
+      await expect(operations.retryJob(started.id)).rejects.toThrow(`overlapping work in job ${blocker.id}`);
+      expect(jobs.get(started.id)?.resumedBy).toBeUndefined();
+      await vi.waitFor(() => expect(jobs.get(blocker.id)?.status).toBe("completed"));
+      const other = jobs.create("audio", imported.story.slug, () => otherMayFinish, { from: 1, to: 1 });
       const resumed = await waitForJob(jobs, (await operations.retryJob(started.id) as Job).id);
       expect(resumed.status).toBe("completed");
       expect(resumed.payload).toMatchObject({ chapters: [2] });
       expect(calls).toEqual([1, 2]);
-    } finally { releaseFirst?.(); await operations.close(); await rm(root, { recursive: true, force: true }); }
+      expect(jobs.get(other.id)?.status).toBe("running");
+      expect(jobs.get(started.id)?.resumedBy).toBe(resumed.id);
+      await expect(operations.retryJob(started.id)).rejects.toThrow("already been resumed");
+      releaseOther();
+      await waitForJob(jobs, other.id);
+    } finally { releaseFirst?.(); releaseOther?.(); await operations.close(); await rm(root, { recursive: true, force: true }); }
   });
 
   it("retries stageExecution with its Chapter policy and target, without the old plan fingerprint", async () => {
@@ -445,11 +457,187 @@ describe("web service layer", () => {
     await operations.close(); await rm(root, { recursive: true, force: true });
   });
 
+  it("indexes literal source mentions and saves a narration rule before the Story Bible exists", async () => {
+    const root = await mkdtemp(join(tmpdir(), "source-name-index-"));
+    const jobs = new JobManager();
+    const llm = new MockLLM("gemini");
+    const candidate = { sourceName: "沈青", aliases: ["青公子", "编造"], type: "character", displayName: "Shen Qing", description: "A traveling swordsman.", importance: "central", suggestedName: "Rowan Vale", reason: "An easy name to recognize aloud." };
+    const generate = vi.spyOn(llm, "generateStructured").mockImplementation(async request => ({
+      value: request.schema.parse({ entities: [
+        candidate, { ...candidate, sourceName: "编造" }, { ...candidate, sourceName: "青公子", aliases: [] },
+        { ...candidate, sourceName: "玄门", aliases: [], type: request.input.includes("向北") ? "organization" : "location" },
+      ] }),
+    }));
+    const operations = new StudioOperations(root, env, jobs, { llm: new LLMRouter(new Map([["gemini", llm], ["openai", llm], ["kimi", llm]])) });
+    try {
+      const inspection = await operations.inspectSource({ files: [
+        { name: "chapter-001.txt", text: "沈青向北走。沈青回头。有人叫他青公子。玄门。" },
+        { name: "chapter-002.txt", text: "青公子来了。玄门。" },
+      ] });
+      const { story } = await operations.importInspection("naming-source-story", inspection.id);
+      for (let i = 0; i < 2; i++) {
+        const preview = await operations.previewSourceNameScan(story.slug, {});
+        expect(preview.requests).toBe(i === 0 ? 2 : 0);
+        if (i === 0) {
+          const rejected = operations.startSourceNameScan(story.slug, { fingerprint: preview.fingerprint, approvedRequests: 1 });
+          expect((await waitForJob(jobs, rejected.id)).error).toContain("approved request cap");
+          expect(generate).not.toHaveBeenCalled();
+        }
+        const job = operations.startSourceNameScan(story.slug, { fingerprint: preview.fingerprint, approvedRequests: preview.requests });
+        expect((await waitForJob(jobs, job.id)).status).toBe("completed");
+      }
+      expect(generate).toHaveBeenCalledTimes(2);
+      const view = await operations.getSourceNameIndex(story.slug);
+      expect(view.stale).toBe(false);
+      expect(view.index?.entries).toHaveLength(2);
+      const ambiguous = view.index!.entries.find(item => item.sourceName === "玄门")!;
+      expect(view.ambiguous).toContain(ambiguous.id);
+      await expect(operations.saveSourceNameRule(story.slug, ambiguous.id, { scannedAt: view.index!.scannedAt, name: "Gate" })).rejects.toThrow("shares this spelling");
+      const entry = view.index!.entries.find(item => item.sourceName === "沈青")!;
+      expect(entry).toMatchObject({ aliases: ["青公子"], mentions: 4, chapters: [{ chapter: 1, count: 3 }, { chapter: 2, count: 1 }] });
+      await operations.saveSourceNameRule(story.slug, entry.id, { scannedAt: view.index!.scannedAt, name: "Rowan Vale" });
+      const { loadNarrationNamingEntities, selectNarrationNamingEntities } = await import("../src/story-bible/narration-names.js");
+      const rules = await loadNarrationNamingEntities(root, story.slug);
+      expect(selectNarrationNamingEntities(rules, "沈青向北走。", 1)).toMatchObject([{ localizedNaming: { fullName: "Rowan Vale", usageMode: "always_full" } }]);
+      expect(selectNarrationNamingEntities(rules, "没有这个名字。", 1)).toEqual([]);
+      const { ChapterPipeline } = await import("../src/pipeline/chapter-pipeline.js");
+      const render = vi.spyOn(llm, "generateText").mockResolvedValue({ text: "Shen Qing turned. The Azure Swordsman walked north.", usage: { inputTokens: 10, outputTokens: 5 } });
+      generate.mockImplementation(async request => ({
+        value: request.schema.parse({ mappings: [{ id: rules[0]!.id, renderings: ["The Azure Swordsman", "Invented alias"] }] }),
+      }));
+      const chapter = (await loadImportedChapters(root, story.slug)).chapters[0]!;
+      const pipeline = new ChapterPipeline(new LLMRouter(new Map([["gemini", llm], ["openai", llm], ["kimi", llm]])), new MockTTS());
+      await pipeline.run({ root, story, chapter: 1, inputPath: chapter.path, source: chapter.source, stopAfter: "narration" });
+      expect(render.mock.calls.at(-1)?.[0].input).toContain("The Azure Swordsman");
+      expect(render.mock.calls.at(-1)?.[0].input).not.toContain("Invented alias");
+      expect(await readFile(storyPaths(root, story.slug, 1).narration, "utf8")).toContain("Rowan Vale turned. Rowan Vale walked north.");
+      const canonical = canonicalEntitySchema.parse({
+        id: "ent_0123456789abcdef01234567", type: "character", canonicalName: "Shen Qing", originalName: "沈青",
+        firstAppearance: 1, lastKnownAppearance: 2,
+      });
+      await atomicWriteJson(storyPaths(root, story.slug, 1).bible, { ...emptyStoryBible(), canonicalEntities: [canonical] });
+      const inherited = await loadNarrationNamingEntities(root, story.slug);
+      expect(selectNarrationNamingEntities(inherited, "青公子来了。\nThe young lord arrived.", 2, "青公子来了。")).toMatchObject([
+        { id: canonical.id, aliases: expect.arrayContaining(["青公子"]), localizedNaming: { fullName: "Rowan Vale" } },
+      ]);
+      expect(selectNarrationNamingEntities(inherited, "Shen Qing", 2, "没有这个名字。")).toEqual([]);
+      const { projectNamingForQa, scopeQaSourceRules } = await import("../src/qa/freshness.js");
+      expect(scopeQaSourceRules(projectNamingForQa(inherited), "没有这个名字。")).toEqual([]);
+      expect(scopeQaSourceRules(projectNamingForQa(inherited), "青公子来了。")).toHaveLength(1);
+      await operations.saveSourceNameRule(story.slug, entry.id, { scannedAt: view.index!.scannedAt, name: "" });
+      expect(await loadNarrationNamingEntities(root, story.slug)).toEqual([]);
+    } finally {
+      await operations.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("charges fallback attempts against the same approval and holds stale audio when a later scan finds ambiguity", async () => {
+    const root = await mkdtemp(join(tmpdir(), "source-name-hold-"));
+    const jobs = new JobManager();
+    const llm = new MockLLM("gemini");
+    let fallback = false;
+    const generate = vi.spyOn(llm, "generateStructured").mockImplementation(async request => {
+      if (fallback) await request.beforeFallbackAttempt?.();
+      return { value: request.schema.parse({ entities: [{
+        sourceName: "玄门", aliases: [], type: request.input.includes("城") ? "location" : "organization",
+        displayName: "Mystic Gate", description: "A named entity.", importance: "central", suggestedName: "Gate", reason: "Shorter.",
+      }] }) };
+    });
+    const operations = new StudioOperations(root, env, jobs, { audio: webAudio, llm: new LLMRouter(new Map([["gemini", llm], ["openai", llm], ["kimi", llm]])) });
+    try {
+      const inspection = await operations.inspectSource({ files: [
+        { name: "chapter-001.txt", text: "玄门派人来了。" },
+        { name: "chapter-002.txt", text: "到了玄门城。" },
+      ] });
+      const { story } = await operations.importInspection("source-hold-story", inspection.id);
+      const range = { from: 1, to: 1 };
+      const first = await operations.previewSourceNameScan(story.slug, range);
+      await waitForJob(jobs, operations.startSourceNameScan(story.slug, { ...range, fingerprint: first.fingerprint, approvedRequests: 1 }).id);
+      const view = await operations.getSourceNameIndex(story.slug);
+      await operations.saveSourceNameRule(story.slug, view.index!.entries[0]!.id, { scannedAt: view.index!.scannedAt, name: "Order of the Gate" });
+      const paths = storyPaths(root, story.slug, 1);
+      const now = new Date().toISOString();
+      const complete = { status: "complete", fingerprint: "input", outputFingerprint: "output" };
+      await atomicWriteJson(paths.chapterMeta, chapterSchema.parse({
+        chapter: 1, originalTitle: "Chapter", sourceLanguage: story.sourceLanguage, outputLanguage: story.outputLanguage,
+        counts: { originalCharacters: 10, englishWords: 2, narrationWords: 2 }, createdAt: now, updatedAt: now,
+        stages: { ingestion: complete, translation: complete, narration: complete, qa: complete, storyBible: complete, tts: complete, audioMastering: complete },
+      }));
+      await atomicWrite(paths.original, "玄门派人来了。");
+      await atomicWrite(paths.narration, "The Order of the Gate sent someone.");
+      await atomicWrite(paths.audio, Buffer.from("ID3 audio"));
+      const whole = await operations.previewSourceNameScan(story.slug, {});
+      fallback = true;
+      const failed = await waitForJob(jobs, operations.startSourceNameScan(story.slug, { fingerprint: whole.fingerprint, approvedRequests: 1 }).id);
+      expect(failed.error).toContain("approved request cap");
+      const calls = generate.mock.calls.length;
+      const retry = await operations.retryJob(failed.id);
+      expect((await waitForJob(jobs, retry.id)).error).toContain("approved request cap");
+      expect(generate).toHaveBeenCalledTimes(calls);
+      fallback = false;
+      const published = await waitForJob(jobs, operations.startSourceNameScan(story.slug, { fingerprint: whole.fingerprint, approvedRequests: 1 }).id);
+      expect(published.status).toBe("completed");
+      const { inspectStageArtifact } = await import("../src/studio/artifact-state.js");
+      for (const stage of ["narration", "tts", "audioMastering"] as const) {
+        expect((await inspectStageArtifact(root, story.slug, 1, stage)).availability).toBe("invalid");
+      }
+      const blocked = await waitForJob(jobs, operations.startAudio(story.slug, range).id);
+      expect(blocked.error).toContain("held for identity review");
+      expect(await readFile(paths.audio, "utf8")).toBe("ID3 audio");
+      const rebuilt = chapterSchema.parse(await readJsonIfExists(paths.chapterMeta));
+      rebuilt.stages.narration = { status: "complete" };
+      rebuilt.stages.tts = { status: "complete" };
+      await atomicWriteJson(paths.chapterMeta, rebuilt);
+      await atomicWrite(paths.audioRaw, "ID3 refreshed raw audio");
+      expect((await waitForJob(jobs, operations.startAudio(story.slug, range).id)).result).toMatchObject({ mastered: 1, reused: 0 });
+    } finally {
+      await operations.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("plans and runs a no-cost production job through the web job boundary", async () => {
     const root = await mkdtemp(join(tmpdir(), "story-web-production-")); const jobs = new JobManager(); const operations = new StudioOperations(root, env, jobs, { pipeline: { run: async ({ chapter }) => ({ chapter, quality: { status: "pass", score: 1, issueCategories: [] } }) } });
     const inspection = await operations.inspectSource({ filename: "chapter.txt", file: Buffer.from("A chapter."), chapter: 1 }); await operations.importInspection("production-story", inspection.id);
     const plan = await operations.productionPlan("production-story", { from: 1, to: 1, outputs: ["audio"] }); expect(plan.stages).toContain("audioMastering"); expect(plan.stages).not.toContain("video");
     const finished = await waitForJob(jobs, operations.startProduction("production-story", { from: 1, to: 1, outputs: ["audio"] }).id); expect(finished.status).toBe("completed"); expect((finished.result as any).summary.completed).toBe(1); await operations.close();
+  });
+
+  it("resumes forced mastering after the last finished chapter", async () => {
+    const root = await mkdtemp(join(tmpdir(), "story-audio-resume-"));
+    const jobs = new JobManager();
+    const master = vi.fn(webAudio.master);
+    const operations = new StudioOperations(root, env, jobs, { audio: { ...webAudio, master } });
+    try {
+      const inspection = await operations.inspectSource({ files: [{ name: "chapter-001.txt", text: "One" }, { name: "chapter-003.txt", text: "Three" }] });
+      const { story } = await operations.importInspection("audio-resume-story", inspection.id, true);
+      const complete = { status: "complete" as const, fingerprint: "input", outputFingerprint: "output" };
+      for (const chapter of [1, 3]) {
+        const paths = storyPaths(root, story.slug, chapter);
+        const now = new Date().toISOString();
+        await atomicWriteJson(paths.chapterMeta, chapterSchema.parse({
+          chapter, originalTitle: "Chapter", sourceLanguage: story.sourceLanguage, outputLanguage: story.outputLanguage,
+          counts: { originalCharacters: 10, englishWords: 2, narrationWords: 2 }, createdAt: now, updatedAt: now,
+          stages: { ingestion: complete, translation: complete, narration: complete, qa: complete, storyBible: complete, tts: complete, audioMastering: pending() },
+        }));
+        await atomicWrite(paths.audioRaw, Buffer.from("raw"));
+      }
+      const first = operations.startAudio(story.slug, { force: true });
+      const unsubscribe = jobs.subscribe(first.id, job => {
+        if ((job.progress as { type?: string } | undefined)?.type === "audio.chapter.started") jobs.pause(first.id);
+      });
+      const paused = await waitForJob(jobs, first.id);
+      unsubscribe?.();
+      expect(paused.result).toMatchObject({ status: "paused", remainingRange: { from: 3, to: 3 } });
+      const continuation = await operations.retryJob(first.id);
+      expect(continuation.scope).toMatchObject({ from: 3, to: 3 });
+      expect((await waitForJob(jobs, continuation.id)).status).toBe("completed");
+      expect(master).toHaveBeenCalledTimes(2);
+    } finally {
+      await operations.close();
+      await rm(root, { recursive: true, force: true });
+    }
   });
 
   it("runs mastering and audiobook exports through web jobs", async () => {
@@ -784,6 +972,28 @@ describe("browser verification routes", () => {
     await handler(req as unknown as IncomingMessage, res as unknown as ServerResponse); await done;
     return { status, body: JSON.parse(Buffer.concat(chunks).toString() || "{}") };
   }
+  it("keeps the TomatoMTL browser session for chapter inspection instead of exporting cookies", async () => {
+    const root = await mkdtemp(join(tmpdir(), "story-tomato-verify-"));
+    const book = "https://tomatomtl.com/book/7048976903398493199";
+    const chapter = `${book}/7049129595244642823`;
+    const text = "The training yard was already full when the bell sounded. Every student turned toward the door to see who had arrived so early. The teacher motioned for the group to follow.";
+    const session = { ...fakeVerificationSession(), readTomatoChapter: vi.fn(async () => `<h1 id="chapter_title">Chapter 1</h1><div id="chapter_content"><p>${text}</p></div>`) };
+    const fetcher: typeof fetch = async (url) => String(url).includes("/catalog/")
+      ? Response.json([{ id: "7049129595244642823", title: "第1章" }])
+      : new Response(String(url) === book ? '<meta property="og:novel:book_name" content="Test book">' : "<title>Login Required</title>");
+    const operations = new StudioOperations(root, env, new JobManager(), { webHttp: new WebHttpClient({ fetcher, requestDelayMs: 0 }), browserVerification: () => session });
+    try {
+      await expect(operations.inspectSource({ url: book, from: 1, to: 1 })).rejects.toThrow("TomatoMTL sign-in required");
+      await operations.openSourceVerification({ url: "https://tomatomtl.com/user/login" });
+      await operations.completeSourceVerification();
+      expect(session.complete).not.toHaveBeenCalled();
+      expect(session.cancel).not.toHaveBeenCalled();
+      await expect(operations.inspectSource({ url: book, from: 1, to: 1 })).resolves.toMatchObject({ chapterCount: 1, language: "en-US" });
+      expect(session.readTomatoChapter).toHaveBeenCalledWith(chapter, undefined);
+    } finally { await operations.close(); }
+    expect(session.cancel).toHaveBeenCalledOnce();
+  });
+
   it("opens, completes, and cancels verification, applying the harvested session to the shared web client", async () => {
     const root = await mkdtemp(join(tmpdir(), "story-web-verify-"));
     const requests: Array<Record<string, string>> = [];

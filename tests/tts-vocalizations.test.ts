@@ -28,7 +28,7 @@ describe("Fish vocalization strategy", () => {
 
   it.each(["s2-pro", "s2.1-pro", "s2.1-pro-free"])("uses verified native tags for %s", (model) => {
     const strategy = provider.vocalizationStrategy(model);
-    expect(strategy).toEqual({ kind: "native_tags", tags: { laugh: "[laughing]", chuckle: "[chuckle]", throat_clear: "[cough]", sigh: "[sigh]", gasp: "[gasp]", scream: "[shouting] Ah!" } });
+    expect(strategy).toEqual({ kind: "native_tags", tags: { laugh: "[laughing]", chuckle: "[chuckle]", throat_clear: "[clears throat]", sigh: "[sigh]", gasp: "[gasp]", scream: "[shouting] Ah!" } });
   });
 
   it.each(["s1", "s1-mini", "unknown-model", undefined])("falls back to safe_normalize for %s", (model) => {
@@ -72,9 +72,9 @@ describe("Fish vocalization strategy", () => {
   it("renders a standalone ahem reaction as a throat clear without changing literal mentions", () => {
     const original = "“Ahem, ahem, ahem… You’re right. That makes sense!”";
     const spoken = normalizeSpeechText(original, "en-US", {}, provider.vocalizationStrategy("s2-pro"));
-    expect(spoken.text).toContain("[cough] You’re right");
-    expect(spoken.transformations).toContainEqual(expect.objectContaining({ kind: "vocalization", spoken: "[cough]" }));
-    expect(normalizeFishSpeechText("Ahem... excuse me.", "s2-pro")).toBe("[cough] excuse me.");
+    expect(spoken.text).toContain("[clears throat] You’re right");
+    expect(spoken.transformations).toContainEqual(expect.objectContaining({ kind: "vocalization", spoken: "[clears throat]" }));
+    expect(normalizeFishSpeechText("Ahem... excuse me.", "s2-pro")).toBe("[clears throat] excuse me.");
     expect(normalizeFishSpeechText("He wrote the word “ahem” in the margin.", "s2-pro")).toContain("“ahem”");
     expect(original).toContain("Ahem, ahem, ahem");
   });
@@ -104,10 +104,10 @@ describe("Fish vocalization strategy", () => {
   it("maps a performed laugh to the approved cue but leaves a literal mention intact", () => {
     expect(normalizeFishSpeechText("“Hehe, I guessed it, didn’t I?”", "s2-pro")).toContain("I guessed it");
     expect(normalizeFishSpeechText("Haha, I knew it.", "s2-pro")).toBe("[laughing] I knew it.");
-    expect(normalizeFishSpeechText("“Heh heh heh... Don’t worry.”", "s2-pro")).toBe("“[laughing] Don’t worry.”");
+    expect(normalizeFishSpeechText("“Heh heh heh... Don’t worry.”", "s2-pro")).toBe("“[chuckle] Don’t worry.”");
     expect(normalizeFishSpeechText("She typed “hehe” into the chat.", "s2-pro")).toContain("“hehe”");
     const original = "“Ahem, ahem, ahem… You’re right.”";
-    expect(normalizeFishSpeechText(original, "s2-pro")).toContain("[cough] You’re right");
+    expect(normalizeFishSpeechText(original, "s2-pro")).toContain("[clears throat] You’re right");
     expect(original).toContain("Ahem, ahem, ahem");
   });
 

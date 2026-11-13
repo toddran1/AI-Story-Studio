@@ -21,11 +21,35 @@ const mockFish = () => {
 };
 
 describe("story-wide pronunciation dictionary", () => {
-  it("derives consistent Mandarin names and surname guidance from matching source characters", () => {
-    const rules = buildPronunciationDictionary([entity()], policy);
+  it("derives guidance only for the entity's recorded names and keeps titles spoken in English", () => {
+    const rules = buildPronunciationDictionary([entity("Zhang Qitian", "张启天", { aliases: ["Master Zhang"] })], policy);
     expect(rules).toContainEqual({ text: "Zhang Qitian", alphabet: "pinyin", phonemes: "zhang1 qi3 tian1" });
-    expect(rules).toContainEqual({ text: "Zhang", alphabet: "pinyin", phonemes: "zhang1" });
+    expect(rules.some(rule => rule.text === "Zhang")).toBe(false);
     expect(renderFishPronunciationDictionary("Master Zhang replied.", rules, base.model)).toBe(`Master ${phoneme("zhang1")} replied.`);
+  });
+
+  it("scopes titled names and rejects an ambiguous alias even if only one entity can supply phonemes", async () => {
+    const fish = mockFish();
+    const yeTe = entity("Ye Te", "叶特");
+    const brotherYe = entity("Brother Ye", "業哥", { id: "ent_abcdef0123456789abcdef01" });
+    const make = (entities: ReturnType<typeof entity>[]) => createEffectiveTtsProvider({ baseProvider: fish.provider, pronunciationEntities: entities, pronunciationPolicy: policy }).provider;
+    const text = "Brother Ye’s gaze met Ye Te. Brother Ye nodded. Ye left.";
+    await make([yeTe, brotherYe]).synthesize({ ...base, text });
+    const expected = `Brother Ye’s gaze met ${phoneme("ye4")}${phoneme("te4")}. Brother Ye nodded. Ye left.`;
+    expect(fish.bodies[0].text).toBe(expected);
+    await make([{ ...yeTe, aliases: ["Brother Ye"] }, brotherYe]).synthesize({ ...base, text, exactChunk: true });
+    expect(fish.bodies[1].text).toBe(expected);
+    const other = entity("Master Ye Te", "未知", { id: "ent_abcdef0123456789abcdef02" });
+    await make([yeTe, other]).synthesize({ ...base, text: "Master Ye Te met Ye Te.", exactChunk: true });
+    expect(fish.bodies[2].text).toBe(`Master Ye Te met ${phoneme("ye4")}${phoneme("te4")}.`);
+  });
+
+  it("does not replace a canonical title with the source-language honorific from a hint", async () => {
+    const fish = mockFish();
+    const make = (phoneticHint: string) => createEffectiveTtsProvider({ baseProvider: fish.provider, pronunciationEntities: [entity("Brother Ye", "業哥", { pronunciation: { mode: "original_language", phoneticHint } })], pronunciationPolicy: policy }).provider;
+    await make("yeh guh").synthesize({ ...base, text: "Brother Ye replied." });
+    await make("Yeh").synthesize({ ...base, text: "Brother Ye replied." });
+    expect(fish.bodies.map(body => body.text)).toEqual(["Brother Ye replied.", "Brother Yeh replied."]);
   });
   it("keeps localized names, translated terms, uncertain spellings and unsupported dialects untouched", () => {
     expect(buildPronunciationDictionary([entity("Asher Sterling", "苏铭", { localizedNaming: { locale: "en-US", fullName: "Asher Sterling", shortName: "Asher", usageMode: "always_full" } })], policy)).toEqual([]);

@@ -1,14 +1,20 @@
 import { stripSpeechMarkdownEmphasis as stripFishMarkdownEmphasis } from "../markdown-emphasis.js";
 export { stripSpeechMarkdownEmphasis as stripFishMarkdownEmphasis } from "../markdown-emphasis.js";
 import { disambiguateFishS2Brackets, isFishS2Model } from "./control-cues.js";
-import { stripFishLeadingHehe, normalizeUnknownFieldValues, normalizeDecimalPercentages, normalizeStructuredSpeechBlock, normalizeSystemMetadataText, speakInteger, stripStandaloneEllipsisLines } from "../speech-normalization.js";
+import { stripFishLeadingHehe, normalizeNumberLabels, normalizeNumericRanges, normalizeUnknownFieldValues, normalizeDecimalPercentages, normalizeStructuredSpeechBlock, normalizeSystemMetadataText, speakInteger, stripStandaloneEllipsisLines } from "../speech-normalization.js";
 import { scanVocalizations } from "../vocalizations.js";
 
-/** Keep a quoted laughter reaction attached to its same-line narration. */
-export function attachInlineLaughter(text: string): string {
+/** Keep a quoted laughter reaction attached to the words it directs. */
+export function attachInlineLaughter(text: string, joinNarration = false): string {
   const closing: Record<string, string> = { '"': '"', "“": "”", "'": "'", "‘": "’", "「": "」", "『": "』", "«": "»" };
+  if (joinNarration) {
+    // An isolated reaction followed immediately by a calm prose cue can use
+    // the first words of that paragraph as delivery context for the same cue.
+    text = text.replace(/^[ \t]*(?:\[soft\][ \t]*)?(["“'‘「『«])[ \t]*(\[(?:laughing|chuckle)\])[ \t]*[,.!?;:…，。！？；：—–-]*[ \t]*(["”'’」』»])[ \t]*\r?\n(?:[ \t]*\r?\n)*[ \t]*\[calm\][ \t]+(?=\p{L})/gmu,
+      (match, open: string, cue: string, close: string) => closing[open] === close ? `${cue} ` : match);
+  }
   // Only cue-only quotations qualify. Never consume dialogue words or cross
-  // a newline; punctuation belongs to the performed reaction, not spoken text.
+  // a newline in the same-line cleanup below.
   const quoted = text.replace(/(?:\[soft\][ \t]*)?(["“'‘「『«])[ \t]*[,.!?;:…，。！？；：—–-]*[ \t]*(\[(?:laughing|chuckle)\])[ \t]*[,.!?;:…，。！？；：—–-]*[ \t]*(["”'’」』»])[ \t]*[,.!?;:…，。！？；：—–-]*[ \t]*(?:\[calm\][ \t]*)?(?=\p{L})/gu,
     (match, open: string, cue: string, close: string) => closing[open] === close ? `${cue} ` : match);
   return quoted.replace(/(\[(?:laughing|chuckle)\])[ \t]*[,.!?;:…，。！？；：—–-]*[ \t]*(?:\[calm\][ \t]*)?(?=\p{L})/gu, "$1 ");
@@ -116,7 +122,7 @@ function replaceAll(text: string, replacements: ReadonlyArray<readonly [RegExp, 
 export function normalizeFishSpeechText(text: string, model?: string, options: { tskRendering?: "preserve" | "direction" } = {}): string {
   // Canonicalize before reaction detection so Unicode and typed ellipses take
   // exactly the same path. This only changes hidden delivery text.
-  text = normalizeDecimalPercentages(text).replace(/…/gu, "...");
+  text = normalizeDecimalPercentages(normalizeNumericRanges(text)).replace(/…/gu, "...");
   // Physical sound effects have no application-supported Fish delivery cue.
   // Describe only standalone effects; preserve quoted dialogue and prose uses.
   text = text.replace(/^[ \t]*(WHU+M|RI+P)[ \t]*[—–-]*[ \t]*!+[ \t]*$/gm,
@@ -124,7 +130,7 @@ export function normalizeFishSpeechText(text: string, model?: string, options: {
   text = stripFishLeadingHehe(text);
   // Only item panels with a recognized rarity and metadata colon qualify;
   // ordinary prose parentheses and deliberate delivery cues remain untouched.
-  const itemPanels = normalizeUnknownFieldValues(text).replace(/\[[^\[\]\r\n]{1,500}\]/gu, (block) =>
+  const itemPanels = normalizeNumberLabels(normalizeUnknownFieldValues(text)).replace(/\[[^\[\]\r\n]{1,500}\]/gu, (block) =>
     /\((?:common|uncommon|rare|epic|legendary|mythic|unique|normal)\)\s*:/iu.test(block)
       ? normalizeStructuredSpeechBlock(block).replace(/\s*:\s*/gu, ". ").replace(/,\s*(?=Special Effect\b)/giu, ". ")
       : block);
@@ -217,9 +223,9 @@ export function renderFishVocalizations(text: string, model?: string, options: {
     const before = text.slice(Math.max(0, item.start - 45), item.start);
     if (/\b(?:word|text|transcript|term|wrote|typed|spelled|literal(?:ly)?)\b[^.!?\n]{0,35}$/iu.test(before)) continue;
     const openingReaction = /(?:^|[.!?…\n“"‘']\s*)$/u.test(before) && /[,!?.…]/u.test(item.sourceText);
-    const replacement = item.vocalization === "throat_clear" ? "[cough]"
+    const replacement = item.vocalization === "throat_clear" ? "[clears throat]"
       : item.vocalization === "laugh" && item.confidence >= .8 && openingReaction ? "[laughing]"
-      : item.vocalization === "chuckle" && /^(?:heh|ha)(?:\.{3,}|…+|[!,])$/iu.test(item.sourceText) && openingReaction ? "[chuckle]"
+      : item.vocalization === "chuckle" && /^(?:heh(?:[, \t]+heh)*|ha)(?:\.{3,}|…+|[!,.])?$/iu.test(item.sourceText) && openingReaction ? "[chuckle]"
       : item.vocalization === "scream" ? "[shouting] Ah!"
       : item.vocalization === "scoff" && /^tsk\b/iu.test(item.sourceText) && options.tskRendering === "direction" ? "[clicks tongue disapprovingly]"
       : undefined;

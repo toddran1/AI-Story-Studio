@@ -147,7 +147,9 @@ export type VisualReferenceImage = {
 export type VisualFieldProvenance = { source: "source_text" | "story_bible" | "continuity" | "approved_artwork" | "ai_generated" | "user_edit" | "manual_override"; locked: boolean; provider?: string; model?: string; generatedAt?: string; contextFingerprint?: string };
 export type VisualProfileConflict = { id: string; field: string; canonicalValue: string; visualValue: string; visualProvenance?: VisualFieldProvenance; detectedAt: string; status: "needs_review" | "resolved"; resolution?: "accept_canonical" | "retain_manual_override"; resolvedAt?: string };
 export type VisualProfileFieldState = { path: string; value?: string; source?: string; locked: boolean; missing: boolean; canonical: boolean; regenerable: boolean; conflict?: VisualProfileConflict };
-export type VisualProfileProposal = { entityId: string; visualType: VisualEntityType; values: Record<string, string>; rationale: string; eligibleFields: string[]; protectedFields: string[]; contextFingerprint: string; provider: string; model: string };
+export type VisualEvidenceRange = { fromChapter: number; toChapter: number };
+export type WardrobeEvidence = { chapter: number; excerpt: string };
+export type VisualProfileProposal = { entityId: string; visualType: VisualEntityType; values: Record<string, string>; rationale: string; eligibleFields: string[]; protectedFields: string[]; contextFingerprint: string; provider: string; model: string; evidenceRange?: VisualEvidenceRange; wardrobeLooks?: Array<{ name: string; outfit: string; evidence: WardrobeEvidence[] }> };
 
 export type VisualEntityType =
   | "character"
@@ -233,6 +235,9 @@ export type VisualVariant = {
 export type VisualAppearanceEra = {
   id: string;
   name: string;
+  sceneAliases?: string[];
+  wornItemIds?: string[];
+  wardrobeEvidence?: WardrobeEvidence[];
   creatureState?: "living" | "dead" | "zombie" | "skeleton" | "undead" | "other";
   startChapter: number;
   endChapter?: number;
@@ -436,6 +441,7 @@ export type VisualCharacterState = {
   equipment?: string;
   carriedItems?: string[];
   activeAbilities?: string[];
+  visibleEffects?: string[];
   visibleEquipment?: string[];
   concealedItems?: string[];
   injuries?: string;
@@ -445,12 +451,12 @@ export type VisualCharacterState = {
   location?: string;
 };
 export type VisualEnvironmentState = { locationId?: string; description?: string; timeOfDay?: string; lighting?: string; weather?: string; condition?: string; damage?: string };
-export type VisualObjectState = { name: string; condition?: string; possessedBy?: string };
+export type VisualObjectState = { name: string; entityId?: string; condition?: string; possessedBy?: string; wornBy?: string | null };
 export type VisualContinuityState = { characters: VisualCharacterState[]; environment?: VisualEnvironmentState; objects: VisualObjectState[]; spatial?: string };
 export type VisualContinuityChange = {
   characters?: Array<{ name: string; entityId?: string; op: "enter" | "exit" | "update"; set?: Partial<Omit<VisualCharacterState, "name" | "entityId">>; clear?: string[] }>;
   environment?: { set?: Partial<VisualEnvironmentState>; clear?: string[] };
-  objects?: Array<{ name: string; op: "add" | "remove" | "update"; set?: Partial<Omit<VisualObjectState, "name">> }>;
+  objects?: Array<{ name: string; entityId?: string; op: "add" | "remove" | "update"; set?: Partial<Omit<VisualObjectState, "name" | "entityId">>; clearWornBy?: boolean }>;
   note?: string;
 };
 export type VisualContinuityReferenceDecision = {
@@ -580,7 +586,7 @@ export type TtsSegmentStatus = "verified" | "needs_review" | "unverified" | "man
 export type TtsSegmentQuality = { index: number; expectedText: string; transcription?: string; score?: number; status: TtsSegmentStatus; issues: TtsQualityIssue[]; attempts: TtsQualityAttempt[]; finalAttempt: number; acceptedAt?: string; acceptedReason?: string };
 export type TtsQualitySummaryStatus = "verified" | "needs_review" | "unverified" | "partial";
 export type TtsQualityArtifact = { version: 1; chapter: number; createdAt: string; updatedAt: string; provider: string; model: string; referenceId?: string; voiceMode?: string; deliveryIntensity?: TtsDeliveryIntensity; status: TtsQualitySummaryStatus; verificationPolicy: { transcriber: string; maxRetries: number; thresholds: Record<string, number>; fingerprint: string }; segments: TtsSegmentQuality[] };
-export type Job = { id: string; createdAt?: string; updatedAt?: string; type: string; story: string; status: "queued" | "running" | "completed" | "failed" | "paused" | "cancelled"; scope?: OperationScope; cancelRequested?: boolean; pauseRequested?: boolean; payload?: any; progress?: any; result?: any; error?: string; diagnostic?: ErrorDiagnostic };
+export type Job = { id: string; createdAt?: string; updatedAt?: string; type: string; story: string; status: "queued" | "running" | "completed" | "failed" | "paused" | "cancelled"; scope?: OperationScope; cancelRequested?: boolean; pauseRequested?: boolean; resumedBy?: string; payload?: any; progress?: any; result?: any; error?: string; diagnostic?: ErrorDiagnostic };
 export function isTerminalJob(job: { status: string }) { return ["completed", "failed", "paused", "cancelled"].includes(job.status); }
 export type StorySummary = import("../../../src/summaries/types.js").StorySummary;
 export type ProductionPlan = { story: string; from: number; to: number; chapters: number[]; requiredChapters: number[]; chapterRequirements: Record<string,string[]>; outputs: string[]; artwork: boolean; stages: string[]; counts: Record<string, { required: number; reusable: number }>; estimates: { llmOperations: number; ttsOperations: number; imageOperations: number; imagesPendingPlanning: number }; finalOutputs: string[]; costEstimate?: {classification:string;estimatedUsd?:number;lowUsd?:number;highUsd?:number;confidence:string;assumptions:string[];unknownStages:string[];breakdown:Array<{stage:string;required:number;estimatedUsd?:number;basis:string}>} };
@@ -621,11 +627,11 @@ export async function generateStyleSheet(slug: string, entityId: string, appeara
 export async function inspectVisualProfile(slug: string, entityId: string): Promise<{ profile: VisualEntityProfile; eligibleFields: string[]; protectedFields: string[]; fields: VisualProfileFieldState[]; conflicts: VisualProfileConflict[]; coreComplete: number; coreTotal: number; context: { explicitVisualFacts: Record<string, string>; storyBibleVisualEvidence?: { values: Record<string, { value: string; chapter: number; confidence: number; source: string }>; conflicts: Record<string, Array<{ value: string; chapter: number }>> } } }> {
   return api(`/stories/${encodeURIComponent(slug)}/visual-profiles/${encodeURIComponent(entityId)}/inspect`);
 }
-export async function proposeVisualProfile(slug: string, entityId: string, input: { fields?: string[]; regenerate?: boolean } = {}): Promise<VisualProfileProposal> {
+export async function proposeVisualProfile(slug: string, entityId: string, input: { fields?: string[]; regenerate?: boolean; evidenceRange?: VisualEvidenceRange; includeWardrobeLooks?: boolean } = {}): Promise<VisualProfileProposal> {
   return post(`/stories/${encodeURIComponent(slug)}/visual-profiles/${encodeURIComponent(entityId)}/proposal`, input);
 }
-export async function applyVisualProfileProposal(slug: string, entityId: string, proposal: VisualProfileProposal, selectedFields: string[]): Promise<VisualEntityProfile> {
-  return put(`/stories/${encodeURIComponent(slug)}/visual-profiles/${encodeURIComponent(entityId)}/proposal`, { proposal, selectedFields });
+export async function applyVisualProfileProposal(slug: string, entityId: string, proposal: VisualProfileProposal, selectedFields: string[], saveWardrobeLooks = false): Promise<VisualEntityProfile> {
+  return put(`/stories/${encodeURIComponent(slug)}/visual-profiles/${encodeURIComponent(entityId)}/proposal`, { proposal, selectedFields, saveWardrobeLooks });
 }
 export async function approveVisualReference(slug: string, entityId: string, refId: string, primary = false, creatureFormId?: string, appearanceEraId?: string): Promise<VisualEntityProfile> {
   return post(`/stories/${encodeURIComponent(slug)}/visual-profiles/${encodeURIComponent(entityId)}/references/${encodeURIComponent(refId)}/approve`, { primary, creatureFormId, appearanceEraId });

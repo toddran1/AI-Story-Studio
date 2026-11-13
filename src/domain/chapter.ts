@@ -1,6 +1,8 @@
 import { z } from "zod";
 import { qaCategorySchema, qaStatusSchema } from "./qa.js";
 
+export const SOURCE_NAME_HOLD_REASON = "A source name used here is held for identity review. Regenerate narration before reusing its audio.";
+
 export const stageNameSchema = z.enum(["ingestion", "translation", "narration", "qa", "storyBible", "continuity", "tts", "audioMastering", "alignment", "subtitles", "scenePlanning", "artwork", "video"]);
 export type StageName = z.infer<typeof stageNameSchema>;
 

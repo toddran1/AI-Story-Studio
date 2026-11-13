@@ -25,6 +25,7 @@ import {
   REFERENCE_USAGE_INSTRUCTION,
   referenceAssignmentPrompt,
   characterReferenceProvenance,
+  sentContinuityReference,
   mixedCastIdentityPrompt,
   validPngFingerprint,
   backingArtworkVersion,
@@ -55,7 +56,7 @@ import { loadVisualProfiles } from "../visual-canon/profiles.js";
 import { loadStoryArtDirection } from "../visual-canon/art-direction.js";
 import { resolveVisualCanonPrompt } from "../visual-canon/resolver.js";
 import { inspectArtworkVisualPreflightForScenes } from "../visual-canon/preflight.js";
-import { renderSceneContinuity, resolveVisualContinuity } from "../visual-canon/continuity.js";
+import { continuityCanonicalEntities, loadVisualContinuityHistory, renderSceneContinuity, resolveVisualContinuity } from "../visual-canon/continuity.js";
 import { visualContinuityOverlaySchema, visualContinuityOverrideEntrySchema, type VisualContinuityOverlay, type VisualContinuityReferenceDecision } from "../visual-canon/continuity-state.js";
 import { MAX_REFERENCE_IMAGE_BYTES, MAX_REFERENCE_IMAGES, MAX_REFERENCE_TOTAL_BYTES, providerSupportsReferenceImages } from "../artwork/providers.js";
 import { resolveSummarySceneArtDirection } from "./art-direction.js";
@@ -192,12 +193,14 @@ export class SummaryVisualService {
     await this.save(slug, summary);
     return this.sceneContinuityDetail(slug, id);
   }
-  async sceneContinuityDetail(slug: string, id: string) {
+  async sceneContinuityDetail(slug: string, id: string, draft?: Scene) {
     const summary = await this.get(slug, id);
-    const resolved = await this.sceneContinuity(slug, id, summary.scenePlan?.scenes ?? []);
-    return (summary.scenePlan?.scenes ?? []).map((scene) => ({ sceneId: scene.id, continuity: resolved.get(scene.id)?.resolved }));
+    const stored = summary.scenePlan?.scenes ?? [];
+    const scenes = draft ? [...stored.filter(scene => scene.id !== draft.id), draft].sort((a, b) => a.startSeconds - b.startSeconds) : stored;
+    const resolved = await this.sceneContinuity(slug, id, scenes);
+    return scenes.map((scene) => ({ sceneId: scene.id, continuity: resolved.get(scene.id)?.resolved }));
   }
-  private async sceneContinuity(slug: string, id: string, scenes: readonly Scene[]) {
+  private async sceneContinuity(slug: string, id: string, scenes: readonly Scene[], context?: Pick<Awaited<ReturnType<SummaryVisualService["context"]>>, "bible" | "visualProfiles">) {
     const paths = this.paths(slug, id);
     const continuityScenes = await Promise.all(scenes.filter((scene) => !scene.disabled).map(async (scene) => {
       const approvedId = scene.artwork.approvedVersionId;
@@ -213,8 +216,22 @@ export class SummaryVisualService {
       return { id: scene.id, sequence: scene.sequence, appearanceChapter: scene.overrides?.appearanceChapter, location: scene.location, visualChanges: scene.visualChanges, contentFingerprint: sceneContentFingerprint(scene),
         approvedArtwork: { versionId: approved.id, versionNumber: approved.versionNumber, imageFingerprint: actual } };
     }));
-    const manualOverrides = await this.loadSceneContinuityOverlay(slug, id);
-    const resolved = resolveVisualContinuity({ scenes: continuityScenes, manualOverrides });
+    const [manualOverrides, bible, profiles] = await Promise.all([
+      this.loadSceneContinuityOverlay(slug, id), context?.bible ?? loadStoryBibleWithCanonicalOverlay(this.root, slug), context?.visualProfiles ?? loadVisualProfiles(this.root, slug),
+    ]);
+    const entities = continuityCanonicalEntities(bible.canonicalEntities, profiles);
+    let presentChapter = 0;
+    let latestFlashbackChapter = 0;
+    for (const scene of continuityScenes) {
+      if (!scene.appearanceChapter) continue;
+      if (scene.visualChanges?.transition === "flashback" || scene.appearanceChapter < presentChapter) {
+        latestFlashbackChapter = Math.max(latestFlashbackChapter, scene.appearanceChapter);
+      } else {
+        presentChapter = scene.appearanceChapter;
+      }
+    }
+    const history = latestFlashbackChapter ? await loadVisualContinuityHistory(this.root, slug, latestFlashbackChapter, entities) : undefined;
+    const resolved = resolveVisualContinuity({ scenes: continuityScenes, manualOverrides, entities, history });
     return new Map(resolved.perScene.map((entry) => [entry.sceneId, { text: renderSceneContinuity(entry), decision: entry.referenceDecision, resolved: entry }]));
   }
   private async imageInput(slug: string, id: string, scene: Scene, visualContinuity?: string, continuityDecision?: VisualContinuityReferenceDecision, summaryDirection?: StorySummary["artDirectionOverride"], chapter?: number, loadedContext?: Awaited<ReturnType<SummaryVisualService["context"]>>, allowUnprofiledEntityIds?: readonly string[], frameState?: import("../visual-canon/continuity-state.js").VisualContinuityState) {
@@ -306,7 +323,8 @@ export class SummaryVisualService {
   private videoFingerprint(summary: StorySummary, settings: unknown, motionAssets?: Array<readonly [string, { fingerprint: string; id: string; durationSeconds: number } | undefined]>) { return fingerprint({ selectedMotion: motionAssets?.filter(([,asset]) => asset).map(([id, asset]) => ({ scene: id, fingerprint: asset!.fingerprint, id: asset!.id, durationSeconds: asset!.durationSeconds })), version: "summary-video-v2", audio: summary.audio?.outputFingerprint, scenes: summary.scenePlan?.scenes.filter((scene) => !scene.disabled).map((scene) => ({ id: scene.id, start: scene.startSeconds, end: scene.endSeconds, image: scene.artwork.imageFingerprint, review: scene.artwork.review, videoTreatment: scene.videoTreatment, motionContext: sceneMotionContext(scene) })), settings, alignment: (settings as { subtitleMode?: string }).subtitleMode === "none" ? undefined : summary.alignment?.inputFingerprint, renderer: this.renderer.version }); }
   private async sceneArtworkFreshness(slug: string, summary: StorySummary) {
     const paths = this.paths(slug, summary.id);
-    const [continuity, context] = await Promise.all([this.sceneContinuity(slug, summary.id, summary.scenePlan?.scenes ?? []), this.context(slug)]);
+    const context = await this.context(slug);
+    const continuity = await this.sceneContinuity(slug, summary.id, summary.scenePlan?.scenes ?? [], context);
     return new Map(await Promise.all((summary.scenePlan?.scenes ?? []).map(async (scene) => {
       const visual = continuity.get(scene.id);
       const input = await this.imageInput(slug, summary.id, scene, visual?.text, visual?.decision, summary.artDirectionOverride, Math.min(...summary.chapters), context, undefined, visual?.resolved?.endState);
@@ -531,7 +549,7 @@ export class SummaryVisualService {
     const context = await this.context(slug);
     const { story } = context;
     const paths = this.paths(slug, id);
-    const continuity = await this.sceneContinuity(slug, id, summary.scenePlan.scenes);
+    const continuity = await this.sceneContinuity(slug, id, summary.scenePlan.scenes, context);
     const upscaler = needsProductionDerivative(story) ? resolveUpscaler(upscalerOverride ?? this.upscaler, story.artwork.upscaler) : undefined;
 
     let imagesToGenerate = 0;
@@ -591,7 +609,12 @@ export class SummaryVisualService {
       root: this.root,
       slug,
       context,
-      candidates: planItems.filter((item) => item.needsGeneration).map((item) => ({ id: item.scene.id, scene: item.scene, chapter: Math.max(...summary.chapters) })),
+      candidates: planItems.filter((item) => item.needsGeneration).map((item) => ({
+        id: item.scene.id,
+        scene: item.scene,
+        chapter: Math.min(...summary.chapters),
+        frameState: continuity.get(item.scene.id)?.resolved?.endState,
+      })),
       allowUnprofiledEntityIds: options.allowUnprofiledEntityIds,
     });
     if (!preflight.ready && !options.dryRun) {
@@ -720,11 +743,11 @@ export class SummaryVisualService {
             original: dims ? { width: dims.width, height: dims.height, fingerprint: fingerprint(result.data.toString("base64")), provider: input.provider.name, model: input.story.artwork.model } : undefined,
             provenance: {
               ...(options.repair ? { repair: options.repair } : {}),
-              referencesUsed: input.references.mode,
-              referenceImageCount: input.references.images.length,
-              availableReferenceCount: input.references.available,
-              characterReferences: characterReferenceProvenance(input.references.images),
-              continuityReference: input.continuityReference,
+              referencesUsed: referenceImages.length ? "images" : input.references.mode,
+              referenceImageCount: referenceImages.length,
+              availableReferenceCount: input.references.available + Number(Boolean(options.repair)),
+              characterReferences: characterReferenceProvenance(referenceImages),
+              continuityReference: sentContinuityReference(input.continuityReference, referenceImages),
               artDirection: input.artDirectionProvenance,
               visualCanon: input.grounding.map((entity) => ({
                 ...entity,

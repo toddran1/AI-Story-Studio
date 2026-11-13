@@ -1,7 +1,7 @@
 import { normalizeCharacterAppearance, REFERENCE_BASELINE_POLICY } from "./appearance-policy.js";
 import { referenceFigureRequirement } from "./figure-guidance.js";
 import { CHARACTER_DESIGN_GUIDANCE, CHARACTER_DESIGN_VERSION, characterDesignContext } from "./character-design.js";
-import { prepareReferenceSheetIdentity, IDENTITY_TRANSFORMATION_INSTRUCTION } from "./reference-identity.js";
+import { prepareReferenceSheetIdentity, loadReferenceSheetImage, IDENTITY_TRANSFORMATION_INSTRUCTION } from "./reference-identity.js";
 import { effectiveVisualProfile } from "./resolver.js";
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readFile, rm } from "node:fs/promises";
@@ -14,6 +14,7 @@ import {
   VisualReferenceSource,
   visualProfileSchema,
   visualReferenceImageSchema,
+  isSceneAppearanceLook,
 } from "../domain/visual-profile.js";
 import { canonicalEntitySchema, type CanonicalEntity } from "../domain/story-bible.js";
 import { requireCanonicalStoryBibleEntity, loadStoryBibleWithCanonicalOverlay } from "../story-bible/canonical.js";
@@ -21,7 +22,7 @@ import { resolveEntityVisualEvidence } from "../story-bible/visual-evidence.js";
 import { readVisualField, resolveVisualEntityType, validVisualField } from "./fields.js";
 import { Story } from "../domain/story.js";
 import { ImageProvider } from "../artwork/provider.js";
-import { assertImageModelCompatible, imageProviderNameSchema } from "../artwork/providers.js";
+import { assertImageModelCompatible, imageProviderNameSchema, MAX_REFERENCE_IMAGES, MAX_REFERENCE_IMAGE_BYTES, MAX_REFERENCE_TOTAL_BYTES } from "../artwork/providers.js";
 import { atomicWrite, atomicWriteJson } from "../storage/atomic-write.js";
 import { storyPaths, visualProfileRefPath } from "../storage/paths.js";
 import { exists, readJsonIfExists } from "../storage/story-files.js";
@@ -185,15 +186,24 @@ export async function approveVisualReference(
   if (!profile) throw new Error(`Visual profile for entity '${entityId}' was not found`);
   const reference = profile.references.find((item) => item.id === refId);
   if (!reference) throw new Error(`Visual reference '${refId}' was not found`);
+  if (reference.provenance?.rejectedAt) throw new Error("Generate a new candidate to replace this rejected reference");
   if (creatureFormId && appearanceEraId) throw new Error("Select a form or an era, not both");
+  const assignedEras = profile.appearanceEras?.filter(era => era.referenceIds.includes(refId) && (!appearanceEraId || era.id === appearanceEraId)) ?? [];
+  const equipment = reference.provenance?.equipmentReferenceIds;
+  for (const itemId of new Set(assignedEras.flatMap(era => era.wornItemIds ?? []))) {
+    const itemReference = profiles[itemId]?.references.find(sheet => sheet.approved && !sheet.provenance?.rejectedAt && Array.isArray(equipment) && equipment.includes(sheet.id));
+    if (!itemReference || !await loadReferenceSheetImage(root, slug, itemId, itemReference)) {
+      throw new Error("Approve an intact copy of the exact linked item sheet used to generate this look before approving the character sheet");
+    }
+  }
   if (appearanceEraId) {
     const era = profile.appearanceEras?.find(item => item.id === appearanceEraId);
     if (!era || !era.referenceIds.includes(refId)) throw new Error("Reference is not assigned to the selected appearance era");
     if (era.detectedChange?.needsReview) throw new Error("Review changed source evidence before approving this era");
     if (profile.conflicts?.some(conflict => conflict.status === "needs_review")) throw new Error("Resolve Visual Profile conflicts before approval");
-    const next = profile.appearanceEras?.filter(item => item.id !== era.id && item.status === "approved" && item.startChapter > era.startChapter).sort((a,b) => a.startChapter-b.startChapter)[0];
+    const next = isSceneAppearanceLook(era) ? undefined : profile.appearanceEras?.filter(item => !isSceneAppearanceLook(item) && item.id !== era.id && item.status === "approved" && item.startChapter > era.startChapter).sort((a,b) => a.startChapter-b.startChapter)[0];
     if (next) era.endChapter = Math.min(era.endChapter ?? Infinity, next.startChapter-1);
-    if (era.detectedChange) for (const earlier of profile.appearanceEras ?? []) if (earlier.id !== era.id && earlier.status === "approved" && earlier.startChapter < era.startChapter && (earlier.endChapter === undefined || earlier.endChapter >= era.startChapter)) earlier.endChapter = era.startChapter-1;
+    if (era.detectedChange && !isSceneAppearanceLook(era)) for (const earlier of profile.appearanceEras ?? []) if (!isSceneAppearanceLook(earlier) && earlier.id !== era.id && earlier.status === "approved" && earlier.startChapter < era.startChapter && (earlier.endChapter === undefined || earlier.endChapter >= era.startChapter)) earlier.endChapter = era.startChapter-1;
     era.status = "approved"; profile.status = "approved"; profile.approvedAt ??= new Date().toISOString();
   }
   if (creatureFormId) {
@@ -204,6 +214,9 @@ export async function approveVisualReference(
     form.status = "approved";
     profile.status = "approved";
     profile.approvedAt ??= new Date().toISOString();
+  }
+  if (!await loadReferenceSheetImage(root, slug, entityId, reference)) {
+    throw new Error("The reference image is missing, changed, empty, or too large. Upload or generate a replacement before approving it.");
   }
   const referenceScope = profile.appearanceEras?.find((era) => era.referenceIds.includes(refId))?.id ?? profile.creatureForms?.find(form => form.referenceIds.includes(refId))?.id;
   for (const item of profile.references) {
@@ -300,6 +313,7 @@ export async function addVisualReferenceImage(
   await requireCanonicalStoryBibleEntity(root, slug, entityId);
   const fileBytes = options.data ?? options.buffer;
   if (!fileBytes) throw new Error("Image data buffer is required");
+  if (!fileBytes.length || fileBytes.length > MAX_REFERENCE_IMAGE_BYTES) throw new Error("Reference image is empty or exceeds the image size limit");
   const ext = normalizeVisualReferenceExtension(options.ext ?? "png");
 
   const profiles = await loadVisualProfiles(root, slug);
@@ -324,7 +338,7 @@ export async function addVisualReferenceImage(
       source: options.source ?? "uploaded",
       approved: options.approved ?? false,
       prompt: options.prompt,
-      provenance: options.provenance,
+      provenance: { ...options.provenance, imageFingerprint: createHash("sha256").update(fileBytes).digest("hex") },
       replacesReferenceId: options.replacesReferenceId,
     });
 
@@ -358,6 +372,34 @@ export async function addVisualReferenceImage(
   }
 }
 
+export async function prepareReferenceSheetDesign(root: string, slug: string, profile: VisualEntityProfile, story: Story, provider: ImageProvider, scope: { appearanceEraId?: string; creatureFormId?: string; candidateItemReferences?: Record<string, string> }) {
+  const identity = await prepareReferenceSheetIdentity(root, slug, profile, story, provider, scope);
+  const itemIds = [...new Set(profile.appearanceEras?.find(era => era.id === scope.appearanceEraId)?.wornItemIds ?? [])];
+  const equipment = [];
+  if (itemIds.length) {
+    if (!identity.images.length || itemIds.length + identity.images.length > (provider.capabilities?.maxReferenceImages ?? MAX_REFERENCE_IMAGES)) {
+      throw new Error("The worn-item design needs its character identity image and a separate reference for every linked item.");
+    }
+    const profiles = await loadVisualProfiles(root, slug);
+    for (const id of itemIds) {
+      const item = profiles[id];
+      const candidate = scope.candidateItemReferences?.[id];
+      const name = (await requireCanonicalStoryBibleEntity(root, slug, id)).canonicalName;
+      const refs = (item?.references ?? []).filter(reference => !reference.provenance?.rejectedAt && (candidate ? reference.id === candidate : reference.approved))
+        .sort((left, right) => Number(right.role === "primary_reference") - Number(left.role === "primary_reference"));
+      let loaded;
+      for (const ref of refs) {
+        loaded = await loadReferenceSheetImage(root, slug, id, ref);
+        if (loaded) break;
+      }
+      if (!loaded) throw new Error(`Approve an intact reference sheet for ${name} before generating this look.`);
+      equipment.push({ ...loaded, name });
+    }
+    if ([...identity.images, ...equipment.map(item => item.image)].reduce((bytes, image) => bytes + image.data.length, 0) > MAX_REFERENCE_TOTAL_BYTES) throw new Error("The combined identity and equipment references exceed the image input limit.");
+  }
+  return { ...identity, equipment, fingerprints: [...identity.fingerprints, ...equipment.map(item => item.hash)] };
+}
+
 export async function generateStyleSheet(
   root: string,
   slug: string,
@@ -367,6 +409,7 @@ export async function generateStyleSheet(
   options: {
     promptOverride?: string;
     feedback?: string;
+    candidateItemReferences?: Record<string, string>;
     replacesReferenceId?: string;
     role?: VisualRole;
     presetId?: string;
@@ -461,13 +504,14 @@ export async function generateStyleSheet(
   const paletteGuidance = "COLOR AND CHARACTER: Where appearance details are unspecified, use a distinctive, story-appropriate mix of colors, materials, and small identifying accents. Avoid automatically making clothing all black or giving every person black hair and dark brown eyes. Preserve every established profile trait, approved reference detail, source fact, and story art-direction choice; do not recolor known features for variety.";
 
   const castDesigns = profile.visualType === "character" ? characterDesignContext(await loadStoryBibleWithCanonicalOverlay(root, slug), await loadVisualProfiles(root, slug), entityId) : [];
-  const identity = await prepareReferenceSheetIdentity(root, slug, savedProfile, story, provider, options);
+  const identity = await prepareReferenceSheetDesign(root, slug, savedProfile, story, provider, options);
+  const equipmentPrompt = identity.equipment.map((item, index) => `Image ${identity.images.length + index + 1} is the separate reference for ${item.name}. Match the item's silhouette, construction and markings, and show the character wearing that same physical object. Keep its visible edges, thickness and fastenings. Do not copy the equipment reference's presentation or treat it as part of the skin.`).join("\n");
   const sheetPrompt = [options.promptOverride ?? [
     artDirectionParts.join("\n"),
     entityDetails.join("\n"),
     paletteGuidance,
     referenceRequirements.join("\n"),
-  ].filter(Boolean).join("\n\n"), options.feedback?.trim() ? `REFERENCE REVIEW FEEDBACK:\n${options.feedback.trim()}\nKeep the established profile identity and source-backed traits consistent.` : "", profile.visualType === "character" ? REFERENCE_BASELINE_POLICY + "\n" + CHARACTER_DESIGN_GUIDANCE + "\nOTHER CAST DESIGNS (comparison only): " + JSON.stringify(castDesigns) : "", identity.images.length ? IDENTITY_TRANSFORMATION_INSTRUCTION : "", referenceFigureRequirement(character, story.artwork.adultContent)].filter(Boolean).join("\n\n");
+  ].filter(Boolean).join("\n\n"), options.feedback?.trim() ? `REFERENCE REVIEW FEEDBACK:\n${options.feedback.trim()}\nKeep the established profile identity and source-backed traits consistent.` : "", profile.visualType === "character" ? REFERENCE_BASELINE_POLICY + "\n" + CHARACTER_DESIGN_GUIDANCE + "\nOTHER CAST DESIGNS (comparison only): " + JSON.stringify(castDesigns) : "", identity.images.length ? IDENTITY_TRANSFORMATION_INSTRUCTION : "", equipmentPrompt, referenceFigureRequirement(character, story.artwork.adultContent)].filter(Boolean).join("\n\n");
 
   // Combined negative prompt
   const negativePromptParts = [
@@ -515,7 +559,7 @@ export async function generateStyleSheet(
     quality: story.artwork.quality,
     size: story.artwork.size,
     outputFormat: story.artwork.outputFormat,
-    referenceImages: identity.images.length ? identity.images : undefined,
+    referenceImages: identity.images.length ? [...identity.images, ...identity.equipment.map(item => item.image)] : undefined,
   });
 
   const ext = "png";
@@ -537,6 +581,7 @@ export async function generateStyleSheet(
       identityReason: identity.reason,
       identityReferenceIds: identity.images.map(image => image.referenceId),
       identityReferenceFingerprints: identity.fingerprints,
+      equipmentReferenceIds: identity.equipment.map(item => item.image.referenceId),
       targetFingerprint: referenceSheetTargetFingerprint(savedProfile, story, activePreset, options, identity.fingerprints, entity, castDesigns),
       appearanceEraId: form ? undefined : era?.id,
       creatureFormId: form?.id,

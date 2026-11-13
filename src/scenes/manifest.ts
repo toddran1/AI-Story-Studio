@@ -51,7 +51,9 @@ export async function planStoredScenes(options: { root: string; story: Story; ch
   const audioDurationSeconds = chapter.audio.durationSeconds;
   const narration = (await readTextIfExists(paths.narration))!; const audioFileFingerprint = await streamedFileFingerprint(paths.audio);
   const fullBible = await rebuildStoryBibleBeforeChapter(options.root, options.story.slug, options.chapter + 1); const bible = retrieveRelevantContext(fullBible, narration, options.chapter + 1, { recentSummaryCount: options.story.context.recentChapterSummaries }); const config = options.story.pipeline.scenePlanner;
-  const visualProfileContext = visualPlanningContext(await loadVisualProfiles(options.root, options.story.slug), bible, options.chapter);
+  const profiles = await loadVisualProfiles(options.root, options.story.slug);
+  const lookOwners = fullBible.canonicalEntities.filter(entity => profiles[entity.id]?.appearanceEras?.some(era => era.sceneAliases?.length && era.startChapter <= options.chapter));
+  const visualProfileContext = visualPlanningContext(profiles, { ...bible, canonicalEntities: [...lookOwners, ...bible.canonicalEntities.filter(entity => !lookOwners.some(owner => owner.id === entity.id))] }, options.chapter);
   const previousContinuity = await resolvePreviousVisualContinuity(options.root, options.story.slug, options.chapter); const continuityOverlay = await loadVisualContinuityOverlay(options.root, options.story.slug, options.chapter);
   const continuityInput = previousContinuity || continuityOverlay.entries.length ? fingerprint({ handoff: previousContinuity?.stateFingerprint ?? "none", overlay: visualContinuityOverlayFingerprint(continuityOverlay) }) : "none";
   const alignment = alignmentArtifactSchema.safeParse(await readJsonIfExists(paths.alignment));

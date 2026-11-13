@@ -30,13 +30,13 @@ export class WebHttpClient {
     this.sleep = options.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
   }
 
-  async getText(input: string, options: { refresh?: boolean; signal?: AbortSignal; allowedHosts?: string[] } = {}): Promise<string> {
+  async getText(input: string, options: { refresh?: boolean; signal?: AbortSignal; allowedHosts?: string[]; noCache?: boolean } = {}): Promise<string> {
     const initial = this.validateUrl(input); let cached: HttpCacheEntry | undefined;
-    try { cached = await this.cache?.get(initial.href); } catch { /* Cache reads are optional; continue with the network. */ }
+    try { if (!options.noCache) cached = await this.cache?.get(initial.href); } catch { /* Cache reads are optional; continue with the network. */ }
     if (!options.refresh && cached && !cached.etag && !cached.lastModified && Date.now() - Date.parse(cached.fetchedAt) < this.cacheTtlMs) return cached.body;
     let lastError: unknown;
     for (let attempt = 0; attempt <= this.retries; attempt++) {
-      try { return await this.request(initial, cached, 0, options.signal, options.allowedHosts); }
+      try { return await this.request(initial, cached, 0, options.signal, options.allowedHosts, options.noCache); }
       catch (error) {
         lastError = error;
         if (options.signal?.aborted || attempt >= this.retries || !isTransient(error)) throw error;
@@ -122,7 +122,7 @@ export class WebHttpClient {
     }
   }
 
-  private async request(initial: URL, cached?: HttpCacheEntry, challengeAttempts = 0, externalSignal?: AbortSignal, allowedHosts?: string[]): Promise<string> {
+  private async request(initial: URL, cached?: HttpCacheEntry, challengeAttempts = 0, externalSignal?: AbortSignal, allowedHosts?: string[], noCache?: boolean): Promise<string> {
     let url = initial;
     for (let redirects = 0; redirects <= this.maxRedirects; redirects++) {
       await this.rateLimit();
@@ -156,9 +156,9 @@ export class WebHttpClient {
       const contentLength = Number(response.headers.get("content-length"));
       if (Number.isFinite(contentLength) && contentLength > this.maxBytes) { await discard(response); throw new WebHttpError(`Web response exceeds ${this.maxBytes} bytes: ${url.href}`, response.status); }
       const body = await readLimitedText(response, this.maxBytes);
-      if (await this.challengeSolved(url, body, challengeAttempts)) return this.request(initial, cached, challengeAttempts + 1, externalSignal, allowedHosts);
+      if (!noCache && await this.challengeSolved(url, body, challengeAttempts)) return this.request(initial, cached, challengeAttempts + 1, externalSignal, allowedHosts, noCache);
       try {
-        if (cacheable(body)) await this.cache?.set(initial.href, { url: initial.href, body, etag: response.headers.get("etag") ?? undefined,
+        if (!noCache && cacheable(body)) await this.cache?.set(initial.href, { url: initial.href, body, etag: response.headers.get("etag") ?? undefined,
           lastModified: response.headers.get("last-modified") ?? undefined, fetchedAt: new Date().toISOString() });
       } catch { /* A cache write must not turn a successful network response into a failed source request. */ }
       return body;

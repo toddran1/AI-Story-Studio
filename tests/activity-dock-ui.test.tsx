@@ -100,3 +100,18 @@ it("cancels only the pending preview and ignores a late response",async()=>{
   await act(async()=>root.render(<BatchProcessingPanel {...props}/>));await act(async()=>host.querySelector<HTMLInputElement>('input[type="checkbox"]')!.click());await act(async()=>button("Preview execution").click());await act(async()=>button("Cancel preview").click());
   expect(signal!.aborted).toBe(true);expect(button("Preview execution").disabled).toBe(false);await act(async()=>finish(response(batchPlan("a"))));expect(host.textContent).not.toContain("Plan aaaaaaaa ready");expect(props.onJob).not.toHaveBeenCalled();
 });
+
+it("shows the resume conflict on the paused card without submitting a different scene job", async () => {
+  const { JobConsole } = await import("../apps/web/src/App.js");
+  const paused: Job = { ...first, type: "scenes", status: "paused" };
+  const conflict = "Story 'a' has overlapping work in job two. Choose different chapters or wait for it to finish.";
+  const fetch = vi.fn(async () => new Response(JSON.stringify({ error: conflict }), { status: 409 }));
+  vi.stubGlobal("fetch", fetch);
+  const render = (job: Job) => <JobConsole job={job} onUpdate={() => undefined} onClose={() => undefined} />;
+  await act(async () => root.render(render(paused)));
+  await act(async () => Array.from(host.querySelectorAll("button")).find(button => button.textContent === "Resume remaining chapters")!.click());
+  expect(host.querySelector('[role="alert"]')?.textContent).toBe(conflict);
+  expect(fetch).toHaveBeenCalledTimes(1);
+  await act(async () => root.render(render({ ...paused, resumedBy: "continuation" })));
+  expect(host.textContent).not.toContain("Resume remaining chapters");
+});

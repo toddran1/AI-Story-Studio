@@ -1,4 +1,4 @@
-import type { CharacterVisualDetails } from "../domain/visual-profile.js";
+import { isSceneAppearanceLook, type CharacterVisualDetails } from "../domain/visual-profile.js";
 
 /** Identity references are not evidence of the state of a narrated frame. */
 export const NARRATIVE_APPEARANCE_POLICY = `NARRATIVE APPEARANCE AND VISIBILITY: Preserve each character's recognizable face, age, body proportions and baseline physical identity. References establish identity, not mandatory costumes, equipment, poses, injuries or activated powers. Resolve attire from the current narrative, location, weather, time and activity, then inherited continuity, then profile defaults. Adapt unspecified clothing to the setting without contradicting stated clothing or inventing an off-screen costume change. Keep established outfits and their damage consistent across continuous scenes and chapters until a supported change, time jump or manual override. Owning a weapon, accessory, item or ability does not make it visible: show only equipment worn, held, used, or explicitly visible in this frame. Stored, sheathed, concealed or off-screen items must not appear drawn or in use. A known ability is not an active effect. Conditional eye/skin/hair changes, auras, transformations and supernatural features appear only when the current scene establishes their trigger; otherwise use the normal inactive appearance. Never apply a temporary observation from another scene or a later chapter to the current frame. In a recap, resolve each beat at its own narrated time, not from the final chapter's state. If baseline appearance is unknown, leave it unspecified rather than using an activated form as the default.`;
@@ -45,12 +45,13 @@ export function visualPlanningContext(
     const profile = profiles[entity.id];
     const character = normalizeCharacterAppearance(profile?.character);
     const conditional = entity.visualEvidence?.filter(item => item.chapter <= chapter && isConditionalVisualObservation(item)).slice(-5).map(item => ({ field: item.field, value: item.value, condition: item.condition, chapter: item.chapter }));
-    if (!character && !conditional?.length) return [];
+    if (!character && !conditional?.length && !profile?.appearanceEras?.some(era => era.sceneAliases?.length)) return [];
     return [{ entityId: entity.id, name: entity.canonicalName, status: profile?.status,
       normalEyes: character?.eyeColor, baselineOutfit: character?.defaultOutfit, footwear: character?.shoes,
       conditionalAppearance: character?.conditionalAppearance, conditionalEvidence: conditional,
       availableEquipmentNotAutomaticallyVisible: [character?.weapons, character?.accessories, character?.equipment].filter(Boolean),
-      appearanceEras: profile?.appearanceEras?.filter(era => era.status === "approved" && era.startChapter <= chapter).map(era => ({ startChapter: era.startChapter, endChapter: era.endChapter, character: normalizeCharacterAppearance(era.character) })),
+      sceneLooks: profile?.appearanceEras?.filter(era => era.sceneAliases?.length && era.startChapter <= chapter).map(era => ({ id: era.id, name: era.name, aliases: era.sceneAliases, appearance: era.appearance, status: era.status })),
+      appearanceEras: profile?.appearanceEras?.filter(era => !isSceneAppearanceLook(era) && era.status === "approved" && era.startChapter <= chapter).map(era => ({ startChapter: era.startChapter, endChapter: era.endChapter, character: normalizeCharacterAppearance(era.character) })),
     }];
   });
   return JSON.stringify(rows).slice(0, 16000);

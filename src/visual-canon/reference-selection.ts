@@ -9,13 +9,13 @@ export const referenceApplicabilitySchema = z.object({
   activationTrigger: z.string().trim().min(1).max(300).optional(),
   state: z.enum(["baseline", "activated", "transformed"]).optional(),
 }).refine(v => !v.fromChapter || !v.toChapter || v.toChapter >= v.fromChapter, "Reference end must follow its start chapter");
-export type ReferenceContext = { chapter?: number; location?: string; wardrobe?: string; timeOfDay?: string; activeState?: boolean; activeAbilities?: string[]; transformation?: string; visibleEquipment?: string[]; text?: string };
+export type ReferenceContext = { chapter?: number; location?: string; wardrobe?: string; timeOfDay?: string; activeState?: boolean; activeAbilities?: string[]; transformation?: string; visibleEquipment?: string[]; visibleItemName?: string; text?: string };
 export function referenceContext(scene: Scene, chapter?: number): ReferenceContext {
   return { chapter: scene.overrides?.appearanceChapter ?? chapter, location: scene.location, wardrobe: Object.values(scene.overrides?.wardrobeOverrides ?? {}).join(" ") || scene.visualChanges?.characters?.map(c => c.set?.wardrobe).filter(Boolean).join(" "), timeOfDay: scene.visualChanges?.environment?.set?.timeOfDay ?? scene.direction?.timeEnvironment, visibleEquipment: scene.visualChanges?.characters?.flatMap(c => c.set?.visibleEquipment ?? []), activeState: Boolean(scene.visualChanges?.characters?.some(c => c.set?.activeAbilities?.length || c.set?.transformation)), text: [scene.summary, scene.narrationText, scene.visualPrompt].filter(Boolean).join(" ") };
 }
 const matches = (a: string | undefined, b: string | undefined) => Boolean(a && b && (a.toLowerCase().includes(b.toLowerCase()) || b.toLowerCase().includes(a.toLowerCase())));
 export function rankVisualReferences(refs: VisualReferenceImage[], context: ReferenceContext = {}) {
-  return refs.filter(ref => ref.approved).map(ref => {
+  return refs.filter(ref => ref.approved && !ref.provenance?.rejectedAt).map(ref => {
     const applicability = ref.applicability;
     const reasons: string[] = [];
     let eligible = true;
@@ -30,7 +30,11 @@ export function rankVisualReferences(refs: VisualReferenceImage[], context: Refe
         reasons.push(trigger ? "The required ability or transformation is not active in this frame" : "Conditional reference needs an explicit ability or transformation trigger");
       }
     }
-    if (ref.role === "equipment_reference" && !(context.visibleEquipment ?? []).some(item => matches(applicability?.locationVariant ?? applicability?.wardrobe, item))) { eligible = false; reasons.push("Equipment is not established as visible"); }
+    if (ref.role === "equipment_reference") {
+      const cue = applicability?.locationVariant ?? applicability?.wardrobe;
+      const visible = cue ? context.visibleEquipment?.some(item => matches(cue, item)) : context.visibleItemName;
+      if (!visible) { eligible = false; reasons.push("Equipment is not established as visible"); }
+    }
     if (ref.role === "outfit_sheet" && !applicability?.wardrobe) { eligible = false; reasons.push("Outfit sheet needs a matching outfit label before automatic use"); }
     if (applicability?.wardrobe) {
       if (matches(applicability.wardrobe, context.wardrobe)) { score += 130; reasons.push("Matches the current outfit"); }

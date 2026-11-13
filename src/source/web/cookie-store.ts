@@ -4,9 +4,10 @@ import { atomicWriteJson } from "../../storage/atomic-write.js";
 import { CookieStore } from "./types.js";
 
 export class FileCookieStore implements CookieStore {
-  constructor(private readonly directory: string) {}
+  constructor(private readonly directory: string, private readonly memoryOnlyHosts: readonly string[] = []) {}
 
   async get(host: string): Promise<Record<string, string> | undefined> {
+    if (this.memoryOnlyHosts.includes(host)) return undefined;
     try {
       const value = JSON.parse(await readFile(this.path(host), "utf8")) as { host?: unknown; cookies?: unknown };
       if (value.host !== host || !value.cookies || typeof value.cookies !== "object" || Array.isArray(value.cookies)) return undefined;
@@ -19,6 +20,7 @@ export class FileCookieStore implements CookieStore {
   }
 
   async set(host: string, cookies: Record<string, string>): Promise<void> {
+    if (this.memoryOnlyHosts.includes(host)) return;
     await atomicWriteJson(this.path(host), { host, cookies, savedAt: new Date().toISOString() });
   }
 

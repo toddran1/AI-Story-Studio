@@ -122,6 +122,7 @@ export function BatchProcessingPanel(props: Props) {
           {(Object.keys(STAGE_SELECTION_PRESETS) as Array<keyof typeof STAGE_SELECTION_PRESETS>).map((key) => <button type="button" key={key} onClick={() => setStages(applyStagePreset(key))}>{presetLabels[key]}</button>)}
           <button type="button" onClick={() => setStages([])}>Clear</button>
         </div>
+        {stages.length === 1 && stages[0] === "storyBible" && <p className="quiet-note">Story Bible only reads imported chapter text and skips translation, narration, and QA.</p>}
         <div className="stage-groups">
           {stageGroups.map((group) => <fieldset className="stage-group" key={group.label}>
             <legend>{group.label}</legend>

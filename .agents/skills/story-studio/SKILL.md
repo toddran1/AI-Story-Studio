@@ -1,18 +1,26 @@
 ---
 name: story-studio
-description: Process AI Story Studio chapters with the current Codex or Antigravity subscription agent, a confirmation preview, and validated local commits. Use for translation, narration text, QA, Story Bible, continuity, scene planning, and artwork on chapter selections; not for application code changes or spoken audio.
+description: Process AI Story Studio chapters with the current Codex or Antigravity subscription agent, a confirmation preview, and validated local commits. Use for Source Name Index scans, translation, narration text, QA, Story Bible, continuity, scene planning, and artwork; not for application code changes or spoken audio.
 ---
 
 # Story Studio subscription processing
 
 Use this repository's `npm run story:agent --` bridge. Generate responses yourself in this session; the local commands prepare the app's prompts, replay supplied responses, validate, and persist normal application artifacts. Never invoke normal process/batch/produce commands, API clients, provider SDKs, or paid image/TTS APIs as fallback. Do not inspect `.env`, auth tokens, or agent session logs. Subscription billing depends on this agent's subscription sign-in; the bridge cannot attest the host's billing route. If the host indicates API-key authentication, stop and explain that subscription sign-in is required.
 
+## Source Name Index
+
+When asked to scan source names, run a separate index plan with `npm run story:agent -- prepare --story <slug> --chapters 'all' --stages sourceNameIndex --agent <codex|antigravity> --model <session-model-or-unknown>`. Replace `all` with the requested chapter selection for a partial scan. This mode requires imported source and uses the current subscription agent for entity extraction and rename suggestions. Use Codex in a subscription session or the requested Gemini model in a subscription-authenticated Antigravity session.
+
+Preview the story, exact chapter scope and count, number of distinct passages, current host/model, and zero local provider API calls. Explain that the completed scan replaces the visible index for that selection and can flag existing narration and audio if it discovers an ambiguous saved name. Ask for confirmation and end the turn. Updating the skill does not authorize running a scan.
+
+After confirmation, use the usual `confirm`, `next`, and `respond` commands. For each structured request submit only the requested JSON. Copy source spellings as written and leave uncertain aliases out. The bridge calculates literal counts and priority locally. It keeps validated responses for resume and publishes one complete index after all passages succeed. Use `fail --outcome needs-input` for quota or other blockers and resume the same run when resolved. Do not publish partial results or save suggested renames as rules unless separately requested. Report the run ID, completed passages, indexed entities, and any affected chapters or held rules.
+
 ## Preview and confirmation
 
 1. Determine the story slug from the request or established context; ask if ambiguous. Accept mixed chapter ranges such as `1,5-10,78,100-150`.
 2. Map processes to `translation`, `narration`, `qa`, `storyBible`, `continuity`, `scenePlanning`, `artwork`. Narration means polished text; spoken audio is a separate paid Fish Audio stage. Include multiple requested processes in one plan. Interpret “Regenerate all”, “redo all”, or “force regeneration” as regeneration of every requested stage for every selected chapter, and pass `--force` to `prepare`. “All” refers to the requested stages, not every pipeline stage. Without a regeneration request, allow valid existing outputs to be reused. The bridge's `--force` applies to all requested stages; if the user requests regeneration of only some stages, clarify that scope before preparing a plan that would force additional stages. Do not add unrequested AI stages to repair missing prerequisites.
 3. Identify the host as `codex` or `antigravity`. Use the actual current session model if exposed by trusted metadata; otherwise use `unknown` and say “Current model is not exposed to this agent; see your model selector.” Never substitute the story's API model. The native image model is separate; report it only when exposed, otherwise use `unknown`.
-4. Run `npm run story:agent -- prepare --story <slug> --chapters '<selection>' --stages <stages> --agent <host> --model <session-model-or-unknown> [--image-model <native-model-or-unknown>] [--force]`. This writes a private run preview, not chapter content.
+4. For chapter processing, run `npm run story:agent -- prepare --story <slug> --chapters '<selection>' --stages <stages> --agent <host> --model <session-model-or-unknown> [--image-model <native-model-or-unknown>] [--force]`. This writes a private run preview, not chapter content.
 5. The first user-facing response for this processing request must be a compact preview of story, selection/count, requested processes in dependency order, session model (and image model when relevant), reused/regenerated stages, missing prerequisites, continuing past chapter failures, and local API calls disabled. Ask for confirmation and end the turn. Do not process chapter content yet. This gate is an explicit requirement of the user's workflow and this skill.
 6. After explicit user confirmation, run `confirm --story <slug> --run <id> --plan <planFingerprint>`, then `next --story <slug> --run <id>`. If the story changed, prepare a new preview and obtain confirmation again.
 

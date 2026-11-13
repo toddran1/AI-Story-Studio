@@ -3,7 +3,7 @@ import { StageState } from "../domain/chapter.js";
 import { QaException, QaState } from "../domain/qa.js";
 import { Story } from "../domain/story.js";
 import { CanonicalEntity, emptyStoryBible, hasActivePronunciation, StoryBible, storyBibleSchema } from "../domain/story-bible.js";
-import { loadNarrationNamingEntities } from "../story-bible/narration-names.js";
+import { loadNarrationNamingEntities, nameMatcher, type NarrationNamingEntity } from "../story-bible/narration-names.js";
 import { loadPronunciationEntities } from "../story-bible/pronunciation.js";
 import { storyPaths } from "../storage/paths.js";
 import { readJsonIfExists, readTextIfExists } from "../storage/story-files.js";
@@ -18,6 +18,7 @@ import { qaFingerprintConfig } from "./policy.js";
 export type QaNamingProjection = {
   /** Versioned authority distinguishes old context-based QA from overlay-based QA. */
   authorityVersion?: number;
+  sourceIndexSpellings?: string[];
   id: string;
   type?: CanonicalEntity["type"];
   canonicalName: string;
@@ -61,9 +62,10 @@ export type QaDependencies = {
   acceptedContinuity: AcceptedContinuity[];
 };
 
-export function projectNamingForQa(entities: CanonicalEntity[]): QaNamingProjection[] {
+export function projectNamingForQa(entities: NarrationNamingEntity[]): QaNamingProjection[] {
   return entities.map((entity) => ({
     authorityVersion: 1,
+    sourceIndexSpellings: entity.sourceIndexSpellings,
     id: entity.id,
     type: entity.type,
     canonicalName: entity.canonicalName,
@@ -158,6 +160,11 @@ export async function loadQaDeterministicDependencies(
   };
 }
 
+export function scopeQaSourceRules(naming: QaNamingProjection[], source: string) {
+  const inSource = nameMatcher(source);
+  return naming.filter(entity => !entity.sourceIndexSpellings || entity.sourceIndexSpellings.some(inSource));
+}
+
 export type QaFreshness = "missing" | "current" | "needs_recheck" | "failed";
 
 /**
@@ -224,6 +231,7 @@ export async function loadStoredQaDependencies(
     prompt: QA_PROMPT_VERSION,
     mode: story.qaMode,
     ...deterministicDeps,
+    naming: scopeQaSourceRules(deterministicDeps.naming, source),
   };
 }
 

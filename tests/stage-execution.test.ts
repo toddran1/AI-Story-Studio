@@ -30,6 +30,33 @@ async function addSceneArtwork(ctx: Awaited<ReturnType<typeof setup>>) {
 }
 
 describe("manual stage execution planner", () => {
+  it("extracts a Story Bible from imported source without translation, narration, or QA", async () => {
+    const root = await mkdtemp(join(tmpdir(), "stage-source-bible-"));
+    try {
+      const story = testStory(); const input = join(root, "chapter.txt");
+      const source = "第一章\n\n测试正文";
+      await writeFile(input, source);
+      const provider = new MockLLM("gemini");
+      const tts = new MockTTS();
+      const pipeline = new ChapterPipeline(new LLMRouter(new Map([["gemini", provider]])), tts);
+      const options = { root, story: story.slug, storyConfig: story, chapter: 1, selectedStages: ["storyBible"] as const };
+      for (const mode of ["selected", "prerequisites"] as const) {
+        const plan = await planStageExecution({ ...options, mode });
+        expect(plan).toMatchObject({ sourceOnlyStoryBible: true, runStages: ["storyBible"], blockedStages: [] });
+      }
+      const plan = await planStageExecution(options);
+      await executeStagePlan({ root, story, chapter: 1, inputPath: input, plan, runtime: { pipeline, alignment: { config: {} as any }, video: {} as any } });
+      const paths = storyPaths(root, story.slug, 1);
+      expect(provider.calls).toHaveLength(1);
+      expect(provider.calls[0]?.input).toContain(source);
+      expect(provider.calls[0]?.input).not.toMatch(/TRANSLATION:|NARRATION:/);
+      expect(JSON.parse(await readFile(paths.bibleUpdate, "utf8")).chapterSummary).toBe("A star lamp awakens.");
+      expect(JSON.parse(await readFile(paths.chapterMeta, "utf8")).stages).toMatchObject({ storyBible: { status: "complete" }, translation: { status: "pending" }, narration: { status: "pending" }, qa: { status: "pending" } });
+      for (const path of [paths.english, paths.narration, paths.qa]) await expect(readFile(path)).rejects.toMatchObject({ code: "ENOENT" });
+      expect(tts.calls).toBe(0);
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
   const chapterPlan = (ctx: Awaited<ReturnType<typeof setup>>, stage: Parameters<typeof planStageExecution>[0]["selectedStages"][number]) =>
     planStageExecution({ root: ctx.root, story: ctx.story.slug, chapter: 1, selectedStages: [stage], executionPolicy: "chapter-stage", storyConfig: ctx.story });
 

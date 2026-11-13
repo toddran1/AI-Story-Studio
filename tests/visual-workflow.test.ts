@@ -1,8 +1,8 @@
 import { StudioOperations } from "../apps/server/operations.js";
 import { loadEnvironment } from "../src/config/env.js";
 import { defaultStory } from "../src/config/load-config.js";
-import { atomicWriteJson } from "../src/storage/atomic-write.js";
-import { storyPaths } from "../src/storage/paths.js";
+import { atomicWrite, atomicWriteJson } from "../src/storage/atomic-write.js";
+import { storyPaths, visualProfileRefPath } from "../src/storage/paths.js";
 import { sceneManifestSchema } from "../src/scenes/types.js";
 import { acquireStoryLock } from "../src/storage/story-lock.js";
 import { describe, it, expect } from "vitest";
@@ -74,6 +74,7 @@ describe("visual workflow review and impact", () => {
       expect((await loadVisualProfiles(root, "test"))[id]?.references[1]?.approved).toBe(false);
       p.appearanceEras[1]!.detectedChange!.needsReview = false;
       await saveVisualProfiles(root, "test", { [id]: p });
+      await atomicWrite(visualProfileRefPath(root, "test", id, "candidate", "png"), Buffer.from("test reference"));
       const approved = await approveVisualReference(root, "test", id, "candidate", true, undefined, "second");
       expect(approved.appearanceEras?.[0]?.endChapter).toBe(9);
       expect(approved.appearanceEras?.[1]?.status).toBe("approved");
@@ -95,6 +96,10 @@ describe("visual workflow review and impact", () => {
       const preview = await operations.previewSceneVisuals("test", { scene: scene(), chapter: 2 });
       expect(preview.prompt).toContain("Gray flesh"); expect(preview.resolvedEntities).toHaveLength(1);
       expect(preview.references.loadedReferenceIds).toEqual([]);
+      const draft = sceneSchema.parse({ ...scene(), visualChanges: { environment: { set: { weather: "Freezing rain" } } } });
+      const draftPreview = await operations.previewSceneVisuals("test", { scene: draft, chapter: 2 });
+      expect(draftPreview.prompt).toContain("Freezing rain");
+      expect(preview.prompt).not.toContain("Freezing rain");
       expect(await operations.visualImpact("test", id)).toMatchObject([{ chapter: 2, sceneId: "scene-001", protected: false }]);
       await expect(operations.previewSceneVisuals("test", { scene: scene(), chapter: 0 })).rejects.toThrow();
       await expect(operations.visualImpact("../test", id)).rejects.toThrow();

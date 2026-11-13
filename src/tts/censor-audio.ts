@@ -11,7 +11,7 @@ import { summarizeQuality } from "./quality-guard.js";
 
 import { z } from "zod";
 
-export const CENSOR_AUDIO_VERSION = "censor-tone-v5-no-empty-speech-fragments";
+export const CENSOR_AUDIO_VERSION = "censor-tone-v7-no-empty-quotes";
 export const CENSOR_BLEEP_MARKER = "[CENSOR_BLEEP]" as const;
 export const censorToneConfig = {
   frequencyHz: 1000,
@@ -50,6 +50,7 @@ const strongWord = /(?<![\p{L}\p{N}_])(?:motherfuck(?:ers?|ing|ed|s)?|fuck(?:ers
 export function planCensoredSpeech(text: string): CensorSegment[] {
   text = stripSpeechMarkdownEmphasis(text);
   const segments: CensorSegment[] = [];
+  const open: OpenQuote[] = [];
   let cursor = 0;
   let quoteAfterCensor = "";
   for (const match of text.matchAll(strongWord)) {
@@ -61,10 +62,18 @@ export function planCensoredSpeech(text: string): CensorSegment[] {
     // Fish chunk (and an unbalanced closing quote in the next chunk).
     const danglingQuote = /(?:\[(?:soft|calm)\]\s*)*[“‘"「『«]$/u.exec(speech)?.[0];
     if (danglingQuote) {
-      speech = speech.slice(0, -danglingQuote.length).trimEnd();
-      quoteAfterCensor = danglingQuote;
+      const preceding = speech.slice(0, -danglingQuote.length).trimEnd();
+      const beforeQuote = [...open];
+      trackQuotes(preceding, beforeQuote);
+      if (!danglingQuote.endsWith('"') || beforeQuote.at(-1)?.mark !== '"') {
+        speech = preceding;
+        quoteAfterCensor = danglingQuote;
+      }
     }
-    if (hasCensorSpeech(speech)) segments.push({ kind: "speech", text: speech });
+    if (hasCensorSpeech(speech)) {
+      segments.push({ kind: "speech", text: speech });
+      trackQuotes(speech, open);
+    }
     const original = match[0];
     segments.push({ kind: "censor", marker: CENSOR_BLEEP_MARKER, original, durationSeconds: censorDuration(original) });
     // A tone already supplies the interruption/pause implied by punctuation.
@@ -124,6 +133,7 @@ export class FfmpegCensorAudioService implements CensorAudioService {
     const plan = planCensoredSpeech(request.text);
     const censored = plan.filter((segment): segment is Extract<CensorSegment, { kind: "censor" }> => segment.kind === "censor");
     if (!censored.length) return provider.synthesize(request);
+    const prepared = prepareCensorSpeech(plan);
     await this.tools.validateAvailability();
     const directory = await mkdtemp(join(tmpdir(), "ai-story-censor-"));
     const files: string[] = [];
@@ -142,7 +152,8 @@ export class FfmpegCensorAudioService implements CensorAudioService {
     try {
       for (const [index, segment] of plan.entries()) {
         if (segment.kind === "speech") {
-          const speechText = speechForSynthesis(plan, index);
+          const speechText = prepared.get(index);
+          if (speechText === undefined) continue;
           const fragmentCheckpointDir = request.checkpointDir
             ? join(request.checkpointDir, `censor-${String(speechOrdinal + 1).padStart(4, "0")}`)
             : undefined;
@@ -245,14 +256,64 @@ export class FfmpegCensorAudioService implements CensorAudioService {
 
 function clamp(minimum: number, maximum: number, value: number) { return Math.max(minimum, Math.min(maximum, value)); }
 
-export function speechForSynthesis(plan: CensorSegment[], index: number) {
-  const segment = plan[index];
-  if (!segment || segment.kind !== "speech") throw new AudioError("Invalid censor speech segment");
-  const text = segment.text.trim();
-  // A clipped open-ended phrase can make some models trail into the removed
-  // word. Give every pre-censor chunk a neutral spoken boundary; this remains
-  // internal and does not alter narration, subtitles, or canonical text.
-  return plan[index + 1]?.kind === "censor" && !/[,.!?;:。！？；：]$/.test(text)
-    ? `${text}${censorToneConfig.speechBoundaryPunctuation}`
-    : text;
+const quotePairs = new Map([["“", "”"], ["‘", "’"], ['"', '"'], ["「", "」"], ["『", "』"], ["«", "»"]]);
+type OpenQuote = { mark: string; index: number };
+
+function trackQuotes(text: string, open: OpenQuote[], onClose?: (start: number, end: number) => void) {
+  for (const { 0: mark, index } of text.matchAll(/[“”‘’"「」『』«»]/gu)) {
+    // Curly apostrophes inside words (e.g. don’t) do not close dialogue.
+    if (mark === "’" && /[\p{L}\p{N}]$/u.test(text.slice(Math.max(0, index - 2), index)) && /^[\p{L}\p{N}]/u.test(text.slice(index + 1, index + 3))) continue;
+    const current = open.at(-1);
+    if (current && quotePairs.get(current.mark) === mark) {
+      open.pop();
+      onClose?.(current.index, index);
+    } else if (quotePairs.has(mark)) open.push({ mark, index });
+  }
+}
+
+function removeEmptyQuotes(text: string) {
+  const empty: Array<{ start: number; end: number }> = [];
+  trackQuotes(text, [], (start, end) => {
+    if (/^[\s\p{P}]*$/u.test(text.slice(start + 1, end))) empty.push({ start, end });
+  });
+  let result = "";
+  let cursor = 0;
+  for (const { start, end } of empty.sort((a, b) => a.start - b.start)) {
+    if (start < cursor) continue; // A nested pair was removed with its outer pair.
+    result += text.slice(cursor, start);
+    if (/[\p{L}\p{N}]$/u.test(result) && /^[\p{L}\p{N}]/u.test(text.slice(end + 1))) result += " ";
+    cursor = end + 1;
+  }
+  return (result + text.slice(cursor)).trim();
+}
+
+/** Balance only the provider payload. Keep the original quote state across
+ * tones so a synthetic closing mark never changes the next fragment's context. */
+export function prepareCensorSpeech(plan: CensorSegment[]): Map<number, string> {
+  const prepared = new Map<number, string>();
+  const open: OpenQuote[] = [];
+  for (const [index, segment] of plan.entries()) {
+    if (segment.kind !== "speech") continue;
+    const text = segment.text.trim();
+    const cues = /^(?:\[[\w-]+\]\s*)*/u.exec(text)?.[0] ?? "";
+    let body = text.slice(cues.length);
+    let prefix = "";
+    if (plan[index - 1]?.kind === "censor") {
+      // If the bleep ended the quotation, there is nothing to reopen.
+      const inherited = open.length;
+      while (open.length && body[0] === quotePairs.get(open.at(-1)!.mark)) {
+        open.pop();
+        body = body.slice(1).trimStart();
+      }
+      if (open.length < inherited) body = body.replace(/^[,.!?;:，。！？；：]+\s*/u, "");
+      prefix = open.map(quote => quote.mark).join("");
+    }
+    trackQuotes(body, open);
+    const beforeTone = plan[index + 1]?.kind === "censor";
+    const punctuation = beforeTone && !/[,.!?;:。！？；：](?:[”’"」』»]*)$/u.test(text) ? censorToneConfig.speechBoundaryPunctuation : "";
+    const suffix = beforeTone ? [...open].reverse().map(quote => quotePairs.get(quote.mark)).join("") : "";
+    const payload = removeEmptyQuotes(`${cues}${prefix}${body}${punctuation}${suffix}`);
+    if (hasCensorSpeech(payload)) prepared.set(index, payload);
+  }
+  return prepared;
 }

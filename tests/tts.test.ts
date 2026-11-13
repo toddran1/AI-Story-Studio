@@ -7,6 +7,14 @@ import { TTSRequest } from "../src/tts/types.js";
 import { attachInlineLaughter } from "../src/tts/fish/speech-normalizer.js";
 
 describe("Fish TTS", () => {
+  it("expands numbered leaderboard labels before spelling out the rank", () => {
+    const text = "【No. 100: Onikiri Ryu, 3565 points】\n\nNo. I disagree. See No.99.";
+    for (const spoken of [normalizeSpeechText(text, "en-US").text, normalizeFishSpeechText(text, "s2.1-pro-free")]) {
+      expect(spoken).toContain("Number one hundred: Onikiri Ryu");
+      expect(spoken).toContain("No. I disagree. See Number 99.");
+    }
+  });
+
   it.each([false, true])("joins prose paragraphs only in Fish transport (exact chunk: %s)", async exactChunk => {
     const fetcher = vi.fn(async (_url: unknown, _init?: RequestInit) => new Response(new Uint8Array([1, 2, 3]), { status: 200 }));
     const provider = new FishAudioProvider("test-key", fetcher as typeof fetch);
@@ -44,6 +52,18 @@ describe("Fish TTS", () => {
     expect(body.text).toContain("[laughing] unable to contain his excitement, Asher laughed out loud.");
     expect(body.text).toContain('“[laughing]”\n');
     expect(body.text).toContain("A separate paragraph.");
+  });
+
+  it.each([[false, "[laughing]"], [true, "[laughing]"], [false, "[chuckle]"], [true, "[chuckle]"], [false, "Heh, heh, heh…"] ] as const)("preserves the reaction type when attaching it to calm narration (exact chunk: %s, reaction: %s)", async (exactChunk, reaction) => {
+    const fetcher = vi.fn(async (_url: unknown, _init?: RequestInit) => new Response(new Uint8Array([1, 2, 3]), { status: 200 }));
+    const provider = new FishAudioProvider("test-key", fetcher as typeof fetch);
+    const text = '[soft] “Boss, shouldn’t you pay half up front?”\n\n[calm] Asher tossed him the equipment.\n\n“' + reaction + '”\n\n[calm] The moment Brother Ye got his hands on it, his face lit up.\n\n[calm] The others watched.';
+    await provider.synthesize({ text, exactChunk, singleAttempt: true, model: "s2.1-pro-free", voiceMode: "same-voice-dialogue", deliveryIntensity: "restrained", speed: 1, format: "mp3", sampleRate: 44100, bitrate: 128, normalize: true, maxCharsPerRequest: 1750 });
+    const body = JSON.parse(String(fetcher.mock.calls[0]?.[1]?.body));
+    const cue = reaction === "[laughing]" ? "[laughing]" : "[chuckle]";
+    expect(body.text).toContain(`${cue} The moment Brother Ye got his hands on it, his face lit up.`);
+    expect(body.text).toContain("[calm] The others watched.");
+    expect(body.text).not.toContain(`“${cue}”`);
   });
 
   it("speaks unknown panel values without interpreting question marks", () => {
@@ -275,7 +295,7 @@ describe("Fish TTS", () => {
     await provider.synthesize({ text: "**Important:** *whisper this.* [sad] 2 * 2", model: "s2.1-pro", speed: 1, format: "mp3", sampleRate: 44100, bitrate: 128, normalize: true, maxCharsPerRequest: 500 });
     const body = JSON.parse(String((fetcher.mock.calls[0]?.[1] as RequestInit).body));
     expect(body.text).toBe("Important: whisper this. [sad] 2 * 2");
-    expect(provider.inputNormalizationVersion).toBe("fish-speech-normalization-v44-prose-boundaries");
+    expect(provider.inputNormalizationVersion).toBe("fish-speech-normalization-v50-throat-clear");
   });
 
   it("does not turn profanity into the literal word bleep inside Fish", async () => {
@@ -432,7 +452,7 @@ describe("Fish TTS", () => {
     expect(posted.join(" ")).toContain("Actually, it’s not impossible");
     expect(posted.join(" ")).toContain("I guessed it");
     expect(posted.join(" ")).not.toMatch(/hehe|\[laughing\]/i);
-    expect(posted.join(" ")).toContain("[cough] You’re right");
+    expect(posted.join(" ")).toContain("[clears throat] You’re right");
     expect(narration).toContain("Ahem, ahem, ahem…");
   });
 
@@ -491,7 +511,7 @@ describe("Fish TTS", () => {
     }
   });
 
-  it("posts one laugh cue for Chapter 552's repeated reaction", async () => {
+  it("posts one chuckle for repeated hehs and keeps one explicit full laugh", async () => {
     const posted: string[] = [];
     const fetcher = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => { posted.push(JSON.parse(String(init?.body)).text); return new Response(new Uint8Array([1]), { headers: { "content-type": "audio/mpeg" } }); });
     const provider = new FishAudioProvider("test-key", fetcher as typeof fetch);
@@ -499,7 +519,8 @@ describe("Fish TTS", () => {
     for (const text of [`“Heh heh... ${phrase}”`, `[soft] “ [laughing] [laughing] ${phrase}”[calm]`]) {
       await provider.synthesize({ text, model: "s2.1-pro-free", speed: 1, format: "mp3", sampleRate: 44100, bitrate: 128, normalize: true, maxCharsPerRequest: 500 });
     }
-    for (const text of posted) { expect(text.match(/\[laughing\]/g)).toHaveLength(1); expect(text).toContain(phrase); expect(text).not.toMatch(/heh|cough/iu); }
+    expect(posted.map(text => text.match(/\[(?:laughing|chuckle)\]/g))).toEqual([["[chuckle]"], ["[laughing]"]]);
+    for (const text of posted) { expect(text).toContain(phrase); expect(text).not.toMatch(/heh|cough/iu); }
     expect(normalizeFishSpeechText("[laughing] Hello. [laughing] Goodbye.", "s2-pro")).toBe("[laughing] Hello. [laughing] Goodbye.");
   });
 

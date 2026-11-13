@@ -1,10 +1,11 @@
 import { readdir, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { CanonicalEntity } from "../domain/story-bible.js";
-import { Chapter, StageName, chapterSchema } from "../domain/chapter.js";
+import { Chapter, SOURCE_NAME_HOLD_REASON, StageName, chapterSchema } from "../domain/chapter.js";
 import { atomicWriteJson } from "../storage/atomic-write.js";
 import { storyPaths } from "../storage/paths.js";
 import { readJsonIfExists } from "../storage/story-files.js";
+import { loadAmbiguousSourceNames, loadSourceNameRules } from "../naming/source-index.js";
 import { loadStoryBibleWithCanonicalOverlay } from "./canonical.js";
 
 const downstream: StageName[] = ["qa", "tts", "audioMastering", "alignment", "subtitles", "scenePlanning", "artwork", "video"];
@@ -13,24 +14,59 @@ export function narrationNamingChanged(before: CanonicalEntity, after: Canonical
   return before.preferredNarrationName !== after.preferredNarrationName || JSON.stringify(before.aliasNarrationRules) !== JSON.stringify(after.aliasNarrationRules) || JSON.stringify(before.localizedNaming) !== JSON.stringify(after.localizedNaming);
 }
 
+export type NarrationNamingEntity = CanonicalEntity & { sourceIndexSpellings?: string[] };
+
 export async function loadNarrationNamingEntities(root: string, slug: string, options: { includeUnmapped?: boolean } = {}) {
-  return (await loadStoryBibleWithCanonicalOverlay(root, slug)).canonicalEntities.filter((entity) => options.includeUnmapped || entity.localizedNaming || entity.preferredNarrationName || entity.aliasNarrationRules.length);
+  const [bible, sourceRules] = await Promise.all([loadStoryBibleWithCanonicalOverlay(root, slug), loadSourceNameRules(root, slug)]);
+  const blocked = new Set(Object.keys(sourceRules).length ? await loadAmbiguousSourceNames(root, slug) : []);
+  const key = (name: string) => name.normalize("NFKC").toLowerCase();
+  const entities: NarrationNamingEntity[] = [...bible.canonicalEntities];
+  for (const rule of Object.values(sourceRules)) {
+    if (blocked.has(key(rule.originalName))) continue;
+    const aliases = rule.aliases.filter(alias => !blocked.has(key(alias)));
+    const sourceIndexSpellings = [rule.originalName, ...aliases];
+    const matches = entities.filter(entity => key(entity.originalName) === key(rule.originalName));
+    if (!matches.length) entities.push({ ...rule, aliases, sourceIndexSpellings });
+    else if (matches.length === 1 && matches[0]!.type === rule.type && !matches[0]!.localizedNaming && !matches[0]!.preferredNarrationName && !matches[0]!.aliasNarrationRules.length) {
+      const entity = matches[0]!;
+      entities[entities.indexOf(entity)] = { ...entity, localizedNaming: rule.localizedNaming, firstAppearance: rule.firstAppearance, sourceIndexSpellings,
+        aliases: [...new Set([...entity.aliases, ...aliases, rule.canonicalName])] };
+    }
+  }
+  return entities.filter(entity => options.includeUnmapped || entity.localizedNaming || entity.preferredNarrationName || entity.aliasNarrationRules.length);
 }
 
 /** A compact, current-chapter naming roster independent of the general Story
  * Bible context budget. Translation can introduce an English alias that did
  * not occur in the Chinese source, so callers pass both texts. */
-export function selectNarrationNamingEntities(entities: CanonicalEntity[], chapterText: string, chapter: number) {
-  const lower = chapterText.toLocaleLowerCase();
-  return entities.filter((entity) => entity.firstAppearance <= chapter && [entity.canonicalName, entity.originalName, ...entity.aliases, entity.preferredNarrationName, entity.localizedNaming?.fullName, entity.localizedNaming?.shortName]
-    .some((name) => {
-      if (!name || name.trim().length < 2) return false;
-      const value = name.trim();
-      if (!/[A-Za-z]/u.test(value)) return lower.includes(value.toLocaleLowerCase());
-      const escaped = value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-      return new RegExp(`(?<![\\p{L}\\p{N}_])${escaped}(?![\\p{L}\\p{N}_])`, "iu").test(chapterText);
-    }))
-    .map((entity) => ({ id: entity.id, canonicalName: entity.canonicalName, originalName: entity.originalName, aliases: entity.aliases, preferredNarrationName: entity.preferredNarrationName, localizedNaming: entity.localizedNaming, aliasNarrationRules: entity.aliasNarrationRules }));
+export function nameMatcher(text: string) {
+  const normalized = text.normalize("NFKC");
+  const lower = normalized.toLowerCase();
+  return (name: string) => {
+    const value = name.trim().normalize("NFKC");
+    if (value.length < 2) return false;
+    if (!/^[\p{Script=Latin}\p{N}]/u.test(value)) return lower.includes(value.toLowerCase());
+    const escaped = value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    return new RegExp(`(?<![\\p{Script=Latin}\\p{N}_])${escaped}(?![\\p{Script=Latin}\\p{N}_])`, "iu").test(normalized);
+  };
+}
+
+export function relevantNarrationNamingEntities(entities: NarrationNamingEntity[], chapterText: string, chapter: number, source?: string) {
+  const inChapter = nameMatcher(chapterText);
+  const inSource = source === undefined ? undefined : nameMatcher(source);
+  return entities.filter(entity => {
+    if (entity.firstAppearance > chapter) return false;
+    if (entity.sourceIndexSpellings && inSource) {
+      return entity.sourceIndexSpellings.some(inSource);
+    }
+    return [entity.canonicalName, entity.originalName, ...entity.aliases, entity.preferredNarrationName, entity.localizedNaming?.fullName, entity.localizedNaming?.shortName]
+      .some(name => name && inChapter(name));
+  });
+}
+
+export function selectNarrationNamingEntities(entities: NarrationNamingEntity[], chapterText: string, chapter: number, source?: string) {
+  return relevantNarrationNamingEntities(entities, chapterText, chapter, source)
+    .map(entity => ({ id: entity.id, canonicalName: entity.canonicalName, originalName: entity.originalName, aliases: entity.aliases, preferredNarrationName: entity.preferredNarrationName, localizedNaming: entity.localizedNaming, aliasNarrationRules: entity.aliasNarrationRules }));
 }
 
 async function listChapterNumbers(root: string, slug: string) {
@@ -89,12 +125,11 @@ export async function inspectNarrationNamingImpact(root: string, slug: string, b
   return { affectedChapters: [...affected].filter((chapter) => availableSet.has(chapter)).sort((a, b) => a - b) };
 }
 
-export async function invalidateNarrationNamingChange(root: string, slug: string, before: CanonicalEntity, after: CanonicalEntity) {
+export async function invalidateNarrationNamingChange(root: string, slug: string, before: CanonicalEntity, after: CanonicalEntity, reason = `Narration naming preferences changed for ${after.canonicalName}`) {
   if (!narrationNamingChanged(before, after)) return { affectedChapters: [] as number[], manualNarrationChapters: [] as number[], exportCleanupWarnings: [] as string[] };
   const story = storyPaths(root, slug, 1).story;
   const chapterNumbers = (await inspectNarrationNamingImpact(root, slug, before, after)).affectedChapters;
 
-  const reason = `Narration naming preferences changed for ${after.canonicalName}`;
   const manualNarrationChapters: number[] = [];
   // Parse and prepare every affected record before the first write. A corrupt
   // chapter therefore cannot leave earlier chapters partially invalidated.
@@ -102,11 +137,12 @@ export async function invalidateNarrationNamingChange(root: string, slug: string
     const path = storyPaths(root, slug, chapterNumber).chapterMeta;
     const raw = await readJsonIfExists<Chapter>(path); if (!raw) return undefined;
     const original = chapterSchema.parse(raw); const chapter = structuredClone(original); const narration = chapter.stages.narration;
+    const reasonFor = (stage: StageName) => chapter.stages[stage].staleReason === SOURCE_NAME_HOLD_REASON ? SOURCE_NAME_HOLD_REASON : reason;
     if (narration.provider === "manual" && narration.status === "complete") {
-      chapter.stages.narration = { ...narration, staleReason: reason, manualReviewRequired: true };
+      chapter.stages.narration = { ...narration, staleReason: reasonFor("narration"), manualReviewRequired: true };
       manualNarrationChapters.push(chapterNumber);
-    } else chapter.stages.narration = { status: "pending", staleReason: reason };
-    for (const stage of downstream) chapter.stages[stage] = { status: "pending", staleReason: reason };
+    } else chapter.stages.narration = { status: "pending", staleReason: reasonFor("narration") };
+    for (const stage of downstream) chapter.stages[stage] = { status: "pending", staleReason: reasonFor(stage) };
     chapter.updatedAt = new Date().toISOString(); return { path, original, chapter };
   });
   const prepared = updates.filter((item): item is NonNullable<typeof item> => Boolean(item)); const written: typeof prepared = [];

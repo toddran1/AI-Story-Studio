@@ -70,6 +70,12 @@ describe("visual workflow generation", () => {
       images.failAt = undefined; await runReferenceBatch(f.root, f.story, images, retry, () => undefined); expect(images.requests).toHaveLength(3);
       const saved = (await loadVisualProfiles(f.root, f.story.slug))[id]!;
       const candidate = saved.references.find(ref => ref.id === result.outcomes[0]?.referenceId)!;
+      const provenance = candidate.provenance!;
+      candidate.provenance = { ...provenance, rejectedAt: new Date().toISOString() };
+      await saveVisualProfiles(f.root, f.story.slug, { [id]: saved });
+      expect((await planReferenceBatch(f.root, f.story, images, input)).entries[0]?.reuseReferenceId).toBeUndefined();
+      candidate.provenance = provenance;
+      await saveVisualProfiles(f.root, f.story.slug, { [id]: saved });
       await atomicWrite(candidate.imagePath, PNG);
       expect((await planReferenceBatch(f.root, f.story, images, input)).imageCount).toBe(1);
     } finally { await rm(f.root, { recursive: true, force: true }); }
@@ -321,6 +327,12 @@ describe("visual workflow generation", () => {
       let report = await operations.imageDraftReport(f.story.slug) as { updatedAt: string; outcomes: Array<{ entityId: string; referenceId: string; status: string }> };
       let selection = report.outcomes.filter(item => item.status === "profile_review").map(({ entityId, referenceId }) => ({ entityId, referenceId }));
       expect(selection).toHaveLength(2);
+      const continuation = await operations.continueImageAutomation(f.story.slug, { reportUpdatedAt: report.updatedAt });
+      expect((await finish(operations, continuation.id)).result).toMatchObject({ requests: 4, reservedUsd: 3 });
+      expect(images.requests).toHaveLength(2);
+      report = await operations.imageDraftReport(f.story.slug) as typeof report;
+      expect(report.outcomes.filter(item => item.status === "profile_review").map(({ entityId, referenceId }) => ({ entityId, referenceId }))).toEqual(selection);
+
       await expect(operations.approveImageDraftReferences(f.story.slug, {
         reportUpdatedAt: report.updatedAt, selection: [selection[0], { ...selection[1], referenceId: "missing" }],
       })).rejects.toThrow("not awaiting");
@@ -421,6 +433,12 @@ describe("visual workflow generation", () => {
         status: "budget_reached", requests: 1,
         outcomes: [{ status: "profile_review" }, { status: "reference_pending" }],
       });
+      const report = await operations.imageDraftReport(f.story.slug) as { updatedAt: string; outcomes: Array<{ referenceId?: string }> };
+      const approval = await operations.approveImageDraftReference(f.story.slug, { entityId: id, referenceId: report.outcomes[0]!.referenceId, reportUpdatedAt: report.updatedAt });
+      expect((await finish(operations, approval.id)).result).toMatchObject({ status: "budget_reached", approved: 1 });
+      expect((await loadVisualProfiles(f.root, f.story.slug))[id]?.references[0]?.approved).toBe(true);
+      expect(await operations.imageDraftReport(f.story.slug)).toMatchObject({ requests: 1, outcomes: [{ status: "reference_pending", entityId: secondId }] });
+      expect(images.requests).toHaveLength(1);
     } finally { await rm(f.root, { recursive: true, force: true }); }
   });
 
@@ -453,6 +471,12 @@ describe("visual workflow generation", () => {
       expect(images.requests[1]?.prompt).toContain("TARGETED REPAIR");
       const manifest=sceneManifestSchema.parse(JSON.parse(await readFile(f.paths.scenesManifest,"utf8")));
       expect(manifest.scenes[0]?.artwork.approvedVersionId).toBeUndefined(); expect(manifest.scenes[0]?.artwork.versions).toHaveLength(3);
+      expect(manifest.scenes[0]?.artwork.versions.at(-1)?.provenance?.referenceImageCount).toBe(images.requests[1]?.referenceImages?.length);
+      const report = await operations.imageDraftReport(f.story.slug);
+      const resumed = await operations.continueImageAutomation(f.story.slug, { reportUpdatedAt: report?.updatedAt });
+      expect((await finish(operations, resumed.id)).result).toMatchObject({ requests: 4, outcomes: [{ status: "mismatch", repairs: 1 }] });
+      expect(images.requests).toHaveLength(2);
+      expect(checks).toBe(2);
     }finally{await rm(f.root,{recursive:true,force:true});}
   });
 
@@ -470,11 +494,17 @@ describe("visual workflow generation", () => {
     const f=await fixture();try{
       f.profile.creatureForms![0]!.status="approved";await saveVisualProfiles(f.root,f.story.slug,{[id]:f.profile});
       delete f.manifest.scenes[0]!.artwork.approvedVersionId;f.manifest.scenes[0]!.artwork.review="needs-regeneration";await atomicWriteJson(f.paths.scenesManifest,f.manifest);
-      let checks=0;let jobId="";const llm:LLMProvider={name:"openai",supportsImageInputs:true,async validateConfiguration(){},async generateText(){throw new Error("Not used");},async generateStructured(){checks++;throw new Error("QA must not run after pause");}};
+      let checks=0;let jobId=""; let allowCheck = false;const llm:LLMProvider={name:"openai",supportsImageInputs:true,async validateConfiguration(){},async generateText(){throw new Error("Not used");},async generateStructured(request){checks++; if (!allowCheck) throw new Error("QA must not run after pause"); return { value: request.schema.parse({ summary: "Matches", ...Object.fromEntries(VISUAL_CHECK_CATEGORIES.map(category => [category, { status: "match", observation: "Matches" }])) }) };}};
       const images=new Images();const operations=new StudioOperations(f.root,loadEnvironment({}),undefined,{image:images,llm:new LLMRouter(new Map([["openai",llm]]))});
       const generate=images.generate.bind(images);images.generate=async request=>{const result=await generate(request);operations.jobs.pause(jobId);return result;};
       const input={scope:{chapters:[1]}};const plan=await operations.planImageAutomation(f.story.slug,input);const job=await operations.startImageAutomation(f.story.slug,{...input,planFingerprint:plan.fingerprint});jobId=job.id;
       const done=await finish(operations,job.id);expect(done.result).toMatchObject({status:"paused",requests:1});expect(checks).toBe(0);expect(images.requests).toHaveLength(1);
+      allowCheck = true;
+      const report = await operations.imageDraftReport(f.story.slug);
+      const resumed = await operations.continueImageAutomation(f.story.slug, { reportUpdatedAt: report?.updatedAt });
+      expect((await finish(operations, resumed.id)).result).toMatchObject({ status: "completed", requests: 2, reservedUsd: 1.25 });
+      expect(images.requests).toHaveLength(1);
+      expect(checks).toBe(1);
     }finally{await rm(f.root,{recursive:true,force:true});}
   });
   it("paginates the storyboard without resolving or reading every frame", async () => {

@@ -10,7 +10,7 @@ describe("vocalization detection matrix", () => {
     ["Ha ha ha!", "laugh", "Hahaha!"],
     ["Haha, haha, haha...", "laugh", "Hahaha..."],
     ["Hehe hehe hehe...", "laugh", "Hehehe..."],
-    ["Heh, heh, heh...", "laugh", "Hehehe..."],
+    ["Heh, heh, heh...", "chuckle", "Hehehe..."],
     ["Hehe...", "laugh", "Hehehe..."],
     ["Ahem, ahem, ahem, ahem...", "throat_clear", "Ahem..."],
     ["Tsk, tsk, tsk, tsk.", "scoff", "Tsk."],

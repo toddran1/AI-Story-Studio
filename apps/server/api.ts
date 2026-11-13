@@ -465,11 +465,11 @@ export function createApiHandler(operations: StudioOperations) {
       if (scenesChapterMatch && request.method === "GET") return send(response, 200, await getScenesChapter(operations.root, scenesChapterMatch[1]!, chapterParam(scenesChapterMatch[2]!)));
       const scenesDashboardMatch = /^\/api\/stories\/([a-z0-9-]+)\/scenes$/.exec(url.pathname);
       if (scenesDashboardMatch && request.method === "GET") return send(response, 200, await getScenesDashboard(operations.root, scenesDashboardMatch[1]!, optionalInteger(url.searchParams.get("chapter"))));
-      const imageWorkbenchMatch = /^\/api\/stories\/([a-z0-9-]+)\/visual-workflow\/images\/(storyboard|plan|start|repair|report|approve-reference|approve-references|reject-reference|reject-references)$/.exec(url.pathname);
+      const imageWorkbenchMatch = /^\/api\/stories\/([a-z0-9-]+)\/visual-workflow\/images\/(storyboard|plan|start|continue|repair|report|approve-reference|approve-references|reject-reference|reject-references)$/.exec(url.pathname);
       if (imageWorkbenchMatch) {
         const slug = imageWorkbenchMatch[1]!; const action = imageWorkbenchMatch[2]!;
         if (action === "report" && request.method === "GET") return send(response, 200, await operations.imageDraftReport(slug));
-        if (request.method === "POST") { const body = await jsonBody(request); return send(response, ["start", "repair"].includes(action) ? 202 : 200, await (action === "reject-references" ? operations.rejectImageDraftReferences(slug, body) : action === "approve-references" ? operations.approveImageDraftReferences(slug, body) : action === "reject-reference" ? operations.rejectImageDraftReference(slug, body) : action === "approve-reference" ? operations.approveImageDraftReference(slug, body) : action === "storyboard" ? operations.imageStoryboard(slug, body) : action === "plan" ? operations.planImageAutomation(slug, body) : action === "start" ? operations.startImageAutomation(slug, body) : operations.startImageRepair(slug, body))); }
+        if (request.method === "POST") { const body = await jsonBody(request); return send(response, ["start", "continue", "repair"].includes(action) ? 202 : 200, await (action === "continue" ? operations.continueImageAutomation(slug, body) : action === "reject-references" ? operations.rejectImageDraftReferences(slug, body) : action === "approve-references" ? operations.approveImageDraftReferences(slug, body) : action === "reject-reference" ? operations.rejectImageDraftReference(slug, body) : action === "approve-reference" ? operations.approveImageDraftReference(slug, body) : action === "storyboard" ? operations.imageStoryboard(slug, body) : action === "plan" ? operations.planImageAutomation(slug, body) : action === "start" ? operations.startImageAutomation(slug, body) : operations.startImageRepair(slug, body))); }
       }
       const regenerationPlanMatch = /^\/api\/stories\/([a-z0-9-]+)\/visual-workflow\/regeneration\/(plan|start)$/.exec(url.pathname);
       if (regenerationPlanMatch && request.method === "POST") return send(response, regenerationPlanMatch[2] === "start" ? 202 : 200, await (regenerationPlanMatch[2] === "start" ? operations.startVisualRegeneration(regenerationPlanMatch[1]!, await jsonBody(request)) : operations.planVisualRegeneration(regenerationPlanMatch[1]!, await jsonBody(request))));
@@ -596,6 +596,8 @@ export function createApiHandler(operations: StudioOperations) {
         return send(response, 200, await operations.deleteArtDirectionPreset(artDirectionPresetMatch[1]!, artDirectionPresetMatch[2]!));
       }
       const productionMatch = /^\/api\/stories\/([a-z0-9-]+)\/production$/.exec(url.pathname);
+      const productionResumeMatch = /^\/api\/stories\/([a-z0-9-]+)\/production\/resume$/.exec(url.pathname);
+      if (productionResumeMatch && request.method === "POST") return send(response, 202, publicJob(await operations.resumeProduction(productionResumeMatch[1]!, await jsonBody(request)), operations.root));
       const productionStatusMatch = /^\/api\/stories\/([a-z0-9-]+)\/production\/status$/.exec(url.pathname);
       if (productionStatusMatch && request.method === "GET") return send(response, 200, await getProductionStatus(operations.root, productionStatusMatch[1]!));
       if (productionMatch && request.method === "GET") return send(response, 200, await getProductionStatus(operations.root, productionMatch[1]!));
@@ -698,6 +700,15 @@ export function createApiHandler(operations: StudioOperations) {
       if (bibleSuppressMatch && request.method === "POST") return send(response, 200, await operations.suppressCanonicalEntity(bibleSuppressMatch[1]!, bibleSuppressMatch[2]!, await jsonBody(request)));
       const bibleRestoreMatch = /^\/api\/stories\/([a-z0-9-]+)\/story-bible\/entities\/(ent_[a-f0-9]{24})\/restore$/.exec(url.pathname);
       if (bibleRestoreMatch && request.method === "POST") return send(response, 200, await operations.restoreCanonicalEntity(bibleRestoreMatch[1]!, bibleRestoreMatch[2]!));
+      const sourceNamePreviewMatch = /^\/api\/stories\/([a-z0-9-]+)\/source-names\/preview$/.exec(url.pathname);
+      if (sourceNamePreviewMatch && request.method === "POST") return send(response, 200, await operations.previewSourceNameScan(sourceNamePreviewMatch[1]!, await jsonBody(request)));
+      const sourceNameMatch = /^\/api\/stories\/([a-z0-9-]+)\/source-names(?:\/([a-f0-9]{24}))?$/.exec(url.pathname);
+      if (sourceNameMatch) {
+        const [, slug, entity] = sourceNameMatch;
+        if (!entity && request.method === "GET") return send(response, 200, await operations.getSourceNameIndex(slug!));
+        if (!entity && request.method === "POST") return send(response, 202, operations.startSourceNameScan(slug!, await jsonBody(request)));
+        if (entity && request.method === "PUT") return send(response, 200, publicJob(await operations.saveSourceNameRule(slug!, entity, await jsonBody(request)), operations.root));
+      }
       const localizationSuggestionsMatch = /^\/api\/stories\/([a-z0-9-]+)\/story-bible\/entities\/(ent_[a-f0-9]{24})\/localization-suggestions$/.exec(url.pathname);
       const pronunciationMatch = /^\/api\/stories\/([a-z0-9-]+)\/pronunciation(?:\/(ent_[a-f0-9]{24})(?:\/(test|enrich|accept-suggestion|dismiss-suggestion))?)?$/.exec(url.pathname);
       if (pronunciationMatch) {

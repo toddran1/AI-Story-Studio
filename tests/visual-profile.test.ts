@@ -26,9 +26,11 @@ import {
 import { toOpenAiTextFormat } from "../src/llm/openai/openai.provider.js";
 import { geminiJsonSchema } from "../src/llm/gemini/gemini.provider.js";
 import { VisualEntityProfile } from "../src/domain/visual-profile.js";
-import { storyPaths } from "../src/storage/paths.js";
+import { storyPaths, visualProfileRefPath } from "../src/storage/paths.js";
 import { atomicWrite, atomicWriteJson } from "../src/storage/atomic-write.js";
 import { emptyStoryBible, canonicalEntitySchema } from "../src/domain/story-bible.js";
+import { effectiveVisualProfile, resolveApprovedAppearanceEra, sceneAppearanceLook } from "../src/visual-canon/resolver.js";
+import { sceneSchema } from "../src/scenes/types.js";
 
 describe("Visual Entity Profiles", () => {
   let root: string;
@@ -458,6 +460,44 @@ describe("Visual Entity Profiles", () => {
     expect(inspection.protectedFields).not.toContain("character.weapons");
   });
 
+  it("finds early wardrobe evidence and saves focused outfit drafts separately from locked identity", async () => {
+    const provenance = [405, ...Array.from({ length: 10 }, (_, index) => 710 + index)].map(chapter => ({ chapter, kind: "extraction" }));
+    const entity = canonicalEntitySchema.parse({ id: entityId, type: "character", canonicalName: "Sakura", aliases: [], firstAppearance: 405, lastKnownAppearance: 719, provenance });
+    const bible = { ...emptyStoryBible(), canonicalEntities: [entity] };
+    await atomicWrite(storyPaths(root, slug, 405).english, "The petite captain wore a JK uniform. Her name was Sakura.");
+    for (const item of provenance.slice(1)) await atomicWrite(storyPaths(root, slug, item.chapter).english, "Sakura waited by the gate.");
+    const source = "Sakura wore a JK uniform.";
+    await atomicWrite(storyPaths(root, slug, 691).english, source);
+    await updateVisualProfile(root, slug, entityId, {
+      character: { height: "Petite", defaultOutfit: "Teal J-K combat outfit" },
+      fieldProvenance: { "character.defaultOutfit": { source: "user_edit", locked: true } },
+    });
+    const full = await inspectVisualProfile(root, slug, bible, entityId);
+    expect(full.context.sourceEvidence).toEqual(expect.arrayContaining([expect.objectContaining({ chapter: 405, text: expect.stringContaining("JK uniform") })]));
+
+    const generateStructured = vi.fn(async () => ({ value: { values: [], wardrobeLooks: [
+      { name: "JK uniform", outfit: "JK uniform", evidence: [{ chapter: 691, excerpt: source }] },
+      { name: "Invented coat", outfit: "Gold coat", evidence: [{ chapter: 691, excerpt: "Sakura wore a gold coat." }] },
+    ] } }));
+    const proposal = await proposeMissingVisualDetails(root, slug, bible, entityId, { name: "openai", generateStructured } as any,
+      { provider: "openai", model: "fake" }, { fields: [], includeWardrobeLooks: true, evidenceRange: { fromChapter: 650, toChapter: 720 } });
+    expect(proposal.wardrobeLooks?.map(look => look.name)).toEqual(["JK uniform"]);
+    const profile = await applyVisualProfileProposal(root, slug, bible, proposal, [], true);
+    expect(profile.character).toMatchObject({ height: "Petite", defaultOutfit: "Teal J-K combat outfit" });
+    expect(profile.fieldProvenance?.["character.defaultOutfit"]?.locked).toBe(true);
+    const look = profile.appearanceEras?.[0];
+    expect(look).toMatchObject({ name: "JK uniform", status: "draft", startChapter: 691, wardrobeEvidence: [{ chapter: 691, excerpt: source }] });
+    look!.status = "approved";
+    expect(resolveApprovedAppearanceEra(profile, 691)).toBeUndefined();
+    const scene = sceneSchema.parse({
+      id: "scene-001", summary: "Sakura waits.", startSeconds: 0, endSeconds: 5, characters: ["Sakura"],
+      visualPrompt: "Sakura by the gate", importance: "standard", artwork: { status: "pending" },
+      overrides: { appearanceEraOverrides: { [entityId]: look!.id } },
+    });
+    expect(sceneAppearanceLook(scene, profile, 691)).toBe(look);
+    expect(effectiveVisualProfile(profile, look).character).toMatchObject({ height: "Petite", defaultOutfit: "JK uniform" });
+  });
+
   it("uses only entity-relevant summaries and requires explicit regeneration fields", async () => {
     const bible = { ...emptyStoryBible(), chapterSummaries: { 1: "Test Character protects the guild.", 2: "An unrelated battle in another empire." }, canonicalEntities: [canonicalEntitySchema.parse({ id: entityId, type: "character", canonicalName: "Test Character", aliases: [], description: "", firstAppearance: 1, lastKnownAppearance: 2 })] };
     const inspection = await inspectVisualProfile(root, slug, bible, entityId);
@@ -524,6 +564,10 @@ describe("Visual Entity Profiles", () => {
       references: [reference("base"), reference("later")],
       appearanceEras: [{ id: "later-era", name: "Later", startChapter: 10, status: "approved", appearance: "silver hair", visualPrompt: "", referenceIds: ["later"] }],
     });
+    await expect(approveVisualReference(root, slug, entityId, "base", true)).rejects.toThrow("image is missing");
+    for (const id of ["base", "later"]) {
+      await atomicWrite(visualProfileRefPath(root, slug, entityId, id, "png"), Buffer.from("test reference"));
+    }
     await approveVisualReference(root, slug, entityId, "base", true);
     const approved = await approveVisualReference(root, slug, entityId, "later", true);
     expect(approved.references.filter((item) => item.role === "primary_reference")).toHaveLength(2);

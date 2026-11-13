@@ -1,23 +1,29 @@
 import { isConditionalVisualObservation, NARRATIVE_APPEARANCE_POLICY, REFERENCE_BASELINE_POLICY } from "./appearance-policy.js";
-import { readFile } from "node:fs/promises";
 import { z } from "zod";
 import type { CanonicalEntity, StoryBible } from "../domain/story-bible.js";
 import type { StageModelConfig } from "../domain/provider.js";
-import { type VisualEntityProfile, type VisualEntityType, type VisualProfileConflict, visualProfileSchema } from "../domain/visual-profile.js";
+import { type VisualEntityProfile, type VisualEntityType, type VisualProfileConflict, visualProfileSchema, wardrobeEvidenceSchema } from "../domain/visual-profile.js";
 import type { LLMProvider } from "../llm/provider.js";
-import { storyPaths } from "../storage/paths.js";
 import { fingerprint } from "../utils/hash.js";
 import { CHARACTER_DESIGN_GUIDANCE, CHARACTER_DESIGN_VERSION, characterDesignContext } from "./character-design.js";
 import { getVisualProfile, loadVisualProfiles, updateVisualProfile } from "./profiles.js";
+import { collectProfileSourceEvidence, profileEvidenceAnchors, profileEvidenceRangeSchema } from "./profile-source-evidence.js";
 import { resolveEntityVisualEvidence } from "../story-bible/visual-evidence.js";
 import { normalizeVisualProposalValue, readVisualField, resolveVisualEntityType, validVisualField, visualFieldsForType, writeVisualField } from "./fields.js";
 
 
 export const visualProfileProposalItemSchema = z.object({ field: z.string().trim().min(1), value: z.string().trim().min(1).max(5_000) }).strict();
-export const visualProfileProposalResponseSchema = z.object({ values: z.array(visualProfileProposalItemSchema), rationale: z.string().trim().max(2_000).default("") }).strict();
+const wardrobeLookProposalSchema = z.object({
+  name: z.string().trim().min(1).max(200),
+  outfit: z.string().trim().min(1).max(1000),
+  evidence: z.array(wardrobeEvidenceSchema).min(1).max(5),
+}).strict();
+type EvidenceRange = z.infer<typeof profileEvidenceRangeSchema>;
+
+export const visualProfileProposalResponseSchema = z.object({ values: z.array(visualProfileProposalItemSchema), wardrobeLooks: z.array(wardrobeLookProposalSchema).max(5).default([]), rationale: z.string().trim().max(2_000).default("") }).strict();
 export type VisualProfileProposalResponse = z.infer<typeof visualProfileProposalResponseSchema>;
 
-export const visualProfileProposalSchema = z.object({ values: z.record(z.string(), z.string().trim().min(1).max(5_000)).default({}), rationale: z.string().trim().max(2_000).default("") });
+export const visualProfileProposalSchema = z.object({ values: z.record(z.string(), z.string().trim().min(1).max(5_000)).default({}), evidenceRange: profileEvidenceRangeSchema.optional(), wardrobeLooks: z.array(wardrobeLookProposalSchema).max(5).optional(), rationale: z.string().trim().max(2_000).default("") });
 export type VisualProfileProposal = z.infer<typeof visualProfileProposalSchema> & { entityId: string; visualType: VisualEntityType; eligibleFields: string[]; protectedFields: string[]; contextFingerprint: string; provider: string; model: string };
 export type VisualProfileFieldState = { path: string; value?: string; source?: string; locked: boolean; missing: boolean; canonical: boolean; regenerable: boolean; conflict?: VisualProfileConflict };
 export type Inspection = { entity: CanonicalEntity; profile: VisualEntityProfile; eligibleFields: string[]; protectedFields: string[]; fields: VisualProfileFieldState[]; conflicts: VisualProfileConflict[]; coreComplete: number; coreTotal: number; context: Record<string, unknown>; contextFingerprint: string };
@@ -41,9 +47,6 @@ const visualMatchers: Array<[string, RegExp]> = [
 ];
 function compact(value: string) { return value.trim().replace(/\s+/g, " "); }
 function canonicalValue(value: string) { return compact(value).toLowerCase().replace(/[.,;:]/g, ""); }
-function entityAnchors(entity: CanonicalEntity) { return [entity.canonicalName, entity.originalName, ...entity.aliases].filter((value): value is string => Boolean(value?.trim())).sort((a, b) => b.length - a.length).slice(0, 12); }
-type SourceEvidence = { chapter: number; text: string; visualSignalScore: number };
-
 /** Raw prose is valuable context, but it is not automatically story canon.
  * Only explicit structured fields or labelled Story Bible descriptions lock a
  * profile field; source excerpts remain candidate evidence for the proposal. */
@@ -73,22 +76,8 @@ function explicitFacts(entity: CanonicalEntity, profile: VisualEntityProfile): R
   }
   return result;
 }
-const visualSignals = /\b(?:hair|eyes?|face|skin|complexion|height|build|body|scar|tattoo|clothing|robe|coat|armor|weapon|accessor(?:y|ies)|appearance|looked|wore|dressed|physique)\b|头发|眼睛|面容|皮肤|身高|体格|伤疤|纹身|衣|袍|甲|武器|佩戴|容貌/gi;
-function escapeRegex(value: string) { return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); }
-function signalScore(text: string) { return [...text.matchAll(visualSignals)].length; }
-async function sourceEvidence(root: string, slug: string, entity: CanonicalEntity): Promise<SourceEvidence[]> {
-  const anchors = entityAnchors(entity); const chapters = [...new Set(entity.provenance.map((item) => item.chapter))].sort((a, b) => b - a).slice(0, 8); const evidence: SourceEvidence[] = [];
-  for (const chapter of chapters) {
-    const paths = storyPaths(root, slug, chapter); const text = await readFile(paths.english, "utf8").catch(() => readFile(paths.original, "utf8").catch(() => ""));
-    const starts = anchors.flatMap((anchor) => [...text.matchAll(new RegExp(escapeRegex(anchor), "gi"))].map((match) => match.index ?? 0));
-    const windows = starts.sort((a, b) => a - b).map((start) => ({ start: Math.max(0, start - 400), end: Math.min(text.length, start + 900) })).filter((window, index, all) => index === 0 || window.start > all[index - 1]!.end);
-    const ranked = windows.map((window) => ({ chapter, text: compact(text.slice(window.start, window.end)), visualSignalScore: signalScore(text.slice(window.start, window.end)) })).sort((left, right) => right.visualSignalScore - left.visualSignalScore || left.text.length - right.text.length).slice(0, 3);
-    evidence.push(...ranked);
-  }
-  return evidence.sort((left, right) => right.visualSignalScore - left.visualSignalScore || right.chapter - left.chapter).slice(0, 8);
-}
 function relevantSummaries(bible: StoryBible, entity: CanonicalEntity, relationships: Array<{ otherEntityId: string }>) {
-  const anchors = entityAnchors(entity).map((item) => item.toLowerCase()); const relatedNames = relationships.map((r) => bible.canonicalEntities.find((item) => item.id === r.otherEntityId)?.canonicalName.toLowerCase()).filter((item): item is string => Boolean(item));
+  const anchors = profileEvidenceAnchors(entity).map((item) => item.toLowerCase()); const relatedNames = relationships.map((r) => bible.canonicalEntities.find((item) => item.id === r.otherEntityId)?.canonicalName.toLowerCase()).filter((item): item is string => Boolean(item));
   return Object.entries(bible.chapterSummaries).map(([chapter, summary]) => ({ chapter: Number(chapter), summary, score: anchors.reduce((sum, anchor) => sum + (summary.toLowerCase().includes(anchor) ? 4 : 0), 0) + relatedNames.reduce((sum, name) => sum + (summary.toLowerCase().includes(name) ? 1 : 0), 0) })).filter((item) => item.score > 0).sort((a, b) => b.score - a.score || b.chapter - a.chapter).slice(0, 6).map(({ chapter, summary }) => ({ chapter, summary }));
 }
 function detectConflicts(profile: VisualEntityProfile, facts: Record<string, string>): VisualProfileConflict[] {
@@ -97,26 +86,27 @@ function detectConflicts(profile: VisualEntityProfile, facts: Record<string, str
   return [...open.filter((item) => item.status === "resolved"), ...detected];
 }
 
-export async function inspectVisualProfile(root: string, slug: string, bible: StoryBible, entityId: string): Promise<Inspection> {
+export async function inspectVisualProfile(root: string, slug: string, bible: StoryBible, entityId: string, evidenceRange?: EvidenceRange): Promise<Inspection> {
   const entity = bible.canonicalEntities.find((item) => item.id === entityId); if (!entity) throw new Error(`Canonical entity '${entityId}' was not found`);
   const profile = (await getVisualProfile(root, slug, entityId)) ?? blankProfile(entity); const coreFields = [...visualFieldsForType(profile.visualType)]; const fields = [...coreFields, "appearance", "visualPrompt", "negativePrompt"];
   const relationships = bible.canonicalRelationships.filter((item) => item.sourceEntityId === entityId || item.targetEntityId === entityId).slice(0, 12).map((item) => ({ type: item.type, otherEntityId: item.sourceEntityId === entityId ? item.targetEntityId : item.sourceEntityId }));
-  const sources = await sourceEvidence(root, slug, entity); const facts = explicitFacts(entity, profile); const conflicts = detectConflicts(profile, facts);
+  const sources = await collectProfileSourceEvidence(root, slug, bible, entity, evidenceRange); const facts = explicitFacts(entity, profile); const conflicts = detectConflicts(profile, facts);
   const protectedFields = fields.filter((field) => Boolean(fieldValue(profile, field)) || Boolean(profile.fieldProvenance?.[field]?.locked) || Boolean(facts[field])); const eligibleFields = fields.filter((field) => !protectedFields.includes(field));
   const fieldStates = fields.map((path) => { const provenance = profile.fieldProvenance?.[path]; const value = fieldValue(profile, path); const canonical = Boolean(facts[path]); const conflict = conflicts.find((item) => item.status === "needs_review" && item.field === path); return { path, value, source: canonical ? "source-backed" : provenance?.source, locked: Boolean(provenance?.locked), missing: !value && !canonical, canonical, regenerable: Boolean(value && provenance?.source === "ai_generated" && !provenance.locked && !canonical), conflict }; });
   const activeReferences = [...profile.references].filter((ref) => ref.approved).sort((left, right) => Number(right.role === "primary_reference") - Number(left.role === "primary_reference"));
   const resolvedEvidence = resolveEntityVisualEvidence(entity, Number.MAX_SAFE_INTEGER);
   const compactEvidence = { values: Object.fromEntries(Object.entries(resolvedEvidence.values).map(([path, item]) => [path, { ...item, provenance: item.provenance.slice(-8) }])), conflicts: Object.fromEntries(Object.entries(resolvedEvidence.conflicts).map(([path, items]) => [path, items.map((item) => ({ ...item, provenance: item.provenance.slice(-8) }))])) };
   const castDesigns = profile.visualType === "character" ? characterDesignContext(bible, await loadVisualProfiles(root, slug), entityId) : [];
-  const context = { characterDesignVersion: CHARACTER_DESIGN_VERSION, castDesigns, canonicalEntity: { name: entity.canonicalName, originalName: entity.originalName, type: entity.type, description: entity.description, status: entity.status, notes: entity.notes, aliases: entity.aliases, sourceProvenance: entity.provenance }, explicitVisualFacts: facts, storyBibleVisualEvidence: compactEvidence, sourceEvidence: sources, existingVisualProfile: profile, fieldStates, approvedReferences: activeReferences.map((ref) => ({ id: ref.id, role: ref.role, source: ref.source, prompt: ref.prompt, provenance: ref.provenance })), relationships: relationships.map((relationship) => ({ ...relationship, otherName: bible.canonicalEntities.find((item) => item.id === relationship.otherEntityId)?.canonicalName })), relevantContinuity: bible.entityTimeline.filter((event) => event.entityId === entityId).slice(-10), relevantStorySummaries: relevantSummaries(bible, entity, relationships) };
+  const context = { evidenceRange, characterDesignVersion: CHARACTER_DESIGN_VERSION, castDesigns, canonicalEntity: { name: entity.canonicalName, originalName: entity.originalName, type: entity.type, description: entity.description, status: entity.status, notes: entity.notes, aliases: entity.aliases, sourceProvenance: entity.provenance }, explicitVisualFacts: facts, storyBibleVisualEvidence: compactEvidence, sourceEvidence: sources, existingVisualProfile: profile, fieldStates, approvedReferences: activeReferences.map((ref) => ({ id: ref.id, role: ref.role, source: ref.source, prompt: ref.prompt, provenance: ref.provenance })), relationships: relationships.map((relationship) => ({ ...relationship, otherName: bible.canonicalEntities.find((item) => item.id === relationship.otherEntityId)?.canonicalName })), relevantContinuity: bible.entityTimeline.filter((event) => event.entityId === entityId).slice(-10), relevantStorySummaries: relevantSummaries(bible, entity, relationships) };
   return { entity, profile, eligibleFields, protectedFields, fields: fieldStates, conflicts, coreComplete: coreFields.filter((field) => !eligibleFields.includes(field)).length, coreTotal: coreFields.length, context, contextFingerprint: fingerprint({ ...context, existingVisualProfile: profile.revision === 0 ? { ...profile, createdAt: undefined, updatedAt: undefined } : profile }) };
 }
-export async function synchronizeVisualProfileConflicts(root: string, slug: string, bible: StoryBible, entityId: string): Promise<Inspection> { let inspection = await inspectVisualProfile(root, slug, bible, entityId); const stored = inspection.profile.conflicts ?? []; if (JSON.stringify(stored) !== JSON.stringify(inspection.conflicts) && inspection.profile.revision > 0) { await updateVisualProfile(root, slug, entityId, { conflicts: inspection.conflicts, fieldProvenance: inspection.profile.fieldProvenance }); inspection = await inspectVisualProfile(root, slug, bible, entityId); } return inspection; }
+export async function synchronizeVisualProfileConflicts(root: string, slug: string, bible: StoryBible, entityId: string, evidenceRange?: EvidenceRange): Promise<Inspection> { let inspection = await inspectVisualProfile(root, slug, bible, entityId, evidenceRange); const stored = inspection.profile.conflicts ?? []; if (JSON.stringify(stored) !== JSON.stringify(inspection.conflicts) && inspection.profile.revision > 0) { await updateVisualProfile(root, slug, entityId, { conflicts: inspection.conflicts, fieldProvenance: inspection.profile.fieldProvenance }); inspection = await inspectVisualProfile(root, slug, bible, entityId, evidenceRange); } return inspection; }
 export async function resolveVisualProfileConflict(root: string, slug: string, bible: StoryBible, entityId: string, conflictId: string, action: "accept_canonical" | "retain_manual_override") {
   const inspection = await synchronizeVisualProfileConflicts(root, slug, bible, entityId); const conflict = (inspection.profile.conflicts ?? []).find((item) => item.id === conflictId && item.status === "needs_review"); if (!conflict) throw new Error("Visual profile conflict was not found or is already resolved"); const next = structuredClone(inspection.profile); if (!validVisualField(next.visualType, conflict.field)) throw new Error("Visual conflict field does not belong to this profile type"); if (action === "accept_canonical") { writeVisualField(next, conflict.field, conflict.canonicalValue); next.fieldProvenance ??= {}; next.fieldProvenance[conflict.field] = { source: "story_bible", locked: true }; } else { next.fieldProvenance ??= {}; next.fieldProvenance[conflict.field] = { source: "manual_override", locked: true }; } next.conflicts = (next.conflicts ?? []).map((item) => item.id === conflictId ? { ...item, status: "resolved" as const, resolution: action, resolvedAt: new Date().toISOString() } : item); return updateVisualProfile(root, slug, entityId, next);
 }
-export async function proposeMissingVisualDetails(root: string, slug: string, bible: StoryBible, entityId: string, provider: LLMProvider, config: StageModelConfig, options: { fields?: string[]; regenerate?: boolean } = {}): Promise<VisualProfileProposal> {
-  const inspection = await synchronizeVisualProfileConflicts(root, slug, bible, entityId);
+export async function proposeMissingVisualDetails(root: string, slug: string, bible: StoryBible, entityId: string, provider: LLMProvider, config: StageModelConfig, options: { fields?: string[]; regenerate?: boolean; evidenceRange?: EvidenceRange; includeWardrobeLooks?: boolean } = {}): Promise<VisualProfileProposal> {
+  const inspection = await synchronizeVisualProfileConflicts(root, slug, bible, entityId, options.evidenceRange);
+  const includeWardrobeLooks = options.includeWardrobeLooks === true && inspection.profile.visualType === "character";
   const knownFields = new Set([...visualFieldsForType(inspection.profile.visualType), "appearance", "visualPrompt", "negativePrompt"]);
   const requested = options.fields ? [...new Set(options.fields)] : inspection.eligibleFields;
   if (requested.some((field) => !knownFields.has(field))) throw new Error("One or more requested visual fields are not supported for this profile type");
@@ -125,12 +115,12 @@ export async function proposeMissingVisualDetails(root: string, slug: string, bi
     const state = inspection.fields.find((item) => item.path === field);
     return options.regenerate ? Boolean(state?.regenerable || state?.missing) : inspection.eligibleFields.includes(field);
   });
-  if (!eligibleFields.length) return { entityId, visualType: inspection.profile.visualType, values: {}, rationale: "No selected visual details can be safely generated.", eligibleFields: [], protectedFields: inspection.protectedFields, contextFingerprint: inspection.contextFingerprint, provider: provider.name, model: config.model };
+  if (!eligibleFields.length && !includeWardrobeLooks) return { entityId, visualType: inspection.profile.visualType, evidenceRange: options.evidenceRange, values: {}, rationale: "No selected visual details can be safely generated.", eligibleFields: [], protectedFields: inspection.protectedFields, contextFingerprint: inspection.contextFingerprint, provider: provider.name, model: config.model };
   const result = await provider.generateStructured({
     model: config.model,
     schemaName: "visual_profile_completion",
     schema: visualProfileProposalResponseSchema,
-    instructions: NARRATIVE_APPEARANCE_POLICY + "\n" + REFERENCE_BASELINE_POLICY + "\nSeparate normal/inactive baseline traits from conditionalAppearance. Put trigger-specific eye colours, skin changes, transformations and other activated features in character.conditionalAppearance with the activation condition, never in normal eyeColor, skinTone, hairColor or distinguishingFeatures. An owned item or known ability is not permanently visible.\n" + (inspection.profile.visualType === "character" ? CHARACTER_DESIGN_GUIDANCE + "\n\n" : "") + "Design only the requested persistent visual details for this one entity. When requested, also propose appearance (a cohesive readable appearance description), visualPrompt (an image-generation prompt consistent with the persistent traits and approved references), and negativePrompt (concise visual exclusions). Keep these consistent with the specific traits proposed in the same response. Source evidence, Story Bible facts, manual/locked fields, and approved primary references are authoritative. Never overwrite or contradict them. When a visual trait is genuinely open, choose a distinctive, story-appropriate palette and silhouette; do not habitually default to all-black clothing, black hair, or dark brown eyes. Use color and small identifying details with restraint and variety, while preserving any established colors, traits, culture, and art direction. Do not use temporary injuries, scene action, current weather, one-off emotions, or short-lived clothing as persistent identity. Use role, relationships, culture, powers, occupation, equipment, faction, history, and entity-relevant summaries only when they support a durable visual suggestion. AI output is a proposal, not story canon. Return only the requested visual fields. Keep character.faceShape and character.hairstyle each within 2000 characters; describe them concisely rather than writing a character biography. For character.apparentAge return only a nonnegative whole number of years as digits, without units, ranges, or descriptions. For character.gender return exactly male or female. If uncertain, omit the field. Never propose character.figure — it is a user-controlled setting, not an AI-generated detail. For each proposed field, return an item in values where 'field' is exactly one of the requested field paths and 'value' is the proposed persistent visual description. Do not return unrequested fields, do not rename field paths, and do not return nested profile objects.",
+    instructions: NARRATIVE_APPEARANCE_POLICY + "\n" + REFERENCE_BASELINE_POLICY + "\nSeparate normal/inactive baseline traits from conditionalAppearance. Put trigger-specific eye colours, skin changes, transformations and other activated features in character.conditionalAppearance with the activation condition, never in normal eyeColor, skinTone, hairColor or distinguishingFeatures. An owned item or known ability is not permanently visible.\n" + (inspection.profile.visualType === "character" ? CHARACTER_DESIGN_GUIDANCE + "\nSeparate physical identity from wardrobe. Keep garment descriptions out of baseline appearance and visualPrompt. The saved structured default outfit supplies baseline wardrobe and stays authoritative; scene-specific wardrobe must not replace it. A rank, youthful face, faction, or a loose summary does not establish a garment. Preserve exact source outfit terms and avoid adding colors, markings, garments or uniform pieces absent from source evidence or a saved editorial choice. If no baseline outfit is established, leave it open.\n" : "") + "Design only the requested persistent visual details for this one entity. When requested, also propose appearance (a cohesive readable appearance description), visualPrompt (an image-generation prompt consistent with the persistent traits and approved references), and negativePrompt (concise visual exclusions). Keep these consistent with the specific traits proposed in the same response. Source evidence, Story Bible facts, manual/locked fields, and approved primary references are authoritative. Never overwrite or contradict them. When a visual trait is genuinely open, choose a distinctive, story-appropriate palette and silhouette; do not habitually default to all-black clothing, black hair, or dark brown eyes. Use color and small identifying details with restraint and variety, while preserving any established colors, traits, culture, and art direction. Do not use temporary injuries, scene action, current weather, one-off emotions, or short-lived clothing as persistent identity. Use role, relationships, culture, powers, occupation, equipment, faction, history, and entity-relevant summaries only when they support a durable visual suggestion. AI output is a proposal, not story canon. Return only the requested visual fields. Keep character.faceShape and character.hairstyle each within 2000 characters; describe them concisely rather than writing a character biography. For character.apparentAge return only a nonnegative whole number of years as digits, without units, ranges, or descriptions. For character.gender return exactly male or female. If uncertain, omit the field. Never propose character.figure — it is a user-controlled setting, not an AI-generated detail. For each proposed field, return an item in values where 'field' is exactly one of the requested field paths and 'value' is the proposed persistent visual description. Do not return unrequested fields, do not rename field paths, and do not return nested profile objects." + (includeWardrobeLooks ? " Separately, return wardrobeLooks for explicitly described recurring or distinctive outfits. Keep the outfit description factual and separate from body, face, weapons, injury, or role. Preserve names such as JK exactly as supported and use sourceEvidence to quote verbatim excerpts, each with its chapter. Use only excerpts that explicitly describe this character's outfit and stay within the requested range, if supplied. Omit wardrobeLooks when the evidence is insufficient. Each look is a scene-selectable draft, never a claim that the character wears it throughout a chapter range." : " Return an empty wardrobeLooks array."),
     input: JSON.stringify({ ...inspection.context, requestedFields: eligibleFields, mode: options.regenerate ? "explicit_selected_regeneration" : "fill_missing_only" }, null, 2)
   });
   const values: Record<string, string> = {};
@@ -155,6 +145,8 @@ export async function proposeMissingVisualDetails(root: string, slug: string, bi
     entityId,
     visualType: inspection.profile.visualType,
     values,
+    evidenceRange: options.evidenceRange,
+    wardrobeLooks: includeWardrobeLooks ? verifiedWardrobeLooks(inspection, result.value.wardrobeLooks ?? []) : undefined,
     rationale: [rejected.length ? `Not included because they exceed field limits or fail validation: ${rejected.join(", ")}. Request a shorter description for those fields.` : "", result.value.rationale ?? ""].filter(Boolean).join("\n").slice(0, 2_000),
     eligibleFields,
     protectedFields: inspection.protectedFields,
@@ -163,8 +155,27 @@ export async function proposeMissingVisualDetails(root: string, slug: string, bi
     model: config.model,
   };
 }
-export async function applyVisualProfileProposal(root: string, slug: string, bible: StoryBible, proposal: VisualProfileProposal, selectedFields: string[]): Promise<VisualEntityProfile> {
-  const inspection = await synchronizeVisualProfileConflicts(root, slug, bible, proposal.entityId); if (proposal.contextFingerprint !== inspection.contextFingerprint) throw new Error("The visual profile changed after this proposal was generated. Generate a fresh proposal before applying it."); const next = structuredClone(inspection.profile);
+function verifiedWardrobeLooks(inspection: Inspection, looks: NonNullable<VisualProfileProposal["wardrobeLooks"]>) {
+  const sources = inspection.context.sourceEvidence as Awaited<ReturnType<typeof collectProfileSourceEvidence>>;
+  return looks.flatMap(look => {
+    const evidence = look.evidence.filter(item => sources.some(source => source.chapter === item.chapter && source.text.includes(compact(item.excerpt))));
+    return evidence.length ? [{ ...look, evidence }] : [];
+  });
+}
+
+export async function applyVisualProfileProposal(root: string, slug: string, bible: StoryBible, proposal: VisualProfileProposal, selectedFields: string[], saveWardrobeLooks = false): Promise<VisualEntityProfile> {
+  const inspection = await synchronizeVisualProfileConflicts(root, slug, bible, proposal.entityId, proposal.evidenceRange); if (proposal.contextFingerprint !== inspection.contextFingerprint) throw new Error("The visual profile changed after this proposal was generated. Generate a fresh proposal before applying it."); const next = structuredClone(inspection.profile);
   for (const path of selectedFields) { const value = normalizeVisualProposalValue(path, proposal.values[path] ?? ""); if (!value || !proposal.eligibleFields.includes(path)) continue; const state = inspection.fields.find((item) => item.path === path); if (!state || state.canonical || state.locked || (!state.missing && !state.regenerable)) continue; if (!writeVisualField(next, path, value)) continue; next.fieldProvenance ??= {}; next.fieldProvenance[path] = { source: "ai_generated", locked: false, provider: proposal.provider, model: proposal.model, generatedAt: new Date().toISOString(), contextFingerprint: proposal.contextFingerprint }; }
+  if (saveWardrobeLooks && next.visualType === "character") {
+    for (const look of verifiedWardrobeLooks(inspection, proposal.wardrobeLooks ?? [])) {
+      const id = `wardrobe-${fingerprint([proposal.entityId, canonicalValue(look.name)]).slice(0, 16)}`;
+      if (next.appearanceEras?.some(era => era.id === id || canonicalValue(era.name) === canonicalValue(look.name))) continue;
+      (next.appearanceEras ??= []).push({
+        id, name: look.name, startChapter: Math.min(...look.evidence.map(item => item.chapter)),
+        status: "draft", appearance: "", visualPrompt: "", referenceIds: [], character: { defaultOutfit: look.outfit },
+        wardrobeEvidence: look.evidence,
+      });
+    }
+  }
   return updateVisualProfile(root, slug, proposal.entityId, next);
 }

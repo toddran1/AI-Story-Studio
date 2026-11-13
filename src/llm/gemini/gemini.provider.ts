@@ -38,23 +38,25 @@ export class GeminiProvider implements LLMProvider {
       const providerSchema = geminiJsonSchema(request.schema);
       const useCompactSchema = JSON.stringify(providerSchema).length > MAX_GEMINI_RESPONSE_SCHEMA_CHARACTERS;
       const responseSchema = useCompactSchema ? compactGeminiSchema(providerSchema) : providerSchema;
+      const attemptOptions = request.beforeFallbackAttempt ? { maxRetries: 0 } : undefined;
       let interaction;
       try {
         interaction = await this.client.interactions.create({
           model: request.model, ...(request.effort ? { generation_config: { thinking_level: request.effort } } : {}),
           input: geminiRequestInput(request, input),
           response_format: { type: "text", mime_type: "application/json", schema: responseSchema },
-        });
+        }, attemptOptions);
       } catch (error) {
         // Gemini can reject an otherwise valid JSON Schema when it is too large
         // or deeply nested. Keep Zod as the authoritative local validator and
         // retry once with the complete contract in the prompt instead.
         if (useCompactSchema || !isGeminiSchemaRejection(error)) throw error;
+        await request.beforeFallbackAttempt?.();
         interaction = await this.client.interactions.create({
           model: request.model, ...(request.effort ? { generation_config: { thinking_level: request.effort } } : {}),
           input: geminiRequestInput(request, `${input}\n\n${compactSchemaContract(request.schema)}`),
           response_format: { type: "text", mime_type: "application/json", schema: { type: "object" } },
-        });
+        }, attemptOptions);
       }
       observedUsage = usageFrom(interaction);
       if (!interaction.output_text?.trim()) throw new ProviderError("Gemini returned no structured output");

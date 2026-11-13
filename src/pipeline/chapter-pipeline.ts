@@ -4,7 +4,7 @@ import { syncAppearanceChanges } from "../visual-canon/appearance-changes.js";
 import { mkdir, readFile, readdir, rm, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
-import { Chapter, StageName, StageState, chapterSchema } from "../domain/chapter.js";
+import { Chapter, SOURCE_NAME_HOLD_REASON, StageName, StageState, chapterSchema } from "../domain/chapter.js";
 import { ttsQualityMode, ttsSynthesisSettings } from "../domain/provider.js";
 import { Story } from "../domain/story.js";
 import { StoryBibleUpdate, storyBibleUpdateSchema, storyBibleSchema } from "../domain/story-bible.js";
@@ -26,24 +26,25 @@ import { NARRATION_PROMPT_VERSION } from "../narration/prompts.js";
 import { polishNarration } from "../narration/narration-editor.js";
 import { narrationDeliveryProfile, stripDeliveryCues } from "../narration/tts-direction.js";
 import { STORY_BIBLE_PROMPT_VERSION } from "../story-bible/prompts.js";
-import { extractStoryBible, storyBibleExtractionFingerprint } from "../story-bible/extractor.js";
+import { extractStoryBible, storyBibleExtractionFingerprint, SOURCE_ONLY_STORY_BIBLE_PROMPT_VERSION } from "../story-bible/extractor.js";
 import { QA_PROMPT_VERSION } from "../qa/prompts.js";
-import { computeQaDependencyFingerprint, computeQaDependencyFingerprints, qaDependencySnapshot, loadQaDeterministicDependencies, resolveStoredQaContext } from "../qa/freshness.js";
+import { computeQaDependencyFingerprints, qaDependencySnapshot, loadQaDeterministicDependencies, scopeQaSourceRules, resolveStoredQaContext } from "../qa/freshness.js";
 import { validateChapterQuality } from "../qa/validator.js";
 import { buildQaState, prepareQaDetections } from "../qa/review.js";
 import { runDeterministicQaChecks } from "../qa/deterministic.js";
 import { filterQaDetectionsForStory, qaFingerprintConfig, qaPolicyPrompt } from "../qa/policy.js";
 import { exceptionsPromptSection, filterExceptedFindings, listQaExceptions } from "../qa/exceptions.js";
 import { mergeStoryBible, normalizeStoryBibleUpdate } from "../story-bible/updater.js";
-import { backfillCanonicalSnapshots, loadStoryBibleWithCanonicalOverlay } from "../story-bible/canonical.js";
+import { backfillCanonicalSnapshots } from "../story-bible/canonical.js";
 import { rebuildStoryBibleBeforeChapter } from "../story-bible/rebuild.js";
-import { PipelineError, QualityGateError, StorageError } from "./errors.js";
+import { ConfigurationError, PipelineError, QualityGateError, StorageError } from "./errors.js";
 import { AudioMasteringProcessor, FfmpegMasteringProcessor } from "../audio/mastering.js";
 import { masterStoredChapter } from "../audio/chapter-audio.js";
 import { retrieveRelevantContext } from "../story-bible/retrieval.js";
 import { analyzeAndPersistContinuity } from "../story-bible/continuity.js";
 import { withUsageScope } from "../cost/context.js";
-import { loadNarrationNamingEntities, selectNarrationNamingEntities } from "../story-bible/narration-names.js";
+import { bridgeSourceNames, loadSourceNameBridge, SOURCE_NAME_BRIDGE_VERSION } from "../naming/translation-bridge.js";
+import { loadNarrationNamingEntities, relevantNarrationNamingEntities, selectNarrationNamingEntities } from "../story-bible/narration-names.js";
 import { loadEligibleSummaryContext } from "../summaries/service.js";
 import { CENSOR_AUDIO_VERSION, CensorAudioService, FfmpegCensorAudioService, censorManifestSchema, censorToneConfig } from "../tts/censor-audio.js";
 import { SpeechTranscriber, summarizeQuality, type TtsQualityProgress } from "../tts/quality-guard.js";
@@ -92,6 +93,8 @@ export type PipelineOptions = {
   onStageEvent?: (event: PipelineStageEvent) => void;
   /** A dependency-aware manual execution plan. Omitted for normal production. */
   executionStages?: StageExecutionNode[];
+  /** Extract entities from imported source without requiring rendered text or QA. */
+  sourceOnlyStoryBible?: boolean;
   /** Internal guard: one automatic recovery per chapter invocation. */
   qaRecoveryAttempted?: boolean;
 };
@@ -137,7 +140,7 @@ export class ChapterPipeline {
     const baseTranslationContext = retrieveRelevantContext(bible, source, options.chapter, { recentSummaryCount: options.story.context.recentChapterSummaries });
     const translationContext = eligibleSummaries.length ? { ...baseTranslationContext, eligibleSummaries } : baseTranslationContext;
     const narrationNamingEntities = await loadNarrationNamingEntities(options.root, options.story.slug);
-    const basePriorContext = retrieveRelevantContext(bible, source, options.chapter, { recentSummaryCount: options.story.context.recentChapterSummaries, narrationNamingEntities });
+    const basePriorContext = retrieveRelevantContext(bible, source, options.chapter, { recentSummaryCount: options.story.context.recentChapterSummaries, narrationNamingEntities: relevantNarrationNamingEntities(narrationNamingEntities, source, options.chapter, source) });
     const priorContext = eligibleSummaries.length ? { ...basePriorContext, eligibleSummaries } : basePriorContext;
     // A selected-only run may use an existing stale context. Do not rewrite it
     // merely because it was read as part of a later-stage invocation.
@@ -176,7 +179,7 @@ export class ChapterPipeline {
       const started = Date.now();
       if (stage === "qa") await resetChapterQaForExecution(paths.qa, chapter);
       if (stage !== "qa") invalidateDownstream(chapter, stage);
-      chapter.stages[stage] = { ...details, status: "running", fingerprint: fp, startedAt: new Date().toISOString() };
+      chapter.stages[stage] = { ...details, status: "running", fingerprint: fp, startedAt: new Date().toISOString(), staleReason: state.staleReason === SOURCE_NAME_HOLD_REASON ? SOURCE_NAME_HOLD_REASON : undefined };
       await persist();
       options.onStageEvent?.({ stage, status: "started", state: chapter.stages[stage], detail: stage === "audioMastering" ? "Mastering audio…" : undefined });
       logger.info({ event: "pipeline.stage.started", story: options.story.slug, chapter: options.chapter, stage, provider: details.provider, model: details.model });
@@ -212,7 +215,7 @@ export class ChapterPipeline {
         // failure cannot leave a new QA artifact paired with old chapter data.
         if (stage === "qa") {
           const qaState = value as QaState;
-          chapter.stages[stage] = { ...chapter.stages[stage], status: "complete", completedAt: new Date().toISOString(), durationMs: Date.now() - started, error: undefined };
+          chapter.stages[stage] = { ...chapter.stages[stage], status: "complete", staleReason: undefined, completedAt: new Date().toISOString(), durationMs: Date.now() - started, error: undefined };
           const committed = await persistQaStateWithMetadata(paths, qaState, chapter, (outputFingerprint, previous) => ({
             ...previous,
             updatedAt: new Date().toISOString(),
@@ -224,7 +227,7 @@ export class ChapterPipeline {
           return value;
         }
         if (!producedFingerprint) throw new Error(`Stage '${stage}' did not produce a non-empty output at ${outputPath}`);
-        chapter.stages[stage] = { ...chapter.stages[stage], status: "complete", outputFingerprint: producedFingerprint, completedAt: new Date().toISOString(), durationMs: Date.now() - started, error: undefined };
+        chapter.stages[stage] = { ...chapter.stages[stage], status: "complete", staleReason: undefined, outputFingerprint: producedFingerprint, completedAt: new Date().toISOString(), durationMs: Date.now() - started, error: undefined };
         await persist();
         options.onStageEvent?.({ stage, status: "completed", state: chapter.stages[stage], detail: stage === "tts" ? `Audio generated · Fish requests: ${chapter.stages.tts.usage?.requests ?? 0} · Automatic retries: ${ttsQualityMode(options.story.pipeline.tts) === "auto_repair" ? "enabled" : "off"}` : stage === "audioMastering" ? "Audio complete" : undefined });
         logger.info({ event: "pipeline.stage.completed", story: options.story.slug, chapter: options.chapter, stage, provider: details.provider, model: details.model, durationMs: Date.now() - started });
@@ -252,6 +255,44 @@ export class ChapterPipeline {
       chapter.counts.originalCharacters = [...source].length;
     });
 
+    const bibleConfig = options.story.pipeline.storyBible;
+    const runBibleExtraction = async (english: string, narration: string, sourceOnly = false) => {
+      const bibleFp = storyBibleExtractionFingerprint({ source, translation: english, narration, config: bibleConfig, bible: priorContext, sourceOnly });
+      const persistFullBible = async (update: StoryBibleUpdate) => {
+        // A rerun of an early chapter starts with only its prior context. Never let
+        // that partial context replace the cumulative Story Bible snapshot.
+        bible = mergeStoryBible(bible, update, options.chapter);
+        const cumulative = await rebuildStoryBibleBeforeChapter(options.root, options.story.slug, Number.MAX_SAFE_INTEGER, { chapterOverride: { chapter: options.chapter, update } });
+        await atomicWriteJson(paths.bible, cumulative);
+        await syncAppearanceChanges(options.root, options.story.slug, cumulative);
+      };
+      const bibleResult = await runStage("storyBible", bibleFp, paths.bibleUpdate, {
+        provider: bibleConfig.provider, model: bibleConfig.model, promptVersion: sourceOnly ? SOURCE_ONLY_STORY_BIBLE_PROMPT_VERSION : STORY_BIBLE_PROMPT_VERSION,
+      }, async () => {
+        const result = await extractStoryBible(this.llms.forStage(bibleConfig), bibleConfig, { chapter: options.chapter, source, translation: english, narration, bible: priorContext, sourceOnly });
+        const update = normalizeStoryBibleUpdate(storyBibleUpdateSchema.parse(result.value), options.chapter);
+        await atomicWriteJson(paths.bibleUpdate, update);
+        await persistFullBible(update);
+        chapter.stages.storyBible.usage = result.usage;
+        return bible;
+      });
+      if (bibleResult) bible = bibleResult;
+      else {
+        const storedUpdate = await readJsonIfExists<StoryBibleUpdate>(paths.bibleUpdate);
+        if (!storedUpdate) throw new PipelineError(`Chapter ${options.chapter} Story Bible update is missing; run Story Bible before ${options.stopAfter ?? "the next stage"}`);
+        const cachedUpdate = storyBibleUpdateSchema.parse(storedUpdate);
+        // Continuity and TTS need this chapter's cumulative Bible in memory, but
+        // selected-only mode must not modify reused Story Bible artifacts.
+        if (shouldRun("storyBible")) await persistFullBible(cachedUpdate);
+        else bible = mergeStoryBible(bible, cachedUpdate, options.chapter);
+      }
+    };
+    if (options.sourceOnlyStoryBible) {
+      await runBibleExtraction("", "", true);
+      await persist();
+      return chapter;
+    }
+
     const translationConfig = options.story.pipeline.translation;
     const passthroughTranslation = sameLanguage(options.story.sourceLanguage, options.story.outputLanguage);
     const translationFp = fingerprint({ source: ingestionFp, config: passthroughTranslation ? "passthrough" : translationConfig, prompt: passthroughTranslation ? "passthrough-v1" : TRANSLATION_FINGERPRINT_VERSION, context: translationContext });
@@ -275,9 +316,10 @@ export class ChapterPipeline {
     let english = translationResult ?? await requireText(paths.english, "translation");
     if (options.stopAfter === "translation") { await persist(); return chapter; }
 
+    const chapterNaming = relevantNarrationNamingEntities(narrationNamingEntities, `${source}\n${english}`, options.chapter, source);
     const narrationContext = {
-      ...retrieveRelevantContext(bible, `${source}\n${english}`, options.chapter, { recentSummaryCount: options.story.context.recentChapterSummaries, narrationNamingEntities }),
-      narrationNamingEntities: selectNarrationNamingEntities(narrationNamingEntities, `${source}\n${english}`, options.chapter),
+      ...retrieveRelevantContext(bible, `${source}\n${english}`, options.chapter, { recentSummaryCount: options.story.context.recentChapterSummaries, narrationNamingEntities: chapterNaming }),
+      narrationNamingEntities: selectNarrationNamingEntities(chapterNaming, `${source}\n${english}`, options.chapter, source),
       ...(eligibleSummaries.length ? { eligibleSummaries } : {}),
     };
 
@@ -285,11 +327,15 @@ export class ChapterPipeline {
     const ttsConfig = options.story.pipeline.tts;
     const deliveryProfile = narrationDeliveryProfile(ttsConfig.provider, ttsConfig.model);
     const narrationBehavior = { profanityMode: options.story.narrationSettings.profanityMode, includeChapterTitle: options.story.narrationSettings.includeChapterTitle };
-    const narrationFp = fingerprint({ english: fingerprint(english), context: narrationContext, config: narrationConfig, narrationSettings: narrationBehavior, deliveryProfile, deliveryIntensity: ttsConfig.deliveryIntensity, prompt: NARRATION_PROMPT_VERSION });
+    const narrationFp = fingerprint({ english: fingerprint(english), context: narrationContext, config: narrationConfig, narrationSettings: narrationBehavior, deliveryProfile, deliveryIntensity: ttsConfig.deliveryIntensity, prompt: NARRATION_PROMPT_VERSION, sourceNameBridge: chapterNaming.some(entity => entity.sourceIndexSpellings) ? SOURCE_NAME_BRIDGE_VERSION : undefined });
+    const bridgeLocation = { root: options.root, slug: options.story.slug, chapter: options.chapter };
     const narrationResult = await runStage("narration", narrationFp, paths.narration, {
       provider: narrationConfig.provider, model: narrationConfig.model, promptVersion: NARRATION_PROMPT_VERSION,
     }, async () => {
-      const result = await polishNarration(this.llms.forStage(narrationConfig), narrationConfig, english, options.story.outputLanguage, narrationContext, ttsConfig.provider, ttsConfig.model, options.story.narrationSettings.profanityMode, ttsConfig.deliveryIntensity, options.story.narrationSettings.includeChapterTitle !== false);
+      const provider = this.llms.forStage(narrationConfig);
+      const bridged = await bridgeSourceNames(provider, narrationConfig, source, english, chapterNaming, bridgeLocation);
+      const context = { ...narrationContext, narrationNamingEntities: selectNarrationNamingEntities(bridged, `${source}\n${english}`, options.chapter, source) };
+      const result = await polishNarration(provider, narrationConfig, english, options.story.outputLanguage, context, ttsConfig.provider, ttsConfig.model, options.story.narrationSettings.profanityMode, ttsConfig.deliveryIntensity, options.story.narrationSettings.includeChapterTitle !== false);
       const cleanNarration = stripDeliveryCues(result.text, ttsConfig.provider, ttsConfig.model);
       if (!cleanNarration) throw new PipelineError("Narration delivery cues cannot replace the chapter's spoken narration");
       const previousNarration = await readTextIfExists(paths.narration);
@@ -327,11 +373,13 @@ export class ChapterPipeline {
     const qaConfig = options.story.pipeline.qa;
     const qaDeterministicDeps = await loadQaDeterministicDependencies(options.root, options.story.slug);
     const qaContext = await resolveStoredQaContext({ storyContext: paths.storyContext, chapter: options.chapter });
-    const qaFp = computeQaDependencyFingerprint({
+    const qaDependencies = {
       source: ingestionFp, translation: fingerprint(english), narration: fingerprint(narration),
       context: qaContext.raw, config: qaFingerprintConfig(options.story), narrationSettings: narrationBehavior, prompt: QA_PROMPT_VERSION, mode: options.story.qaMode,
-      ...qaDeterministicDeps,
-    });
+      ...qaDeterministicDeps, naming: scopeQaSourceRules(qaDeterministicDeps.naming, source),
+    };
+    const qaDependencyFingerprints = computeQaDependencyFingerprints(qaDependencies);
+    const qaFp = qaDependencyFingerprints.fingerprint;
     const qaResult = await runStage("qa", qaFp, paths.qa, {
       provider: qaConfig.provider, model: qaConfig.model, promptVersion: QA_PROMPT_VERSION,
     }, async () => {
@@ -339,12 +387,13 @@ export class ChapterPipeline {
         runDeterministicQaChecks({ root: options.root, story: options.story, chapter: options.chapter, source, translation: english, narration }),
         listQaExceptions(options.root, options.story.slug),
       ]);
+      const qaNaming = await loadSourceNameBridge(bridgeLocation, source, english, chapterNaming);
       const result = await validateChapterQuality(this.llms.forStage(qaConfig), qaConfig, {
         chapter: options.chapter, sourceLanguage: options.story.sourceLanguage, outputLanguage: options.story.outputLanguage,
-        source, translation: english, narration, context: qaContext.parsed, authorizedNarrationEntities: narrationNamingEntities, profanityMode: options.story.narrationSettings.profanityMode, includeChapterTitle: options.story.narrationSettings.includeChapterTitle !== false,
+        source, translation: english, narration, context: qaContext.parsed, authorizedNarrationEntities: qaNaming, profanityMode: options.story.narrationSettings.profanityMode, includeChapterTitle: options.story.narrationSettings.includeChapterTitle !== false,
         exceptionsContext: [exceptionsPromptSection(exceptions), qaPolicyPrompt(options.story)].filter(Boolean).join("\n"), mode: options.story.qaMode,
       });
-      const effectiveNamingEntities = (await loadStoryBibleWithCanonicalOverlay(options.root, options.story.slug)).canonicalEntities;
+      const effectiveNamingEntities = qaNaming;
       const detections = prepareQaDetections(filterQaDetectionsForStory(options.story, [...deterministic.detections, ...result.value.issues]), { canonicalEntities: qaContext.parsed.canonicalEntities, effectiveNamingEntities, translation: english, narration });
       const { state } = buildQaState(undefined, filterExceptedFindings(detections, exceptions), {
         chapter: options.chapter, canonicalEntities: qaContext.parsed.canonicalEntities, effectiveNamingEntities, translation: english, narration,
@@ -353,10 +402,7 @@ export class ChapterPipeline {
         qaPolicy: options.story.qaPolicy,
         acceptedContinuity: deterministic.acceptedContinuity,
         dependencyFingerprint: qaFp,
-        dependencySnapshot: qaDependencySnapshot(computeQaDependencyFingerprints({
-          source: ingestionFp, translation: fingerprint(english), narration: fingerprint(narration), context: qaContext.raw,
-          config: qaFingerprintConfig(options.story), narrationSettings: narrationBehavior, prompt: QA_PROMPT_VERSION, mode: options.story.qaMode, ...qaDeterministicDeps,
-        })),
+        dependencySnapshot: qaDependencySnapshot(qaDependencyFingerprints),
       });
       chapter.stages.qa.usage = result.usage;
       return state;
@@ -440,7 +486,7 @@ export class ChapterPipeline {
       if (quality.status === "fail") {
         chapter.stages.storyBible = pending();
         chapter.stages.continuity = pending();
-        chapter.stages.tts = pending();
+        if (chapter.stages.tts.staleReason !== SOURCE_NAME_HOLD_REASON) chapter.stages.tts = pending();
         await persist();
         // QA failure must not replace the last known-good canonical snapshot with
         // the pre-chapter context. The rejected chapter can be retried later.
@@ -453,36 +499,7 @@ export class ChapterPipeline {
       : true;
     if (options.stopAfter === "qa" || !hasRemainingCoreStages) { await persist(); return chapter; }
 
-    const bibleConfig = options.story.pipeline.storyBible;
-    const bibleFp = storyBibleExtractionFingerprint({ source, translation: english, narration, config: bibleConfig, bible: priorContext });
-    const persistFullBible = async (update: StoryBibleUpdate) => {
-      // A rerun of an early chapter starts with only its prior context. Never let
-      // that partial context replace the cumulative Story Bible snapshot.
-      bible = mergeStoryBible(bible, update, options.chapter);
-      const cumulative = await rebuildStoryBibleBeforeChapter(options.root, options.story.slug, Number.MAX_SAFE_INTEGER, { chapterOverride: { chapter: options.chapter, update } });
-      await atomicWriteJson(paths.bible, cumulative);
-      await syncAppearanceChanges(options.root, options.story.slug, cumulative);
-    };
-    const bibleResult = await runStage("storyBible", bibleFp, paths.bibleUpdate, {
-      provider: bibleConfig.provider, model: bibleConfig.model, promptVersion: STORY_BIBLE_PROMPT_VERSION,
-    }, async () => {
-      const result = await extractStoryBible(this.llms.forStage(bibleConfig), bibleConfig, { chapter: options.chapter, source, translation: english, narration, bible: priorContext });
-      const update = normalizeStoryBibleUpdate(storyBibleUpdateSchema.parse(result.value), options.chapter);
-      await atomicWriteJson(paths.bibleUpdate, update);
-      await persistFullBible(update);
-      chapter.stages.storyBible.usage = result.usage;
-      return bible;
-    });
-    if (bibleResult) bible = bibleResult;
-    else {
-      const storedUpdate = await readJsonIfExists<StoryBibleUpdate>(paths.bibleUpdate);
-      if (!storedUpdate) throw new PipelineError(`Chapter ${options.chapter} Story Bible update is missing; run Story Bible before ${options.stopAfter ?? "the next stage"}`);
-      const cachedUpdate = storyBibleUpdateSchema.parse(storedUpdate);
-      // Continuity and TTS need this chapter's cumulative Bible in memory, but
-      // selected-only mode must not modify reused Story Bible artifacts.
-      if (shouldRun("storyBible")) await persistFullBible(cachedUpdate);
-      else bible = mergeStoryBible(bible, cachedUpdate, options.chapter);
-    }
+    await runBibleExtraction(english, narration);
     if (options.stopAfter === "storyBible") { await persist(); return chapter; }
 
     const continuityFp = fingerprint({ bible: bible.version, entities: bible.canonicalEntities, relationships: bible.canonicalRelationships, timeline: bible.entityTimeline });
@@ -495,6 +512,7 @@ export class ChapterPipeline {
 
     // Reader-facing narration remains clean for QA, subtitles, Story Bible, and
     // scene planning. Only Fish receives the model-specific delivery script.
+    if (chapter.stages.narration.staleReason === SOURCE_NAME_HOLD_REASON) throw new ConfigurationError(SOURCE_NAME_HOLD_REASON);
     const ttsScript = (await readTextIfExists(paths.narrationTts))?.trim() || narration;
     // A blank per-story voice intentionally inherits the environment default. Include
     // the resolved value in the fingerprint so a changed default cannot reuse audio
@@ -776,6 +794,7 @@ export class ChapterPipeline {
             ...chapter.stages.tts,
             status: "complete",
             fingerprint: ttsFp,
+            staleReason: undefined,
             outputFingerprint,
             completedAt: new Date().toISOString(),
             durationMs: Date.now() - ttsStartedAt,
@@ -961,7 +980,9 @@ async function requireText(path: string, stage: string): Promise<string> {
 const wordCount = (text: string) => text.trim() ? text.trim().split(/\s+/).length : 0;
 const sameLanguage = (source: string, output: string) => source.trim().toLowerCase().replaceAll("_", "-") === output.trim().toLowerCase().replaceAll("_", "-");
 function invalidateDownstream(chapter: Chapter, stage: StageName) {
-  for (const dependent of dependentProcessingStages(stage)) chapter.stages[dependent] = pending();
+  for (const dependent of dependentProcessingStages(stage)) {
+    if (chapter.stages[dependent].staleReason !== SOURCE_NAME_HOLD_REASON) chapter.stages[dependent] = pending();
+  }
   if (["ingestion", "translation", "narration", "qa"].includes(stage)) chapter.quality = undefined;
 }
 

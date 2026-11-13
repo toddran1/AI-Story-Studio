@@ -20,6 +20,7 @@ import { NeedsReviewPage, QueueStudioPage } from "./QueueStudio.js";
 import { audioProviderDefinition, audioProviderIds, audioProviderCatalog } from "./tts-providers.js";
 import { ChapterImportPage } from "./ChapterImportPage.js";
 import { SummariesPage } from "./SummariesPage.js";
+import { SourceNameIndexPage } from "./SourceNameIndexPage.js";
 import { NamesLocalizationPage } from "./NamesLocalizationPage.js";
 import { PronunciationFields, PronunciationPanel } from "./PronunciationPanel.js";
 import { PronunciationActions } from "./PronunciationActions.js";
@@ -174,6 +175,7 @@ export function App({ initialJob, initialRoute }: { initialJob?: Job; initialRou
         {route.page === "qa" && route.story && <QaPage slug={route.story} navigate={navigate} />}
         {route.page === "preview" && route.story && <PreviewPage slug={route.story} onJob={updateJob} />}
         {route.page === "bible" && route.story && <BiblePage slug={route.story} navigate={navigate} locationSearch={location.search} />}
+        {route.page === "source-names" && route.story && <SourceNameIndexPage key={route.story} slug={route.story} navigate={navigate} onJob={updateJob} job={activity.jobs.filter(current => current.story === route.story && current.type === "sourceNameScan").at(-1)} />}
         {route.page === "names" && route.story && <NamesLocalizationPage slug={route.story} navigate={navigate} onJob={updateJob} />}
         {route.page === "continuity" && route.story && <ContinuityPage slug={route.story} navigate={navigate} />}
         {route.page === "summaries" && route.story && <SummariesPage slug={route.story} onJob={updateJob} activeJob={activity.jobs.filter(current => current.story === route.story && isSummaryRelatedJob(current)).at(-1)} />}
@@ -209,6 +211,7 @@ function Sidebar({ stories, active, navigate }: { stories: StoryCard[]; active?:
       <Nav icon="compare" label="Preview A/B" disabled={!active} onClick={() => navigate(storyPath("/preview"))} />
       <Nav icon="bible" label="Story Bible" disabled={!active} onClick={() => navigate(storyPath("/bible"))} />
       <Nav icon="compare" label="Names / Localization" disabled={!active} onClick={() => navigate(storyPath("/names"))} />
+      <Nav icon="compare" label="Source Name Index" disabled={!active} onClick={() => navigate(storyPath("/source-names"))} />
       <Nav icon="quality" label="Continuity Review" disabled={!active} onClick={() => navigate(storyPath("/continuity"))} />
       <Nav icon="bible" label="Summaries" disabled={!active} onClick={() => navigate(storyPath("/summaries"))} />
       <Nav icon="scenes" label="Scenes / Artwork" disabled={!active} onClick={() => navigate(storyPath("/scenes"))} />
@@ -2633,6 +2636,7 @@ const CONTINUITY_CHARACTER_LABELS: Record<string, string> = {
   equipment: "equipment",
   carriedItems: "carrying",
   activeAbilities: "active abilities",
+  visibleEffects: "visible effects",
   visibleEquipment: "visible equipment",
   concealedItems: "concealed / stored",
   injuries: "injuries",
@@ -2744,8 +2748,9 @@ export function describeEnvironmentContinuityState(environment?: VisualEnvironme
   return lines;
 }
 
-export function describeObjectContinuityState(object: VisualObjectState): string {
-  const parts = [object.condition ? `condition: ${object.condition}` : undefined, object.possessedBy ? `with ${object.possessedBy}` : undefined].filter((part): part is string => Boolean(part));
+export function describeObjectContinuityState(object: VisualObjectState, characters?: VisualContinuityState["characters"]): string {
+  const wearer = characters?.find(character => character.entityId === object.wornBy)?.name ?? object.wornBy;
+  const parts = [object.condition ? `condition: ${object.condition}` : undefined, object.possessedBy ? `with ${object.possessedBy}` : undefined, wearer ? `worn by ${wearer}` : wearer === null ? "removed" : undefined].filter(Boolean);
   return parts.length ? `${object.name} — ${parts.join("; ")}` : object.name;
 }
 
@@ -2788,7 +2793,7 @@ export function SceneContinuityStateView({ title, state }: { title: string; stat
   const lines = [
     ...(state?.characters ?? []).map(describeCharacterContinuityState),
     ...describeEnvironmentContinuityState(state?.environment),
-    ...(state?.objects ?? []).map(describeObjectContinuityState),
+    ...(state?.objects ?? []).map(object => describeObjectContinuityState(object, state?.characters)),
     ...(state?.spatial ? [`spatial: ${state.spatial}`] : []),
   ];
   return (
@@ -3809,7 +3814,7 @@ export function ScenesPage({ slug, onJob, navigate, initialData }: { slug: strin
 
                     <AdvancedVisualDirection source="chapter" direction={scene.direction} overrides={scene.overrides} artDirection={data.artDirection}
                       onDirection={(patch) => editDirection(scene.id, patch)} onOverrides={(patch) => editOverrides(scene.id, patch)} />
-                    <SceneVisualPreview slug={slug} scene={scene} chapter={data.selectedChapter} />
+                    <SceneVisualPreview slug={slug} scene={scene} chapter={data.selectedChapter} onLookChange={(entityId, lookId) => editOverrides(scene.id, { appearanceEraOverrides: Object.fromEntries(Object.entries({ ...scene.overrides?.appearanceEraOverrides, [entityId]: lookId }).filter(([, id]) => id)) })} />
                     <SceneCreatureGroups slug={slug} groups={scene.creatureGroups} onChange={(creatureGroups) => edit(scene.id, { creatureGroups })} />
                     <VideoTreatmentEditor slug={slug} chapter={data.selectedChapter} motionDisabled={hasUnsavedSceneChanges} onMotionChanged={() => void load(data.selectedChapter)} scene={scene} hasNext={!scene.disabled && draft.slice(draftIndex + 1).some((item) => !item.disabled)} onChange={(videoTreatment) => edit(scene.id, { videoTreatment })} />
 
@@ -4500,10 +4505,10 @@ export function ProductionPage({ slug, activeJob, onJob, navigate }: { slug: str
   const payload = (dryRun: boolean) => { const selectedRange = rangeMode === "all" ? allRange : range; return { from: Number(selectedRange.from), to: Number(selectedRange.to), profile: profile || undefined, outputs: outputs.length ? outputs : undefined, artwork, repairQa, refresh, dryRun, maxProviderBudgetUsd: budget ? Number(budget) : undefined }; };
   const preview = async () => { try { setError(""); setPlan(await post<ProductionPlan>(`/stories/${slug}/production/plan`, payload(true))); } catch (e) { setError(message(e)); } };
   const start = async (override?: { from: number; to: number }) => { if (!plan && !override) { setError("Review the production plan before starting."); return; } try { setError(""); const started=await post<any>(`/stories/${slug}/jobs/production`, { ...payload(false), ...override });if(typeof started.totalItems==="number")navigate(`/queue?job=${started.id}`);else onJob(started); } catch (e) { setError(message(e)); } };
-  const resume = async () => { if (!latest) return; try { setError(""); onJob(await post<Job>(`/stories/${slug}/jobs/production`, { from: latest.selection.from, to: latest.selection.to, ...latest.options, dryRun: false })); } catch (value) { setError(message(value)); } };
+  const resume = async () => { if (!latest) return; try { setError(""); onJob(await post<Job>(`/stories/${slug}/production/resume`, { runId: latest.id })); } catch (value) { setError(message(value)); } };
   const chooseProfile = (name: string) => { setProfile(name); const value = story?.productionProfiles[name]; if (value) { setOutputs(value.outputs); setArtwork(value.artwork); setRepairQa(value.repairQa); } setPlan(undefined); };
   const toggleOutput = (value: string) => setOutputs((current) => current.includes(value) ? current.filter((item) => item !== value) : [...current, value]);
-  return <section className="page production-page"><div className="section-heading"><div><span className="eyebrow">End-to-end orchestrator</span><h2>Production run</h2><p>Plan, resume, and finish a chapter range through only the stages its outputs require.</p></div><div className="production-head-actions"><a className="button" href={"/stories/" + slug}>Story dashboard</a>{latest?.status === "paused" && <button className="button primary" onClick={resume}>Resume safely</button>}{latest && <Status status={latest.status === "completed" ? "pass" : latest.status.includes("error") ? "warn" : "pending"} label={pretty(latest.status)} />}</div></div>
+  return <section className="page production-page"><div className="section-heading"><div><span className="eyebrow">End-to-end orchestrator</span><h2>Production run</h2><p>Plan, resume, and finish a chapter range through only the stages its outputs require.</p></div><div className="production-head-actions"><a className="button" href={"/stories/" + slug}>Story dashboard</a>{latest?.status === "paused" && (!activeJob || isTerminalJob(activeJob) && !activeJob.resumedBy) && <button className="button primary" onClick={resume}>Resume safely</button>}{latest && <Status status={latest.status === "completed" ? "pass" : latest.status.includes("error") ? "warn" : "pending"} label={pretty(latest.status)} />}</div></div>
     <div className="production-controls"><div className="production-options"><span>Chapter range</span><label><input type="radio" checked={rangeMode === "all"} onChange={() => setRangeMode("all")} /> All imported chapters</label><label><input type="radio" checked={rangeMode === "custom"} onChange={() => setRangeMode("custom")} /> Custom range</label></div>{rangeMode === "custom" && <><Field label="From"><input value={range.from} inputMode="numeric" onChange={(e) => { setRange({ ...range, from: e.target.value }); setPlan(undefined); }} /></Field><Field label="To"><input value={range.to} inputMode="numeric" onChange={(e) => { setRange({ ...range, to: e.target.value }); setPlan(undefined); }} /></Field></>}<Field label="Production profile"><select value={profile} onChange={(e) => chooseProfile(e.target.value)}>{Object.keys(story?.productionProfiles ?? { audio: true, audiobook: true, "story-video": true, everything: true }).map((name) => <option key={name} value={name}>{pretty(name)}</option>)}</select></Field><div className="production-options"><span>Final output</span>{["audio", "audiobook", "video"].map((value) => <label key={value}><input type="checkbox" checked={outputs.includes(value)} onChange={() => { toggleOutput(value); setPlan(undefined); }} /> {value === "audio" ? "Narrated chapters" : pretty(value)}</label>)}</div><div className="production-options"><span>Production options</span><label title="Attempts bounded text repair after a failed quality gate."><input type="checkbox" checked={repairQa} onChange={(e) => { setRepairQa(e.target.checked); setPlan(undefined); }} /> QA repair</label><label title="May call the configured paid image provider."><input type="checkbox" checked={artwork} onChange={(e) => { setArtwork(e.target.checked); setPlan(undefined); }} /> Artwork generation</label><label title="Included automatically for video output."><input type="checkbox" checked={outputs.includes("video")} readOnly /> Subtitle generation</label><label title="Included automatically for every narrated output."><input type="checkbox" checked readOnly /> Audio mastering</label><label><input type="checkbox" checked={refresh} onChange={(e) => { setRefresh(e.target.checked); setPlan(undefined); }} /> Check remote source first</label></div><button className="button primary" onClick={preview}>Review production plan</button></div>
     {error && <ErrorBox text={error} />}{statusError && <ErrorBox text={statusError} />}{plan && <div className="production-plan"><div className="section-heading"><div><h3>Review before production</h3><p>{plan.chapters.length} chapters · expected: {plan.finalOutputs.join(" · ")}</p></div><span className="mono">{plan.from}–{plan.to}</span></div><div className="plan-grid">{plan.stages.map((stage) => <article key={stage}><span>{pretty(stage)}</span><b>{plan.counts[stage]?.required ?? 0}</b><small>{plan.counts[stage]?.reusable ?? 0} cached</small></article>)}</div><p className="cost-note"><b>May call paid providers:</b> LLM {plan.estimates.llmOperations} · TTS {plan.estimates.ttsOperations} · artwork {plan.estimates.imageOperations}{plan.estimates.imagesPendingPlanning ? ` · ${plan.estimates.imagesPendingPlanning} chapters need scene plans before image totals are known` : ""}. Cached operations are excluded.</p>{plan.costEstimate&&<div className={`plan-cost ${plan.costEstimate.classification}`}><span className="eyebrow">{plan.costEstimate.classification} estimate · {plan.costEstimate.confidence} confidence</span><b>{plan.costEstimate.estimatedUsd!==undefined?`$${plan.costEstimate.estimatedUsd.toFixed(4)}`:"Pricing unavailable"}</b>{plan.costEstimate.lowUsd!==undefined&&<small>Likely range ${plan.costEstimate.lowUsd.toFixed(4)}–${plan.costEstimate.highUsd?.toFixed(4)} · {plan.costEstimate.unknownStages.length?`${plan.costEstimate.unknownStages.length} stage(s) unknown`:"all stages represented"}</small>}</div>}<Field label="Optional provider budget (USD)"><input type="number" min="0.01" step="0.01" placeholder="No budget guard" value={budget} onChange={event=>setBudget(event.target.value)}/></Field><small className="budget-note">Checked after each chapter. In-flight provider requests can exceed this amount.</small><button className="button primary start-production" disabled={activeJob?.status === "running"} onClick={() => start()}>Start production</button></div>}
     {latest && <div className="production-run"><div className="run-head"><div><span className="eyebrow">{latest.status === "running" ? "Live production" : "Durable run record"}</span><h3>{latest.current.chapter ? "Chapter " + latest.current.chapter + " · " + pretty(latest.current.stage ?? "working") : pretty(latest.status)}</h3></div><b className="mono">{Math.round((latest.summary.completed + latest.summary.failed + latest.summary.needsReview) / Math.max(1, latest.summary.chapters) * 100)}%</b></div><div className="summary-strip"><span><b>{latest.summary.completed}</b> complete</span><span><b>{latest.summary.failed}</b> failed</span><span><b>{latest.summary.needsReview}</b> warnings</span><span><b>{latest.summary.reusedStages}</b> cached</span><span><b>{formatDuration(latest.summary.elapsedMs / 1000)}</b> running time</span></div><div className="production-table">{Object.values(latest.chapters).map((chapter) => <article key={chapter.chapter}><header><b>Chapter {chapter.chapter}</b><div><Status status={chapter.status === "complete" ? "pass" : chapter.status === "needs-review" ? "warn" : chapter.status === "failed" ? "fail" : "pending"} label={pretty(chapter.status)} />{chapter.status === "failed" && <><button onClick={() => start({ from: chapter.chapter, to: chapter.chapter })}>Retry</button><a href={"/stories/" + slug + "/chapters/" + chapter.chapter}>Open</a></>}</div></header><div>{Object.entries(chapter.operations).map(([stage, operation]) => <span key={stage} className={operation.status}><i />{pretty(stage)}{operation.reused ? " ↺" : ""}</span>)}</div></article>)}</div>{latest.failures.length > 0 && <div className="run-log"><h3>Warnings and failures</h3>{latest.failures.map((failure, index) => <p key={index}><span>{failure.chapter ? "Chapter " + failure.chapter : "Export"}</span>{pretty(failure.stage)} · {failure.message}</p>)}</div>}{Object.entries(latest.summary.exports).length > 0 && <div className="export-links">{latest.summary.exports.audiobook && <a className="button" href={`/api/stories/${slug}/exports/${latest.selection.from}-${latest.selection.to}.${latest.options.audiobookFormat}`}>Download audiobook</a>}{latest.summary.exports.video && <a className="button" href={`/api/stories/${slug}/video-exports/${latest.selection.from}-${latest.selection.to}.mp4`}>Download video</a>}</div>}</div>}
@@ -4584,17 +4589,8 @@ export function JobConsole({ job, onUpdate, onClose, navigate, initialQaComparis
     setActionError("");
     try {
       if (job.payload?.queueJobId) { await post(`/queue/jobs/${job.payload.queueJobId}/resume`, {}); return; }
-      let nextJob: Job;
-      try {
-        nextJob = await post<Job>(`/jobs/${job.id}/retry`, {});
-      } catch {
-        if (job.type === "scenes") {
-          const ch = chapter ?? (job.progress as any)?.chapter ?? 1;
-          nextJob = await post<Job>(`/stories/${job.story}/jobs/scenes`, { from: ch, to: ch });
-        } else {
-          throw new Error("Could not retry this job automatically.");
-        }
-      }
+      const nextJob = await post<Job>(`/jobs/${job.id}/retry`, {});
+      if (job.status === "paused") onUpdate({ ...job, resumedBy: nextJob.id, updatedAt: nextJob.updatedAt });
       onUpdate(nextJob);
     } catch (error) {
       setActionError(message(error));
@@ -4614,10 +4610,10 @@ export function JobConsole({ job, onUpdate, onClose, navigate, initialQaComparis
     }
   };
   const isSceneJob = job.type === "scenes" || stage === "scenePlanning" || stage === "scenes";
-  const label = summaryView?.title ?? ({ batch: "Processing chapters", preview: "Rendering comparison", metadataTranslation: "Translating reader metadata", qaRepair: "Repairing selected QA findings", qaRecheck: "Rechecking chapter QA", stageExecution: "Processing stage", summary: "Building story recap", audio: "Mastering chapter audio", audiobook: "Building audiobook", alignment: "Aligning narration to audio", subtitles: "Timing subtitles", video: "Rendering chapter video", videoExport: "Building combined video", scenes: "Planning chapter scenes", artwork: "Generating scene artwork", production: "Producing finished story", audioRegeneration: "Regenerating selected speech", ttsQualityVerify: "Verifying TTS quality", ttsSegmentRegenerate: "Regenerating TTS segment" } as Record<string, string>)[job.type] ?? "Working";
+  const label = summaryView?.title ?? ({ batch: "Processing chapters", preview: "Rendering comparison", metadataTranslation: "Translating reader metadata", qaRepair: "Repairing selected QA findings", qaRecheck: "Rechecking chapter QA", stageExecution: "Processing stage", sourceNameScan: "Indexing source names", summary: "Building story recap", audio: "Mastering chapter audio", audiobook: "Building audiobook", alignment: "Aligning narration to audio", subtitles: "Timing subtitles", video: "Rendering chapter video", videoExport: "Building combined video", scenes: "Planning chapter scenes", artwork: "Generating scene artwork", production: "Producing finished story", audioRegeneration: "Regenerating selected speech", ttsQualityVerify: "Verifying TTS quality", ttsSegmentRegenerate: "Regenerating TTS segment" } as Record<string, string>)[job.type] ?? "Working";
   const modelBadge = [diagnostic?.provider, diagnostic?.model].filter(Boolean).join(" · ");
   const terminal = isTerminalJob(job);
-  const chapterPause = ["stageExecution", "batch", "production", "audio", "alignment", "subtitles", "video", "scenes", "artwork"].includes(job.type);
+  const chapterPause = ["stageExecution", "batch", "production", "audio", "alignment", "subtitles", "video", "scenes", "artwork", "sourceNameScan"].includes(job.type);
   const title = terminal ? (job.status === "completed" ? `${label} — completed` : `${label} — ${job.status}`) : label;
   const progressTotal = job.progress?.total ?? job.progress?.chapterTotal;
   const progressDone = terminal && job.status === "completed" ? progressTotal : job.progress?.completed ?? (job.progress?.index ? Math.max(0, job.progress.index - (String(job.progress?.type).endsWith("completed") ? 0 : 1)) : undefined);
@@ -4717,13 +4713,13 @@ export function JobConsole({ job, onUpdate, onClose, navigate, initialQaComparis
             ? <details><summary>Issues reported by this attempt</summary><ul>{diagnostic.issues.slice(0, 3).map((issue, index) => <li key={`${issue.category}-${index}`}><b>{pretty(issue.category)}</b>{issue.message}</li>)}</ul></details>
             : <ul>{diagnostic.issues.slice(0, 3).map((issue, index) => <li key={`${issue.category}-${index}`}><b>{pretty(issue.category)}</b>{issue.message}</li>)}</ul>) : null}          <div className="incident-next"><small>Recommended next step</small><p>{diagnostic.recommendedAction}</p></div>
           <details><summary>Technical details</summary><p>{diagnostic.technicalDetails ?? "No additional provider details were supplied."}</p><small>{new Date(diagnostic.timestamp).toLocaleString()} · {diagnostic.id} · Job {job.id.slice(0, 8)}</small></details>
-        </div> : <p className={summaryView ? "job-artwork-detail" : undefined} aria-live={summaryView ? "polite" : undefined}>{actionError || job.error || (summaryView ? summaryView.detail : chapter ? `Chapter ${chapter} · ${pretty(stage ?? "working")}${detail ? ` — ${detail}` : ""}` : detail ?? pretty(job.status))}</p>}
+        </div> : <p className={summaryView ? "job-artwork-detail" : undefined} aria-live={summaryView ? "polite" : undefined}>{job.error || (summaryView ? summaryView.detail : chapter ? `Chapter ${chapter} · ${pretty(stage ?? "working")}${detail ? ` — ${detail}` : ""}` : detail ?? pretty(job.status))}</p>}
         {jobWarnings.length > 0 && <ul className="job-warnings">{jobWarnings.map((warning, index) => <li key={index}>{warning}</li>)}</ul>}
         <div className="job-actions">
           {!terminal && <button type="button" disabled={job.cancelRequested} onClick={() => void post(job.payload?.queueJobId ? `/queue/jobs/${job.payload.queueJobId}/cancel` : `/jobs/${job.id}/cancel`, {}).catch(error => setActionError(message(error)))}>{job.cancelRequested ? "Cancelling after current action…" : "Cancel remaining work"}</button>}
           {job.payload?.queueJobId && <button type="button" onClick={() => navigate?.("/queue")}>Open production queue</button>}
           {diagnostic && <button type="button" onClick={() => void copyDiagnostic()}>{copied ? "Copied" : "Copy details"}</button>}
-          {((job.status === "failed" && !job.payload?.queueJobId) || (job.status === "paused" && ["stageExecution", "batch", "audio", "audiobook", "subtitles", "alignment", "video", "videoExport", "scenes", "artwork", "production"].includes(job.type))) && <button type="button" className="button-retry" disabled={retrying} onClick={() => void retry()}>{retrying ? "Starting…" : job.status === "paused" ? "Resume remaining chapters" : "Retry"}</button>}
+          {((job.status === "failed" && !job.payload?.queueJobId) || (job.status === "paused" && !job.resumedBy && ["sourceNameScan", "stageExecution", "batch", "audio", "audiobook", "subtitles", "alignment", "video", "videoExport", "scenes", "artwork", "production"].includes(job.type))) && <button type="button" className="button-retry" disabled={retrying} onClick={() => void retry()}>{retrying ? "Starting…" : job.status === "paused" ? job.type === "sourceNameScan" ? "Resume source scan" : "Resume remaining chapters" : "Retry"}</button>}
           {job.story && (
             <button type="button" onClick={() => navigate?.(`/stories/${job.story}/settings`) ?? (location.href = `/stories/${job.story}/settings`)}>Open model settings</button>
           )}
@@ -4731,7 +4727,8 @@ export function JobConsole({ job, onUpdate, onClose, navigate, initialQaComparis
           {!terminal && <button type="button" disabled={job.pauseRequested} onClick={() => void pause()}>{chapterPause ? job.pauseRequested ? "Pausing after current chapter…" : "Pause after current chapter" : job.pauseRequested ? "Pausing after current action…" : "Pause after current action"}</button>}
           <button type="button" onClick={onClose}>{terminal ? "Close" : "Dismiss"}</button>
         </div>
-        {actionError && diagnostic && <p className="incident-action-error">{actionError}</p>}
+        {actionError && <p role="alert" className="incident-action-error">{actionError}</p>}
+        {job.resumedBy && <p>Continued in a new Activity card.</p>}
       </>
     )}
   </aside>;
@@ -5120,7 +5117,7 @@ function JobErrorHistoryPage({ slug }: { slug: string }) {
   </section>;
 }
 
-function parseRoute(path: string): Route { const parts = path.split("?")[0]!.split("/").filter(Boolean); if (!parts.length) return { page: "stories" }; if (parts[0] === "new") return { page: "new" }; if (parts[0] === "settings") return { page: "app-settings" }; if (parts[0] === "queue") return {page:"queue"}; if(parts[0]==="review")return{page:"review"}; if (parts[0] === "import") return { page: "import" }; if (parts[0] !== "stories" || !parts[1]) return { page: "stories" }; if (parts[2] === "chapters" && parts[3]) return { page: "chapter", story: parts[1], chapter: Number(parts[3]) }; if (["qa", "errors", "preview", "bible", "names", "continuity", "summaries", "audio", "video", "scenes", "production", "costs", "outputs", "voice", "settings", "manage", "import"].includes(parts[2] ?? "")) return { page: parts[2]!, story: parts[1] }; return { page: "story", story: parts[1] }; }
+function parseRoute(path: string): Route { const parts = path.split("?")[0]!.split("/").filter(Boolean); if (!parts.length) return { page: "stories" }; if (parts[0] === "new") return { page: "new" }; if (parts[0] === "settings") return { page: "app-settings" }; if (parts[0] === "queue") return {page:"queue"}; if(parts[0]==="review")return{page:"review"}; if (parts[0] === "import") return { page: "import" }; if (parts[0] !== "stories" || !parts[1]) return { page: "stories" }; if (parts[2] === "chapters" && parts[3]) return { page: "chapter", story: parts[1], chapter: Number(parts[3]) }; if (["qa", "errors", "preview", "bible", "names", "source-names", "continuity", "summaries", "audio", "video", "scenes", "production", "costs", "outputs", "voice", "settings", "manage", "import"].includes(parts[2] ?? "")) return { page: parts[2]!, story: parts[1] }; return { page: "story", story: parts[1] }; }
 function pageTitle(page: string) { return ({ stories: "AI Story Studio", import: "Import", new: "New Story", "app-settings": "Studio Settings",queue:"Production Queue",review:"Needs Review" } as Record<string, string>)[page] ?? pretty(page); }
 function message(error: unknown) { return error instanceof Error ? error.message : String(error); }
 function formatDuration(seconds: number) { if (!Number.isFinite(seconds) || seconds <= 0) return "0:00"; const whole = Math.round(seconds); const hours = Math.floor(whole / 3600); const minutes = Math.floor(whole % 3600 / 60); const rest = whole % 60; return hours ? `${hours}:${String(minutes).padStart(2, "0")}:${String(rest).padStart(2, "0")}` : `${minutes}:${String(rest).padStart(2, "0")}`; }
@@ -5185,6 +5182,6 @@ export function clearJobMinimized(jobId: string) {
 export function shouldRefreshAfterJob(previous: Job | undefined, next: Job) {
   // These read-only jobs own their result in the current workspace. Remounting
   // on completion discards that result before the page can render it.
-  if (next.type === "voicePreview" || next.type === "entityLocalizationSuggestions" || next.type === "summary" || next.type === "visualWorkflow") return false;
+  if (next.type === "voicePreview" || next.type === "entityLocalizationSuggestions" || next.type === "sourceNameScan" || next.type === "summary" || next.type === "visualWorkflow") return false;
   return isTerminalJob(next) && (previous?.id !== next.id || !isTerminalJob(previous));
 }

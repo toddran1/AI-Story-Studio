@@ -10,6 +10,7 @@ export function useActivityJobs(initial?: Job) {
   const startedAt = useRef(Date.now());
   const update = useCallback((next: Job) => {
     const previous = records.current.get(next.id); const known = seen.current.has(next.id);
+    if (previous?.resumedBy && !next.resumedBy) return;
     const previousTime = Date.parse(previous?.updatedAt ?? ""), nextTime = Date.parse(next.updatedAt ?? "");
     if (Number.isFinite(previousTime) && Number.isFinite(nextTime) && nextTime < previousTime) return;
     // Queue resume keeps the same job ID. Accept a newer resumed state while

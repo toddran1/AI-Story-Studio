@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 import { GeminiProvider, geminiJsonSchema } from "../src/llm/gemini/gemini.provider.js";
+import { ConfigurationError } from "../src/pipeline/errors.js";
 import { storyBibleUpdateSchema } from "../src/domain/story-bible.js";
 
 describe("Gemini structured output schema", () => {
@@ -29,6 +30,23 @@ describe("Gemini structured output schema", () => {
     expect(calls).toHaveLength(2);
     expect(calls[1].response_format.schema).toEqual({ type: "object" });
     expect(calls[1].input).toContain("conforms exactly to this JSON Schema");
+  });
+
+  it("disables SDK retries and reserves the schema fallback before sending it", async () => {
+    const provider = new GeminiProvider("test-key");
+    const attempts: unknown[] = [];
+    Object.assign(provider, {
+      client: { interactions: { create: async (_request: unknown, options: unknown) => {
+        attempts.push(options);
+        throw Object.assign(new Error("400 Request contains an invalid argument."), { status: 400 });
+      } } },
+    });
+    const cap = new ConfigurationError("Approved request cap reached");
+    await expect(provider.generateStructured({
+      model: "test-model", instructions: "Return data", input: "input", schemaName: "result", schema: z.object({ value: z.string() }),
+      beforeFallbackAttempt: async () => { throw cap; },
+    })).rejects.toBe(cap);
+    expect(attempts).toEqual([{ maxRetries: 0 }]);
   });
 
   it("uses a compact but still required-field-preserving schema for Story Bible output", async () => {

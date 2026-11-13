@@ -2,7 +2,7 @@ import { fingerprint } from "../utils/hash.js";
 import { chapterProvenance, NovelSourceProvider } from "./novel-provider.js";
 import { RawChapter, SourceInspectOptions, SourceInspection, SourceType, SourceWarning } from "./types.js";
 import { splitText } from "./txt-source.js";
-import { SourceValidationError } from "./errors.js";
+import { SourceAuthenticationRequiredError, SourceValidationError } from "./errors.js";
 
 export async function inspectNovelProvider(provider: NovelSourceProvider, sourcePath: string, options: SourceInspectOptions = {}, adapterVersion: string): Promise<SourceInspection> {
   if (options.from !== undefined && options.to !== undefined && options.from > options.to) throw new SourceValidationError("--from cannot be greater than --to");
@@ -44,6 +44,7 @@ export async function inspectNovelProvider(provider: NovelSourceProvider, source
         sourceType: provider.id === "fanqie" ? "fanqie" : "web", metadata: { ...provenance, bookId: ref.bookId, chapterId: ref.chapterId, url: ref.url, order: ref.chapter } }, text: fetched.text });
     } catch (error) {
       options.signal?.throwIfAborted();
+      if (error instanceof SourceAuthenticationRequiredError) throw error;
       warnings.push({ code: "unavailable_chapter", sourceId: ref.chapterId, message: `Chapter ${ref.chapter} from ${provider.displayName} could not be retrieved: ${error instanceof Error ? error.message : String(error)}` });
     } finally {
       if (!options.signal?.aborted) options.onProgress?.({ ...progress, completed: index + 1 });

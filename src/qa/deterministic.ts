@@ -2,7 +2,8 @@ import { needsContextualNameResolution, identitySpans } from "../narration/name-
 import { Story } from "../domain/story.js";
 import { CanonicalEntity, hasActivePronunciation } from "../domain/story-bible.js";
 import { continuityReviewSchema } from "../story-bible/continuity.js";
-import { loadNarrationNamingEntities } from "../story-bible/narration-names.js";
+import { loadSourceNameBridge } from "../naming/translation-bridge.js";
+import { loadNarrationNamingEntities, relevantNarrationNamingEntities } from "../story-bible/narration-names.js";
 import { loadPronunciationEntities } from "../story-bible/pronunciation.js";
 import { normalizeSpeechText, speechNormalizationSettingsFromNarration } from "../tts/speech-normalization.js";
 import { detectVocalizations } from "../tts/vocalizations.js";
@@ -233,14 +234,16 @@ export async function runDeterministicQaChecks(deps: {
   translation: string;
   narration: string;
 }): Promise<DeterministicQaResult> {
-  const { root, story, translation, narration } = deps;
+  const { root, story, chapter, source, translation, narration } = deps;
   const [namingEntities, pronunciationEntities, acceptedContinuity] = await Promise.all([
     loadNarrationNamingEntities(root, story.slug, { includeUnmapped: true }),
     loadPronunciationEntities(root, story.slug),
     loadAcceptedContinuity(root, story.slug),
   ]);
+  const relevantNames = relevantNarrationNamingEntities(namingEntities, `${source}\n${translation}\n${narration}`, chapter, source);
+  const effectiveNames = await loadSourceNameBridge({ root, slug: story.slug, chapter }, source, translation, relevantNames);
   const detections: FreshQaDetection[] = [
-    ...namingDetections(namingEntities, translation, narration),
+    ...namingDetections(effectiveNames, translation, narration),
     ...(story.qaPolicy.disabledRules.includes("duplicateParagraph") ? [] : duplicateParagraphDetections(translation, narration)),
     ...speechReadinessDetections(story, narration),
     ...pronunciationDetections(pronunciationEntities, narration),

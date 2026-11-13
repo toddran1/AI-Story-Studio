@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { normalizeSpeechForProvider, normalizeSpeechText, speechNormalizationFingerprint, speechNormalizationSettingsFromNarration } from "../src/tts/speech-normalization.js";
 import type { VocalizationRenderStrategy } from "../src/tts/vocalizations.js";
 
-const fishS2Tags: VocalizationRenderStrategy = { kind: "native_tags", tags: { laugh: "[laugh]", chuckle: "[laugh]", sigh: "[sigh]", gasp: "[gasp]" } };
+const fishS2Tags: VocalizationRenderStrategy = { kind: "native_tags", tags: { laugh: "[laugh]", chuckle: "[chuckle]", sigh: "[sigh]", gasp: "[gasp]" } };
 const fiendDragon = "Hahaha... Brat, once my fiend dragon comes out, all your bullshit undead are nothing but ants!";
 
 describe("provider-neutral speech normalization", () => {
@@ -108,11 +108,11 @@ describe("vocalization speech normalization", () => {
     expect(normalizeSpeechText("He sighed. Sigh. Ahhh! Grrrrr!", "en-US", {}, fishS2Tags).text).toBe("He sighed. [sigh] Ah! Grrr!");
   });
 
-  it("renders a repeated heh laugh as one cue instead of three separate reactions", () => {
+  it("renders a repeated heh as one chuckle cue instead of three separate reactions", () => {
     const line = "“Heh heh heh... Don’t worry. I’ll send you off to join him right now!”";
     const tagged = normalizeSpeechText(line, "en-US", {}, fishS2Tags);
-    expect(tagged.text).toBe("“[laugh] Don’t worry. I’ll send you off to join him right now!”");
-    expect(tagged.transformations).toEqual([expect.objectContaining({ kind: "vocalization", written: "Heh heh heh...", spoken: "[laugh]" })]);
+    expect(tagged.text).toBe("“[chuckle] Don’t worry. I’ll send you off to join him right now!”");
+    expect(tagged.transformations).toEqual([expect.objectContaining({ kind: "vocalization", written: "Heh heh heh...", spoken: "[chuckle]" })]);
     expect(normalizeSpeechText(line, "en-US").text).toBe("“Hehehe... Don’t worry. I’ll send you off to join him right now!”");
     expect(normalizeSpeechText("He typed 'heh heh heh' into the chat.", "en-US", {}, fishS2Tags).text).toBe("He typed 'heh heh heh' into the chat.");
   });

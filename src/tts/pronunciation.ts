@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { buildPronunciationDictionary, dictionaryForText, hasExplicitPronunciationGuidance, PRONUNCIATION_DICTIONARY_VERSION, type PronunciationPolicy } from "./pronunciation-dictionary.js";
+import { buildPronunciationDictionary, dictionaryForText, hasExplicitPronunciationGuidance, PRONUNCIATION_DICTIONARY_VERSION, splitPronunciationTitle, type PronunciationPolicy } from "./pronunciation-dictionary.js";
 import { pronunciationSchema, hasActivePronunciation, type CanonicalEntity, type EntityPronunciation } from "../domain/story-bible.js";
 import type { LLMProvider } from "../llm/provider.js";
 import type { StageModelConfig } from "../domain/provider.js";
@@ -7,7 +7,7 @@ import { fingerprint } from "../utils/hash.js";
 import { logger } from "../utils/logger.js";
 import type { TTSProvider } from "./provider.js";
 
-export const PRONUNCIATION_VERSION = "pronunciation-v1";
+export const PRONUNCIATION_VERSION = "pronunciation-v2-preserve-titles";
 // OpenAI strict structured outputs represent optional fields as required,
 // nullable fields. Accept that wire shape, then restore the canonical record.
 const pronunciationSuggestionSchema = z.object({
@@ -40,7 +40,8 @@ export type PronunciationCapabilities = { ipa?: boolean; dictionary?: boolean; s
 
 /** Resolve again for each actual request, so censor splitting cannot corrupt offsets. */
 export function pronunciationProvider(provider: TTSProvider, entities: readonly CanonicalEntity[], policy: PronunciationPolicy = {}): TTSProvider {
-  const dictionary = buildPronunciationDictionary(entities, policy);
+  const conflicts: Record<string, string[]> = Object.create(null);
+  const dictionary = buildPronunciationDictionary(entities, policy, conflicts);
   const rulesForText = (text: string, exactChunk = false, occurrences?: PronunciationOccurrence[]) => {
     const spoken = exactChunk ? text : adaptPronunciationText(text, occurrences ?? resolvePronunciations(text, entities), provider.pronunciationCapabilities ?? {});
     // A manual spoken form can introduce a dictionary key (Kyrie -> Kyree).
@@ -62,12 +63,13 @@ export function pronunciationProvider(provider: TTSProvider, entities: readonly 
     vocalizationStrategy: provider.vocalizationStrategy?.bind(provider),
     resolveReferenceId: provider.resolveReferenceId?.bind(provider),
     validateConfiguration: () => provider.validateConfiguration(),
-    pronunciationFingerprint: text => { const rules = rulesForText(text); return rules.length ? fingerprint({ version: PRONUNCIATION_DICTIONARY_VERSION, rules }) : undefined; },
+    pronunciationFingerprint: text => { const rules = rulesForText(text); return rules.length ? fingerprint({ version: PRONUNCIATION_DICTIONARY_VERSION, rules, conflicts: rules.map(rule => conflicts[rule.text.toLowerCase()] ?? []) }) : undefined; },
     prepareSegments: provider.prepareSegments ? request => provider.prepareSegments!({ ...request, pronunciation: request.exactChunk ? [] : (request.pronunciation ?? resolvePronunciations(request.text, entities)) }) : undefined,
     synthesize: request => provider.synthesize({
       ...request,
       pronunciationDictionary: request.pronunciationDictionary ?? rulesForText(request.text, request.exactChunk, request.pronunciation),
       pronunciationProtectedTerms: request.pronunciationProtectedTerms ?? protectedTerms,
+      pronunciationIdentityConflicts: request.pronunciationIdentityConflicts ?? conflicts,
       pronunciation: request.exactChunk ? [] : (request.pronunciation ?? resolvePronunciations(request.text, entities)),
     }),
   };
@@ -157,13 +159,19 @@ export function adaptPronunciationText(text: string, occurrences: readonly Pronu
       // A translated place suffix remains audible; hints describe the foreign root.
       const suffix = /\s+(City|Town|Village|Province)$/i.exec(occurrence.surfaceText)?.[0];
       let rendered = suffix && !spoken.toLocaleLowerCase().endsWith(suffix.toLocaleLowerCase()) ? spoken + suffix : spoken;
-      const title = /^(Mr\.?|Mrs\.?|Ms\.?|Brother|Sister|Master|Senior|Junior)\s+(.+)$/i.exec(occurrence.surfaceText);
-      if (title && occurrence.canonicalName && occurrence.surfaceText !== occurrence.canonicalName) {
-        const roots = occurrence.canonicalName.split(/\s+/), hints = spoken.split(/\s+/);
-        const position = roots.findIndex(root => root.toLocaleLowerCase() === title[2]!.toLocaleLowerCase());
-        // Only reuse a partial root where the hint has an unambiguous token mapping.
-        if (position < 0 || roots.length !== hints.length) continue;
-        rendered = `${title[1]} ${hints[position]}`;
+      const title = splitPronunciationTitle(occurrence.surfaceText);
+      if (title) {
+        const spokenTitle = splitPronunciationTitle(spoken);
+        const canonical = occurrence.canonicalName ?? occurrence.surfaceText;
+        const canonicalName = splitPronunciationTitle(canonical)?.name ?? canonical;
+        const hints = (spokenTitle?.name ?? spoken).trim().split(/\s+/);
+        const roots = canonicalName.split(/\s+/);
+        const parts = title.name.split(/\s+/);
+        const matches = roots.flatMap((_, i) => roots.slice(i, i + parts.length).join(" ").toLowerCase() === title.name.toLowerCase() ? [i] : []);
+        // A source hint that also pronounces an honorific (e.g. "yeh guh")
+        // cannot safely replace a single name token in "Brother Ye".
+        if (matches.length !== 1 || roots.length !== hints.length) continue;
+        rendered = `${title.prefix}${hints.slice(matches[0]!, matches[0]! + parts.length).join(" ")}`;
       }
       result = result.slice(0, occurrence.start) + rendered + result.slice(occurrence.end);
     }

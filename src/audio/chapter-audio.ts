@@ -1,7 +1,7 @@
 import { mkdir, readFile, readdir, rename, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
-import { Chapter, StageState, chapterSchema } from "../domain/chapter.js";
+import { Chapter, SOURCE_NAME_HOLD_REASON, StageState, chapterSchema } from "../domain/chapter.js";
 import { Story } from "../domain/story.js";
 import { AudioError } from "../pipeline/errors.js";
 import { atomicWrite, atomicWriteJson } from "../storage/atomic-write.js";
@@ -18,6 +18,7 @@ export async function masterStoredChapter(options: { root: string; story: Story;
   const paths = storyPaths(options.root, options.story.slug, options.chapter); const raw = await readJsonIfExists<Chapter>(paths.chapterMeta);
   if (!raw) throw new AudioError(`Chapter ${options.chapter} has no pipeline metadata; run TTS first`);
   const chapter = chapterSchema.parse(raw);
+  if ([chapter.stages.narration, chapter.stages.tts].some(stage => stage.staleReason === SOURCE_NAME_HOLD_REASON)) throw new AudioError(SOURCE_NAME_HOLD_REASON);
   const hasRawOrSegments = (await exists(paths.audioRaw)) || (await exists(paths.segments));
   if (!hasRawOrSegments) {
     if (chapter.stages.tts.status !== "complete") throw new AudioError(`Chapter ${options.chapter} TTS is not complete`);
@@ -33,13 +34,13 @@ export async function masterStoredChapter(options: { root: string; story: Story;
     && chapter.stages.audioMastering.outputFingerprint === currentOutput && chapter.audio) {
     options.onEvent?.({ status: "reused", chapter: options.chapter, state: chapter.stages.audioMastering }); return { chapter, reused: true, probe: chapter.audio, warnings };
   }
-  const started = Date.now(); chapter.audio = undefined; chapter.alignment = undefined; chapter.subtitle = undefined; chapter.video = undefined; chapter.scenes = undefined; chapter.stages.alignment = { status: "pending" }; chapter.stages.subtitles = { status: "pending" }; chapter.stages.scenePlanning = { status: "pending" }; chapter.stages.artwork = { status: "pending" }; chapter.stages.video = { status: "pending" }; chapter.stages.audioMastering = { status: "running", provider: "ffmpeg", model: options.processor.version, fingerprint: fp, startedAt: new Date().toISOString() };
+  const started = Date.now(); chapter.audio = undefined; chapter.alignment = undefined; chapter.subtitle = undefined; chapter.video = undefined; chapter.scenes = undefined; chapter.stages.alignment = { status: "pending" }; chapter.stages.subtitles = { status: "pending" }; chapter.stages.scenePlanning = { status: "pending" }; chapter.stages.artwork = { status: "pending" }; chapter.stages.video = { status: "pending" }; chapter.stages.audioMastering = { status: "running", staleReason: chapter.stages.audioMastering.staleReason === SOURCE_NAME_HOLD_REASON ? SOURCE_NAME_HOLD_REASON : undefined, provider: "ffmpeg", model: options.processor.version, fingerprint: fp, startedAt: new Date().toISOString() };
   await persist(paths.chapterMeta, chapter); options.onEvent?.({ status: "started", chapter: options.chapter, state: chapter.stages.audioMastering });
   const staged = `${paths.audio}.stage-${randomUUID()}.mp3`;
   try {
     await mkdir(paths.chapterDir, { recursive: true }); const probe = await options.processor.master(inputs, staged, options.story.audio); await rename(staged, paths.audio);
     const outputFingerprint = await fileFingerprint(paths.audio); if (!outputFingerprint) throw new AudioError(`Mastering produced an empty output for Chapter ${options.chapter}`);
-    chapter.audio = probe; chapter.stages.audioMastering = { ...chapter.stages.audioMastering, status: "complete", outputFingerprint,
+    chapter.audio = probe; chapter.stages.audioMastering = { ...chapter.stages.audioMastering, status: "complete", staleReason: undefined, outputFingerprint,
       completedAt: new Date().toISOString(), durationMs: Date.now() - started };
     await persist(paths.chapterMeta, chapter); options.onEvent?.({ status: "completed", chapter: options.chapter, state: chapter.stages.audioMastering }); return { chapter, reused: false, probe, warnings };
   } catch (error) {

@@ -197,6 +197,16 @@ describe("OpenAIProvider execution & error diagnostics", () => {
     }
   });
 
+  it("serializes the platform FormData used by OpenAI image uploads", async () => {
+    const response = await openAiTransport.fetch("data:,");
+    const ResponseType = response.constructor as typeof Response;
+    const body = new FormData();
+    body.append("image", new Blob(["reference image"]), "reference.png");
+    const encoded = new ResponseType(body);
+    expect(encoded.headers.get("content-type")).toMatch(/^multipart\/form-data; boundary=/);
+    expect(await encoded.text()).toContain('filename="reference.png"');
+  });
+
   it("distinguishes socket connection timeout from the overall request deadline", () => {
     const socket = Object.assign(new Error("Connect Timeout Error (attempted address: api.openai.com:443, timeout: 10000ms)"), { code: "UND_ERR_CONNECT_TIMEOUT" });
     const error = new Error("Request timed out.", { cause: new TypeError("fetch failed", { cause: socket }) });

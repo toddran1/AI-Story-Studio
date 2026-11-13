@@ -1,7 +1,7 @@
 import { fingerprint } from "../utils/hash.js";
 import { proposedCreatureState } from "./creature-look.js";
 import type { CanonicalEntity, StoryBible } from "../domain/story-bible.js";
-import { visualProfileSchema, visualAppearanceEraSchema, characterVisualDetailsSchema, creatureVisualDetailsSchema, type VisualEntityProfile, type VisualAppearanceEra } from "../domain/visual-profile.js";
+import { visualProfileSchema, visualAppearanceEraSchema, characterVisualDetailsSchema, creatureVisualDetailsSchema, isSceneAppearanceLook, type VisualEntityProfile, type VisualAppearanceEra } from "../domain/visual-profile.js";
 import { resolveVisualEntityType, validVisualField, writeVisualField } from "./fields.js";
 import { loadVisualProfiles, saveVisualProfiles } from "./profiles.js";
 
@@ -30,7 +30,7 @@ export function proposeAppearanceChanges(entity: CanonicalEntity, profile: Visua
       const validator = (shapes as Record<string, { safeParse: (value: unknown) => { success: boolean } }>)[key];
       if (validator?.safeParse(change.value).success) accumulated[key] = change.value;
     }
-    if (profile.appearanceEras?.some(era => era.id === id || era.startChapter === chapter) || profile.dismissedAppearanceEraIds?.includes(id)) return [];
+    if (profile.appearanceEras?.some(era => era.id === id || (!isSceneAppearanceLook(era) && era.startChapter === chapter)) || profile.dismissedAppearanceEraIds?.includes(id)) return [];
     const traits = { ...accumulated };
     const description = Object.entries(traits).map(([field,value]) => `${field}: ${value}`).join("; ").slice(0, 10000);
     const candidate = visualAppearanceEraSchema.safeParse({ id, name: `Appearance change · chapter ${chapter}`, startChapter: chapter,

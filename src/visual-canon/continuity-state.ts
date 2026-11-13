@@ -23,6 +23,7 @@ export const visualCharacterStateSchema = z.object({
   equipment: bounded(300).optional(),
   carriedItems: z.array(bounded(120)).max(10).optional(),
   activeAbilities: z.array(bounded(200)).max(10).optional(),
+  visibleEffects: z.array(bounded(200)).max(10).optional(),
   visibleEquipment: z.array(bounded(200)).max(10).optional(),
   concealedItems: z.array(bounded(200)).max(10).optional(),
   injuries: bounded(300).optional(),
@@ -46,8 +47,10 @@ export type VisualEnvironmentState = z.infer<typeof visualEnvironmentStateSchema
 
 export const visualObjectStateSchema = z.object({
   name: bounded(200),
+  entityId: bounded(100).optional(),
   condition: bounded(300).optional(),
   possessedBy: bounded(200).optional(),
+  wornBy: bounded(200).nullable().optional(),
 });
 export type VisualObjectState = z.infer<typeof visualObjectStateSchema>;
 
@@ -84,7 +87,9 @@ export const visualContinuityChangeSchema = z.object({
   objects: z.array(z.object({
     name: bounded(200),
     op: z.enum(["add", "remove", "update"]),
-    set: visualObjectStateSchema.partial().omit({ name: true }).optional(),
+    entityId: bounded(100).optional(),
+    set: visualObjectStateSchema.partial().omit({ name: true, entityId: true }).optional(),
+    clearWornBy: z.boolean().optional(),
   })).max(10).optional(),
   note: bounded(500).optional(),
 });
@@ -96,6 +101,7 @@ const nullishCharacterPatch = z.object({
   equipment: bounded(300).nullish(),
   carriedItems: z.array(bounded(120)).max(10).nullish(),
   activeAbilities: z.array(bounded(200)).max(10).nullish(),
+  visibleEffects: z.array(bounded(200)).max(10).nullish(),
   visibleEquipment: z.array(bounded(200)).max(10).nullish(),
   concealedItems: z.array(bounded(200)).max(10).nullish(),
   injuries: bounded(300).nullish(),
@@ -133,7 +139,8 @@ export const visualContinuityChangeInputSchema = z.object({
   objects: z.array(z.object({
     name: bounded(200),
     op: z.enum(["add", "remove", "update"]),
-    set: z.object({ condition: bounded(300).nullish(), possessedBy: bounded(200).nullish() }).nullish(),
+    set: z.object({ condition: bounded(300).nullish(), possessedBy: bounded(200).nullish(), wornBy: bounded(200).nullish() }).nullish(),
+    clearWornBy: z.boolean().nullish(),
   })).max(10).nullish(),
   note: bounded(500).nullish(),
 });
@@ -168,7 +175,7 @@ export function continuitySnapshot(state: ResolvedSceneContinuity): ContinuitySn
     const { locationId, ...fields } = state.endState.environment;
     add("Environment", fields);
   }
-  for (const { name, ...fields } of state.endState.objects) add(name, fields);
+  for (const { name, entityId, wornBy, ...fields } of state.endState.objects) add(name, { ...fields, wornBy: wornBy === null ? "Removed" : wornBy && (state.endState.characters.find(character => character.entityId === wornBy)?.name ?? wornBy) });
   add("Scene", { geography: state.endState.spatial, note: state.manualOverride?.note });
   return Object.fromEntries(entries);
 }

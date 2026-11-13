@@ -75,6 +75,21 @@ describe("production planning", () => {
 describe("production execution", () => {
   it("builds an audiobook, persists its manifest, and records stage work", async () => { const { root, story, chapters } = await fixture(2); const pipeline = new ProductionPipeline(); const result = await runProduction({ root, story, from: 1, to: 2, outputs: ["audiobook"] }, dependencies(pipeline, chapters)); expect(result.manifest.status).toBe("completed"); expect(result.manifest.summary.exports.audiobook).toMatch(/\.m4b$/); expect(result.manifest.summary.newStages).toBe(16); const stored = await readJsonIfExists(join(root, "stories", story.slug, "production-runs", `${result.manifest.id}.json`)); expect(productionManifestSchema.parse(stored).summary.completed).toBe(2); });
   it("builds subtitles, chapter video, and a combined video for video output", async () => { const { root, story, chapters } = await fixture(1); const result = await runProduction({ root, story, from: 1, to: 1, outputs: ["video"], artwork: false }, dependencies(new ProductionPipeline(), chapters)); expect(result.manifest.status).toBe("completed"); expect(result.manifest.summary.exports.video).toMatch(/\.mp4$/); expect(result.manifest.chapters["1"]?.operations).toMatchObject({ subtitles: { status: "complete" }, video: { status: "complete" } }); });
+  it("resumes the exact forced production run without repeating finished chapters", async () => {
+    const { root, story, chapters } = await fixture(2);
+    const pause = { requested: false, get isRequested() { return this.requested; } };
+    const firstPipeline = new ProductionPipeline();
+    firstPipeline.pauseAfter = pause;
+    const request = { root, story, from: 1, to: 2, outputs: ["audio" as const], force: "audio" as const };
+    const first = await runProduction({ ...request, pause }, dependencies(firstPipeline, chapters));
+    expect(first.manifest.status).toBe("paused");
+    const continuation = new ProductionPipeline();
+    const result = await runProduction({ ...request, resumeManifestId: first.manifest.id }, dependencies(continuation, chapters));
+    expect(result.manifest.id).toBe(first.manifest.id);
+    expect(result.manifest.selection).toEqual({ from: 1, to: 2 });
+    expect(result.manifest.status).toBe("completed");
+    expect(continuation.calls).toEqual([{ chapter: 2, force: "audio" }]);
+  });
   it("resumes after a safe pause without rerunning completed chapters", async () => { const { root, story, chapters } = await fixture(2); const pause = { requested: false, get isRequested() { return this.requested; } }; const firstPipeline = new ProductionPipeline(); firstPipeline.pauseAfter = pause; const first = await runProduction({ root, story, from: 1, to: 2, outputs: ["audio"], pause }, dependencies(firstPipeline, chapters)); expect(first.manifest.status).toBe("paused"); const secondPipeline = new ProductionPipeline(); const second = await runProduction({ root, story, from: 1, to: 2, outputs: ["audio"] }, dependencies(secondPipeline, chapters)); expect(second.manifest.id).toBe(first.manifest.id); expect(secondPipeline.calls.map((item) => item.chapter)).toEqual([2]); expect(second.manifest.status).toBe("completed"); });
   it("continues past an isolated chapter failure", async () => { const { root, story, chapters } = await fixture(2); const pipeline = new ProductionPipeline(); pipeline.fail.add(1); const result = await runProduction({ root, story, from: 1, to: 2, outputs: ["audio"] }, dependencies(pipeline, chapters)); expect(result.manifest.status).toBe("completed_with_errors"); expect(result.manifest.summary).toMatchObject({ completed: 1, failed: 1 }); });
   it("retries transient chapter failures while reusing completed stage work", async () => { const { root, story, chapters } = await fixture(1); const pipeline = new ProductionPipeline(); const base = pipeline.run.bind(pipeline); let attempts = 0; pipeline.run = async (options) => { if (++attempts === 1) throw Object.assign(new Error("service unavailable"), { status: 503, headers: { "retry-after": "0" } }); return base(options); }; const result = await runProduction({ root, story, from: 1, to: 1, outputs: ["audio"] }, dependencies(pipeline, chapters)); expect(result.manifest.status).toBe("completed"); expect(attempts).toBe(2); });

@@ -2,14 +2,14 @@ import { fingerprint } from "../utils/hash.js";
 import { scanVocalizations, type VocalizationRenderStrategy } from "./vocalizations.js";
 import type { TTSProvider } from "./provider.js";
 
-export const SPEECH_NORMALIZATION_VERSION = "speech-normalization-v13-unknown-fields";
+export const SPEECH_NORMALIZATION_VERSION = "speech-normalization-v15-numeric-ranges";
 export type SpeechNormalizationMode = "automatic" | "enabled" | "disabled";
 export type TimeSpeechMode = "natural_12h" | "natural_24h" | "preserve";
 export type VocalizationMode = "automatic" | "preserve" | "disabled";
 export type VocalizationFallback = "safe_normalize" | "omit_unsupported" | "preserve";
 export type VocalizationSettings = { mode?: VocalizationMode; fallback?: VocalizationFallback };
 export type SpeechNormalizationSettings = { mode?: SpeechNormalizationMode; timeSpeechMode?: TimeSpeechMode; speechAbbreviations?: Record<string, string>; vocalizations?: VocalizationSettings };
-export type SpeechTransformation = { kind: "time" | "percentage" | "currency" | "measurement" | "number" | "chapter" | "quoted-label" | "abbreviation" | "vocalization" | "structured-block"; written: string; spoken: string; start: number; end: number };
+export type SpeechTransformation = { kind: "time" | "percentage" | "currency" | "measurement" | "number" | "chapter" | "quoted-label" | "abbreviation" | "vocalization" | "structured-block" | "range"; written: string; spoken: string; start: number; end: number };
 export type SpeechNormalizationResult = { text: string; transformations: SpeechTransformation[]; warnings: string[] };
 
 const small = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen", "eighteen", "nineteen"];
@@ -41,6 +41,8 @@ export function normalizeSpeechText(text: string, language: string, settings: Sp
   // insert a dialogue-sized pause. Only remove them when the surrounding grammar
   // clearly identifies the quote as a label within an ongoing noun phrase.
   replace("structured-block", /[:：][ \t]*[?？]{2,}(?=[ \t]*(?:[】\]]|$))/gmu, normalizeUnknownFieldValues);
+  replace("abbreviation", numberLabelPattern, () => "Number ");
+  replace("range", numericRangePattern, speakNumericRange);
   replace("percentage", decimalPercentagePattern, normalizeDecimalPercentages);
   replace("structured-block", /【([^【】\n]{1,500})】/gu, (written, offset, source) => normalizeStructuredSpeechBlock(written, offset, source));
   replace("structured-block", /(?<![\p{L}\p{N}])([A-Z][\p{L}\p{N} -]{1,80})\s+\((Passive|Active)\)\s+\((Level [^()\n]{1,30}|Rank [^()\n]{1,30})\)/gu,
@@ -108,6 +110,32 @@ export function normalizeStructuredSpeechBlock(written: string, offset?: number,
 /** Unknown UI field values are labels, not punctuation or vocal reactions. */
 export function normalizeUnknownFieldValues(text: string): string {
   return text.replace(/([:：])[ \t]*[?？]{2,}(?=[ \t]*(?:[】\]]|$))/gmu, "$1 unknown");
+}
+
+const numberLabelPattern = /\bNo\.[ \t]*(?:#[ \t]*)?(?=[0-9])/giu;
+
+/** Expand numbered labels without changing ordinary uses of "No." */
+export function normalizeNumberLabels(text: string): string {
+  return text.replace(numberLabelPattern, "Number ");
+}
+
+// Compact ASCII hyphens can denote dates, identifiers, or subtraction.
+// An en dash or a spaced hyphen is a clearer range marker in prose.
+const numericRangePattern = /(?<![\p{L}\p{N}_.,:/+\-−–])(\d+(?:,\d{3})*(?:\.\d+)?)(?:[ \t]*–[ \t]*|[ \t]+-[ \t]+)(\d+(?:,\d{3})*(?:\.\d+)?)(?![\p{L}\p{N}_:/+\-−–]|[.,]\d)/gu;
+
+function speakNumericRange(written: string, offset: number, source: string): string | undefined {
+  const [low, high] = written.split(/[ \t]*[–-][ \t]*/u);
+  const value = (part: string | undefined) => Number(part?.replaceAll(",", ""));
+  if (!(value(low) < value(high))) return undefined;
+  const before = source.slice(Math.max(0, offset - 35), offset);
+  const after = source.slice(offset + written.length);
+  if (/[=+*/−][ \t]*$/u.test(before) || /\b(?:subtract|compute|calculate|evaluate|equation)\b[^.!?\n]{0,25}$/iu.test(before) || /^[ \t]*[=+*/−]/u.test(after)) return undefined;
+  return `${low} to ${high}`;
+}
+
+export function normalizeNumericRanges(text: string): string {
+  return text.replace(numericRangePattern, (written: string, _low: string, _high: string, offset: number, source: string) =>
+    speakNumericRange(written, offset, source) ?? written);
 }
 
 const decimalPercentagePattern = /(?<![\p{L}\p{N}_.,+-])[+-]?(?:\d{1,3}(?:,\d{3})+|\d{1,9})\.\d+[ \t]*[%％](?![\p{L}\p{N}_])/gu;

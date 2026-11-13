@@ -28,6 +28,7 @@ export function safeProgress<T>(callback: ((progress: T) => void) | undefined, e
 
 export type TTSRequest = {
   pronunciationProtectedTerms?: string[];
+  pronunciationIdentityConflicts?: Record<string, string[]>;
   pronunciationDictionary?: import("../domain/pronunciation-dictionary.js").PronunciationRule[];
   pronunciation?: import("./pronunciation.js").PronunciationOccurrence[];
   text: string; model: string; referenceId?: string; secondaryReferenceId?: string;

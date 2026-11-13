@@ -48,6 +48,7 @@ import type { ArtifactAvailability, ArtifactFreshness, StageArtifactState } from
 export type StageExecutionPlan = {
   executionPolicy: StageExecutionPolicy;
   selectedStages: BatchStage[];
+  sourceOnlyStoryBible?: boolean;
   mode: StageExecutionMode;
   force: boolean;
   prerequisitesComplete: boolean;
@@ -149,10 +150,11 @@ export async function planStageExecution(options: { root: string; story: string;
   if (!selectedStages.length) throw new Error("Select at least one executable stage");
   if (chapterPolicy && selectedStages.length !== 1) throw new Error("Chapter-stage execution requires exactly one target stage.");
   const target = selectedStages[0];
+  const sourceOnlyStoryBible = !chapterPolicy && selectedStages.length === 1 && target === "storyBible";
   const selectedNodes: StageExecutionNode[] = chapterPolicy && target === "audioMastering" ? ["tts", "audioMastering"]
     : chapterPolicy && target === "subtitles" ? ["alignment", "subtitles"]
     : chapterPolicy && target === "storyBible" ? ["storyBible", "context"] : selectedStages;
-  const stageDependencies = (stage: StageExecutionNode): StageExecutionNode[] => chapterPolicy && stage === "video"
+  const stageDependencies = (stage: StageExecutionNode): StageExecutionNode[] => sourceOnlyStoryBible && stage === "storyBible" ? [] : chapterPolicy && stage === "video"
     ? dependencies.video.filter((dependency) => dependency !== "subtitles") : dependencies[stage];
   const requiredFor = (stage: StageExecutionNode): StageExecutionNode[] => {
     const found = new Set<StageExecutionNode>();
@@ -216,7 +218,7 @@ export async function planStageExecution(options: { root: string; story: string;
   const blockedStages = orderedEntries.filter((item) => item.action === "blocked").map((item) => item.stage);
   const prerequisitesComplete = blockedStages.length === 0;
   const reason = blockedStages.length ? "One or more selected operations are blocked by unavailable prerequisites." : mode === "selected" ? "Only selected stages will run; usable prerequisites are reused." : "Missing prerequisites are included explicitly; usable prerequisites are reused.";
-  return { executionPolicy: options.executionPolicy ?? "standard", selectedStages, mode, force, prerequisitesComplete, runStages, reusedStages, missingStages, blockedStages, entries: orderedEntries, artifacts, reason };
+  return { executionPolicy: options.executionPolicy ?? "standard", selectedStages, ...(sourceOnlyStoryBible ? { sourceOnlyStoryBible: true } : {}), mode, force, prerequisitesComplete, runStages, reusedStages, missingStages, blockedStages, entries: orderedEntries, artifacts, reason };
 }
 
 export async function planStageExecutionBatch(options: { root: string; story: string; chapters: readonly number[]; selectedStages: readonly BatchStage[]; mode?: StageExecutionMode; force?: boolean; executionPolicy?: StageExecutionPolicy; storyConfig?: Story }): Promise<StageExecutionBatchPlan> {
@@ -226,7 +228,7 @@ export async function planStageExecutionBatch(options: { root: string; story: st
   const stageCounts = (entries: StageExecutionEntry[]) => entries.reduce<Partial<Record<StageExecutionNode, number>>>((result, item) => ({ ...result, [item.stage]: (result[item.stage] ?? 0) + 1 }), {});
   const providerOperations = planned.reduce((totals, item) => { const kind = providerKind(item.stage); if (kind) totals[kind]++; return totals; }, { llm: 0, tts: 0, images: 0 });
   const summary: StageExecutionBatchPlan["summary"] = { chapterCount: chapters.length, selectedStages: orderedBatchStages(options.selectedStages), mode: options.executionPolicy === "chapter-stage" ? "selected" : options.mode ?? "selected", force: options.executionPolicy === "chapter-stage" || (options.force ?? false), operationCount: planned.length, reusedCount: reused.length, blockedOperations: blocked.length, blockedChapters: chapters.filter((chapter) => chapter.blockedStages.length > 0).length, plannedByStage: stageCounts(planned), reusedByStage: stageCounts(reused), blockedByStage: stageCounts(blocked), addedPrerequisites: allStageOrder.filter((stage) => planned.some((entry) => entry.stage === stage && entry.action === "prerequisite-run")), providerOperations };
-  const planFingerprint = fingerprint({ chapters: chapters.map((chapter) => ({ chapter: chapter.chapter, entries: chapter.entries })), summary });
+  const planFingerprint = fingerprint({ chapters: chapters.map((chapter) => ({ chapter: chapter.chapter, entries: chapter.entries, sourceOnlyStoryBible: chapter.sourceOnlyStoryBible })), summary });
   return { chapters, summary, fingerprint: planFingerprint };
 }
 
@@ -270,7 +272,7 @@ export async function executeStagePlan(options: {
   const last = pipelineStopAfterForStages(options.plan.runStages);
   if (last) {
     await options.runtime.pipeline.run({ root: options.root, story: options.story, chapter: options.chapter, inputPath: options.inputPath, source: options.source,
-      executionStages: options.plan.runStages, stopAfter: last, onStageEvent: options.onStageEvent });
+      executionStages: options.plan.runStages, sourceOnlyStoryBible: options.plan.sourceOnlyStoryBible, stopAfter: last, onStageEvent: options.onStageEvent });
   }
   for (const stage of options.plan.runStages) {
     if (["context", ...core].includes(stage)) continue;

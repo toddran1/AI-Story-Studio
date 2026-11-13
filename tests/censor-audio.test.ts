@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { atomicWrite } from "../src/storage/atomic-write.js";
-import { CENSOR_BLEEP_MARKER, CensorAudioService, FfmpegCensorAudioService, buildCensorToneArgs, planCensoredSpeech } from "../src/tts/censor-audio.js";
+import { CENSOR_BLEEP_MARKER, CensorAudioService, FfmpegCensorAudioService, buildCensorToneArgs, planCensoredSpeech, prepareCensorSpeech } from "../src/tts/censor-audio.js";
 import { TTSProvider } from "../src/tts/provider.js";
 import { FishAudioProvider } from "../src/tts/fish/fish-audio.provider.js";
 import { TTSRequest } from "../src/tts/types.js";
@@ -8,6 +8,29 @@ import { TTSRequest } from "../src/tts/types.js";
 const request: TTSRequest = { text: "This shit is fucking crazy.", model: "test", bleepStrongProfanity: true, speed: 1, format: "mp3", sampleRate: 44100, bitrate: 128, normalize: true, maxCharsPerRequest: 500 };
 
 describe("censor audio", () => {
+  it.each([
+    ["[soft]“What a fucking waste.”", ["[soft]“What a,”", "“waste.”"]],
+    ['"What a fucking waste."', ['"What a,"', '"waste."']],
+    ["“I said ‘don’t fucking touch that,’ you shithead.”", ["“I said ‘don’t,’”", "“‘touch that,’ you,”"]],
+    ['"Done." Fuck!', ['"Done."']],
+    ["“You little shit!” He stormed out.", ["“You little,”", "He stormed out."]],
+    ['"You little shit", he muttered.', ['"You little,"', 'he muttered.']],
+  ])("balances the provider text across bleep boundaries: %s", (source, expected) => {
+    const plan = planCensoredSpeech(source);
+    expect([...prepareCensorSpeech(plan).values()]).toEqual(expected);
+  });
+
+  it("drops empty and punctuation-only quotes without removing neighboring dialogue or the bleep", async () => {
+    const calls: TTSRequest[] = [];
+    const tools = { validateAvailability: async () => undefined, ffmpeg: async (args: string[]) => { await atomicWrite(args.at(-1)!, new Uint8Array([1, 2, 3])); } };
+    const service = new FfmpegCensorAudioService(tools as any);
+    const result = await service.synthesize(fakeProvider(calls), {
+      ...request, text: '"" "!" "." “…” "Keep this." "And this."\n\n“Fuck!” He left.',
+    });
+    expect(calls.map(call => call.text)).toEqual(['"Keep this." "And this."', 'He left.']);
+    expect(result.censorManifest?.items.map(item => item.kind)).toEqual(["speech", "tone", "speech"]);
+  });
+
   it("removes paired emphasis before bleep splitting without consuming multiplication", () => {
     const source = "*What the absolute fuck? If you want to die, don’t drag me down with you!*";
     expect(planCensoredSpeech(source)).toEqual([

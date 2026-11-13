@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { Story } from "../domain/story.js";
-import { Chapter, chapterSchema } from "../domain/chapter.js";
+import { Chapter, SOURCE_NAME_HOLD_REASON, chapterSchema } from "../domain/chapter.js";
 import { AudioError } from "../pipeline/errors.js";
 import { atomicWrite, atomicWriteJson } from "../storage/atomic-write.js";
 import { exportPaths, storyPaths } from "../storage/paths.js";
@@ -95,7 +95,9 @@ export async function selectExportChapters(root: string, story: Story, from: num
   const chapters: AudiobookChapter[] = [];
   for (const chapter of chapterNumbers) {
     const paths = storyPaths(root, story.slug, chapter); const raw = await readJsonIfExists<Chapter>(paths.chapterMeta); if (!raw) throw new AudioError(`Chapter ${chapter} has not been processed`);
-    const metadata = chapterSchema.parse(raw); const actualFingerprint = await fileFingerprint(paths.audio);
+    const metadata = chapterSchema.parse(raw);
+    if (metadata.stages.audioMastering.staleReason === SOURCE_NAME_HOLD_REASON) throw new AudioError(SOURCE_NAME_HOLD_REASON);
+    const actualFingerprint = await fileFingerprint(paths.audio);
     // Freshness controls whether a chapter should be regenerated, not whether a
     // retained, intact master can be exported. The actual file fingerprint is
     // included in the audiobook fingerprint below, so stale masters remain safe

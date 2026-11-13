@@ -365,6 +365,82 @@ describe("artwork routing and provenance", () => {
     expect(version.model).toBe("gemini-3.1-flash-image");
     expect(version.provenance).toMatchObject({ referencesUsed: "images", referenceImageCount: 1, availableReferenceCount: 1 });
   });
+  it("sends an approved weapon sheet only for the frame where the weapon is visible", async () => {
+    const { root, story, paths } = await fixture({ provider: "gemini", model: "gemini-3.1-flash-image" }, { withCanon: true });
+    const weaponId = "ent_222222222222222222222222";
+    const bible = JSON.parse(await readFile(paths.bible, "utf8"));
+    bible.canonicalEntities.push({ id: weaponId, type: "item", canonicalName: "Azure Sword", aliases: ["Star Blade"], firstAppearance: 1, lastKnownAppearance: 1 });
+    await atomicWriteJson(paths.bible, bible);
+    const profiles = await loadVisualProfiles(root, story.slug);
+    profiles[weaponId] = {
+      ...profiles[ENTITY_ID]!, id: "vp-sword", entityId: weaponId, visualType: "weapon", appearance: "Blue steel with a star-shaped guard.",
+      visualPrompt: "", references: [{ id: "weapon-sheet", entityId: weaponId, role: "equipment_reference", imagePath: "weapon.png", source: "uploaded", approved: true, createdAt: new Date().toISOString() }],
+    };
+    await saveVisualProfiles(root, story.slug, profiles);
+    await atomicWrite(visualProfileRefPath(root, story.slug, weaponId, "weapon-sheet", "png"), PNG_ALT);
+    const manifest = sceneManifestSchema.parse(JSON.parse(await readFile(paths.scenesManifest, "utf8")));
+    const drawn = manifest.scenes[0]!;
+    drawn.characters = ["Li Chen"];
+    drawn.visualChanges = { characters: [{ name: "Li Chen", op: "update", set: { visibleEquipment: ["Star Blade"] } }] };
+    const next = manifest.scenes[1]!;
+    next.characters = ["Li Chen"];
+    next.visualChanges = undefined;
+    await atomicWriteJson(paths.scenesManifest, manifest);
+
+    const images = fakeImages("gemini");
+    await generateStoredArtwork({ root, story, chapter: 1, provider: images });
+    expect(images.calls[0]!.referenceImages?.map(ref => ref.referenceId)).toContain("weapon-sheet");
+    expect(images.calls[0]!.prompt).toContain("Azure Sword is visible with Li Chen");
+    expect(images.calls[1]!.referenceImages?.map(ref => ref.referenceId)).not.toContain("weapon-sheet");
+  });
+  it("sends standalone effect sheets only for an on-screen active ability or visible transformation", async () => {
+    const { root, story, paths } = await fixture({ provider: "gemini", model: "gemini-3.1-flash-image" }, { withCanon: true });
+    const effects = [
+      { id: "ent_222222222222222222222222", type: "ability", canonicalName: "Starfire", alias: "Blue Flame", state: "activated", ref: "starfire-sheet" },
+      { id: "ent_333333333333333333333333", type: "concept", canonicalName: "Astral Form", alias: "Star Body", state: "transformed", ref: "astral-sheet" },
+    ] as const;
+    const bible = JSON.parse(await readFile(paths.bible, "utf8"));
+    const profiles = await loadVisualProfiles(root, story.slug);
+    for (const effect of effects) {
+      bible.canonicalEntities.push({ ...effect, aliases: [effect.alias], firstAppearance: 1, lastKnownAppearance: 1 });
+      profiles[effect.id] = {
+        ...profiles[ENTITY_ID]!, id: effect.ref, entityId: effect.id, visualType: "object", appearance: "A clear silhouette of blue light.",
+        visualPrompt: "", references: [{
+          id: effect.ref, entityId: effect.id, role: "primary_reference", imagePath: "effect.png", source: "uploaded", approved: true,
+          createdAt: new Date().toISOString(), applicability: { state: effect.state, activationTrigger: effect.canonicalName },
+        }],
+      };
+      await atomicWrite(visualProfileRefPath(root, story.slug, effect.id, effect.ref, "png"), PNG_ALT);
+    }
+    await atomicWriteJson(paths.bible, bible);
+    await saveVisualProfiles(root, story.slug, profiles);
+    const manifest = sceneManifestSchema.parse(JSON.parse(await readFile(paths.scenesManifest, "utf8")));
+    const active = manifest.scenes[0]!;
+    active.visualChanges = { characters: [{ name: "Li Chen", op: "update", set: {
+      activeAbilities: ["Starfire"], transformation: "Star Body", visibleEffects: ["Blue Flame", "Astral Form"],
+    } }] };
+    const next = manifest.scenes[1]!;
+    next.visualChanges = undefined;
+    await atomicWriteJson(paths.scenesManifest, manifest);
+
+    const images = fakeImages("gemini");
+    await generateStoredArtwork({ root, story, chapter: 1, provider: images });
+    expect(images.calls[0]!.referenceImages?.map(ref => ref.referenceId)).toEqual(expect.arrayContaining(["starfire-sheet", "astral-sheet"]));
+    expect(images.calls[0]!.prompt).toContain("Astral Form is visibly active for Li Chen");
+    const later = images.calls[1]!.referenceImages?.map(ref => ref.referenceId);
+    expect(later).not.toContain("starfire-sheet");
+    expect(later).not.toContain("astral-sheet");
+
+    next.visualChanges = { characters: [{ name: "Li Chen", op: "update", clear: ["transformation"], set: {
+      activeAbilities: [], visibleEffects: ["Starfire", "Astral Form"],
+    } }] };
+    const saved = sceneManifestSchema.parse(JSON.parse(await readFile(paths.scenesManifest, "utf8")));
+    saved.scenes[1]!.visualChanges = next.visualChanges;
+    await atomicWriteJson(paths.scenesManifest, saved);
+    const inactive = fakeImages("gemini");
+    await generateStoredArtwork({ root, story, chapter: 1, sceneId: next.id, provider: inactive, force: true });
+    expect(inactive.calls[0]!.referenceImages?.map(ref => ref.referenceId)).toEqual(["ref-1"]);
+  });
   it("records the text-only fallback when the provider cannot consume references", async () => {
     const { root, story, paths } = await fixture({ provider: "openai", model: "gpt-image-1" }, { withCanon: true });
     const images = fakeImages("openai");
@@ -373,6 +449,17 @@ describe("artwork routing and provenance", () => {
     expect(images.calls[0]!.prompt).not.toContain("REFERENCE USAGE:");
     const manifest = sceneManifestSchema.parse(JSON.parse(await readFile(paths.scenesManifest, "utf8")));
     expect(manifest.scenes[0]!.artwork.versions[0]!.provenance).toMatchObject({ referencesUsed: "text-only", referenceImageCount: 0, availableReferenceCount: 1 });
+  });
+  it("does not send an approved sheet whose stored bytes no longer match its fingerprint", async () => {
+    const { root, story, paths } = await fixture({ provider: "gemini", model: "gemini-3.1-flash-image" }, { withCanon: true });
+    const profiles = await loadVisualProfiles(root, story.slug);
+    profiles[ENTITY_ID]!.references[0]!.provenance = { imageFingerprint: "original-image-hash" };
+    await saveVisualProfiles(root, story.slug, profiles);
+    const images = fakeImages("gemini");
+    await generateStoredArtwork({ root, story, chapter: 1, provider: images, sceneId: "scene-001" });
+    expect(images.calls[0]!.referenceImages ?? []).toHaveLength(0);
+    const manifest = sceneManifestSchema.parse(JSON.parse(await readFile(paths.scenesManifest, "utf8")));
+    expect(manifest.scenes[0]!.artwork.versions[0]!.provenance).toMatchObject({ referencesUsed: "text-only" });
   });
   it("passes reference images for the gpt-image-2.5 family", async () => {
     const { root, story } = await fixture({ provider: "openai", model: "gpt-image-2.5-sunburst" }, { withCanon: true });

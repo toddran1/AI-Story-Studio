@@ -1,16 +1,12 @@
 import { characterDesignContext } from "./character-design.js";
-import { createHash } from "node:crypto";
-import { readFile, stat } from "node:fs/promises";
-import { findVisualReferenceFile } from "./assets.js";
-import { MAX_REFERENCE_IMAGE_BYTES } from "../artwork/providers.js";
-import { requireCanonicalStoryBibleEntity, loadStoryBibleWithCanonicalOverlay } from "../story-bible/canonical.js";
+import { loadReferenceSheetImage } from "./reference-identity.js";
+import { loadStoryBibleWithCanonicalOverlay } from "../story-bible/canonical.js";
 import { z } from "zod";
 import type { Story } from "../domain/story.js";
 import type { ImageProvider } from "../artwork/provider.js";
 import { canonicalEntitySchema } from "../domain/story-bible.js";
-import { loadVisualProfiles, generateStyleSheet, canApproveVisualProfile, referenceSheetTargetFingerprint } from "./profiles.js";
+import { loadVisualProfiles, generateStyleSheet, canApproveVisualProfile, referenceSheetTargetFingerprint, prepareReferenceSheetDesign } from "./profiles.js";
 import { loadStoryArtDirection, resolveActiveArtDirection } from "./art-direction.js";
-import { prepareReferenceSheetIdentity } from "./reference-identity.js";
 import { pricingFor, calculateCost } from "../cost/pricing.js";
 import { fingerprint } from "../utils/hash.js";
 import { withUsageScope } from "../cost/context.js";
@@ -28,7 +24,11 @@ export async function planReferenceBatch(root: string, story: Story, provider: I
   const entries: ReferenceBatchEntry[] = []; const seen = new Set<string>();
   for (const item of input.selection) {
     const key = `${item.entityId}:${item.kind}:${item.scopeId ?? "base"}`; if (seen.has(key)) continue; seen.add(key);
-    const entity = await requireCanonicalStoryBibleEntity(root, story.slug, item.entityId);
+    const entity = bible.canonicalEntities.find(candidate => candidate.id === item.entityId);
+    if (!entity) {
+      entries.push({ ...item, key, label: item.entityId, blockedReason: "This entity was removed or merged. Refresh the Visual Canon queue." });
+      continue;
+    }
     const profile = profiles[item.entityId];
     const scope = { appearanceEraId: item.kind === "era" ? item.scopeId : undefined, creatureFormId: item.kind === "form" ? item.scopeId : undefined };
     const design = item.kind === "era" ? profile?.appearanceEras?.find(era => era.id === item.scopeId) : item.kind === "form" ? profile?.creatureForms?.find(form => form.id === item.scopeId) : profile;
@@ -37,7 +37,11 @@ export async function planReferenceBatch(root: string, story: Story, provider: I
     else if (profile.conflicts?.some(conflict => conflict.status === "needs_review")) blockedReason = "Resolve visual conflicts first.";
     else if (item.kind === "era" && profile.appearanceEras?.find(era => era.id === item.scopeId)?.detectedChange?.needsReview || item.kind === "form" && profile?.creatureForms?.find(form => form.id === item.scopeId)?.detectedSource?.needsReview) blockedReason = "Review changed source evidence first.";
     else if (item.kind === "profile" ? !canApproveVisualProfile(profile) : !design.appearance.trim() && !design.visualPrompt.trim() && !Object.values(design.character ?? design.creature ?? {}).some(value => typeof value === "string" && value.trim())) blockedReason = "Describe this visual design first.";
-    const identity = profile && !blockedReason ? await prepareReferenceSheetIdentity(root, story.slug, profile, story, provider, scope) : undefined;
+    let identity;
+    if (profile && !blockedReason) {
+      try { identity = await prepareReferenceSheetDesign(root, story.slug, profile, story, provider, scope); }
+      catch (error) { blockedReason = error instanceof Error ? error.message : String(error); }
+    }
     const targetFingerprint = profile && identity ? referenceSheetTargetFingerprint(profile, story, direction, scope, identity.fingerprints, entity, profile.visualType === "character" ? characterDesignContext(bible, profiles, item.entityId) : []) : undefined;
     const assigned = new Set([...(profile?.appearanceEras ?? []).flatMap(era => era.referenceIds), ...(profile?.creatureForms ?? []).flatMap(form => form.referenceIds)]);
     const ids = item.kind === "era" ? profile?.appearanceEras?.find(era => era.id === item.scopeId)?.referenceIds : item.kind === "form" ? profile?.creatureForms?.find(form => form.id === item.scopeId)?.referenceIds : profile?.references.filter(ref => !assigned.has(ref.id)).map(ref => ref.id);
@@ -45,12 +49,10 @@ export async function planReferenceBatch(root: string, story: Story, provider: I
     // Approved sheets are intentional canon. A retry also reuses a candidate
     // generated from the same target and verified identity-image inputs.
     let reuse: (typeof refs)[number] | undefined;
-    if (!input.force) for (const ref of refs) {
+    if (!input.force && !blockedReason) for (const ref of refs) {
+      if (ref.provenance?.rejectedAt) continue;
       if (!ref.approved && ref.provenance?.targetFingerprint !== targetFingerprint) continue;
-      const file = await findVisualReferenceFile(root, story.slug, profile!.entityId, ref.id); if (!file) continue;
-      const size = (await stat(file.path)).size; if (!size || size > MAX_REFERENCE_IMAGE_BYTES) continue;
-      const data = await readFile(file.path); if (data.length > MAX_REFERENCE_IMAGE_BYTES) continue;
-      if (ref.provenance?.imageFingerprint && ref.provenance.imageFingerprint !== createHash("sha256").update(data).digest("hex")) continue;
+      if (!await loadReferenceSheetImage(root, story.slug, item.entityId, ref)) continue;
       reuse = ref; break;
     }
     entries.push({ ...item, key, label: design && "name" in design ? `${entity.canonicalName} · ${String(design.name)}` : entity.canonicalName, blockedReason, targetFingerprint, reuseReferenceId: reuse?.id, identityMode: identity?.mode, identityReason: identity?.reason });

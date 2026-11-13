@@ -32,6 +32,16 @@ Spoken audio, mastering, subtitles, and video are not selectable here. Existing 
 
 QA uses the existing full stateful recheck path, including deterministic checks, approved exceptions, prior findings, dismissals, and resolution history. A successfully executed evaluation can have `warn` or `fail` quality; both are saved. Critical findings block downstream work but do not stop batch QA. This path never invokes the normal pipeline's automatic translation/narration regeneration.
 
+## Source Name Index
+
+Use a separate run for imported source chapters. To scan a whole book, use `--chapters all`. Mixed chapter ranges also work.
+
+```sh
+npm run story:agent -- prepare --story undead-disaster --chapters all --stages sourceNameIndex --agent codex --model unknown
+```
+
+Use `--agent antigravity` in a subscription-authenticated Antigravity session and report its current Gemini model when known. Confirm the preview and submit one structured JSON response per distinct passage using the commands below. The bridge saves progress, counts verified spellings locally, and publishes the completed report to the regular Source Name Index. It preserves approved rename rules and applies the existing review holds if the scan discovers a shared spelling. A partial run keeps its responses and leaves the existing report in place.
+
 ## Local commands
 
 All commands emit JSON. Run `npm run story:agent -- --help` for arguments.

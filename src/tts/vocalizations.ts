@@ -42,12 +42,13 @@ const collapsed = (max = 3) => (token: string) => {
 // still a token, "aggregate" is not). Elongated lexical words (Nooooo, Pleeease) are
 // deliberately absent from the lexicon and must remain untouched.
 const lexicon: LexemeEntry[] = [
+  { pattern: "ke(?:[-‐‑]ke){2,}", vocalization: "laugh", confidence: .9, spoken: fixed("hahaha") },
   { pattern: "ha(?:ha)+(?:[, \\t]+ha(?:ha)+)+", vocalization: "laugh", confidence: .9, spoken: fixed("hahaha") },
   { pattern: "ha(?:ha)+", vocalization: "laugh", confidence: .9, spoken: fixed("hahaha") },
   { pattern: "ha(?:[, \\t]+ha)+", vocalization: "laugh", confidence: .85, spoken: fixed("hahaha") },
   { pattern: "he(?:he)+(?:[, \\t]+he(?:he)+)+", vocalization: "laugh", confidence: .85, spoken: fixed("hehehe") },
   { pattern: "he(?:he)+", vocalization: "laugh", confidence: .85, spoken: fixed("hehehe") },
-  { pattern: "heh(?:[, \\t]+heh)+", vocalization: "laugh", confidence: .85, spoken: fixed("hehehe") },
+  { pattern: "heh(?:[, \\t]+heh)+", vocalization: "chuckle", confidence: .85, spoken: fixed("hehehe") },
   { pattern: "ha", vocalization: "chuckle", confidence: .7, spoken: fixed("ha") },
   { pattern: "heh", vocalization: "chuckle", confidence: .7, spoken: fixed("heh") },
   { pattern: "ahem(?:[, \\t]+ahem)*", vocalization: "throat_clear", confidence: .9, spoken: fixed("ahem") },
@@ -102,7 +103,7 @@ export function scanVocalizations(text: string): ScannedVocalization[] {
       const literalMention = /\b(?:word|text|transcript|term|wrote|typed|spelled|literal(?:ly)?)\b[^.!?\n]{0,35}$/iu.test(before.slice(-80));
       if (!reactionStart || !reactionEnd || literalMention) continue;
     }
-    if (entry.vocalization === "throat_clear" || entry.vocalization === "laugh" || entry.vocalization === "scream") {
+    if (entry.vocalization === "throat_clear" || entry.vocalization === "laugh" || entry.vocalization === "chuckle" || entry.vocalization === "scream") {
       const before = text.slice(Math.max(0, start - 45), start);
       // A quoted lexical mention is prose, not a performed reaction.
       if (/\b(?:word|text|transcript|term|wrote|typed|spelled|literal(?:ly)?)\b[^.!?\n]{0,35}$/iu.test(before)) continue;

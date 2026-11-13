@@ -12,7 +12,7 @@ import { readJsonIfExists } from "../../src/storage/story-files.js";
 import { failedResultDiagnostics, saveJobError } from "./job-error-history.js";
 
 export type JobStatus = "queued" | "running" | "completed" | "failed" | "paused" | "cancelled";
-export type Job = { id: string; type: "audioRegeneration" | "visualWorkflow" | "batch" | "stageExecution" | "preview" | "voicePreview" | "metadataTranslation" | "entityLocalizationSuggestions" | "pronunciation" | "qaRepair" | "qaRecheck" | "summary" | "audio" | "audiobook" | "chapterMusicExport" | "summaryMusicExport" | "alignment" | "subtitles" | "video" | "videoExport" | "scenes" | "artwork" | "production" | "ttsQualityVerify" | "ttsSegmentRegenerate"; story: string; status: JobStatus; createdAt: string; updatedAt: string; scope?: OperationScope; cancelRequested?: boolean; pauseRequested?: boolean; payload?: unknown; progress?: unknown; result?: unknown; error?: string; diagnostic?: ErrorDiagnostic };
+export type Job = { id: string; type: "audioRegeneration" | "visualWorkflow" | "batch" | "stageExecution" | "preview" | "voicePreview" | "metadataTranslation" | "entityLocalizationSuggestions" | "sourceNameScan" | "pronunciation" | "qaRepair" | "qaRecheck" | "summary" | "audio" | "audiobook" | "chapterMusicExport" | "summaryMusicExport" | "alignment" | "subtitles" | "video" | "videoExport" | "scenes" | "artwork" | "production" | "ttsQualityVerify" | "ttsSegmentRegenerate"; story: string; status: JobStatus; createdAt: string; updatedAt: string; scope?: OperationScope; cancelRequested?: boolean; pauseRequested?: boolean; resumedBy?: string; payload?: unknown; progress?: unknown; result?: unknown; error?: string; diagnostic?: ErrorDiagnostic };
 type JobControl = { update(progress: unknown): void; setPause(handler: () => void): void; reserve?(scope: OperationScope): Promise<void> };
 
 export class JobConflictError extends Error {}
@@ -71,6 +71,18 @@ export class JobManager {
     const now = new Date().toISOString(); const job: Job = { id: randomUUID(), type, story, status: "queued", createdAt: now, updatedAt: now, payload, scope };
     this.jobs.set(job.id, job); this.events.set(job.id, new EventEmitter()); this.reservations.set(job.id, { story, scope });
     queueMicrotask(() => this.run(job, runner)); return structuredClone(job);
+  }
+
+  retry(id: string, start: (job: Job) => Job): Job {
+    const job = this.jobs.get(id);
+    if (!job) throw new Error(`Job '${id}' was not found`);
+    if (job.resumedBy) throw new JobConflictError("This paused job has already been resumed. Use its continuation in Activity.");
+    if (job.status !== "paused" && job.status !== "failed") throw new JobConflictError("Only paused or failed jobs can be retried.");
+    // Start and consume the checkpoint synchronously. A rejected reservation
+    // leaves the paused job available for another attempt.
+    const next = start(structuredClone(job));
+    if (job.status === "paused") this.set(job, { resumedBy: next.id });
+    return next;
   }
 
   get(id: string): Job | undefined { const job = this.jobs.get(id); return job ? structuredClone(job) : undefined; }
